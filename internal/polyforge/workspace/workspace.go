@@ -26,8 +26,8 @@
 // wholly governs (yielding no switchable chain rather than a
 // fall-through). Absent keys fall through per the precedence chain
 // (compose.go), five levels, highest first: manual `pf submit --models`
-// (per work item, every step) > models.<project>.<kind> >
-// models.<project>.default > bundle step model_candidates > bundle
+// (per work item, every step) > models.<project>.<kind> > bundle step
+// model_candidates > models.<project>.default > bundle
 // defaults.model_candidates.
 package workspace
 
@@ -44,7 +44,8 @@ import (
 const FileName = ".polyforge.yaml"
 
 // DefaultKey is the per-project key whose list governs every step of
-// the project that has no list of its own kind.
+// the project that has neither a list of its own kind nor a bundle
+// step-level model_candidates list.
 const DefaultKey = "default"
 
 // KindVocabulary is the closed V8 step-kind set (the same vocabulary

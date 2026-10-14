@@ -2,7 +2,7 @@ package test
 
 // s12_submit_models_test.go: `pf submit <wi> --models a,b,c` — the manual
 // per-work-item candidate list, the top of the five-level precedence
-// (manual > yaml kind > yaml default > bundle step > bundle defaults).
+// (manual > yaml kind > bundle step > yaml default > bundle defaults).
 // Observed through the real pf/aihub/fakepi binaries: the model pinned on
 // each step in execution.json and the capsule.json audit.
 

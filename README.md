@@ -471,7 +471,7 @@ fail loudly):
 ```yaml
 models:
   polyforge:                          # a project of this workspace
-    default: ["model-a", "model-b"]   # optional: every step of the project
+    default: ["model-a", "model-b"]   # optional: steps without a list of their own
     code: ["model-c"]                 # optional: one step kind (qa, spec,
                                       # author, code, gate, review)
 ```
@@ -480,8 +480,8 @@ For a step of the claimed project the list is, highest first: the work
 item's manual `pf submit <id> --models a,b,c` list (every step; kept by this
 daemon only — across its restarts and `pf resume` — and a re-claim on
 another machine uses that machine's settings), else the
-step's kind list, else the project's `default`, else the workflow
-bundle's step-level candidates, else the bundle's `defaults` (a
+step's kind list, else the workflow bundle's step-level candidates, else
+the project's `default`, else the bundle's `defaults` (a
 declared-but-empty yaml list governs: no switchable chain). A project not
 listed, or an absent or comments-only file, keeps the bundle's. The
 daemon reads and validates the file BEFORE the aihub claim: an invalid

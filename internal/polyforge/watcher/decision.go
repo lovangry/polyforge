@@ -55,6 +55,10 @@ var eventRules = map[string]Rule{
 	// (polyforge#158). The daemon raises it once per repo per job until a
 	// carrier push of that repo succeeds again.
 	"carrier_push_failed": {Class: "carrier_push_failed", Phrase: "this task repo cannot be saved; a resume may lose its commits", NamesRepo: true},
+	// a requires_human_answer: if_asked checkpoint (quick-fix grill)
+	// completed without asking a human anything (polyforge#164 H11): the
+	// lane ran on, the owner is told the checkpoint was not exercised.
+	"human_gate_unasked": {Class: "human_gate_unasked", Phrase: "a human checkpoint passed with zero questions asked"},
 }
 
 // statusRules maps a status to its terminal decision: the driver's

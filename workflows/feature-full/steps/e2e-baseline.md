@@ -14,7 +14,7 @@ output:
       minItems: 1
       uniqueItems: true
       items: { type: string }
-      description: Verbatim echo of e2e-author's scenario_titles, read from execution.json's steps.e2e-author.output.scenario_titles. Must equal it element for element and in order - this is the mechanical cross-check that one result exists per authored scenario, no more and no fewer; a baseline whose recorded titles diverge from the authored list did not exercise the authored suite. uniqueItems mirrors the producer's own schema (R3-F3 - e2e-author's scenario_titles declares uniqueItems too), so a VERBATIM echo of a valid authored list can never violate it; without the producer-side constraint a duplicated authored list would leave this step with no valid response - echoing it violates uniqueItems here, deduping it violates the exact-echo instruction. The element-for-element equality itself is not expressible in draft-07; the step performs that comparison mechanically before returning its completed envelope, via the echoed-field cross-check: when the output schema requires echoing a field of a referenced prior step's output, compare element for element before returning `completed` - a mismatch means the step did not exercise what the upstream step produced, and is an infrastructure failure of this step, never a silent `completed`.
+      description: "Verbatim echo of e2e-author's scenario_titles, read from execution.json's steps.e2e-author.output.scenario_titles. Must equal it element for element and in order - this is the mechanical cross-check that one result exists per authored scenario, no more and no fewer; a baseline whose recorded titles diverge from the authored list did not exercise the authored suite. uniqueItems mirrors the producer's own schema (R3-F3 - e2e-author's scenario_titles declares uniqueItems too), so a VERBATIM echo of a valid authored list can never violate it; without the producer-side constraint a duplicated authored list would leave this step with no valid response - echoing it violates uniqueItems here, deduping it violates the exact-echo instruction. The element-for-element equality itself is not expressible in draft-07; the step performs that comparison mechanically before returning its completed envelope, via the echoed-field cross-check: when the output schema requires echoing a field of a referenced prior step's output, compare element for element before returning `completed` - a mismatch means the step did not exercise what the upstream step produced, and is an infrastructure failure of this step, never a silent `completed`."
     scenarios:
       type: array
       minItems: 1
@@ -25,7 +25,7 @@ output:
           title: { type: string }
           status: { type: string, enum: [fail] }
           evidence: { type: string, minLength: 1 }
-      description: One entry per authored title, in the same order as authored_titles. Every entry records a semantic failure - the assertion-level red that is this step's legal completed output. The status enum admits only fail (a vacuous pass cannot ride a completed result); evidence carries the assertion-level failure proof - a runner output excerpt or an observed-vs-expected contrast, long enough to be checked by a reader (minLength 1).
+      description: One entry per authored title, in the same order as authored_titles. Every entry records a semantic failure - the assertion-level red that is this step's legal completed output. The status enum admits only fail (a vacuous pass cannot ride a completed result - a scenario that passes makes the outcome incomplete, whose output is not held to this schema); evidence carries the assertion-level failure proof - a runner output excerpt or an observed-vs-expected contrast, long enough to be checked by a reader (minLength 1).
 ---
 
 # e2e-baseline
@@ -58,6 +58,11 @@ against and that `e2e-run` re-runs as a hard gate after `code`.
 5. Record every scenario's outcome in `artifacts/e2e-baseline.md`, in the same order
    `e2e-author` declared them, so `code` (the next step) can read the bar it must
    clear.
+
+**Run only the authored files.** Execute the scenarios `e2e-author` authored and nothing
+else — never the project's full suite (`go test ./...`, `make test`, the full `./test`,
+`npm test`) or unrelated packages; target the authored test files directly (e.g.
+`go test ./test/ -run '<authored test names>'`). The full bar runs once, in `verification`.
 
 ## When the run counts as laid (completed vs incomplete)
 
@@ -96,4 +101,7 @@ executable acceptance it just saw laid — the baseline document is the bar, and
 
 Emit the final JSON object per the schema above: the baseline results document path,
 the verbatim `authored_titles` echo (equal to `e2e-author`'s `scenario_titles`), and
-one `fail` entry per authored scenario with assertion-level `evidence`.
+one `fail` entry per authored scenario with assertion-level `evidence`. The schema admits
+only `fail` in a COMPLETED baseline: if any scenario passes against the pre-implementation
+tree, the bar is not laid — report `outcome: incomplete` (see above), listing the passing
+scenarios (status `pass`) and why they need re-authoring; never `completed`.

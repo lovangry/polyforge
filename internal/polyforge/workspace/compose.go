@@ -9,8 +9,15 @@ package workspace
 // The chain, outermost first (five levels):
 //
 //	manual `pf submit --models` > yaml models.<project>.<kind> >
-//	yaml models.<project>.default > bundle step-level model_candidates >
+//	bundle step-level model_candidates > yaml models.<project>.default >
 //	bundle defaults.model_candidates
+//
+// A step's own list outranks the project yaml `default` (polyforge#164,
+// H10): the yaml default is the project's fallback for steps that make
+// no choice of their own, so a bundle step that pins its model (e.g. an
+// Opus-first root-cause, a flash-first verification) keeps it. A yaml
+// kind list still overrides the step — it is the project's explicit
+// per-kind decision.
 //
 // The manual list is the per-work-item level: when present it is the
 // candidate chain of EVERY step of that work item.
@@ -65,11 +72,11 @@ func composeStep(fm *workflow.Frontmatter, pm map[string][]string, s workflow.Fr
 	if list, ok := pm[s.Kind]; ok {
 		return list
 	}
-	if list, ok := pm[DefaultKey]; ok {
-		return list
-	}
 	if s.ModelCandidates != nil {
 		return s.ModelCandidates
+	}
+	if list, ok := pm[DefaultKey]; ok {
+		return list
 	}
 	if fm.Defaults != nil {
 		return fm.Defaults.ModelCandidates

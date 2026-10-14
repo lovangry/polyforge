@@ -64,7 +64,9 @@ is a rewind re-entry, also read `execution.json`'s `pending_rewind_input` for th
   that test passing on your tree is your own fastest feedback; run it before declaring
   done. `fix` never edits `repro`'s test files (the paths in
   `steps.repro.output.test_files`) — no exceptions. If a repro test is wrong, leave it
-  untouched and report it in `summary` (or ask via `needs_input`).
+  untouched and ask via `needs_input`. The driver enforces this: a completion whose
+  tree changed those files since `repro`'s commit is rejected, unless a human answered
+  your question in this attempt.
 - **No drive-by fixes.** Adjacent ugliness the diagnosis did not implicate stays
   untouched; note it in `summary` if it deserves its own WI.
 

@@ -76,6 +76,12 @@ rather than merely passing on a technicality.
    (which receives this text as its `pending_rewind_input`) does not have to guess what to
    change. The schema requires `fail_reason` on any fail verdict.
 
+**Do not run tests or builds.** This step reads and judges; it never runs the build, the
+test suite (`go test ./...`, `make test`, the full `./test`, `npm test`) or the e2e
+suite. The full bar runs exactly once per pass, in `verification` (after this step), and
+the authored suite's evidence is `artifacts/e2e-results.md`. Reading a test file's source
+is part of the review; running it is not.
+
 ## Owner-rules checklist (any hit is a blocking finding)
 
 On top of the spec-conformance judgment above, check the diff against the owner's

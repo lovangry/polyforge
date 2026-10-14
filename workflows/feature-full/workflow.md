@@ -1,16 +1,16 @@
 ---
 name: feature-full
 steps:
-  - { id: grill, context_policy: fresh, handoff: true, kind: qa, budget: { wall_minutes: 30 } }
-  - { id: spec, context_policy: inherit, handoff: true, kind: spec, budget: { wall_minutes: 15 } }
-  - { id: grill-review, context_policy: fresh, handoff: true, kind: qa, requires_human_answer: true, gate: true, budget: { wall_minutes: 30 }, on_fail: { target: spec } }
-  - { id: plan, context_policy: inherit, handoff: true, kind: author, budget: { wall_minutes: 15 } }
-  - { id: e2e-author, context_policy: fresh, handoff: true, kind: author, budget: { wall_minutes: 15 } }
-  - { id: e2e-baseline, context_policy: fresh, handoff: true, kind: code, gate: false, budget: { wall_minutes: 20 } }
-  - { id: code, context_policy: inherit, handoff: true, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: e2e-run, context_policy: fresh, handoff: true, kind: code, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
-  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
-  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
+  - { id: grill, context_policy: fresh, handoff: true, kind: qa }
+  - { id: spec, context_policy: inherit, handoff: true, kind: spec }
+  - { id: grill-review, context_policy: fresh, handoff: true, kind: qa, requires_human_answer: true, gate: true, on_fail: { target: spec } }
+  - { id: plan, context_policy: inherit, handoff: true, kind: author }
+  - { id: e2e-author, context_policy: fresh, handoff: true, kind: author }
+  - { id: e2e-baseline, context_policy: fresh, handoff: true, kind: code, gate: false, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: code, context_policy: inherit, handoff: true, kind: code }
+  - { id: e2e-run, context_policy: fresh, handoff: true, kind: code, gate: true, on_fail: { target: code }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, on_fail: { target: code } }
+  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, on_fail: { target: code }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 ---
@@ -96,18 +96,12 @@ the workflow in `failed_rewind_exhausted`, not an infinite loop.
 
 ## Budget guidance
 
-There is no workflow-level budget; the bounds are the rewind limits above and each step's wall estimate. Projects
-with larger codebases or slower CI should raise the per-step `budget.wall_minutes` on `code`/`e2e-run`.
-
-Every step declares its own `budget.wall_minutes`: the checkpoints `grill` and `grill-review` get 30 (the
-user's own thinking time is inside the step), the authoring steps `spec`/`plan`/`e2e-author` 15, the e2e
-executions `e2e-baseline`/`e2e-run` 20, `code` 30, and the judgment gates `verification`/`review`
-20 — 215 minutes in total.
-
-The declared wall is an estimate, not a limit: the daemon bounds a step's total runtime across its
-dispatches at T = max(3 × its `budget.wall_minutes`, the daemon's `--step-timeout`, default 90 minutes).
-A step that declares nothing gets the default, so declare a wall only for a step that legitimately
-needs more than 90 minutes in total.
+There is no workflow-level budget; the bounds are the rewind limits above and the daemon's
+per-step runtime bound. No step declares `budget.wall_minutes` (polyforge#164): the daemon
+bounds a step's total runtime across its dispatches at T = max(3 × `budget.wall_minutes`,
+the daemon's `--step-timeout`, default 90 minutes), so any estimate of 30 minutes or less is
+inert and T is 90 minutes for every step here. Declare a wall only for a step that
+legitimately needs more than 90 minutes in total (31 or more).
 
 ## No release slot
 

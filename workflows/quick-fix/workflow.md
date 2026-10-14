@@ -7,9 +7,9 @@ rewind:
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
-  - { id: grill, context_policy: fresh, handoff: true, kind: spec, budget: { wall_minutes: 30 } }
-  - { id: fix, context_policy: inherit, handoff: true, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: fix } }
+  - { id: grill, context_policy: fresh, handoff: true, kind: spec, requires_human_answer: if_asked }
+  - { id: fix, context_policy: inherit, handoff: true, kind: code }
+  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, on_fail: { target: fix }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
 ---
 
 # quick-fix — light remediation flow
@@ -33,6 +33,14 @@ scope is already small and well understood: a bounded bug fix, a small config or
 dependency change, a tiny feature. If a WI routed here turns out to need a real spec or a
 separate review pass, that is a signal it was misrouted — cancel and re-file against
 `feature-full` or `bug-fix` rather than stretching this lane.
+
+## The human checkpoint (`requires_human_answer: if_asked`)
+
+`grill` is the lane's only human checkpoint. Its questions are a human's to answer: the
+daemon refuses an answer that comes from a step process. Zero questions is a legitimate
+outcome for a clear, small ask, so `grill` may complete without asking — an unattended
+claim runs on — but that completion is recorded (`human_gate_unasked` event) and the
+owner is notified.
 
 ## Why `grill` is `kind: spec` (not `kind: qa`)
 
@@ -69,17 +77,12 @@ not more loops.
 
 ## Budget guidance
 
-There is no workflow-level budget; the bounds are the rewind limits above and each step's wall estimate. This is
-the tightest reference lane on purpose: the lane's contract is that the WI is small. Do not raise a step's wall to
-make an oversized WI fit — re-route the WI instead.
-
-Every step declares its own `budget.wall_minutes` — `grill: 30` (the user's own thinking time is inside the
-step), `fix: 30`, `verification: 20`, 80 minutes in total.
-
-The declared wall is an estimate, not a limit: the daemon bounds a step's total runtime across its
-dispatches at T = max(3 × its `budget.wall_minutes`, the daemon's `--step-timeout`, default 90 minutes).
-A step that declares nothing gets the default, so declare a wall only for a step that legitimately
-needs more than 90 minutes in total.
+There is no workflow-level budget; the bounds are the rewind limits above and the daemon's
+per-step runtime bound. No step declares `budget.wall_minutes` (polyforge#164): the daemon
+bounds a step's total runtime across its dispatches at T = max(3 × `budget.wall_minutes`,
+the daemon's `--step-timeout`, default 90 minutes), so any estimate of 30 minutes or less is
+inert and T is 90 minutes for every step here. Declare a wall only for a step that
+legitimately needs more than 90 minutes in total (31 or more).
 
 ## No release slot
 

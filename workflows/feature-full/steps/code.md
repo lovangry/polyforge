@@ -57,9 +57,11 @@ verdict) and address every point it raises before proceeding with the rest of th
   `e2e-run`/`verification`.
 - **Never edit `e2e-author`'s test files.** The paths in
   `steps.e2e-author.output.test_files` are read-only to `code`: do not modify, move,
-  rename, delete, or stage them. If one looks wrong, make no change to it — report it
-  in `summary` (or ask via `needs_input`); satisfying the tests is the job, rewriting
-  them is not.
+  rename, delete, or stage them. If one looks wrong, make no change to it — ask via
+  `needs_input`; satisfying the tests is the job, rewriting them is not. The driver
+  enforces this: a completion whose tree changed those files since `e2e-author`'s commit
+  (`git diff <author-commit>..HEAD -- <test_files>`) is rejected, unless a human
+  answered your question in this attempt.
 - **Commit per compilable unit**, one commit per plan step (or a tightly related group of
   plan steps if the project's convention groups small steps), with a message that
   identifies which plan step it satisfies. Do not accumulate the entire plan into one

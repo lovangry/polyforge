@@ -62,13 +62,14 @@ the user saying "init workspace".
    ```yaml
    models:
      polyforge:                       # one entry per project of this workspace
-       default: ["model-a", "model-b"]   # optional: every step of this project
+       default: ["model-a", "model-b"]   # optional: steps without a list of their own
        code: ["model-c"]                 # optional: per step kind (qa, spec,
                                          # author, code, gate, review only)
    ```
 
-   Precedence for a step of the claimed project: its kind list, then its
-   `default` list, then the workflow bundle's own candidates. A project
+   Precedence for a step of the claimed project: its kind list, then the
+   workflow step's own `model_candidates`, then the project's `default`
+   list, then the bundle's `defaults`. A project
    not listed keeps the bundle's. A declared-but-empty list governs (no
    switchable chain). The aihub project registry, not this file, supplies
    the repo list.

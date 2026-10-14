@@ -5,8 +5,12 @@ package test
 // their human-confirmation steps (the driver's human-gate guarantee,
 // polyforge#138), which an unattended scripted plan (completed grill with
 // no question) can never satisfy. Scenarios that are not about the gate
-// therefore run a copy with that one frontmatter flag stripped; scenarios
-// that are (TestV2HumanGateGuaranteeEndToEnd) set inst.gateQuickFixGrill.
+// therefore run a copy with that one frontmatter flag stripped (both its
+// `true` and its `if_asked` form); scenarios that are
+// (TestV2HumanGateGuaranteeEndToEnd) set inst.gateQuickFixGrill. The
+// step definitions' `output:` schemas stay: the driver validates in
+// record-only mode (polyforge#164 H3), so the fake harness's placeholder
+// outputs are recorded as output_schema_violation events, never refused.
 
 import (
 	"os"
@@ -16,7 +20,7 @@ import (
 	"testing"
 )
 
-var humanGateFlag = regexp.MustCompile(`,\s*requires_human_answer:\s*true`)
+var humanGateFlag = regexp.MustCompile(`,\s*requires_human_answer:\s*(true|if_asked)`)
 
 // stepWallBudget matches one step-level `budget: { wall_minutes: N }`
 // override (the flow-map holds ONLY wall_minutes).
@@ -47,7 +51,7 @@ func addGrillHumanGate(t testing.TB, dir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := strings.Replace(string(raw), "kind: spec, budget", "kind: spec, requires_human_answer: true, budget", 1)
+	out := strings.Replace(string(raw), "{ id: grill, context_policy: fresh, handoff: true, kind: spec", "{ id: grill, context_policy: fresh, handoff: true, kind: spec, requires_human_answer: true", 1)
 	if out == string(raw) {
 		t.Fatal("quick-fix grill line not found for the human-gate copy")
 	}

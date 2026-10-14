@@ -127,7 +127,17 @@ type TransitionRequest struct {
 	// WallMs is the finished dispatch's wall time folded into the step's
 	// cumulative runtime by a step_result write.
 	WallMs int64
-	SpawnN int64
+	// TestFilesCommit is the authored-tests baseline (task repo -> HEAD)
+	// a completed step_result stamps under test_files_commit
+	// (polyforge#164 H4); nil = no stamp. It lands in the result's own
+	// output when that declares test_files (an authoring step), and —
+	// with RebaselineAuthoredTests, a human-approved change to authored
+	// tests — replaces the stamp of every earlier done step that carries
+	// one, so the approved baseline survives a later rewind of the
+	// approving step.
+	TestFilesCommit         map[string]any
+	RebaselineAuthoredTests bool
+	SpawnN                  int64
 }
 
 // GateVerdict is one business gate FAIL judgment (01 §6.2): the policy
@@ -409,6 +419,22 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 		}
 		if len(res.CommandEvidence) > 0 {
 			out["commands"] = res.CommandEvidence // B10: the only accepted command evidence
+		}
+		// H4: the authored-tests baseline is driver-written only — a
+		// step-supplied value is never kept (it would forge the bar).
+		delete(out, testFilesCommitKey)
+		if len(req.TestFilesCommit) > 0 && len(declaredTestFiles(res.Output)) > 0 {
+			out[testFilesCommitKey] = req.TestFilesCommit
+		}
+		if len(req.TestFilesCommit) > 0 && req.RebaselineAuthoredTests {
+			for _, s := range d.workflow.Steps {
+				if s.ID == req.StepID {
+					break
+				}
+				if prev := d.exec.Steps[s.ID]; prev != nil && prev.Status == capsule.StepDone && prev.Output[testFilesCommitKey] != nil {
+					prev.Output[testFilesCommitKey] = req.TestFilesCommit
+				}
+			}
 		}
 		st.Status = capsule.StepDone
 		st.Output = out

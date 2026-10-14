@@ -7,15 +7,15 @@ rewind:
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
-  - { id: repro, context_policy: fresh, handoff: true, kind: code, budget: { wall_minutes: 30 } }
+  - { id: repro, context_policy: fresh, handoff: true, kind: code }
   # root-cause is a gate: it must run FRESH (the judge never inherits the
   # judged conversation — driver rule, separation of powers) and takes the
   # repro record (artifacts/repro.md) by path convention: it reads the
   # artifact, not the chat.
-  - { id: root-cause, context_policy: fresh, handoff: true, kind: qa, gate: true, budget: { wall_minutes: 20 }, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3], on_fail: { target: repro } }
-  - { id: fix, context_policy: inherit, handoff: true, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: fix } }
-  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: fix } }
+  - { id: root-cause, context_policy: fresh, handoff: true, kind: qa, gate: true, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3], on_fail: { target: repro } }
+  - { id: fix, context_policy: inherit, handoff: true, kind: code }
+  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, on_fail: { target: fix }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, on_fail: { target: fix } }
 ---
 
 # bug-fix — root-cause lane
@@ -99,16 +99,12 @@ surface that honestly instead of burning the budget on repeat attempts.
 
 ## Budget guidance
 
-There is no workflow-level budget; the bounds are the rewind limits above and each step's wall estimate. Repos
-with slow CI should raise the per-step `budget.wall_minutes` on `fix` rather than shrinking the verification set.
-
-Every step declares its own `budget.wall_minutes`: the code-writing steps `repro`/`fix` get 30, and
-`root-cause`, `verification` and `review` 20 each — 120 minutes in total.
-
-The declared wall is an estimate, not a limit: the daemon bounds a step's total runtime across its
-dispatches at T = max(3 × its `budget.wall_minutes`, the daemon's `--step-timeout`, default 90 minutes).
-A step that declares nothing gets the default, so declare a wall only for a step that legitimately
-needs more than 90 minutes in total.
+There is no workflow-level budget; the bounds are the rewind limits above and the daemon's
+per-step runtime bound. No step declares `budget.wall_minutes` (polyforge#164): the daemon
+bounds a step's total runtime across its dispatches at T = max(3 × `budget.wall_minutes`,
+the daemon's `--step-timeout`, default 90 minutes), so any estimate of 30 minutes or less is
+inert and T is 90 minutes for every step here. Declare a wall only for a step that
+legitimately needs more than 90 minutes in total (31 or more).
 
 ## No release slot
 

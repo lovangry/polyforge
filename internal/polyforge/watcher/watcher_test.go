@@ -106,6 +106,17 @@ func TestDecisionTableClassifiesTheDocumentedKinds(t *testing.T) {
 	}
 }
 
+// polyforge#164 H11: a zero-question pass of an if_asked human checkpoint
+// (the driver's human_gate_unasked event) wakes the owner.
+func TestHumanGateUnaskedNotifiesOwner(t *testing.T) {
+	snap := running("wi_1", "fix")
+	snap.Events = []protocol.EventEntry{ev(1, "human_gate_unasked")}
+	res := Evaluate(sub("wi_1", 0), snap)
+	if len(res.Decisions) != 1 || res.Decisions[0].Class != "human_gate_unasked" {
+		t.Fatalf("decisions = %+v, want one human_gate_unasked notification", res.Decisions)
+	}
+}
+
 func TestNewKindIsOneTableEntry(t *testing.T) {
 	eventRules["fancy_new_kind"] = Rule{Class: "fancy", Phrase: "something new happened"}
 	defer delete(eventRules, "fancy_new_kind")

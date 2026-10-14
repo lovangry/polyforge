@@ -18,12 +18,16 @@ output:
         required: [name, status]
         properties:
           name: { type: string }
-          status: { type: string, enum: [pass, fail, skipped] }
+          status: { type: string, enum: [pass, fail, skipped, pre_existing] }
           detail: { type: string }
       description: Per-check breakdown (build, lint, tests, etc.), in the order run. At least one check must be recorded (minItems 1) - a verdict over zero checks is an unfilled template.
     fail_reason:
       type: string
       description: Required when verdict is fail — a precise description of what failed, to be carried back to code as its pending_rewind_input. The oneOf split below makes the requirement mechanical - a fail verdict without a non-empty fail_reason does not validate.
+    pre_existing_failures:
+      type: array
+      items: { type: string }
+      description: "Tests that fail on this tree AND fail the same way on the base commit (re-run there) - pre-existing failures, reported but never this change's fault, each as `<repo-relative test file>: <test name>`. Their checks carry status pre_existing with the base sha in detail; they never fail the gate. Never the repro, an authored test_files entry or the regression test (the driver rejects that)."
   oneOf:
     - description: A pass verdict - every recorded check must itself be pass or an honestly-marked skipped; no check may be recorded as fail.
       properties:
@@ -33,7 +37,7 @@ output:
           items:
             type: object
             properties:
-              status: { type: string, enum: [pass, skipped] }
+              status: { type: string, enum: [pass, skipped, pre_existing] }
       required: [verdict]
     - description: A fail verdict - at least one check failed; requires a non-empty fail_reason. The contains constraint mechanically requires at least one check with status fail, so an all-pass checks array cannot ride a fail verdict (draft-07 mechanical only).
       properties:
@@ -83,6 +87,28 @@ pass. No subjective judgment belongs here.
    failing command, its output excerpt, and which plan step's work it implicates. The
    schema requires `fail_reason` here. This text becomes `code`'s `pending_rewind_input`
    on the next attempt; vague language wastes the rewind.
+
+## Pre-existing failures (reported, never a rewind)
+
+Before you record a failing test as `fail`, re-run ONLY the failing tests on the base
+commit this work item's branch started from (`git merge-base HEAD origin/HEAD`, falling
+back to `origin/main` or `origin/master`), in a throwaway worktree OUTSIDE the capsule:
+`tmp=$(mktemp -d)`, `git worktree add --detach "$tmp" <base>`, run the failing tests
+there, then `git worktree remove --force "$tmp"` (and `rm -rf "$tmp"`) — never check the
+base out in the task repo itself. A test that fails the same way on the base commit is a
+PRE-EXISTING failure: record its check as `status: pre_existing` with the base commit
+sha and the base run's failure excerpt in `detail` (the driver rejects a pre_existing
+check whose detail names no sha), list it in `pre_existing_failures` as
+`<repo-relative test file>: <test name>`, and list it in the report. Pre-existing
+failures do not fail this gate: no rewind, no question to the owner — they are
+reported. Only a failure that does not occur on the base (or a test the base does not
+have) is this change's `fail`; a check with both kinds is `fail`, and `fail_reason`
+names only the new failures. The base runs are command evidence like any other.
+
+**Never pre_existing:** any test the plan names as pinning this change, and any repro check. These pin THIS change and fail on the base by design
+— a repro that still fails is an unfixed bug, not a pre-existing failure. Report them
+`pass` or `fail`, never `pre_existing`; the driver rejects a result that classifies a
+repro check or an authored/regression test as pre_existing.
 
 ## Honesty
 

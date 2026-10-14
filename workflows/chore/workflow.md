@@ -7,10 +7,10 @@ rewind:
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
-  - { id: plan, context_policy: fresh, handoff: true, kind: author, budget: { wall_minutes: 15 } }
-  - { id: code, context_policy: inherit, handoff: true, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
-  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
+  - { id: plan, context_policy: fresh, handoff: true, kind: author }
+  - { id: code, context_policy: inherit, handoff: true, kind: code }
+  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, on_fail: { target: code } }
+  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, on_fail: { target: code }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
 ---
 
 # chore — deletion-type maintenance flow
@@ -94,15 +94,9 @@ honestly instead of burning the budget.
 
 ## Budget guidance
 
-There is no workflow-level budget; the bounds are the rewind limits above and each step's wall estimate. Slow-CI
-repos should raise the `code` and `verification` walls rather than thin the verification set.
-
-Every step declares its own `budget.wall_minutes` — `plan: 15`, `code: 30`, `review: 20`,
-`verification: 20`, 85 minutes
-in total, matching the lane's contract: known shape, one bounded judgment pass, one
-machine gate.
-
-The declared wall is an estimate, not a limit: the daemon bounds a step's total runtime across its
-dispatches at T = max(3 × its `budget.wall_minutes`, the daemon's `--step-timeout`, default 90 minutes).
-A step that declares nothing gets the default, so declare a wall only for a step that legitimately
-needs more than 90 minutes in total.
+There is no workflow-level budget; the bounds are the rewind limits above and the daemon's
+per-step runtime bound. No step declares `budget.wall_minutes` (polyforge#164): the daemon
+bounds a step's total runtime across its dispatches at T = max(3 × `budget.wall_minutes`,
+the daemon's `--step-timeout`, default 90 minutes), so any estimate of 30 minutes or less is
+inert and T is 90 minutes for every step here. Declare a wall only for a step that
+legitimately needs more than 90 minutes in total (31 or more).

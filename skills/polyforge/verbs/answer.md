@@ -47,6 +47,7 @@ confirm the first answer landed.
 | `ANSWER-400` (several open questions) | No `--question` was given and the work item has TWO OR MORE pending questions (the error names them) | The daemon refuses to guess which one you meant — run `pf watch <id> --once`, pick the question you intend, and answer with `--question <id>`. |
 | `DAEMON-409` | The work item has no live driver handle (the workflow is between derivations) | Retry shortly, after the daemon re-derives the workflow. |
 | `DAEMON-403` | The `--by` identity does not match the request's caller identity | The answerer identity and the caller identity must be the same — fix `--by` / `PF_USER_ID`, or answer as yourself. |
+| `DAEMON-403` (step process) | The caller runs inside a step agent's process tree (polyforge#122: the daemon checks the UDS peer, its ancestors and its process group for the step markers) | Questions are a human's to answer — a step agent never answers; answer from your own session. |
 | `DAEMON-404` | No local job for this work item | The work item is not running on this machine — answer from the machine that runs it. |
 | (no code) `answer: --text is required` / `… identity required` | Local usage refusal | Fill in the required flags; no request left the machine. |
 | `DAEMON-500` | Delivery failed (the driver could not take the answer) | Retry after the daemon re-derives the workflow; nothing was lost. |
