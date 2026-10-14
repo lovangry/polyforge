@@ -69,11 +69,19 @@ quality belongs here (`review` handles that next).
    against the fixed tree; if `repro` authored a failing test, run that test. Record the
    outcome as its own named check. The observed behavior must match `## Expected` — a
    repro that now fails *differently* is a fail, not a pass.
-4. Record every check run (name, pass/fail/skipped, detail) in `checks` - at least one
+4. **No untracked upstream test files (mechanical).** Read `execution.json`'s
+   `steps.repro.output.test_files` and verify every listed path is tracked (committed)
+   in the repo worktree — `git status --porcelain` must show no untracked residue for
+   any of those paths, and `git ls-files --error-unmatch <path>` must succeed for each.
+   `repro` is required to commit its authored tests itself and `fix` may not touch
+   them, so any listed path that is missing or untracked at this gate is a residue the
+   flow must not ship. Record this as its own named check (e.g.
+   `upstream-test-files-committed`); an empty `test_files` list trivially passes.
+5. Record every check run (name, pass/fail/skipped, detail) in `checks` - at least one
    entry is required, repro included.
-5. If every check passes: `verdict: pass`. No check may be recorded as `fail` under a
+6. If every check passes: `verdict: pass`. No check may be recorded as `fail` under a
    pass verdict - the schema's oneOf rejects that combination as self-contradictory.
-6. If any check fails: `verdict: fail` with a precise `fail_reason` - exact command,
+7. If any check fails: `verdict: fail` with a precise `fail_reason` - exact command,
    output excerpt, and which part of the fix it implicates. The schema requires
    `fail_reason` here. This text becomes `fix`'s `pending_rewind_input`; vague language
    wastes the rewind.

@@ -81,6 +81,29 @@ catch one.
    cause mid-flow (there is no direct rewind to `root-cause` in this lane; see
    `workflow.md`'s rewind-boundaries section).
 
+## Owner-rules checklist (any hit is a blocking finding)
+
+On top of the spec-conformance judgment above, check the diff against the owner's
+fixed rules. ANY hit is a blocking finding - there is no pass verdict with one of
+these present:
+
+- **No faked concurrency semantics.** No timing-based fakes (`time.Sleep` as a
+  synchronization stand-in, backoff tuned to "usually long enough") and no
+  in-process locks/mutexes standing in for the cross-process or distributed mutual
+  exclusion the semantics actually require.
+- **No unrequested concepts.** No new states, fields, error codes, config items, or
+  concepts the WI and the root-cause scope guidance did not request. List each one
+  you find as its own must-fix finding.
+- **No manual-gate bypass.** No code path that bypasses a manual checkpoint
+  (`needs_input` / gate) - the flow's interactive checkpoints must stay
+  load-bearing.
+- **No backward-compatibility code.** No compat shims, dual paths, or
+  legacy-behavior fallbacks; when behavior changes, the old shape is deleted, not
+  carried alongside.
+- **Agent reachability for new entry points.** If the diff adds a new daemon or
+  aihub entry point, the diff must state whether the step agent can reach it; an
+  unstated new entry point is itself a finding.
+
 ## Position in the flow
 
 This step is declared `kind: review` in the workflow frontmatter, which the schema

@@ -48,8 +48,13 @@ is a rewind re-entry, also read `execution.json`'s `pending_rewind_input` for th
   the review verdict route the WI honestly (there is no direct rewind to `root-cause`
   in this lane; see `workflow.md`'s rewind-boundaries section).
 - **Work only inside the declared repo worktree(s)** (`repos/<name>/**`).
-- **Keep the build green between commits.** Run the project's build and test commands
-  (via `bash`) after each compilable unit; do not proceed on a red build.
+- **Keep the build green between commits — fast checks only, per unit.** After each
+  compilable unit run, via `bash`: `go build ./...`, `go vet ./...`, `gofmt -l .`, plus
+  the unit tests of the packages this unit touched — the packages of the changed files
+  and of their tests (a changed file's package and its test package, no more). That is
+  the whole per-unit bar. Full-suite testing belongs to `verification` (the one gate
+  that runs the project's full bar); do not run `go test ./...` here, and do not
+  proceed on top of a red fast check.
 - **Commit per compilable unit** with a message that references what it changes and why.
 - **The repro test must now pass** — if `repro` encoded the failure as a failing test,
   that test passing on your tree is your own fastest feedback; run it before declaring

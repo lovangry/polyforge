@@ -63,6 +63,18 @@ non-reproducible record poisons the whole lane.
    accordingly — add logging around the failing path, tighten the trigger, capture more
    of the environment — rather than re-running the same script unchanged.
 
+## Commit duty for authored test files (hard rule)
+
+If you authored test files under `repos/<name>/**` (the failing test encoding this
+repro), you MUST commit them yourself before completing this step: **ONE dedicated
+commit** containing exactly those files, **verbatim** — the exact paths you report in
+`test_files`, staged by path, no content edits after authoring, and no unrelated files
+in the same commit. `fix` is forbidden from touching these files, so an authored test
+left uncommitted would sit untracked until flow end; `verification` mechanically
+FAILs on any path listed in `steps.repro.output.test_files` that is not tracked
+(committed) in the repo worktree. A scripted-repro-only step (no test files authored)
+commits nothing — this duty fires only when `test_files` is non-empty.
+
 ## Non-goals
 
 - Do not fix anything, even a one-line obvious fix — the lane's contract is that the
