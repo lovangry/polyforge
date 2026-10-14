@@ -49,11 +49,12 @@ var eventRules = map[string]Rule{
 	"submit_rejected":  {Class: "submit_rejected", Phrase: "a submit was accepted but did not start"},
 	"submit_dropped":   {Class: "submit_dropped", Phrase: "a queued submit was dropped"},
 	"daemon_restarted": {Class: "daemon_restarted", Phrase: "the daemon restarted"},
-	// a task repo's carrier ref (refs/pf-task/<repo>) could not be pushed:
-	// a resume would restore the repo without the WI's commits since its
-	// last carried head (polyforge#158). The daemon raises it once per
-	// WI + repo until a carrier push of that repo succeeds again.
-	"carrier_push_failed": {Class: "carrier_push_failed", Phrase: "this task repo cannot be saved; a resume would lose its commits", NamesRepo: true},
+	// a task repo's carrier ref (refs/pf-task/<repo>) could not be pushed
+	// although the capsule chain landed: a resume restores the repo
+	// without the WI's commits since its last carried head
+	// (polyforge#158). The daemon raises it once per repo per job until a
+	// carrier push of that repo succeeds again.
+	"carrier_push_failed": {Class: "carrier_push_failed", Phrase: "this task repo cannot be saved; a resume may lose its commits", NamesRepo: true},
 }
 
 // statusRules maps a status to its terminal decision: the driver's

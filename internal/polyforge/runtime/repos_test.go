@@ -16,11 +16,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
 // fakeTaskRemote builds a real local git repo (one commit on main) to
@@ -354,4 +356,78 @@ func TestReclaimRestoresTaskRepoFromCarrier(t *testing.T) {
 	}
 	unseal(t, testCapsuleDir(r, wi))
 	unseal(t, repoB)
+}
+
+// polyforge#158 SHOULD-2: the once-per-repo carrier_push_failed state
+// belongs to the job. Within one job a persisting carrier failure alerts
+// once; after a re-claim in the same daemon (a new job) the same failure
+// alerts again.
+func TestCarrierPushFailedAlertStateIsPerJob(t *testing.T) {
+	setGitIdentity(t)
+	_, url, _ := fakeTaskRemote(t)
+	hub := newFakeHub()
+	hub.repos = []api.ProjectRepo{{Name: "app", URL: url}}
+	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	var mu sync.Mutex
+	var alerts int
+	r.cfg.EventTap = func(_, kind string, _ map[string]any) {
+		if kind == gitops.EventCarrierPushFailed {
+			mu.Lock()
+			alerts++
+			mu.Unlock()
+		}
+	}
+	count := func() int { mu.Lock(); defer mu.Unlock(); return alerts }
+
+	// The WI's hub bare refuses every carrier ref (the chain lands).
+	hubRoot := t.TempDir()
+	hubBare := filepath.Join(hubRoot, "wi_alert.git")
+	if out, err := exec.Command("git", "init", "--bare", "-b", "main", hubBare).CombinedOutput(); err != nil {
+		t.Fatalf("hub bare init: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "--git-dir", hubBare, "config", "receive.advertisePushOptions", "true").CombinedOutput(); err != nil {
+		t.Fatalf("hub bare config: %v: %s", err, out)
+	}
+	hook := "#!/bin/sh\nwhile read old new ref; do case \"$ref\" in refs/pf-task/*) echo 'carrier refused' >&2; exit 1;; esac; done; exit 0\n"
+	if err := os.WriteFile(filepath.Join(hubBare, "hooks", "pre-receive"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.cfg.GitRemoteBase = hubRoot
+
+	wi := "wi_alert"
+	publish := func(label string) {
+		t.Helper()
+		if _, _, _, err := gitops.CommitPush(r.jobOf(wi).git, label); err != nil {
+			t.Fatalf("CommitPush(%s): %v", label, err)
+		}
+	}
+	if err := r.Start(context.Background(), wi); err != nil {
+		t.Fatalf("first Start: %v", err)
+	}
+	publish("a1")
+	publish("a2")
+	if got := count(); got != 1 {
+		t.Fatalf("job A: %d carrier alerts, want exactly 1 for a persisting failure", got)
+	}
+
+	// Re-claim in the same daemon: a new job, a fresh alert state.
+	j := r.jobOf(wi)
+	r.killAgentTree(j)
+	r.dropJob(j)
+	writeStateFile(t, r, nil)
+	hub.forceEnd(wi)
+	if err := r.Start(context.Background(), wi); err != nil {
+		t.Fatalf("re-claim Start: %v", err)
+	}
+	publish("b1")
+	publish("b2")
+	if got := count(); got != 2 {
+		t.Fatalf("after the re-claim: %d carrier alerts in total, want 2 (one per job)", got)
+	}
+
+	if err := r.Stop(context.Background(), wi, protocol.FinishWrapped); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	unseal(t, testCapsuleDir(r, wi))
+	unseal(t, filepath.Join(testCapsuleDir(r, wi), capsule.DirRepos, "app"))
 }

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 )
@@ -249,7 +250,7 @@ func TestPushTaskRefsWithoutReposIsANoop(t *testing.T) {
 // stderr).
 func TestTaskRefDivergenceIsRejectedAndRaisedAsEvent(t *testing.T) {
 	setIdentity(t)
-	o, base := taskOpts(t, "wi_task5")
+	o, base := taskOpts(t, "wi_task3")
 	mkBare(t, o.RemoteURL, false)
 	mkTaskCapsule(t, o)
 	workHead := mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
@@ -368,8 +369,8 @@ func TestIsNonFastForwardOnRealGitOutput(t *testing.T) {
 }
 
 // polyforge#158: a failed carrier push is raised as a carrier_push_failed
-// event (the watcher's human decision) — ONCE per work item + repo, not
-// on every publish, until a carrier push of that repo succeeds again; a
+// event (the watcher's human decision) — ONCE per repo per job (the
+// runtime's CarrierAlerts), not on every publish, until a carrier push of that repo succeeds again; a
 // later failure then alerts again. The body names the repo and keeps the
 // git error as detail (the watcher's line never shows it).
 func TestCarrierPushFailureAlertsOnceUntilSuccess(t *testing.T) {
@@ -378,7 +379,7 @@ func TestCarrierPushFailureAlertsOnceUntilSuccess(t *testing.T) {
 	bare := mkBare(t, o.RemoteURL, true) // hook: seq enforced on EVERY ref
 	mkTaskCapsule(t, o)
 	workHead := mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
-	t.Cleanup(func() { carrierAlertClear(o.WorkItemID, "demo-src") })
+	o.CarrierAlerts = &CarrierAlerts{} // the runtime's per-job state
 
 	var kinds []string
 	var bodies []map[string]any
@@ -439,22 +440,225 @@ func TestCarrierPushFailureAlertsOnceUntilSuccess(t *testing.T) {
 	}
 }
 
-// The once-per-repo state is keyed by work item AND repo: a failure of
-// one repo never silences another repo's, or another work item's.
-func TestCarrierAlertOnceIsPerWorkItemAndRepo(t *testing.T) {
-	t.Cleanup(func() {
-		carrierAlertClear("wi_a", "r1")
-		carrierAlertClear("wi_a", "r2")
-		carrierAlertClear("wi_b", "r1")
-	})
-	if !carrierAlertOnce("wi_a", "r1") || carrierAlertOnce("wi_a", "r1") {
-		t.Fatal("wi_a/r1: first failure alerts, the second does not")
+// The once-per-repo state is per repo (and, held by the runtime job, per
+// job): a failure of one repo never silences another's, a success clears
+// it, and a nil state (no job wiring) raises every failure.
+func TestCarrierAlertsOncePerRepoUntilSuccess(t *testing.T) {
+	a := &CarrierAlerts{}
+	if !a.first("r1") || a.first("r1") {
+		t.Fatal("r1: the first failure alerts, the second does not")
 	}
-	if !carrierAlertOnce("wi_a", "r2") || !carrierAlertOnce("wi_b", "r1") {
-		t.Fatal("another repo / another work item must alert on its own")
+	if !a.first("r2") {
+		t.Fatal("another repo must alert on its own")
 	}
-	carrierAlertClear("wi_a", "r1")
-	if !carrierAlertOnce("wi_a", "r1") {
+	a.clear("r1")
+	if !a.first("r1") {
 		t.Fatal("after a success the next failure alerts again")
+	}
+	if !(&CarrierAlerts{}).first("r1") {
+		t.Fatal("a fresh job's state (a re-claim) must alert again")
+	}
+	var none *CarrierAlerts
+	if !none.first("r1") || !none.first("r1") {
+		t.Fatal("a nil state raises every failure")
+	}
+	none.clear("r1") // must not panic
+}
+
+// SHOULD-1: a carrier failure is a "cannot be saved" decision only when
+// the chain push landed. A publish whose chain push fails too (hub
+// outage, fenced session — here: a hub that refuses every ref) raises no
+// carrier_push_failed; the still-failing carrier is reported on the next
+// publish whose chain push succeeds.
+func TestCarrierPushFailedOnlyAfterTheChainLanded(t *testing.T) {
+	setIdentity(t)
+	o, base := taskOpts(t, "wi_task7")
+	mkBare(t, o.RemoteURL, false)
+	mkTaskCapsule(t, o)
+	mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
+	o.CarrierAlerts = &CarrierAlerts{}
+	var kinds []string
+	o.EventSink = func(kind string, _ map[string]any) { kinds = append(kinds, kind) }
+	hook := filepath.Join(o.RemoteURL, "hooks", "pre-receive")
+	setHook := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(hook, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Every ref refused: the chain push fails, so does the carrier.
+	setHook("echo 'hub refuses everything' >&2; exit 1\n")
+	if _, _, _, err := CommitPush(o, "boundary 1"); err == nil {
+		t.Fatal("the chain push must fail against a hub refusing every ref")
+	}
+	if len(kinds) != 0 {
+		t.Fatalf("a failed chain push must raise no carrier decision: %v", kinds)
+	}
+
+	// The chain lands, the carrier is still refused: reported now.
+	setHook(`while read old new ref; do case "$ref" in refs/pf-task/*) echo "carrier refused" >&2; exit 1;; esac; done; exit 0
+`)
+	if _, _, _, err := CommitPush(o, "boundary 2"); err != nil {
+		t.Fatalf("CommitPush: %v", err)
+	}
+	if len(kinds) != 1 || kinds[0] != EventCarrierPushFailed {
+		t.Fatalf("events = %v, want one %s after the chain landed", kinds, EventCarrierPushFailed)
+	}
+}
+
+// NIT-1: event bodies carry a bounded git error.
+func TestEventDetailIsBounded(t *testing.T) {
+	if got := EventDetail("short"); got != "short" {
+		t.Fatalf("short detail changed: %q", got)
+	}
+	long := strings.Repeat("é", eventDetailMax) // 2 bytes per rune
+	got := EventDetail(long)
+	if len(got) > eventDetailMax+len("…(truncated)") || !strings.HasSuffix(got, "…(truncated)") {
+		t.Fatalf("detail not truncated: %d bytes", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("truncation split a rune")
+	}
+}
+
+// SECURITY: the carrier push argv resets every credential helper and the
+// http proxy and keeps the hooks/fsmonitor hardening.
+func TestCarrierPushArgvHardening(t *testing.T) {
+	setIdentity(t)
+	o, base := taskOpts(t, "wi_task8")
+	mkBare(t, o.RemoteURL, false)
+	mkTaskCapsule(t, o)
+	mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
+	var carrier []string
+	gitArgsProbe = func(args []string) {
+		for _, a := range args {
+			if strings.HasPrefix(a, "HEAD:"+TaskCarrierNamespace) {
+				carrier = append([]string{}, args...)
+			}
+		}
+	}
+	t.Cleanup(func() { gitArgsProbe = nil })
+	if _, _, _, err := CommitPush(o, "boundary"); err != nil {
+		t.Fatalf("CommitPush: %v", err)
+	}
+	want := []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "credential.helper=", "-c", "http.proxy=", "push"}
+	if len(carrier) < len(want) || strings.Join(carrier[:len(want)], " ") != strings.Join(want, " ") {
+		t.Fatalf("carrier push argv = %q, want it to start with %q", carrier, want)
+	}
+}
+
+// hostileCarrierEnv is an http:// hub with basic auth (startGitHTTP) plus
+// a capsule whose task repo the test then poisons with its own git
+// config. Answers the opts, the task repo dir and the hub bare.
+func hostileCarrierEnv(t *testing.T) (Opts, string, string) {
+	t.Helper()
+	setIdentity(t)
+	root := t.TempDir()
+	repo := filepath.Join(root, "wi_http.git")
+	mustRun(t, "git", "init", "-q", "--bare", repo)
+	mustRun(t, "git", "--git-dir", repo, "config", "http.receivepack", "true")
+	mustRun(t, "git", "--git-dir", repo, "config", "receive.advertisePushOptions", "true")
+	url := startGitHTTP(t, root)
+	o, base := taskOpts(t, "wi_http")
+	o.RemoteURL = url + "/wi_http.git"
+	o.Secret = "http-push-secret"
+	mkTaskCapsule(t, o)
+	mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
+	return o, filepath.Join(o.CapsuleDir, capsule.DirRepos, "demo-src"), repo
+}
+
+// Control for the hostile tests: over http:// with the credential, a
+// clean task repo's carrier lands.
+func TestCarrierPushOverHTTPLands(t *testing.T) {
+	o, _, hub := hostileCarrierEnv(t)
+	var kinds []string
+	o.EventSink = func(kind string, _ map[string]any) { kinds = append(kinds, kind) }
+	if _, _, _, err := CommitPush(o, "boundary"); err != nil {
+		t.Fatalf("CommitPush: %v", err)
+	}
+	if _, ok := bareRefSHA(t, hub, TaskRefName("demo-src")); !ok {
+		t.Fatal("the carrier ref did not land over http://")
+	}
+	if len(kinds) != 0 {
+		t.Fatalf("a clean carrier push must raise nothing: %v", kinds)
+	}
+}
+
+// SECURITY: an agent-planted credential.helper in the task repo's own
+// config never runs and never sees the secret — the repo is refused
+// before any credential is prepared, raised as carrier_push_failed.
+func TestCarrierRefusesRepoCredentialHelper(t *testing.T) {
+	o, repoDir, hub := hostileCarrierEnv(t)
+	marker := filepath.Join(t.TempDir(), "helper-ran")
+	mustRun(t, "git", "-C", repoDir, "config", "credential.helper", "!f() { cat >> "+marker+"; }; f")
+	var kinds []string
+	var bodies []map[string]any
+	o.EventSink = func(kind string, b map[string]any) { kinds = append(kinds, kind); bodies = append(bodies, b) }
+	if _, _, _, err := CommitPush(o, "boundary"); err != nil {
+		t.Fatalf("a refused carrier must not fail the chain publish: %v", err)
+	}
+	if b, err := os.ReadFile(marker); err == nil {
+		if strings.Contains(string(b), o.Secret) {
+			t.Fatalf("the planted helper received the secret: %q", b)
+		}
+		t.Fatalf("the planted credential helper ran: %q", b)
+	}
+	if _, ok := bareRefSHA(t, hub, TaskRefName("demo-src")); ok {
+		t.Fatal("a refused carrier must not land")
+	}
+	if len(kinds) != 1 || kinds[0] != EventCarrierPushFailed {
+		t.Fatalf("events = %v, want one %s", kinds, EventCarrierPushFailed)
+	}
+	if e, _ := bodies[0]["error"].(string); !strings.Contains(e, "credential.helper") {
+		t.Fatalf("the refusal must name the key: %v", bodies[0])
+	}
+}
+
+// SECURITY: an agent-planted url.<x>.insteadOf (and pushInsteadOf) that
+// would redirect the credentialed push elsewhere refuses the push; the
+// other location receives nothing.
+func TestCarrierRefusesRepoURLRewrite(t *testing.T) {
+	for _, key := range []string{"insteadOf", "pushInsteadOf"} {
+		t.Run(key, func(t *testing.T) {
+			o, repoDir, _ := hostileCarrierEnv(t)
+			evil := filepath.Join(t.TempDir(), "evil.git")
+			mustRun(t, "git", "init", "-q", "--bare", evil)
+			mustRun(t, "git", "-C", repoDir, "config", "url."+evil+"."+key, o.RemoteURL)
+			var kinds []string
+			o.EventSink = func(kind string, _ map[string]any) { kinds = append(kinds, kind) }
+			if _, _, _, err := CommitPush(o, "boundary"); err != nil {
+				t.Fatalf("CommitPush: %v", err)
+			}
+			if _, ok := bareRefSHA(t, evil, TaskRefName("demo-src")); ok {
+				t.Fatal("the carrier push was redirected to the planted URL")
+			}
+			if len(kinds) != 1 || kinds[0] != EventCarrierPushFailed {
+				t.Fatalf("events = %v, want one %s", kinds, EventCarrierPushFailed)
+			}
+		})
+	}
+}
+
+// The refused-key table: the redirect / credential / program keys are
+// refused; an ordinary clone's keys are not.
+func TestCarrierConfigKeyRefused(t *testing.T) {
+	for _, k := range []string{
+		"url.http://x/.insteadof", "url.http://x/.pushinsteadof", "credential.helper",
+		"credential.http://h.username", "http.proxy", "http.extraheader", "http.http://h/.extraheader",
+		"http.sslcainfo", "remote.origin.pushurl", "remote.origin.proxy", "core.sshcommand", "core.askpass",
+		"core.gitproxy", "include.path", "includeif.gitdir:/x.path", "gpg.program", "push.gpgsign",
+	} {
+		if !carrierConfigKeyRefused(k) {
+			t.Errorf("%s must be refused", k)
+		}
+	}
+	for _, k := range []string{
+		"core.repositoryformatversion", "core.bare", "remote.origin.url", "remote.origin.fetch",
+		"branch.main.remote", "branch.main.merge", "user.name", "core.hookspath",
+	} {
+		if carrierConfigKeyRefused(k) {
+			t.Errorf("%s must not be refused", k)
+		}
 	}
 }

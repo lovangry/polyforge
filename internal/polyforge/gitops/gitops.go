@@ -59,6 +59,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
@@ -100,6 +101,10 @@ type Opts struct {
 	// (e.g. EventTaskRefDiverged), already bound to this work item by the
 	// runtime. nil drops them.
 	EventSink func(kind string, body map[string]any)
+	// CarrierAlerts is the job's once-per-repo state for
+	// carrier_push_failed (owned by the runtime job, so it ends with the
+	// job and starts fresh on a re-claim). nil raises every failure.
+	CarrierAlerts *CarrierAlerts
 }
 
 // Env returns the environment every raw git invocation against this
@@ -427,8 +432,12 @@ func pushLocked(o Opts) (bool, int64, error) {
 	env := append(o.Env(), additions...)
 	pushed, pushMS, perr := pushChainLocked(env, o.CapsuleDir, args)
 	// Task-repo durability lane: after the chain push either way, its
-	// own invocations, its own failures — never the chain's result.
-	pushTaskRefsLocked(o)
+	// own invocations, its own failures — never the chain's result. A
+	// carrier failure is raised as a human decision only when the chain
+	// push itself landed: a hub outage or a fenced session fails both,
+	// and that is not a "cannot be saved" decision (a still-failing
+	// carrier is reported on the next successful publish).
+	pushTaskRefsLocked(o, perr == nil)
 	return pushed, pushMS, perr
 }
 
@@ -480,27 +489,27 @@ func TaskRefName(repo string) string { return TaskCarrierNamespace + repo }
 // the per-WI lock (called from pushLocked), AFTER the chain push, and is
 // BEST-EFFORT-LOUD: each push is its own git invocation — a rejected or
 // failed carrier never fails the execution-state publish this lane
-// rides; it is logged loudly and raised as a carrier_push_failed event
-// (a human decision, once per WI + repo until the repo's carrier push
-// succeeds again) so the human sees that a re-claim would lose that
-// repo's state. An unborn or unreadable task HEAD is nothing
-// to carry (honest skip, not a failure). The invocations run inside each
-// task worktree with its OWN git-dir — never the capsule's external
-// GIT_DIR/GIT_WORK_TREE binding, whose history holds none of these
-// objects.
-func pushTaskRefsLocked(o Opts) {
+// rides; it is logged loudly and, when the chain push landed (chainOK),
+// raised as a carrier_push_failed event (a human decision, once per repo
+// per job until the repo's carrier push succeeds again) so the human
+// sees that a re-claim may lose that repo's state. An unborn or
+// unreadable task HEAD is nothing to carry (honest skip, not a failure).
+// The invocations run inside each task worktree with its OWN git-dir —
+// never the capsule's external GIT_DIR/GIT_WORK_TREE binding, whose
+// history holds none of these objects.
+//
+// The task repo is agent-controlled (agents are untrusted) and the push
+// carries the session credential: a repo whose own git config could
+// redirect or capture it (carrierConfigRefusal) is refused BEFORE any
+// credential is prepared, and the push argv (carrierGitFlags) resets the
+// credential helpers and the http proxy and disables hooks and fsmonitor.
+func pushTaskRefsLocked(o Opts, chainOK bool) {
 	reposDir := filepath.Join(o.CapsuleDir, capsule.DirRepos)
 	ents, err := os.ReadDir(reposDir)
 	if err != nil {
 		return // no repos/ tree: no inventory, nothing to carry
 	}
-	additions, cleanup, cerr := credentialEnv(o)
-	if cerr != nil {
-		fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push skipped (credential prep failed): %v\n", o.WorkItemID, cerr)
-		return
-	}
-	defer cleanup()
-	env := append(os.Environ(), additions...)
+	var names []string
 	for _, e := range ents {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
@@ -509,31 +518,37 @@ func pushTaskRefsLocked(o Opts) {
 		if out, err := git(nil, dir, "rev-parse", "HEAD"); err != nil || strings.TrimSpace(out) == "" {
 			continue // unborn/absent HEAD: nothing to carry yet
 		}
-		// The task repo is agent-controlled (agents are untrusted): its
-		// hooks (pre-push would run as the daemon WITH the credential
-		// askpass) and fsmonitor are disabled for this invocation.
-		args := []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "push"}
+		if reason := carrierConfigRefusal(dir, o.RemoteURL); reason != "" {
+			fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s refused (task-repo state may not survive a re-claim): %s\n", o.WorkItemID, e.Name(), reason)
+			o.carrierFailed(e.Name(), chainOK, "carrier push refused: "+reason)
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	if len(names) == 0 {
+		return
+	}
+	additions, cleanup, cerr := credentialEnv(o)
+	if cerr != nil {
+		fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push skipped (credential prep failed): %v\n", o.WorkItemID, cerr)
+		return
+	}
+	defer cleanup()
+	env := append(os.Environ(), additions...)
+	for _, name := range names {
+		dir := filepath.Join(reposDir, name)
+		args := append(append([]string{}, carrierGitFlags...), "push")
 		if o.Fingerprint != "" {
 			args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
 		}
-		args = append(args, o.RemoteURL, "HEAD:"+TaskRefName(e.Name()))
+		args = append(args, o.RemoteURL, "HEAD:"+TaskRefName(name))
 		out, err := git(env, dir, args...)
 		if err == nil {
-			carrierAlertClear(o.WorkItemID, e.Name())
+			o.CarrierAlerts.clear(name)
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s failed (task-repo state may not survive a re-claim): %v: %s\n", o.WorkItemID, e.Name(), err, strings.TrimSpace(out))
-		// Any carrier failure means a re-claim would lose this repo's
-		// commits: raised once as a carrier_push_failed event (a human
-		// decision for the watcher) until a push of the repo succeeds
-		// again — not on every publish.
-		if o.EventSink != nil && carrierAlertOnce(o.WorkItemID, e.Name()) {
-			o.EventSink(EventCarrierPushFailed, map[string]any{
-				"repo":  e.Name(),
-				"ref":   TaskRefName(e.Name()),
-				"error": err.Error(),
-			})
-		}
+		fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s failed (task-repo state may not survive a re-claim): %v: %s\n", o.WorkItemID, name, err, strings.TrimSpace(out))
+		o.carrierFailed(name, chainOK, err.Error())
 		// Never force: a non-fast-forward rejection means the carrier
 		// and this worktree DIVERGED (e.g. a re-claim that started
 		// from a clone lacking the carried commits). The carrier is
@@ -541,12 +556,121 @@ func pushTaskRefsLocked(o Opts) {
 		// event, not left to stderr.
 		if IsNonFastForward(err, out) && o.EventSink != nil {
 			o.EventSink(EventTaskRefDiverged, map[string]any{
-				"repo":  e.Name(),
-				"ref":   TaskRefName(e.Name()),
-				"error": err.Error(),
+				"repo":  name,
+				"ref":   TaskRefName(name),
+				"error": EventDetail(err.Error()),
 			})
 		}
 	}
+}
+
+// carrierGitFlags lead every git invocation against an agent-controlled
+// task repo on the carrier lane: no hooks (pre-push would run as the
+// daemon WITH the credential askpass), no fsmonitor, no credential
+// helper (an empty value resets the helper list — a helper would be
+// handed the secret on `store`), no http proxy.
+var carrierGitFlags = []string{
+	"-c", "core.hooksPath=/dev/null",
+	"-c", "core.fsmonitor=false",
+	"-c", "credential.helper=",
+	"-c", "http.proxy=",
+}
+
+// carrierConfigRefusal answers why the task repo at dir must not receive
+// the session credential ("" = safe). It reads the repo's OWN config
+// (local and worktree scope; included files report as local) with the
+// carrier flags and the GIT_* environment stripped, and refuses any key
+// that could redirect the push or capture the credential
+// (carrierConfigKeyRefused); then it checks that the effective push URL
+// is exactly remoteURL. A read failure refuses.
+func carrierConfigRefusal(dir, remoteURL string) string {
+	env := withoutGitEnv(os.Environ())
+	out, err := git(env, dir, append(append([]string{}, carrierGitFlags...), "config", "--list", "--show-scope", "-z")...)
+	if err != nil {
+		return "cannot read the repo's git config"
+	}
+	// -z: "<scope>\0<key>\n<value>\0" per entry ("<key>\0" when valueless).
+	fields := strings.Split(out, "\x00")
+	for i := 0; i+1 < len(fields); i += 2 {
+		if scope := fields[i]; scope != "local" && scope != "worktree" {
+			continue
+		}
+		key, _, _ := strings.Cut(fields[i+1], "\n")
+		if carrierConfigKeyRefused(strings.ToLower(key)) {
+			return "the repo's own git config sets " + key
+		}
+	}
+	got, err := git(env, dir, append(append([]string{}, carrierGitFlags...), "ls-remote", "--get-url", remoteURL)...)
+	if err != nil {
+		return "cannot resolve the push URL"
+	}
+	if strings.TrimSpace(got) != remoteURL {
+		return "the effective push URL is not the work item's carrier URL"
+	}
+	return ""
+}
+
+// carrierConfigKeyRefused reports a repo-local config key (lowercased)
+// that could redirect a credentialed push, hand the credential to a
+// program, or run a program during the push.
+func carrierConfigKeyRefused(key string) bool {
+	for _, p := range []string{"credential.", "http.", "include.", "includeif.", "gpg."} {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	switch key {
+	case "core.sshcommand", "core.askpass", "core.gitproxy", "push.gpgsign":
+		return true
+	}
+	if strings.HasPrefix(key, "url.") && (strings.HasSuffix(key, ".insteadof") || strings.HasSuffix(key, ".pushinsteadof")) {
+		return true
+	}
+	if strings.HasPrefix(key, "remote.") && (strings.HasSuffix(key, ".pushurl") || strings.HasSuffix(key, ".proxy")) {
+		return true
+	}
+	return false
+}
+
+// withoutGitEnv drops every GIT_* variable from env.
+func withoutGitEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "GIT_") {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
+// carrierFailed raises carrier_push_failed for repo — only when the
+// chain push landed (chainOK), and only the first time since the repo's
+// last successful carrier push in this job (CarrierAlerts).
+func (o Opts) carrierFailed(repo string, chainOK bool, detail string) {
+	if !chainOK || o.EventSink == nil || !o.CarrierAlerts.first(repo) {
+		return
+	}
+	o.EventSink(EventCarrierPushFailed, map[string]any{
+		"repo":  repo,
+		"ref":   TaskRefName(repo),
+		"error": EventDetail(detail),
+	})
+}
+
+// eventDetailMax bounds the free-text detail an event body carries.
+const eventDetailMax = 2048
+
+// EventDetail truncates an event body's free-text detail (a git error)
+// to eventDetailMax bytes, cut on a rune boundary.
+func EventDetail(s string) string {
+	if len(s) <= eventDetailMax {
+		return s
+	}
+	cut := eventDetailMax
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…(truncated)"
 }
 
 // FetchTaskRef reads the carrier lane from the claim side: it fetches
@@ -897,42 +1021,50 @@ const EventTaskRefDiverged = "task_ref_diverged"
 
 // EventCarrierPushFailed is the event kind raised when the carrier push
 // of one task repo fails for any reason (blob limit, divergence,
-// transport): a re-claim would restore that repo without the commits
-// since its last carried head, so the watcher classifies it as a human
-// decision (polyforge#158). Raised once per work item + repo until a
-// carrier push of that repo succeeds again (carrierAlertOnce).
+// transport, a refused repo config): a re-claim restores that repo
+// without the commits since its last carried head, so the watcher
+// classifies it as a human decision (polyforge#158). Raised only after a
+// chain push that landed, and once per repo per job until a carrier push
+// of that repo succeeds again (CarrierAlerts).
 const EventCarrierPushFailed = "carrier_push_failed"
 
-// carrierAlerted holds, in memory, the work item + repo pairs whose
-// carrier failure has already been raised; a successful carrier push
-// clears the pair, so a later failure alerts again. A daemon restart
-// forgets it: the next failure after a restart alerts once more.
-var carrierAlerted = struct {
-	sync.Mutex
-	m map[string]bool
-}{m: map[string]bool{}}
+// CarrierAlerts is one job's in-memory record of the task repos whose
+// carrier failure has already been raised; a successful carrier push of
+// a repo clears it, so a later failure alerts again. The runtime keeps
+// one per job: it ends with the job, and a re-claim (a new job) starts
+// clean. The zero value is ready; a nil *CarrierAlerts raises every
+// failure.
+type CarrierAlerts struct {
+	mu sync.Mutex
+	m  map[string]bool
+}
 
-func carrierKey(wi, repo string) string { return wi + "\x00" + repo }
-
-// carrierAlertOnce records a carrier failure for wi/repo and reports
-// whether it is the first since the last success (i.e. whether to alert).
-func carrierAlertOnce(wi, repo string) bool {
-	carrierAlerted.Lock()
-	defer carrierAlerted.Unlock()
-	k := carrierKey(wi, repo)
-	if carrierAlerted.m[k] {
+// first records a failure of repo and reports whether it is the first
+// since the repo's last success (i.e. whether to alert).
+func (a *CarrierAlerts) first(repo string) bool {
+	if a == nil {
+		return true
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.m[repo] {
 		return false
 	}
-	carrierAlerted.m[k] = true
+	if a.m == nil {
+		a.m = map[string]bool{}
+	}
+	a.m[repo] = true
 	return true
 }
 
-// carrierAlertClear forgets wi/repo's raised failure after a successful
-// carrier push.
-func carrierAlertClear(wi, repo string) {
-	carrierAlerted.Lock()
-	delete(carrierAlerted.m, carrierKey(wi, repo))
-	carrierAlerted.Unlock()
+// clear forgets repo's raised failure after a successful carrier push.
+func (a *CarrierAlerts) clear(repo string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	delete(a.m, repo)
+	a.mu.Unlock()
 }
 
 // IsNonFastForward reports a push refused because the remote ref is not an

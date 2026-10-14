@@ -205,7 +205,7 @@ func TestCarrierPushFailedLineNamesTheRepoOnly(t *testing.T) {
 	if len(res.Decisions) != 3 {
 		t.Fatalf("decisions = %+v", res.Decisions)
 	}
-	const tail = " — this task repo cannot be saved; a resume would lose its commits; this is a human decision, the agent must not answer it"
+	const tail = " — this task repo cannot be saved; a resume may lose its commits; this is a human decision, the agent must not answer it"
 	if got, want := res.Decisions[0].Line(), "[polyforge] polyforge#158 carrier_push_failed skypilot"+tail; got != want {
 		t.Fatalf("line = %q\nwant   %q", got, want)
 	}
