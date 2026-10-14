@@ -75,7 +75,11 @@
 #     recreates the service and verifies that the OLD version answers. A
 #     FAILED upgrade script was rolled back by its own transaction, so nothing
 #     of it is applied and no rollback SQL runs for it. Data restore stays
-#     manual (it needs a stop) - the commands are printed.
+#     manual (it needs a stop) - the commands are printed. When the SQL run
+#     itself errors (e.g. the ssh connection drops), the version's probe is
+#     re-run: if it reports the version applied, its rollback.sql runs too.
+#   * The SQL plan reads the LOCAL git tags: the target tag must exist locally
+#     (refused in step 0 otherwise - `git fetch --tags`).
 #
 # Usage:
 #   .polyforge/deploy.sh <version> --confirm <version> [--dry-run] [--force]
@@ -84,7 +88,10 @@
 #     --dry-run  steps 0-1 run for real (strictly read-only on the server),
 #                steps 2-8 are printed as a plan; nothing is changed, no lock
 #                is taken. --confirm is not required (if given it must match).
-#     --force    allow re-deploying the running version / a downgrade.
+#     --force    allow re-deploying the running version / a downgrade. A
+#                downgrade across a deploy/sql version (a dir in (<version>,
+#                running]) is refused even with --force: no rollback SQL runs
+#                for a downgrade - roll the schema back by hand.
 #
 # Exit codes (the last stdout line is machine-readable on 0 / 10 / 11):
 #   0   deployed.            deployed=<version> previous=<old>
@@ -239,9 +246,11 @@ on_exit() {
     echo "deploy: unexpected exit (status $rc) after the switch window began - rolling back" >&2
     # auto_rollback always exits: run it in a subshell so that the cleanup below
     # (lock release, $WORK removal) still happens; its exit code (10 rolled back,
-    # 11 rollback failed) is the outcome that is reported.
+    # 11 rollback failed) is the outcome that is reported. The reason keeps
+    # the REAL exit status (captured before rc is reset).
+    reason="unexpected exit, status $rc"
     rc=0
-    ( auto_rollback "unexpected exit, status $rc" ) || rc=$?
+    ( auto_rollback "$reason" ) || rc=$?
   fi
   cleanup
   exit "$rc"
@@ -301,9 +310,14 @@ rollback_text() {
   # aihub.db is the consistent snapshot):
   ssh $AIHUB_HOST "docker stop $AIHUB_CONTAINER && mv $AIHUB_DATA $AIHUB_DATA.failed-$TS && cp -a $SRV_BACKUP $AIHUB_DATA && docker start $AIHUB_CONTAINER"
 EOF
-  if [ -n "$APPLIED_VERS" ] && [ -n "$SQLSRV" ]; then
-    for v in $APPLIED_VERS; do
-      echo "  ssh $AIHUB_HOST \"python3 - '$AIHUB_DATA/aihub.db' '$SQLSRV/$v-rollback.sql'\"   # rollback SQL of $v (if it did not run yet)"
+  if [ -n "$APPLIED_VERS" ]; then
+    desc="$(printf '%s\n' "$APPLIED_VERS" | awk 'NF {a[++n] = $0} END {for (i = n; i >= 1; i--) print a[i]}')"
+    for v in $desc; do
+      if [ -n "$SQLSRV" ]; then
+        echo "  # rollback SQL of $v (if it did not run yet), newest first, ONE transaction against $AIHUB_DATA/aihub.db: staged at $AIHUB_HOST:$SQLSRV/$v-rollback.sql"
+      else
+        echo "  # rollback SQL of $v (if it did not run yet), newest first, ONE transaction against $AIHUB_DATA/aihub.db: git show $v:deploy/sql/$v/rollback.sql"
+      fi
     done
   fi
 }
@@ -358,6 +372,7 @@ auto_rollback() {
   img_now="$(dk inspect -f '{{.Config.Image}}' "$AIHUB_CONTAINER" 2>/dev/null || true)"
   [ "$img_now" = "$OLDIMG" ] || die "rollback: container image is \"$img_now\", expected $OLDIMG"
   wait_version "$OLDVER" || die "rollback: after ${WAIT_SECS}s container running=$LAST_RUN, version=\"$LAST_VER\" (wanted $OLDVER)"
+  sql_unstage
   {
     echo
     echo "#############################################################################"
@@ -400,7 +415,14 @@ vcmp() {
 # re-deploy of an already-upgraded version is a no-op for the SQL.
 sql_candidate_versions() {
   if [ "$OLDVER" = "$TAG" ]; then printf '%s\n' "$TAG"; return 0; fi
-  git -C "$SCRIPT_DIR" tag -l 'v*' | awk -v old="${OLDVER#v}" -v new="${TAG#v}" '
+  sql_tags_between "$OLDVER" "$TAG"
+}
+
+# sql_tags_between <lo> <hi>: the LOCAL release tags in (lo, hi], ascending.
+# Only the target tag must exist locally (checked in step 0); lo is just a
+# numeric bound, so a running version whose tag is absent locally is fine.
+sql_tags_between() {
+  git -C "$SCRIPT_DIR" tag -l 'v*' | awk -v old="${1#v}" -v new="${2#v}" '
     function num(s,  a) { sub(/[-+].*/, "", s); split(s, a, "."); return a[1] * 1000000 + a[2] * 1000 + a[3] + 0 }
     { v = $0; sub(/^v/, "", v)
       if (v !~ /^[0-9]+\.[0-9]+\.[0-9]+/) next
@@ -418,6 +440,7 @@ sql_fetch() {
     return 0
   fi
   if [ -s "$SCRIPT_DIR/../deploy/sql/$sv/$sf" ]; then
+    note "NOTE: deploy/sql/$sv/$sf is not in tag $sv - taken from the WORKING TREE ($SCRIPT_DIR/../deploy/sql/$sv/$sf)"
     cp "$SCRIPT_DIR/../deploy/sql/$sv/$sf" "$dst"
     return 0
   fi
@@ -540,7 +563,7 @@ sql_plan() {
     done
   done
   for v in $SQLVERS; do
-    out="$(printf '%s\n' "$PYPROBE" | rssh python3 - "$AIHUB_DATA/aihub.db" "$SQLSRV/$v-probe.sql" 2>&1)" \
+    out="$(sql_probe "$v")" \
       || die "probe of deploy/sql/$v/probe.sql failed: $out"
     case "$out" in
       "PROBE 0")
@@ -555,6 +578,20 @@ sql_plan() {
   done
 }
 
+# sql_probe <ver>: run the version's staged probe.sql (read-only); prints
+# "PROBE <n>" (0 = applied).
+sql_probe() {
+  printf '%s\n' "$PYPROBE" | rssh python3 - "$AIHUB_DATA/aihub.db" "$SQLSRV/$1-probe.sql" 2>&1
+}
+
+# sql_unstage: remove the server-side SQL staging dir once the window is
+# over (success, or a completed rollback). Best effort.
+sql_unstage() {
+  [ -n "$SQLSRV" ] || return 0
+  rssh "rm -rf '$SQLSRV'" || note "WARNING: could not remove the SQL staging dir $AIHUB_HOST:$SQLSRV"
+  SQLSRV=""
+}
+
 # apply_upgrade_sql (inside the window): run the pending versions'
 # upgrade.sql in ascending order, one transaction each; a failure dies into
 # the auto-rollback (a failed script applied nothing of its own; versions
@@ -562,10 +599,17 @@ sql_plan() {
 apply_upgrade_sql() {
   for v in $SQLTODO; do
     note "upgrade SQL: applying deploy/sql/$v/upgrade.sql (one transaction)"
-    if ! run_sql "$SQLSRV/$v-upgrade.sql" >"$WORK/sql-$v.log" 2>&1; then
+    if ! run_sql "$SQLSRV/$v-upgrade.sql" >"$WORK/sql-$v.log" 2>&1 || ! grep -q '^SQL-OK' "$WORK/sql-$v.log"; then
+      # the run failed or did not confirm - but the commit may have landed
+      # (e.g. the ssh connection dropped after COMMIT): ask the probe. If it
+      # says applied, the version is a rollback.sql target.
+      if [ "$(sql_probe "$v")" = "PROBE 0" ]; then
+        APPLIED_VERS="$APPLIED_VERS$v
+"
+        die "upgrade SQL of $v reported failure but the probe says it IS applied (connection lost after the commit?) - its rollback.sql runs: $(tail -3 "$WORK/sql-$v.log")"
+      fi
       die "upgrade SQL of $v failed (its transaction rolled back, nothing of it applied): $(tail -3 "$WORK/sql-$v.log")"
     fi
-    grep -q '^SQL-OK' "$WORK/sql-$v.log" || die "upgrade SQL of $v did not confirm: $(tail -3 "$WORK/sql-$v.log")"
     APPLIED_VERS="$APPLIED_VERS$v
 "
     note "upgrade SQL of $v applied: $(tail -1 "$WORK/sql-$v.log")"
@@ -908,8 +952,22 @@ if [ "$TAG" = "$OLDVER" ] || [ "$cmp" = "0" ]; then
   note "WARNING: redeploying the running version (--force)"
 elif [ "$cmp" = "-1" ]; then
   [ -n "$FORCE" ] || die "$TAG is OLDER than the running $OLDVER - a downgrade needs --force"
-  note "WARNING: downgrade $OLDVER -> $TAG (--force)"
+  # deploy.sh runs rollback SQL only inside an auto-rollback; a downgrade
+  # across a schema change would start the old binary on the new schema.
+  git -C "$SCRIPT_DIR" rev-parse -q --verify "refs/tags/$OLDVER^{commit}" >/dev/null \
+    || die "tag $OLDVER (the running version) not in the local repo - git fetch --tags (needed to check the downgrade for schema changes)"
+  for v in $(sql_tags_between "$TAG" "$OLDVER"); do
+    if sql_fetch "$v" upgrade.sql "$WORK/down-$v.sql"; then
+      die "REFUSED: the downgrade $OLDVER -> $TAG crosses the schema change of $v (deploy/sql/$v/) and deploy.sh does not run rollback SQL for a downgrade - roll back by hand (each crossed version's rollback.sql, newest first, with the service stopped) or use the rollback path; nothing was changed"
+    fi
+  done
+  note "WARNING: downgrade $OLDVER -> $TAG (--force; no deploy/sql dir in ($TAG, $OLDVER])"
 fi
+# The SQL plan reads the LOCAL git tags: a stale clone without the target tag
+# would silently skip that version's SQL. Only the TARGET tag is required (a
+# first deploy from an old running version needs nothing else).
+git -C "$SCRIPT_DIR" rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null \
+  || die "tag $TAG not in the local repo - git fetch --tags"
 
 # The upgrade-SQL plan (polyforge#154): which versions in (OLDVER, TAG] ship
 # a deploy/sql dir, and - outside dry-run - which of them the structural
@@ -1198,6 +1256,7 @@ fi
 
 # ---------------------------------------------------------------- step 8
 step 8 "rollback + summary"
+sql_unstage
 echo "rollback commands for this run (not executed):"
 rollback_text
 echo

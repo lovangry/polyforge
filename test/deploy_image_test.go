@@ -109,6 +109,14 @@ shift   # host
 export FAKE_SIDE=server
 echo "ssh $*" >> "$FAKE_W/log-ssh"
 case "$*" in flock\ -n*) echo $$ > "$FAKE_W/lockpid" ;; esac
+# FAKE_SSH_DROP_AFTER=<substring>: the matching remote command RUNS, then the
+# connection "drops" (exit 255) - a commit that landed but was never confirmed.
+if [ -n "$FAKE_SSH_DROP_AFTER" ]; then
+  case "$*" in *"$FAKE_SSH_DROP_AFTER"*)
+    sh -c "$*" >/dev/null 2>&1
+    echo "Connection to fakehost closed by remote host." >&2; exit 255 ;;
+  esac
+fi
 # FAKE_SQLITE_VERSION: fake the server python3's linked sqlite3 library
 # version (the deploy's >= 3.35 preflight gate). Only the gate's program is
 # intercepted; every other python3 program runs for real (the SQL really
@@ -156,7 +164,8 @@ type deployWorld struct {
 	t      *testing.T
 	w      string
 	path   string
-	script string // the deploy.sh under test (default: the repo's own; SQL tests point it at a throwaway deployer repo)
+	repo   string // the deployer's throwaway git repo: the real deploy.sh + deploy/Dockerfile; release() tags it
+	script string // the deploy.sh under test (inside repo)
 	env    []string
 }
 
@@ -192,11 +201,28 @@ func (d *deployWorld) release(tag string, withImage bool, digestInRelease, regis
 		t.Fatal(err)
 	}
 	wf(t, filepath.Join(rel, "SHA256SUMS"), string(out), 0o644)
+	// a published release is a git tag the deployer has fetched (deploy.sh
+	// refuses a target tag missing from the local repo)
+	if d.git("tag", "-l", tag) == "" {
+		d.git("tag", tag)
+	}
+}
+
+// git runs one git command in the deployer repo and returns its trimmed output.
+func (d *deployWorld) git(args ...string) string {
+	d.t.Helper()
+	cmd := exec.Command("git", append([]string{"-c", "user.email=deploy@test", "-c", "user.name=deploy"}, args...)...)
+	cmd.Dir = d.repo
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		d.t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func newDeployWorld(t *testing.T, oldVer string) *deployWorld {
 	t.Helper()
-	for _, tool := range []string{"python3", "rsync", "sha256sum", "flock", "mkfifo"} {
+	for _, tool := range []string{"python3", "rsync", "sha256sum", "flock", "mkfifo", "git"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s not available", tool)
 		}
@@ -230,7 +256,20 @@ c.commit()`
 	compose := filepath.Join(w, "srv", "compose", "docker-compose.yml")
 	wf(t, compose, "services:\n  aihub:\n    image: polyforge/aihub:"+oldVer+"\n    ports:\n      - \"8080:8080\"\n  other:\n    image: busybox\n", 0o644)
 	d.path = bin + ":" + os.Getenv("PATH")
-	d.script = filepath.Join("..", ".polyforge", "deploy.sh")
+	// the deployer machine: a throwaway git repo holding the real deploy.sh
+	// and deploy/Dockerfile, so the local-tag lookups are hermetic
+	d.repo = filepath.Join(w, "deployer")
+	for _, f := range []string{".polyforge/deploy.sh", "deploy/Dockerfile"} {
+		b, err := os.ReadFile(filepath.Join("..", f))
+		if err != nil {
+			t.Fatal(err)
+		}
+		wf(t, filepath.Join(d.repo, f), string(b), 0o755)
+	}
+	d.git("init", "-q", "-b", "main")
+	d.git("add", "-A")
+	d.git("commit", "-q", "-m", "deployer")
+	d.script = filepath.Join(d.repo, ".polyforge", "deploy.sh")
 	d.env = append(os.Environ(),
 		"PATH="+d.path, "FAKE_W="+w, "TMPDIR="+w,
 		"HOME="+filepath.Join(w, "home"), "DOCKER_CONFIG="+filepath.Join(w, "home", ".docker"),
@@ -423,6 +462,7 @@ func TestReleaseScriptDigestFileFeedsDeployPreflight(t *testing.T) {
 	// the registry's image carries the repo digest the release's push produced
 	wf(t, filepath.Join(d.w, "registry", "ghcr.io_silgrid_aihub_v1.3.0"),
 		fmt.Sprintf("sha256:idv1.3.0\nv1.3.0\n%s\n", imageRepoDigest(relFakeDigest)), 0o644)
+	d.git("tag", "v1.3.0") // the deployer has fetched the release's tag
 	out, err := d.run("", "v1.3.0", "--dry-run")
 	if err != nil {
 		t.Fatalf("deploy preflight rejected release.sh's own digest file: %v\n%s", err, out)

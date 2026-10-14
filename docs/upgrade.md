@@ -44,6 +44,20 @@ fetched. release.sh is not involved — the SQL is not a release asset. A
 release tag without a `deploy/sql/<TAG>/` directory carries no schema
 change; its switch window is just the container recreate.
 
+The candidate versions come from the deployer's **local** git tags, so the
+target tag must exist locally — deploy.sh refuses in preflight otherwise
+(`git fetch --tags`). The running version's tag is not required.
+
+**File format**: each file is a sequence of `;`-terminated statements.
+Comments are fine before or between statements, but **nothing may follow
+the last statement's `;`** — a trailing comment after it is read as an
+incomplete final statement and the runner refuses the file.
+
+**Downgrades**: a `--force` downgrade whose range (target, running] contains
+a `deploy/sql` version is refused in preflight — deploy.sh runs rollback SQL
+only inside its own auto-rollback. Roll such a schema back by hand (each
+crossed version's `rollback.sql`, newest first, service stopped).
+
 **Run-once**: `probe.sql` is a structural check answered read-only against
 the live database before the window (e.g. "does the column that will be
 dropped still exist?"). `0` means the upgrade already ran and the version

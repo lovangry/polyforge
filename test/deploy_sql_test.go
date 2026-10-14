@@ -20,7 +20,7 @@ package test
 //     pre-#149 schema carried, the probe looks for, and the window's
 //     upgrade.sql drops); the test rollback.sql re-adds it with a default,
 //     exactly like the real v2.4.0 files.
-//   - The deployer-side git repo is a throwaway repo (newSQLWorld): deploy.sh
+//   - The deployer-side git repo is a throwaway repo (newDeployWorld; newSQLWorld adds the SQL): deploy.sh
 //     is copied verbatim from the repo, the test SQL files are committed and
 //     tagged v2.3.0 and then REMOVED from the working tree, so the
 //     `git show <TAG>:deploy/sql/<TAG>/...` sourcing path is what runs — the
@@ -54,53 +54,53 @@ const (
 `
 )
 
-// newSQLWorld builds the deploy world whose deployer machine is a
-// throwaway git repo: the real deploy.sh plus a tagged deploy/sql/v2.3.0
-// whose files are removed from the working tree afterwards (git-tag
+// sqlVer is one release's deploy/sql/<ver>/ directory in the test world.
+type sqlVer struct{ ver, upgrade, rollback, probe string }
+
+// newSQLWorld builds the deploy world whose deployer repo carries a tagged
+// deploy/sql/v2.3.0 (removed from the working tree afterwards: git-tag
 // sourcing). oldShape adds the pre-#149 column to the fixture db so the
 // probe reports "not yet applied"; without it the probe skips.
 func newSQLWorld(t *testing.T, upgradeSQL string, oldShape bool) *deployWorld {
 	t.Helper()
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skipf("git not available")
-	}
-	dr := t.TempDir()
-	realScript, err := os.ReadFile(filepath.Join("..", ".polyforge", "deploy.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	wf(t, filepath.Join(dr, ".polyforge", "deploy.sh"), string(realScript), 0o755)
-	sqlDir := filepath.Join(dr, "deploy", "sql", "v2.3.0")
-	wf(t, filepath.Join(sqlDir, "upgrade.sql"), upgradeSQL, 0o644)
-	wf(t, filepath.Join(sqlDir, "rollback.sql"), testRollbackSQL, 0o644)
-	wf(t, filepath.Join(sqlDir, "probe.sql"), testProbeSQL, 0o644)
-	for _, args := range [][]string{
-		{"init", "-b", "main"},
-		{"add", "-A"},
-		{"-c", "user.email=deploy@test", "-c", "user.name=deploy", "commit", "-q", "-m", "sql"},
-		{"tag", "v2.3.0"},
-	} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dr
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	// the working tree no longer carries the SQL: only the tag does
-	if err := os.RemoveAll(sqlDir); err != nil {
-		t.Fatal(err)
-	}
-
-	d := newDeployWorld(t, "v2.2.1")
-	d.release("v2.2.1", true, digOld, digOld)
-	d.release("v2.3.0", true, digNew, digNew)
-	d.script = filepath.Join(dr, ".polyforge", "deploy.sh")
+	var cols []string
 	if oldShape {
+		cols = []string{"identifier_hash"}
+	}
+	return newSQLWorldVers(t, "v2.2.1", []string{"v2.3.0"},
+		[]sqlVer{{"v2.3.0", upgradeSQL, testRollbackSQL, testProbeSQL}}, cols)
+}
+
+// newSQLWorldVers: the general form. The server runs oldVer; every version
+// in releases (and oldVer) is a published release and a local git tag; the
+// deploy/sql dirs of vers are committed BEFORE the tags and then removed
+// from the working tree, so only `git show <tag>:deploy/sql/...` finds them.
+// oldCols are added to the fixture's projects table (the old shapes).
+func newSQLWorldVers(t *testing.T, oldVer string, releases []string, vers []sqlVer, oldCols []string) *deployWorld {
+	t.Helper()
+	d := newDeployWorld(t, oldVer)
+	for _, v := range vers {
+		dir := filepath.Join(d.repo, "deploy", "sql", v.ver)
+		wf(t, filepath.Join(dir, "upgrade.sql"), v.upgrade, 0o644)
+		wf(t, filepath.Join(dir, "rollback.sql"), v.rollback, 0o644)
+		wf(t, filepath.Join(dir, "probe.sql"), v.probe, 0o644)
+	}
+	d.git("add", "-A")
+	d.git("commit", "-q", "-m", "sql")
+	d.release(oldVer, true, digOld, digOld)
+	for _, r := range releases {
+		d.release(r, true, digNew, digNew)
+	}
+	// the working tree no longer carries the SQL: only the tags do
+	if err := os.RemoveAll(filepath.Join(d.repo, "deploy", "sql")); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range oldCols {
 		py := `import sqlite3, sys
 c = sqlite3.connect(sys.argv[1])
-c.execute("ALTER TABLE projects ADD COLUMN identifier_hash TEXT")
+c.execute("ALTER TABLE projects ADD COLUMN %s TEXT" % sys.argv[2])
 c.commit()`
-		if out, err := exec.Command("python3", "-I", "-c", py, d.dbPath()).CombinedOutput(); err != nil {
+		if out, err := exec.Command("python3", "-I", "-c", py, d.dbPath(), c).CombinedOutput(); err != nil {
 			t.Fatalf("old-shape fixture: %v\n%s", err, out)
 		}
 	}
@@ -116,10 +116,16 @@ func (d *deployWorld) dbPath() string {
 // column (i.e. is the schema in the old shape)?
 func dbHasColumn(t *testing.T, dbPath string) bool {
 	t.Helper()
+	return dbHasCol(t, dbPath, "identifier_hash")
+}
+
+// dbHasCol: does the fixture's projects table carry column col?
+func dbHasCol(t *testing.T, dbPath, col string) bool {
+	t.Helper()
 	py := `import sqlite3, sys
 cols = [r[1] for r in sqlite3.connect(sys.argv[1]).execute("pragma table_info(projects)")]
-print("yes" if "identifier_hash" in cols else "no")`
-	out, err := exec.Command("python3", "-I", "-c", py, dbPath).CombinedOutput()
+print("yes" if sys.argv[2] in cols else "no")`
+	out, err := exec.Command("python3", "-I", "-c", py, dbPath, col).CombinedOutput()
 	if err != nil {
 		t.Fatalf("column probe: %v\n%s", err, out)
 	}
@@ -331,4 +337,149 @@ func TestDeployDryRunStagesAndRunsNoSQL(t *testing.T) {
 		t.Errorf("the dry-run executed a probe (%d)\n%s", n, d.logOf("log-ssh"))
 	}
 	d.assertNothingMutated("v2.2.1")
+}
+
+// ---- the multi-version gap (two schema-changing releases) ----
+//
+// v2.9.0 drops col_a, v2.10.0 drops col_b; the server runs v2.8.0. The
+// pair is chosen so that a LEXICAL sort ("v2.10.0" < "v2.9.0") would get the
+// order wrong: the plan must sort numerically.
+
+func colProbe(c string) string {
+	return "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name = '" + c + "';\n"
+}
+
+func newGapWorld(t *testing.T, oldCols ...string) *deployWorld {
+	t.Helper()
+	return newSQLWorldVers(t, "v2.8.0", []string{"v2.9.0", "v2.10.0"}, []sqlVer{
+		{"v2.9.0", "ALTER TABLE projects DROP COLUMN col_a;\n", "ALTER TABLE projects ADD COLUMN col_a TEXT;\n", colProbe("col_a")},
+		{"v2.10.0", "ALTER TABLE projects DROP COLUMN col_b;\n", "ALTER TABLE projects ADD COLUMN col_b TEXT;\n", colProbe("col_b")},
+	}, oldCols)
+}
+
+// stagingLeft: server-side SQL staging dirs still present after the run.
+func stagingLeft(d *deployWorld) []string {
+	m, _ := filepath.Glob(filepath.Join(filepath.Dir(filepath.Dir(d.dbPath())), "aihub-sql-*"))
+	return m
+}
+
+func TestDeploySQLGapAppliesAscending(t *testing.T) {
+	d := newGapWorld(t, "col_a", "col_b")
+	out, err := d.run("", "v2.10.0", "--confirm", "v2.10.0")
+	if err != nil {
+		t.Fatalf("deploy failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "upgrade SQL:    applied v2.9.0 v2.10.0") {
+		t.Errorf("summary lacks the ascending applied list\n%s", out)
+	}
+	sshLog := d.logOf("log-ssh")
+	i9, i10 := sqlRunIndex(sshLog, "v2.9.0-upgrade.sql"), sqlRunIndex(sshLog, "v2.10.0-upgrade.sql")
+	if !(i9 >= 0 && i9 < i10) {
+		t.Errorf("want v2.9.0 upgrade before v2.10.0 (got %d, %d)\n%s", i9, i10, sshLog)
+	}
+	if dbHasCol(t, d.dbPath(), "col_a") || dbHasCol(t, d.dbPath(), "col_b") {
+		t.Error("a gap version's upgrade SQL did not apply")
+	}
+	if left := stagingLeft(d); len(left) != 0 {
+		t.Errorf("SQL staging dir left on the server: %v", left)
+	}
+}
+
+func TestDeploySQLGapProbeSkipsAppliedVersion(t *testing.T) {
+	d := newGapWorld(t, "col_b") // v2.9.0 already applied (col_a gone), v2.10.0 not
+	out, err := d.run("", "v2.10.0", "--confirm", "v2.10.0")
+	if err != nil {
+		t.Fatalf("deploy failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"upgrade SQL v2.9.0: already applied (probe) - skipped",
+		"upgrade SQL v2.10.0: not yet applied (probe: 1) - runs in the window",
+		"upgrade SQL:    applied v2.10.0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q\n%s", want, out)
+		}
+	}
+	if n := sqlRuns(d, "v2.9.0-upgrade.sql"); n != 0 {
+		t.Errorf("the probe-applied v2.9.0 upgrade SQL ran (%d)", n)
+	}
+	if dbHasCol(t, d.dbPath(), "col_b") {
+		t.Error("v2.10.0's upgrade SQL did not apply")
+	}
+}
+
+// assertGapRolledBack: both versions' rollback.sql ran, newest first, before
+// the compose file pointed back at the old image; both old shapes are back.
+func assertGapRolledBack(t *testing.T, d *deployWorld, out string) {
+	t.Helper()
+	sshLog := d.logOf("log-ssh")
+	r10, r9 := sqlRunIndex(sshLog, "v2.10.0-rollback.sql"), sqlRunIndex(sshLog, "v2.9.0-rollback.sql")
+	iSed := strings.Index(sshLog, "sed -i 's|image: polyforge/aihub:v2.10.0|image: polyforge/aihub:v2.8.0|'")
+	if !(r10 >= 0 && r10 < r9 && r9 < iSed) {
+		t.Errorf("want rollback v2.10.0 -> v2.9.0 -> old image (got %d, %d, %d)\n%s", r10, r9, iSed, sshLog)
+	}
+	if !dbHasCol(t, d.dbPath(), "col_a") || !dbHasCol(t, d.dbPath(), "col_b") {
+		t.Error("the old shapes are not restored by the rollback SQL")
+	}
+	if !strings.Contains(out, "deployed=ROLLED_BACK previous=v2.8.0 attempted=v2.10.0") {
+		t.Errorf("no rolled-back result line\n%s", out)
+	}
+	if left := stagingLeft(d); len(left) != 0 {
+		t.Errorf("SQL staging dir left on the server after the rollback: %v", left)
+	}
+}
+
+func TestDeploySQLGapRollbackDescending(t *testing.T) {
+	d := newGapWorld(t, "col_a", "col_b")
+	d.env = append(d.env, "FAKE_BAD_IMG=polyforge/aihub:v2.10.0")
+	out, err := d.run("", "v2.10.0", "--confirm", "v2.10.0")
+	if exitCode(err) != 10 {
+		t.Fatalf("want exit 10, got %v\n%s", err, out)
+	}
+	assertGapRolledBack(t, d, out)
+}
+
+func TestDeploySQLConnectionDropAfterCommitStillRollsBack(t *testing.T) {
+	// v2.10.0's upgrade COMMITS, then the ssh connection drops: the runner's
+	// exit says failure, the re-run probe says applied -> its rollback.sql
+	// must run along with v2.9.0's.
+	d := newGapWorld(t, "col_a", "col_b")
+	d.env = append(d.env, "FAKE_SSH_DROP_AFTER=v2.10.0-upgrade.sql")
+	out, err := d.run("", "v2.10.0", "--confirm", "v2.10.0")
+	if exitCode(err) != 10 {
+		t.Fatalf("want exit 10, got %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "upgrade SQL of v2.10.0 reported failure but the probe says it IS applied") {
+		t.Errorf("no probe re-check note\n%s", out)
+	}
+	assertGapRolledBack(t, d, out)
+}
+
+func TestDeployRefusesTargetTagMissingLocally(t *testing.T) {
+	d := newGapWorld(t, "col_a", "col_b")
+	d.git("tag", "-d", "v2.10.0") // a stale clone: released, but not fetched
+	out, err := d.run("", "v2.10.0", "--confirm", "v2.10.0")
+	if exitCode(err) != 1 || !strings.Contains(out, "tag v2.10.0 not in the local repo - git fetch --tags") {
+		t.Fatalf("want exit 1 + the missing-tag refusal, got %v\n%s", err, out)
+	}
+	d.assertNothingMutated("v2.8.0")
+	if strings.Contains(d.logOf("log-ssh"), "aihub-sql-") {
+		t.Errorf("SQL staged despite the refusal:\n%s", d.logOf("log-ssh"))
+	}
+	if !dbHasCol(t, d.dbPath(), "col_a") || !dbHasCol(t, d.dbPath(), "col_b") {
+		t.Error("the db changed despite the refusal")
+	}
+}
+
+func TestDeployRefusesDowngradeAcrossSQLVersion(t *testing.T) {
+	// running v2.10.0 (schema already without col_b); a --force downgrade to
+	// v2.9.0 would start the v2.9.0 binary on v2.10.0's schema.
+	d := newSQLWorldVers(t, "v2.10.0", []string{"v2.9.0"}, []sqlVer{
+		{"v2.10.0", "ALTER TABLE projects DROP COLUMN col_b;\n", "ALTER TABLE projects ADD COLUMN col_b TEXT;\n", colProbe("col_b")},
+	}, nil)
+	out, err := d.run("", "v2.9.0", "--confirm", "v2.9.0", "--force")
+	if exitCode(err) != 1 || !strings.Contains(out, "REFUSED: the downgrade v2.10.0 -> v2.9.0 crosses the schema change of v2.10.0") {
+		t.Fatalf("want exit 1 + the downgrade refusal, got %v\n%s", err, out)
+	}
+	d.assertNothingMutated("v2.10.0")
 }
