@@ -73,7 +73,8 @@ func TestD6SlowModelRelaxationDoublesEachTime(t *testing.T) {
 }
 
 // TestD6LongTaskRelaxesSameModelThenBlocks: a long-task timeout relaxes
-// T x2 and retries the SAME model; the second one blocks the step.
+// T x2 and retries the SAME model; the second one doubles T again and
+// blocks the step.
 func TestD6LongTaskRelaxesSameModelThenBlocks(t *testing.T) {
 	env := newSupEnv(t, func(c *Config) {
 		c.Limits = supervise.Defaults{StepTimeout: 3 * time.Second}
@@ -95,8 +96,10 @@ func TestD6LongTaskRelaxesSameModelThenBlocks(t *testing.T) {
 	if x.WorkflowStatus != StatusBlocked {
 		t.Fatalf("the second long-task timeout blocks: %q", x.WorkflowStatus)
 	}
-	if sup := x.Steps["s"].Supervision; sup == nil || sup.RelaxedWallMs != (6*time.Second).Milliseconds() {
-		t.Fatalf("the relaxed bound must persist (3s doubled): %+v", x.Steps["s"].Supervision)
+	// the blocking (second) timeout doubles T again before it parks, so
+	// a human continue runs under a fresh window: 3s -> 6s -> 12s
+	if sup := x.Steps["s"].Supervision; sup == nil || sup.RelaxedWallMs != (12*time.Second).Milliseconds() {
+		t.Fatalf("the relaxed bound must persist (3s doubled twice): %+v", x.Steps["s"].Supervision)
 	}
 }
 
@@ -192,5 +195,34 @@ func TestD6RewindZeroesTheStepBudget(t *testing.T) {
 	}
 	if archived != 5000 {
 		t.Fatalf("the archived attempt keeps the old window's accounting: %d", archived)
+	}
+}
+
+// TestD6GateFailRewindZeroesTheGateBudget: the gate step stays
+// in_progress across its own FAIL rewind, so its T must be reset by the
+// rewind itself — its re-entry is a fresh window (D6: reset on rewind).
+func TestD6GateFailRewindZeroesTheGateBudget(t *testing.T) {
+	d, _, _, execPath := testEnv(t, spec("a"), gateSpec("g", "a"))
+	mustInit(t, d)
+	mustStart(t, d, "a", 1)
+	if err := d.transition(TransitionRequest{
+		Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: completedResult("a", 1, `{}`),
+	}); err != nil {
+		t.Fatalf("result: %v", err)
+	}
+	mustStart(t, d, "g", 2)
+	if err := d.transition(TransitionRequest{
+		Kind: TransBudgetUpdate, StepID: "g", SpawnN: 2, Budget: &capsule.Budget{WallMs: 7000},
+	}); err != nil {
+		t.Fatalf("budget: %v", err)
+	}
+	if err := d.transition(TransitionRequest{
+		Kind: TransGateFail, StepID: "g", SpawnN: 2,
+		Gate: &GateVerdict{GateStepID: "g", TargetStep: "a", VerdictText: "FAIL: redo it"},
+	}); err != nil {
+		t.Fatalf("gate fail: %v", err)
+	}
+	if got := readExec(t, execPath).Steps["g"].BudgetConsumed.WallMs; got != 0 {
+		t.Fatalf("a gate-fail rewind must zero the gate's own T, got %dms", got)
 	}
 }

@@ -382,6 +382,25 @@ func TestSpawnStepFirstStepHasNoHandoffSection(t *testing.T) {
 	}
 }
 
+// TestSpawnStepInheritMissingHandoffFileOmitsSection: a done handoff
+// producer that never wrote artifacts/handoff-<id>.md does not fail the
+// dispatch — the inherit step's prompt simply lacks the handoff section
+// (01-workflow-skills.md §4.4a).
+func TestSpawnStepInheritMissingHandoffFileOmitsSection(t *testing.T) {
+	ad, sp, capDir := spawnEnv(t)
+	grillDone(t, capDir)
+	if err := os.Remove(filepath.Join(capDir, "artifacts", "handoff-grill.md")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 2}); err != nil {
+		t.Fatalf("a missing handoff file must not fail the dispatch: %v", err)
+	}
+	p, _ := sp.last()
+	if strings.Contains(p.InitialPrompt, "Handoff from step") {
+		t.Fatalf("a missing handoff file must omit the section\n%s", p.InitialPrompt)
+	}
+}
+
 // TestSpawnStepGatePromptStatesVerdictBinding: the instruction half of
 // the #106 fix — a gate step's prompt must state that a fail verdict
 // REQUIRES outcome gate_failed (the driver's only rewind trigger) and

@@ -36,7 +36,9 @@ package driver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -512,10 +514,9 @@ func readCapsuleFile(root, rel string) ([]byte, error) {
 // artifacts/handoff-<step>.md (polyforge#147: path convention, no
 // manifest, no digest verification). No earlier handoff-declaring step
 // at all answers (nil, nil) (a first step may legitimately inherit
-// nothing); a done producer whose convention-path file is unreadable is
-// an infrastructure inconsistency and fails loud (the driver would not
-// have advanced past an un-done producer, and the delivery contract
-// tells the step to write the file exactly there).
+// nothing), and so does a done producer that left no file at the
+// convention path: the handoff section is simply omitted, never a
+// dispatch failure (01-workflow-skills.md §4.4a).
 func (a *StepSpawnAdapter) resolveHandoff(stepID string) (*handoffSection, error) {
 	idx := -1
 	for i := range a.Workflow.Steps {
@@ -542,6 +543,9 @@ func (a *StepSpawnAdapter) resolveHandoff(stepID string) (*handoffSection, error
 		}
 		rel := capsule.DirArtifacts + "/handoff-" + prod.ID + ".md"
 		content, err := readCapsuleFile(a.WI.CapsuleDir, rel)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
 		if err != nil {
 			return nil, fmt.Errorf("driver: handoff artifact of step %q unreadable at %s (path convention): %w", prod.ID, rel, err)
 		}

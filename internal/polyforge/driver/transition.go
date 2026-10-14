@@ -514,6 +514,10 @@ func (d *Driver) applyGateFailLocked(req TransitionRequest, info *appliedInfo) e
 			gst.Supervision = &capsule.StepSupervision{}
 		}
 		gst.Supervision.NextDispatch = capsule.NextDispatchFresh
+		// D6: a rewind resets T — the gate's re-entry judges the redone
+		// work in a fresh window, not on the runtime of the verdict it
+		// already delivered.
+		gst.BudgetConsumed = capsule.Budget{}
 	}
 	// The FAIL verdict text rides to the target's pending_rewind_input
 	// (D8) so the rewound step's next dispatch is guaranteed to see it.

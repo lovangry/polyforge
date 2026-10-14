@@ -2,7 +2,8 @@
 // replacement for the LLM-driven WI Agent inside the daemon. The driver
 // reads runtime-state/execution.json to determine the current state,
 // spawns step processes (harness sessions) directly, validates step
-// results against the R13 envelope (artifacts verified by hash), writes
+// results against the minimal result envelope (outcome + output, plus
+// the V4 command-evidence gate; no hashes, no manifest), writes
 // execution.json exclusively through the single transition entry point
 // (transition.go), and advances the workflow on validated results.
 //
@@ -727,8 +728,8 @@ type StepSpawn struct {
 	Fresh bool
 	// PriorRejection is the verbatim validation error the PREVIOUS
 	// dispatch's envelope was rejected for (the in-process retry lane):
-	// the step author sees exactly what to fix — digests computed
-	// programmatically, required fields present — instead of blindly
+	// the step author sees exactly what to fix — required fields
+	// present, evidence carried — instead of blindly
 	// re-authoring. Empty on a fresh dispatch.
 	PriorRejection string
 	// PriorEndedWithoutResult tells the retry that the previous dispatch's
@@ -748,22 +749,14 @@ type StepRun interface {
 }
 
 // ---------------------------------------------------------------------------
-// Result envelope (R13).
-
-// StepResult is the R13 result envelope every step process returns.
-// SpawnN is the fencing key; ResultID the idempotency key (the R14
-// accept staging in result.go rides on it).
-
-// ---------------------------------------------------------------------------
-// Result validation (the core's accept gate; the full output-schema
-// validation is validate.go's later lane — this is the envelope,
-// output-shape, handoff and artifact-manifest layer).
+// Result validation (the core's accept gate on the minimal envelope).
 
 // validateResultStrict is the accept-path check before the step_result
 // transition. It builds a ResultSpec from the driver's current state and
 // delegates to ValidateStepResult (the staging gates: shape, binding and
 // fencing, the needs_input question pair, the verdict binding, the
-// human-gate guarantee, the output schema and the evidence duty). A
+// human-gate guarantee, the release verdict binding and the V4
+// command-evidence gate). A
 // failure is an infrastructure-class rejection — Run surfaces it and the
 // recovery lane owns re-derivation.
 func (d *Driver) validateResultStrict(res *StepResult, stepID string, n int64) error {
