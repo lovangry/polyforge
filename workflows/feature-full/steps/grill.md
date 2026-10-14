@@ -33,7 +33,17 @@ every ambiguity you can find as a question, not an assumption.
    ("does this include the admin UI or just the API"), edge-case behavior ("what happens
    on an empty list"), non-functional constraints ("does this need to be backward
    compatible with X"), and anything that smells like an unstated assumption.
-2. BATCH your questions (owner ruling 2026-10-02): collect ALL material
+2. **Bundle-mismatch probe.** The bundle chosen at filing IS the classification — no
+   label or field is added later. A pure-deletion ticket (work whose substance is
+   removing code, config, or behavior, with no new feature to spec) belongs on the
+   `chore` lane (deletion-type: plan → code → review → verification, no `e2e-author`,
+   acceptance = existing tests green plus a few targeted tests for behavior changes),
+   not here — `feature-full` is NOT trimmed by change type. If reading the work item
+   reveals a pure-deletion ask riding `feature-full`, do not proceed silently: include
+   a question in your batch asking the owner to confirm the bundle choice (re-file on
+   `chore`, or an explicit waiver to keep this WI on feature-full with its untrimmed
+   e2e lane).
+3. BATCH your questions (owner ruling 2026-10-02): collect ALL material
    ambiguities you can find first, then ask them in ONE needs_input envelope as a
    NUMBERED list (each item one focused question, answerable in one line each) -
    the owner answers all of them in one reply (same numbering). Only a question
@@ -44,15 +54,15 @@ every ambiguity you can find as a question, not an assumption.
    `question_id` and the `question` text, and end your turn. The answer arrives in the NEXT
    dispatch of this step under "# Answered questions" - continue from it; never fabricate
    or guess an answer you did not receive.
-3. Append every question and its answer to `artifacts/grill-qa.md` under a `## grill`
+4. Append every question and its answer to `artifacts/grill-qa.md` under a `## grill`
    heading, in the order asked, as they come in — this file is shared with `spec` (which
    reads it as primary input) and later with `grill-review` (which appends its own
    confirmation pass below your section, in the same file).
-4. Stop asking once the remaining unknowns are things a spec author can reasonably decide
+5. Stop asking once the remaining unknowns are things a spec author can reasonably decide
    and flag as an explicit assumption (not things that would silently produce the wrong
    feature). Do not over-interrogate a genuinely simple, unambiguous ask — a one-line bug
    fix with a clear repro does not need ten questions.
-5. Do not write requirements, acceptance criteria, or design here — that is `spec`'s job.
+6. Do not write requirements, acceptance criteria, or design here — that is `spec`'s job.
    Your output is raw clarified intent, not structured requirements.
 
 ## Non-goals

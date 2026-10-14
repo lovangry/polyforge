@@ -41,17 +41,18 @@ verdict) and address every point it raises before proceeding with the rest of th
   buildable; do not skip ahead or reorder for convenience — if the order genuinely does
   not work, that is itself a finding to report in `summary`, not a license to silently
   reorder.
-- **Keep the build green between commits — the bar is the `verification` gate's bar,
-  verbatim.** After implementing each plan step, run the project's build and test
-  commands that the `verification` gate runs — the same component list, no paraphrase,
-  no subset (via `bash`) — before moving to the next step. When `e2e-author` authored
-  executable test files for this WI, intermediate units run that bar minus exactly the
-  files named in `execution.json`'s `steps.e2e-author.output.test_files` — each
-  excluded by its exact repo-relative path, never a directory-, pattern-, or
-  category-level subset (those files are allowed, expected even, to sit red until the
-  implementation satisfies them). The FULL gate bar — the named files included —
-  applies at the plan's final unit; no exclusion survives to it, and the rerun gate
-  and `verification` re-run the full bar regardless.
+- **Keep the build green between commits — fast checks only, per unit.** After
+  implementing each plan step, run, via `bash`: `go build ./...`, `go vet ./...`,
+  `gofmt -l .`, plus the unit tests of the packages this unit touched — the packages
+  of the changed files and of their tests (a changed file's package and its test
+  package, no more). That is the whole per-unit bar. Full testing belongs to the
+  acceptance lane and the gates: `e2e-run` re-runs the authored e2e suite and
+  `verification` runs the project's full bar — do not run `go test ./...` here, and do
+  not proceed on top of a red fast check. There is no "final unit runs the full bar"
+  rule and no e2e-test-file parking on this step: the files named in
+  `execution.json`'s `steps.e2e-author.output.test_files` are simply not part of this
+  step's per-unit bar — they are committed by `e2e-author` itself and exercised by
+  `e2e-run`/`verification`, never by `code`.
 - **Commit per compilable unit**, one commit per plan step (or a tightly related group of
   plan steps if the project's convention groups small steps), with a message that
   identifies which plan step it satisfies. Do not accumulate the entire plan into one
