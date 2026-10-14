@@ -575,7 +575,7 @@ func (d *Driver) prepareDispatch(stepID string) (*StepSpawn, int64, error) {
 
 // awaitAnswer parks the loop while the current step holds an open
 // question. Every successful transition pushes a wake, so the wait
-// re-plans on the answer, an operator rewind/terminate, or a terminal —
+// re-plans on the answer, an operator terminate, or a terminal —
 // and exits promptly on ctx.
 func (d *Driver) awaitAnswer(ctx context.Context) error {
 	for {

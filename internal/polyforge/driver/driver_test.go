@@ -469,32 +469,6 @@ func TestRunGateFailRewindExhausted(t *testing.T) {
 	}
 }
 
-func TestRunOperatorRewindFromBlockedThenComplete(t *testing.T) {
-	d, sp, execPath := runEnv(t, spec("a"), spec("b"))
-	sp.script = []fakeEntry{done(`{"a":1}`), incomplete()}
-	if err := d.Run(context.Background()); err != nil {
-		t.Fatalf("Run (incomplete): %v", err)
-	}
-	exec := readExec(t, execPath)
-	if exec.WorkflowStatus != StatusBlocked || exec.Steps["b"].Status != capsule.StepInProgress {
-		t.Fatalf("blocked shape: %+v", exec)
-	}
-	// The owner's verdict: rewind to a, then the flow completes.
-	if err := d.transition(TransitionRequest{Kind: TransRewind, StepID: "a", Reason: "owner: wrong premise", SpawnN: d.currentSpawnN()}); err != nil {
-		t.Fatalf("rewind: %v", err)
-	}
-	if s := readExec(t, execPath).CurrentStep; s != "a" {
-		t.Fatalf("position back at a: %q", s)
-	}
-	sp.script = []fakeEntry{done(`{"a":2}`), done(`{"b":2}`)}
-	if err := d.Run(context.Background()); err != nil {
-		t.Fatalf("Run (after rewind): %v", err)
-	}
-	if s := readExec(t, execPath).WorkflowStatus; s != StatusCompleted {
-		t.Fatalf("completed after the operator rewind: %q", s)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // incomplete / errors
 
