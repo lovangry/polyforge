@@ -18,6 +18,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -60,6 +61,13 @@ func TestRestartSealingWithoutRecordedReasonFinishesBlocked(t *testing.T) {
 	if hub.endCount() != 1 || hub.lastEnd().Status != protocol.FinishBlocked {
 		t.Fatalf("REPORTED FAILURE (B2): session-end must carry the blocked verdict, got %+v (ends=%d)",
 			hub.lastEnd(), hub.endCount())
+	}
+	// the B2 note (说明) must reach SessionEnd: the blocked verdict carries
+	// WHY it was blocked — a seal finished by nobody's decision, for a
+	// human to read on the hub.
+	if note := hub.lastEnd().Note; !strings.Contains(note, "seal interrupted by a daemon crash") ||
+		!strings.Contains(note, "finished blocked for a human to decide") {
+		t.Fatalf("the blocked session-end must carry the cause-unknown note, got %q", note)
 	}
 	if recs := loadRecords(t, r); len(recs) != 0 {
 		t.Fatalf("finished seal must drop the record, got %+v", recs)

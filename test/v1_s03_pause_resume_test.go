@@ -20,13 +20,19 @@ import (
 //     and pushes the dirty capsule state, then RETAINS the job record in
 //     the runtime's paused state. There is NO read-only seal and NO fresh
 //     claim: the SAME session keeps owning the paused work item.
-//   - pf resume = the whitelisted WI PATCH clean_pause=false — and
-//     nothing else: the paused work item stays with its holder session.
-//   - the scenario drives exactly that: after the resume flag lands, the
-//     holder daemon restarts (graceful stop + fresh start on the same
-//     data dir/workspace), the attach fires, the resumed driver parks on
-//     the SAME persisted question, and the owner's answer completes the
-//     workflow — the terminal wiring wraps it.
+//   - pf resume = the whitelisted WI PATCH clean_pause=false, then the
+//     CLI tells the holder daemon (the resume-paused route,
+//     wi_seWTgHeKtaa8 / v2-converge §7): a LIVE holder re-attaches the
+//     kept session and continues IN PLACE (the scenario asserts exactly
+//     that below); a holder that was down attaches on its next start.
+//   - the scenario drives both faces: after the resume flag lands on a
+//     live holder, the work item continues in place (no restart needed);
+//     then a second pause + holder-down resume exercises the restart
+//     reconciliation fallback — the holder daemon restarts (graceful
+//     stop + fresh start on the same data dir/workspace), the attach
+//     fires, the resumed driver parks on the SAME persisted question,
+//     and the owner's answer completes the workflow — the terminal
+//     wiring wraps it.
 func TestV1S03PauseResume(t *testing.T) {
 	inst := newV1Install(t)
 	const qid = "q_v1s03"
@@ -102,8 +108,10 @@ func TestV1S03PauseResume(t *testing.T) {
 	// so the typed refusal is asserted at the claim endpoint itself.
 	refuseClaim(t, inst, wi, "ALREADY_HELD")
 
-	// The operator unpause: the whitelisted PATCH clears clean_pause and
-	// the work item stays with its holder session.
+	// The operator unpause — the LIVE-HOLDER continuation
+	// (wi_seWTgHeKtaa8, v2-converge §7): the PATCH clears clean_pause
+	// AND the CLI tells the holder daemon, which re-attaches the kept
+	// session and continues in place.
 	d.pf(t, "resume", wi)
 	sess = inst.sessionOf(t, wi)
 	if sess.CleanPause {
@@ -112,17 +120,35 @@ func TestV1S03PauseResume(t *testing.T) {
 	if sess.Fingerprint != sessBefore.Fingerprint {
 		t.Fatalf("unpause changed the session: %+v", sess)
 	}
-	if st := inst.wiStatus(t, wi); st != "paused" {
-		t.Fatalf("unpause must not flip the status itself: %q", st)
+	// The online holder picked the resume up: the work item is RUNNING
+	// again under the SAME session — no daemon restart involved — and the
+	// resumed driver re-poses the SAME persisted question on this
+	// daemon.
+	inst.waitWIStatus(t, wi, "running", 30*time.Second)
+	if sess = inst.sessionOf(t, wi); sess.Fingerprint != sessBefore.Fingerprint {
+		t.Fatalf("the in-place attach changed the session: %q, want %q", sess.Fingerprint, sessBefore.Fingerprint)
+	}
+	waitQuestion(t, d, wi, qid, 30*time.Second)
+	// No dispatch while the question is open (acceptance 1): the resumed
+	// driver re-poses the SAME persisted question and waits for the
+	// human answer — the spawn journal still carries exactly the one
+	// pre-pause derivation.
+	if n := len(spawnJournal(t, d.capsuleDir(wi))); n != 1 {
+		t.Fatalf("the in-place resume must re-pose the question without dispatching; spawn journal = %d entries", n)
 	}
 
-	// The continuation the contract promises: the holder daemon's NEXT
-	// start attaches. Stop it gracefully (the paused record persists
-	// through the shutdown's bookkeeping step) and start a fresh daemon
-	// on the SAME data dir and workspace: the restart reconciliation
-	// sees verify matches + paused + clean_pause=false, attaches through
-	// the SAME session and resumes from the capsule.
+	// The holder-DOWN fallback: a second operator pause re-parks the
+	// work item, the holder daemon stops, and the resume lands with no
+	// daemon reachable (the flag clear alone — the CLI's guidance path).
+	// The fresh daemon's restart reconciliation then attaches: the same
+	// continuation, one daemon start later.
+	d.pf(t, "pause", wi)
+	inst.waitWIStatus(t, wi, "paused", 30*time.Second)
 	d.stop()
+	d.pf(t, "resume", wi)
+	if sess = inst.sessionOf(t, wi); sess.CleanPause {
+		t.Fatalf("holder-down resume did not clear clean_pause: %+v", sess)
+	}
 	d2 := &v1Daemon{
 		t: t, inst: inst, sock: d.sock, dataDir: d.dataDir, workspace: d.workspace,
 		machineID: d.machineID, extraArgs: d.extraArgs,
@@ -166,8 +192,11 @@ func TestV1S03PauseResume(t *testing.T) {
 
 	// The continuation's faces: grill done with its archived answer, the
 	// whole quick-fix chain done, the spawn journal carrying the pause
-	// interruption (derivation 1 pre-pause, the resume re-dispatch
-	// after the attach — the second entry is a RESUME).
+	// interruption (derivation 1 pre-pause, the answer's resume
+	// dispatch of the re-posed question after the whole cycle, then the
+	// fresh dispatches of fix and verification — neither the in-place
+	// resume nor the restart attach dispatched while the question was
+	// open).
 	x := readExecution(t, d2.capsuleDir(wi))
 	for _, step := range []string{"grill", "fix", "verification"} {
 		if st := x.Steps[step]; st == nil || st.Status != "done" {
@@ -178,11 +207,13 @@ func TestV1S03PauseResume(t *testing.T) {
 		t.Fatalf("grill's archived answers: %+v", x.Steps["grill"].Answers)
 	}
 	spawns := spawnJournal(t, d2.capsuleDir(wi))
-	// The whole post-resume workflow rode the SAME session: the attach
-	// re-dispatch (a resume, ordinal 2) plus the fresh dispatches of fix
-	// and verification.
+	// The whole post-resume workflow rode the SAME session: the answer's
+	// completion dispatch of the parked grill step (a resume, ordinal 2)
+	// plus the fresh dispatches of fix and verification — neither the
+	// in-place resume nor the restart attach dispatched anything while
+	// the question was open.
 	if len(spawns) != 4 || spawns[1]["resume"] != true || spawns[2]["resume"] != false {
-		t.Fatalf("spawn journal after the cycle: %d entries (want 4, second a resume then fresh dispatches)", len(spawns))
+		t.Fatalf("spawn journal after the cycle: %d entries (want 4, second a resume then fresh dispatches): %v", len(spawns), spawns)
 	}
 
 	// And no orphan of the paused close survived the whole cycle.

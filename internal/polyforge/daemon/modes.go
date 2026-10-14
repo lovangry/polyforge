@@ -233,6 +233,18 @@ func (q *jobQueue) persistLocked() error {
 // caller answers `accepted` only on a nil error, so an accepted submit is
 // always on disk. A persist failure rolls the entry back.
 func (q *jobQueue) Enqueue(e qEntry) error {
+	_, err := q.EnqueueIf(e, nil)
+	return err
+}
+
+// EnqueueIf is Enqueue gated by admit, evaluated under the queue lock:
+// admit false means nothing lands (false, nil). The auto wave passes
+// ModeCtl.AdmitAutoPull so its switch re-check and the append are one
+// step against the auto-off flip — SetAuto(false) precedes PurgeOrigin,
+// which takes this same lock, so an entry either sees the switch off or
+// is appended before the purge runs and is dropped by it (audit B3 race,
+// wi_seWTgHeKtaa8). A nil admit always admits.
+func (q *jobQueue) EnqueueIf(e qEntry, admit func() bool) (bool, error) {
 	now := time.Now()
 	if e.EnqueuedAt.IsZero() {
 		e.EnqueuedAt = now
@@ -242,12 +254,15 @@ func (q *jobQueue) Enqueue(e qEntry) error {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if admit != nil && !admit() {
+		return false, nil
+	}
 	q.pending = append(q.pending, e)
 	if err := q.persistLocked(); err != nil {
 		q.pending = q.pending[:len(q.pending)-1]
-		return err
+		return false, err
 	}
-	return nil
+	return true, nil
 }
 
 // Settle ends the inflight state of a Take()n entry (the claim attempt
@@ -344,7 +359,9 @@ func (q *jobQueue) LenPending() int {
 }
 
 // FreeSlots reports how many spawn slots are open right now (the wave
-// budget fetchAutoWave spends per enqueued entry, audit B3a).
+// budget fetchAutoWave spends per enqueued entry, audit B3a). It counts
+// only RUNNING work; the wave budget subtracts the already-queued
+// entries itself (wi_seWTgHeKtaa8) — Take() is the start-side gate.
 func (q *jobQueue) FreeSlots() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -353,11 +370,6 @@ func (q *jobQueue) FreeSlots() int {
 		n = 0
 	}
 	return n
-}
-
-// SlotFree reports whether a spawn slot is open.
-func (q *jobQueue) SlotFree() bool {
-	return q.FreeSlots() > 0
 }
 
 // Take pops the next DUE pending entry IF a slot is free (04 §6.1d

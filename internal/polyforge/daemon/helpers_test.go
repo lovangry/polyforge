@@ -124,6 +124,28 @@ type fakeHub struct {
 	// seeded list — the drain degraded-signal test scripts denials with
 	// it.
 	queueErr error
+	// attachErr, when non-nil, is what SessionAttach answers (a
+	// transport-class error: the hub was not reached).
+	attachErr error
+	// cleanPauseCleared records the operator's `pf resume` PATCH having
+	// cleared clean_pause on this hub (the B6 repro's HTTP face writes
+	// it; the daemon-side resume-paused route reads it through
+	// SessionVerify's CleanPause answer below).
+	cleanPauseCleared bool
+	// cleanPause is the hub-side clean_pause state per work item
+	// (wi_seWTgHeKtaa8): latched by a pause close's
+	// SessionEnd(paused, CleanPause=true), cleared by the operator's
+	// resume PATCH (cleanPauseCleared). SessionVerify answers it so the
+	// live-holder resume door re-validates the flag exactly like the
+	// startup reconciliation does against the real hub.
+	cleanPause map[string]bool
+	// queueBlock, when non-nil, parks each Queue call until the channel
+	// closes; queueEntered, when non-nil, is closed exactly once when a
+	// Queue call has parked. The B3 race repro (auto off landing while a
+	// wave is mid-fetch) scripts the interleave with them; both are nil
+	// in every other test.
+	queueBlock   chan struct{}
+	queueEntered chan struct{}
 	// heartbeats/heartbeatErr are the M3 liveness seam: heartbeats
 	// records every Heartbeat payload the daemon POSTed; heartbeatErr,
 	// when non-nil, is what Heartbeat answers instead.
@@ -142,7 +164,7 @@ type endCall struct {
 }
 
 func newFakeHub() *fakeHub {
-	return &fakeHub{status: map[string]string{}, held: map[string]string{}}
+	return &fakeHub{status: map[string]string{}, held: map[string]string{}, cleanPause: map[string]bool{}}
 }
 
 func (h *fakeHub) canonicalID(in string) string {
@@ -172,6 +194,9 @@ func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimRe
 func (h *fakeHub) SessionAttach(wi string, req api.SessionAttachRequest) (*api.SessionClaimResponse, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.attachErr != nil {
+		return nil, h.attachErr
+	}
 	h.attaches = append(h.attaches, req)
 	id := h.canonicalID(wi)
 	h.status[id] = api.StatusRunning
@@ -191,6 +216,12 @@ func (h *fakeHub) SessionVerify(wi, sessionID string) (*api.SessionVerifyRespons
 		st = api.StatusRunning
 	}
 	out := &api.SessionVerifyResponse{WorkItemID: id, Status: st}
+	// the hub-side operator-pause flag (wi_seWTgHeKtaa8): latched by the
+	// pause close's SessionEnd, cleared by the operator's resume PATCH
+	// (cleanPauseCleared — the B6 repro's HTTP face writes it).
+	if st == api.StatusPaused && h.cleanPause[id] && !h.cleanPauseCleared {
+		out.CleanPause = true
+	}
 	if cur := h.held[id]; cur != "" {
 		if cur == sessionID {
 			out.Matches = true
@@ -219,6 +250,10 @@ func (h *fakeHub) SessionEnd(wi string, req api.SessionEndRequest) error {
 	switch req.Status {
 	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked, api.StatusCanceled:
 		h.held[id] = ""
+		h.cleanPause[id] = false
+	case api.StatusPaused:
+		// the pause close's operator-pause marker (wi_seWTgHeKtaa8)
+		h.cleanPause[id] = req.CleanPause
 	}
 	h.status[id] = req.Status
 	return nil
@@ -254,6 +289,16 @@ func (h *fakeHub) ResumeBlockedWorkItem(idOrSlug string) (json.RawMessage, error
 }
 
 func (h *fakeHub) Queue(project string) ([]api.WorkItem, error) {
+	h.mu.Lock()
+	block, entered := h.queueBlock, h.queueEntered
+	h.queueEntered = nil
+	h.mu.Unlock()
+	if entered != nil {
+		close(entered)
+	}
+	if block != nil {
+		<-block
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.queueErr != nil {

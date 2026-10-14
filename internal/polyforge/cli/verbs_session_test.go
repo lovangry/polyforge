@@ -12,16 +12,21 @@ import (
 	"testing"
 )
 
-// TestResumeFlagClearSemantics: v1.5 resume clears clean_pause on the
-// hub (PATCH, flag=false) and claims nothing locally — no daemon route
-// is contacted. The old v1 behavior (fresh local claim via
-// POST /jobs/{id}/resume) is deliberately gone.
+// TestResumeFlagClearSemantics: the v1.5 resume clears clean_pause on
+// the hub (PATCH, flag=false) and then makes the resume observable by
+// the ONLINE holder: the CLI calls the daemon's resume-paused route
+// (wi_seWTgHeKtaa8, v2-converge §7) — before that fix the hub-side flag
+// clear was the resume's ONLY effect (no daemon call), so a live holder
+// never picked the resume up. The old v1 behavior (fresh local claim
+// via POST /jobs/{id}/resume) stays gone: this is the in-place
+// continuation door, not a claim.
 func TestResumeFlagClearSemantics(t *testing.T) {
 	var aihubRec reqRecorder
 	aihub := newFakeAihub(t, &aihubRec, func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, cannedWI)
 	})
-	d := newDaemonFixture(t) // NO resume answer: any daemon call fails loudly
+	d := newDaemonFixture(t)
+	d.answer("POST", "/jobs/wi_abc/resume-paused", `{"resumed":true,"work_item_id":"wi_abc","outcome":"attached"}`)
 
 	code, stdout, stderr := runPf(t, map[string]string{
 		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock,
@@ -32,6 +37,9 @@ func TestResumeFlagClearSemantics(t *testing.T) {
 	if !strings.Contains(stdout, "clean_pause cleared") {
 		t.Errorf("stdout must say the flag was cleared: %s", stdout)
 	}
+	if !strings.Contains(stdout, "continues the current step in place") {
+		t.Errorf("stdout must say the holder continues in place: %s", stdout)
+	}
 	// Precheck (GET) then the flag PATCH; both against aihub only.
 	last := aihubRec.last()
 	if last.Method != "PATCH" || !strings.Contains(last.Body, `"clean_pause":false`) {
@@ -40,8 +48,19 @@ func TestResumeFlagClearSemantics(t *testing.T) {
 	}
 	for _, r := range aihubRec.all() {
 		if strings.HasPrefix(r.Path, "/jobs/") {
-			t.Errorf("v1.5 resume must not hit daemon routes; saw %s", r.Path)
+			t.Errorf("the daemon routes must go to the daemon socket, not aihub; saw %s", r.Path)
 		}
+	}
+	// The live-holder door: exactly one daemon call, the resume-paused
+	// route (never the old v1 claim door).
+	var daemonPosts []string
+	for _, r := range d.rec.all() {
+		if r.Method == "POST" {
+			daemonPosts = append(daemonPosts, r.Path)
+		}
+	}
+	if strings.Join(daemonPosts, ",") != "/jobs/wi_abc/resume-paused" {
+		t.Errorf("resume must call the daemon's resume-paused route once; daemon POSTs = %v", daemonPosts)
 	}
 }
 
@@ -89,8 +108,9 @@ func TestWrapFailOnBlockedPrintsResumeOrCancelHint(t *testing.T) {
 // TestResumeBlockedDoorWiring (polyforge#116): a workflow parked blocked
 // answers the §6.4 owner move, not the pause copy — the hub status picks
 // the door, and the blocked door contacts the daemon's resume-blocked
-// route (the paused door contacts no daemon route at all; the test above
-// pins that).
+// route (the paused door now contacts the daemon's resume-paused route —
+// the live-holder continuation of wi_seWTgHeKtaa8; the test above pins
+// that door's wire shape).
 func TestResumeBlockedDoorWiring(t *testing.T) {
 	blockedWI := `{"id":"wi_blocked","slug":"pf-43","seq":43,"project":"polyforge","goal":"the goal",` +
 		`"status":"blocked","priority":"normal","labels":["a"],"reporter":"usr_1","created_at":"2026-10-01T00:00:00Z",` +
@@ -245,7 +265,8 @@ func TestPauseRefusalWritesNothing(t *testing.T) {
 
 // TestResumeDispatchByWIState pins the two-way `pf resume` order: blocked ->
 // human-key door then daemon resume-blocked; otherwise (paused) -> the plain
-// clean_pause PATCH with no daemon route.
+// clean_pause PATCH and the daemon's resume-paused route (the live-holder
+// continuation, wi_seWTgHeKtaa8).
 func TestResumeDispatchByWIState(t *testing.T) {
 	wiWith := func(status string, clean bool) string {
 		return `{"id":"wi_abc","slug":"pf-42","seq":42,"project":"polyforge","goal":"g","status":"` + status +
@@ -261,7 +282,7 @@ func TestResumeDispatchByWIState(t *testing.T) {
 		wantDaemon   []string // POST paths expected on the daemon
 		wantStdoutIn string
 	}{
-		{"paused", "paused", true, true, false, nil, "clean_pause cleared"},
+		{"paused", "paused", true, true, false, []string{"/jobs/wi_abc/resume-paused"}, "clean_pause cleared"},
 		{"blocked", "blocked", false, false, true, []string{"/jobs/wi_abc/resume-blocked"}, "parked blocked"},
 	}
 	for _, tc := range cases {
@@ -272,6 +293,7 @@ func TestResumeDispatchByWIState(t *testing.T) {
 			})
 			d := newDaemonFixture(t)
 			d.answer("POST", "/jobs/wi_abc/resume-blocked", `{"resumed":true,"work_item_id":"wi_abc"}`)
+			d.answer("POST", "/jobs/wi_abc/resume-paused", `{"resumed":true,"work_item_id":"wi_abc","outcome":"attached"}`)
 			d.answer("POST", "/jobs/wi_abc/resume", `{"accepted":true,"work_item_id":"wi_abc"}`)
 			code, stdout, stderr := runPf(t, map[string]string{
 				"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "human-key",

@@ -219,6 +219,17 @@ func (r *Runtime) restartRelease(rec *jobRecord, currentFingerprint string) {
 // the transcript the graceful shutdown synced; a mid-seal record finishes
 // its interrupted stop instead).
 func (r *Runtime) restartAttach(ctx context.Context, rec *jobRecord) error {
+	return r.attachPaused(ctx, rec, causeOperatorAttach, "session attach after a graceful shutdown")
+}
+
+// attachPaused is the shared body of the same-session paused attach:
+// the startup reconciliation (restartAttach) and the LIVE-holder
+// operator resume (ResumePaused, wi_seWTgHeKtaa8) run exactly the same
+// sequence — mid-flight capsule guard, SessionAttach under the retained
+// secret, restartResume (Paused → RUNNING, then the recovery engine's
+// continuation) — so an in-place resume keeps every restart-time
+// semantic, the pending-question re-pose included.
+func (r *Runtime) attachPaused(ctx context.Context, rec *jobRecord, cause, detail string) error {
 	j := r.jobOf(rec.WorkItemID)
 	if j == nil {
 		return fmt.Errorf("runtime: %s: no seeded record", rec.WorkItemID)
@@ -233,9 +244,127 @@ func (r *Runtime) restartAttach(ctx context.Context, rec *jobRecord) error {
 		SessionID:  rec.SessionID,
 		MachineID:  r.cfg.MachineID,
 	}); err != nil {
+		var ae *api.Error
+		if !errors.As(err, &ae) {
+			// no typed hub answer: the hub was not reached (transport)
+			return &hubTransportError{err: err}
+		}
 		return err
 	}
-	return r.restartResume(ctx, rec, j, causeOperatorAttach, "session attach after a graceful shutdown")
+	return r.restartResume(ctx, rec, j, cause, detail)
+}
+
+// hubTransportError marks a SessionAttach that never got a typed hub
+// answer, so the live resume door can answer DAEMON-503 (hub
+// unreachable, nothing resumed) exactly like its verify step.
+type hubTransportError struct{ err error }
+
+func (e *hubTransportError) Error() string { return e.err.Error() }
+func (e *hubTransportError) Unwrap() error { return e.err }
+
+// ResumePaused is the LIVE-holder half of the operator's `pf resume`
+// (wi_seWTgHeKtaa8, v2-converge §7): the operator already cleared
+// clean_pause at the hub, and this daemon HOLDS the retained paused
+// record — so the same reconciliation the daemon's STARTUP runs for it
+// (verify → attach → recovery continuation) runs NOW, in place, instead
+// of the record sitting parked until the next daemon start. Every
+// restart-time semantic is kept: a pending unanswered question is
+// re-posed and the step waits for the human answer, a normal record
+// takes the ordinary recovery continuation.
+//
+// It returns the resume outcome for the route's answer
+// (ResumeAttached / ResumeAlreadyLive / ResumeClosed) or a typed
+// *api.Error refusal:
+// DAEMON-404 (this daemon holds no record for the WI), DAEMON-409 (not
+// a paused record, clean_pause not yet cleared, a pending terminal
+// close, or the session no longer holds the WI), DAEMON-503 (hub
+// unreachable — nothing was resumed). A typed mid-flight failure
+// (missing capsule / unmapped project) BLOCKS the work item first
+// (blockUnrecoverable, the ordinary bounded-fail close at aihub) and
+// returns the cause as the DAEMON-409 refusal detail — the resume door
+// never answers the restart copy for a capsule it cannot resume.
+func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	id := r.Resolve(wi)
+	if id == "" {
+		id = wi
+	}
+	j := r.jobOf(id)
+	if j == nil {
+		return "", &api.Error{Code: api.ErrDaemonNotFound, Detail: fmt.Sprintf("no paused work item %s held by this daemon", id)}
+	}
+	state, _ := j.snapshot()
+	if state != StatePaused {
+		if state == StateRunning {
+			// an earlier resume (or a live dispatch) owns the record: the
+			// operator's goal — the WI running here — already holds
+			return ResumeAlreadyLive, nil
+		}
+		return "", &api.Error{Code: api.ErrDaemonConflict, Detail: fmt.Sprintf("work item is %s; only a paused record resumes in place", state)}
+	}
+	rec := j.record()
+	if isTerminalStopReason(rec.StopReason) {
+		// NEW-3 crash window: a terminal close of the retained record is
+		// still pending — the restart's reconciliation replays it; a
+		// resume must not race the close it would cancel.
+		return "", &api.Error{Code: api.ErrDaemonConflict, Detail: fmt.Sprintf("a %s close of the retained paused record is pending (a crash interrupted it); the next daemon start replays the close", rec.StopReason)}
+	}
+	v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
+	if err != nil {
+		var ae *api.Error
+		if errors.As(err, &ae) {
+			return "", err
+		}
+		return "", &api.Error{Code: api.ErrDaemonHubUnavailable, Detail: err.Error()}
+	}
+	if !v.Matches {
+		// superseded (a force-end + re-claim happened while paused): the
+		// record is kept and the next daemon start reconciles it — never a
+		// hub transition from this door.
+		return "", &api.Error{Code: api.ErrDaemonConflict, Detail: fmt.Sprintf("the session no longer holds %s (current holder %q); the record is kept and the next daemon start reconciles it", rec.WorkItemID, v.CurrentFingerprint)}
+	}
+	switch v.Status {
+	case api.StatusPaused:
+		if v.CleanPause {
+			// the hub flag was not cleared: the operator's resume PATCH
+			// has not landed — nothing may auto-resume an operator pause
+			return "", &api.Error{Code: api.ErrDaemonConflict, Detail: "clean_pause is still set at the hub — the operator's resume (the clean_pause=false PATCH) has not landed; nothing was resumed"}
+		}
+		if err := r.attachPaused(ctx, rec, causeOperatorResume, "session attach after the operator's pf resume (live holder)"); err != nil {
+			var miss *MissingCapsuleError
+			var unm *UnmappedMidflightError
+			if errors.As(err, &miss) || errors.As(err, &unm) {
+				// the typed mid-flight block path (never the "next start"
+				// copy): the WI is blocked at aihub naming the cause
+				r.blockUnrecoverable(ctx, rec, err)
+				return "", &api.Error{Code: api.ErrDaemonConflict, Detail: err.Error()}
+			}
+			var te *hubTransportError
+			if errors.As(err, &te) {
+				return "", &api.Error{Code: api.ErrDaemonHubUnavailable, Detail: "session attach: " + err.Error() + "; nothing was resumed"}
+			}
+			var ae *api.Error
+			if errors.As(err, &ae) {
+				return "", err
+			}
+			return "", &api.Error{Code: api.ErrDaemonInternal, Detail: err.Error()}
+		}
+		// the recovery continuation runs synchronously (opMu held): a
+		// terminal capsule verdict or an exhausted relaunch ladder closes
+		// the job inside it — the WI does NOT continue in place then.
+		if nj := r.jobOf(id); nj == nil {
+			return ResumeClosed, nil
+		} else if st, _ := nj.snapshot(); st != StateRunning {
+			return ResumeClosed, nil
+		}
+		return ResumeAttached, nil
+	default:
+		// any other hub status under our session (running, queued,
+		// blocked, terminal): not this door's business — the record is
+		// kept for the next restart's reconciliation verdict.
+		return "", &api.Error{Code: api.ErrDaemonConflict, Detail: fmt.Sprintf("aihub says %s while the session still holds the work item; the record is kept and the next daemon start reconciles it", v.Status)}
+	}
 }
 
 // restartDrop handles aihub's terminal verdicts: no revival. A local
@@ -572,8 +701,29 @@ func (r *Runtime) blockUnrecoverable(ctx context.Context, rec *jobRecord, cause 
 	r.boundedFail(ctx, j, detail)
 }
 
-// Recovery causes that are lifecycle events, exempt from the storm ledger.
+// Resume outcomes for the live-holder resume door (ResumePaused).
+const (
+	// ResumeAttached: the retained paused session was re-attached and
+	// the work item continues IN PLACE on this daemon.
+	ResumeAttached = "attached"
+	// ResumeAlreadyLive: the work item is already running here — an
+	// earlier resume or a live dispatch owns the record; idempotent.
+	ResumeAlreadyLive = "already_live"
+	// ResumeClosed: the session was re-attached, but the recovery
+	// continuation closed the job (a terminal capsule verdict — wrapped,
+	// failed, blocked — or an exhausted relaunch ladder); nothing
+	// continues in place.
+	ResumeClosed = "closed"
+)
+
+// Recovery causes that are lifecycle events, exempt from the
+// consecutive-failures ledger.
 const (
 	causeDaemonRestart  = "daemon_restart"
 	causeOperatorAttach = "operator daemon shutdown"
+	// causeOperatorResume is the live-holder operator resume
+	// (wi_seWTgHeKtaa8): a deliberate stop's deliberate continuation —
+	// a lifecycle event like the operator attach, never a failure the
+	// consecutive-failures ledger should count.
+	causeOperatorResume = "operator resume"
 )

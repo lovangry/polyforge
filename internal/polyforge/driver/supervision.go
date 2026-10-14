@@ -57,6 +57,17 @@ const (
 	// (unparseable model, 401/403/auth, quota, insufficient
 	// permissions/balance, billing credit).
 	FailExitModel = "exit_model_class"
+	// FailUpstreamTransient (wi_seWTgHeKtaa8, the #147 incident's
+	// follow-up): the upstream's RETURN was corrupted or the transport
+	// dropped mid-flight — truncated/incomplete tool-call arguments, an
+	// empty response, a connection reset — an error-ended turn whose
+	// text names no model, allowance or throttle problem. Not
+	// model-class: the fault is not the model's, so the SAME model is
+	// retried after the D7 backoff, bounded at UpstreamTransientRetryBound
+	// same-model retries; past the bound the attempt is re-classified as
+	// a model-class death (applyStepFailedLocked) and switches
+	// candidates, like every other model-class failure.
+	FailUpstreamTransient = "upstream_transient"
 	// FailExitHost: the driver's own I/O failed (ENOSPC, EACCES, ...) or
 	// the harness reported a host error.
 	FailExitHost = "exit_host_class"
@@ -88,6 +99,14 @@ const (
 	RateLimitBackoffMax  = 300 * time.Second
 )
 
+// UpstreamTransientRetryBound is the same-model retry bound of the
+// upstream-transient class (wi_seWTgHeKtaa8): the first two corrupted
+// returns are retried on the SAME model under the D7 backoff; a third
+// consecutive one counts as a model-class death and switches candidates
+// (a persistently corrupting upstream is indistinguishable from a model
+// the chain should move past).
+const UpstreamTransientRetryBound = 2
+
 // rateLimitBackoff answers the wait before the (streak+1)-th throttled
 // dispatch of a step: the base doubled once per already-recorded
 // consecutive rate-limit death, capped.
@@ -105,19 +124,34 @@ func rateLimitBackoff(streak int) time.Duration {
 	return d
 }
 
-// rateLimitStreak counts the step's trailing consecutive rate-limit
-// infra failures (the archived attempts are the authority, like the
+// trailingCause counts the step's trailing consecutive attempts of one
+// failure cause (the archived attempts are the authority, like the
 // candidate pointer): a dispatch that died of anything else — or a
 // delivered result — ends the streak and the backoff starts over.
-func rateLimitStreak(attempts []capsule.Attempt) int {
+func trailingCause(attempts []capsule.Attempt, cause string) int {
 	n := 0
 	for i := len(attempts) - 1; i >= 0; i-- {
-		if attempts[i].FailureCause != FailRateLimited {
+		if attempts[i].FailureCause != cause {
 			break
 		}
 		n++
 	}
 	return n
+}
+
+// rateLimitStreak counts the step's trailing consecutive rate-limit
+// infra failures (trailingCause over the throttle cause).
+func rateLimitStreak(attempts []capsule.Attempt) int {
+	return trailingCause(attempts, FailRateLimited)
+}
+
+// upstreamTransientStreak counts the step's trailing consecutive
+// upstream-transient failures (trailingCause over the transient cause):
+// the retry bound's own ledger, readable from the archive alone — a
+// crash-recovered driver derives the same remaining bound as its
+// predecessor without any process memory.
+func upstreamTransientStreak(attempts []capsule.Attempt) int {
+	return trailingCause(attempts, FailUpstreamTransient)
 }
 
 // ErrDriverStalled is Run's error when the supervisor's driver_stalled
@@ -189,10 +223,19 @@ type StepFailure struct {
 
 var (
 	hostPatterns = regexp.MustCompile(`(?i)(no space left|enospc|disk quota|edquot|permission denied|eacces|read-only file system|erofs|too many open files|emfile|cannot allocate memory|out of memory|enomem|input/output error|executable file not found|no such file or directory.*(pi|harness))`)
-	// model-class: the model/provider side is broken, a different model
-	// may work (F4: a pinned model that cannot resolve must advance the
-	// candidate chain).
-	modelPatterns = regexp.MustCompile(`(?i)(model\W.{0,60}(not found|unknown|unresolved|cannot be resolved|could not be resolved|not resolve|invalid|unavailable|not available|unsupported|does not exist)|(unknown|invalid|unparse?able|unresolved|unsupported|no such) model|no models? (found|available|match)|\b401\b|\b403\b|unauthori[sz]ed|authentication|invalid api key|incorrect api key|api key|quota|insufficient|billing|credit)`)
+	// allowance/auth (model-class, D7): the account or key cannot use
+	// this candidate — a different one may work, so these switch
+	// IMMEDIATELY. Checked before every other text class: a text that also
+	// carries a throttle or transport signature ("429 ... exceeded your
+	// current quota", "insufficient balance ... connection reset") still
+	// switches.
+	allowanceAuthPatterns = regexp.MustCompile(`(?i)(\b401\b|\b403\b|unauthori[sz]ed|authentication|invalid api key|incorrect api key|api key|quota|insufficient|billing|credit)`)
+	// model-name (model-class, F4): a pinned model that cannot resolve
+	// must advance the candidate chain. Checked AFTER the throttle and
+	// upstream-transient classes: its loose "model ... invalid" shape
+	// would otherwise swallow "the model returned an invalid tool call
+	// (incomplete JSON arguments)".
+	modelNamePatterns = regexp.MustCompile(`(?i)(model\W.{0,60}(not found|unknown|unresolved|cannot be resolved|could not be resolved|not resolve|invalid|unavailable|not available|unsupported|does not exist)|(unknown|invalid|unparse?able|unresolved|unsupported|no such) model|no models? (found|available|match))`)
 	// rate-limit class (polyforge#147 D7): ONLY transient throttling.
 	// Another model would be throttled just the same (and a switch would
 	// burn the chain), so these never advance the candidate pointer: the
@@ -200,6 +243,22 @@ var (
 	// problems (quota, billing, credit, insufficient ...) are NOT here:
 	// they are model-class and switch candidates.
 	rateLimitPatterns = regexp.MustCompile(`(?i)(\b429\b|rate.?limit|too many requests|overloaded)`)
+	// upstream-transient class (wi_seWTgHeKtaa8, the #147 incident's
+	// truncated tool-call arguments): ONLY a corrupted upstream return or
+	// a drop of the upstream stream, as the harness reports it —
+	// malformed/incomplete/truncated tool-call arguments or JSON in the
+	// provider reply, an empty (0-token) reply, a reset/refused/closed/EOF
+	// upstream connection. Not model-class (another model would be
+	// corrupted just the same) and not a throttle: the same model is
+	// retried under the D7 backoff, bounded at
+	// UpstreamTransientRetryBound. A bare "invalid ..." (tool name,
+	// request, argument), a context-length error or a local I/O error is
+	// NOT here.
+	upstreamTransientPatterns = regexp.MustCompile(`(?i)(` +
+		`tool\W{0,3}calls?\W.{0,60}\b(incomplete|truncated|malformed|unterminated)\b|` +
+		`\b(incomplete|truncated|malformed|unterminated)\W{1,3}(json|arguments|tool\W{0,3}calls?)\b|` +
+		`\bempty\W(response|reply|completion)\b|\b(0|zero)\W?(output\W)?tokens?\b|` +
+		`\b(upstream|provider|stream|connection)\W.{0,30}\b(reset|refused|dropped|closed|aborted|eof)\b)`)
 )
 
 // classifyWaitFailure maps a Wait error (not a cancellation) onto a
@@ -218,16 +277,23 @@ func classifyWaitFailure(err error) (cause string, exitCode int, detail string) 
 			// before any text match: leftover stderr must never turn a
 			// clean stop into a model fault that burns a candidate.
 			return FailEndedWithoutResult, ee.ExitCode, ee.Error()
-		case modelPatterns.MatchString(text):
-			// evaluated before the throttle class: a text that names a
-			// model/auth/allowance problem ("429 ... exceeded your
-			// current quota", "403 insufficient permissions") switches
-			// candidates even when it also carries a throttle signature
+		case allowanceAuthPatterns.MatchString(text):
+			// evaluated before every other text class: an allowance/auth
+			// problem ("429 ... exceeded your current quota", "403
+			// insufficient permissions") switches candidates even when it
+			// also carries a throttle or transport signature
 			return FailExitModel, ee.ExitCode, ee.Error()
 		case rateLimitPatterns.MatchString(text):
 			// a pure throttle (the error turn it usually ends is the
 			// throttle itself): same-model backoff retry
 			return FailRateLimited, ee.ExitCode, ee.Error()
+		case upstreamTransientPatterns.MatchString(text):
+			// a corrupted upstream return or a mid-flight transport drop
+			// (the #147 incident's truncated tool-call arguments): the same
+			// model is retried under the D7 backoff, bounded
+			return FailUpstreamTransient, ee.ExitCode, ee.Error()
+		case modelNamePatterns.MatchString(text):
+			return FailExitModel, ee.ExitCode, ee.Error()
 		case ee.TurnError:
 			return FailExitModel, ee.ExitCode, ee.Error()
 		default:
@@ -242,11 +308,17 @@ func classifyWaitFailure(err error) (cause string, exitCode int, detail string) 
 	// A harness that died at startup never read its prompt (EPIPE on the
 	// write); the error carries its stderr, and a model-class text there
 	// advances the candidate chain (F4) — a pure throttle text does not.
-	if modelPatterns.MatchString(err.Error()) {
+	// No upstream-transient match here: this path is the driver's own
+	// failure, never an upstream return ("read transcript: unexpected
+	// EOF" is a local I/O error, not a provider stream drop).
+	if allowanceAuthPatterns.MatchString(err.Error()) {
 		return FailExitModel, -1, err.Error()
 	}
 	if rateLimitPatterns.MatchString(err.Error()) {
 		return FailRateLimited, -1, err.Error()
+	}
+	if modelNamePatterns.MatchString(err.Error()) {
+		return FailExitModel, -1, err.Error()
 	}
 	return FailExitOther, -1, err.Error()
 }
@@ -505,6 +577,13 @@ func (d *Driver) decideFailureLocked(stepID string, st *capsule.Step, f *StepFai
 		// spent by someone else's quota) and no block — the backoff
 		// before the next dispatch is the whole disposal.
 		dec.Backoff = rateLimitBackoff(rateLimitStreak(st.Attempts))
+	case f.Cause == FailUpstreamTransient:
+		// wi_seWTgHeKtaa8: a corrupted upstream return. Same disposal as
+		// a throttle — same model, D7 backoff, no pointer move, the
+		// blocking counter stays — except the class carries its own
+		// retry bound: past it applyStepFailedLocked re-classifies the
+		// record as a model-class death and this branch no longer sees it.
+		dec.Backoff = rateLimitBackoff(upstreamTransientStreak(st.Attempts))
 	case IsModelClass(f.Cause):
 		ptr := CandidatePointer(st.Attempts, cands)
 		switch {
@@ -547,10 +626,11 @@ func (d *Driver) decideFailureLocked(stepID string, st *capsule.Step, f *StepFai
 	if dec.Switch {
 		dec.Count = 0 // a new candidate starts a fresh ledger
 		dec.Fresh = true
-	} else if f.Cause == FailRateLimited {
-		// D7: a throttle is not the step failing. The counter that
-		// blocks never moves (no retry bound below T) and the retry
-		// resumes the transcript it already has.
+	} else if f.Cause == FailRateLimited || f.Cause == FailUpstreamTransient {
+		// D7 / wi_seWTgHeKtaa8: a throttle or an upstream transient is
+		// not the step failing (the transient only past its bound, where
+		// the cause was re-classified above). The counter that blocks
+		// never moves and the retry resumes the transcript it already has.
 		dec.Count = sup.FailureCount
 		dec.Fresh = false
 	} else {
@@ -591,6 +671,16 @@ func (d *Driver) applyStepFailedLocked(req TransitionRequest, info *appliedInfo)
 		return err
 	}
 	st := d.exec.Steps[req.StepID]
+	// wi_seWTgHeKtaa8: an upstream transient past its same-model retry
+	// bound counts as a model-class death. Re-classified HERE, before
+	// the decision and the archive: the in-bound retries archive
+	// upstream_transient (never advancing the pointer), and the
+	// bound-crossing attempt archives exit_model_class — the archive is
+	// the bound's ledger, so a crash-recovered driver reads the same
+	// remaining retries as its predecessor.
+	if f.Cause == FailUpstreamTransient && upstreamTransientStreak(st.Attempts) >= UpstreamTransientRetryBound {
+		f.Cause = FailExitModel
+	}
 	dec := d.decideFailureLocked(req.StepID, st, f)
 	seq := 0
 	for _, a := range st.Attempts {

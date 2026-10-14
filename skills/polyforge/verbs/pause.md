@@ -5,8 +5,9 @@ of the current generation with reason `paused`). The daemon seals the
 capsule read-only and closes the session as `paused`; the work item
 becomes `paused` and the only way back is the `resume` verb. The session
 is KEPT (it is not cleared like a wrap/fail/block): `pf resume` on a paused
-work item is a hub PATCH that clears `clean_pause`, and the holder daemon
-attaches to the kept session on its next start.
+work item clears `clean_pause` on the hub and tells the holder daemon, which
+re-attaches to the kept session and continues in place (a holder that was
+down attaches on its next start).
 
 ## Triggers
 

@@ -266,6 +266,34 @@ func (d *DaemonClient) ResumeBlocked(wiID string) (json.RawMessage, error) {
 	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/resume-blocked", "", d.withOrigin(map[string]any{}), nil)
 }
 
+// ResumePaused is the live-holder half of `pf resume` on a paused work
+// item (wi_seWTgHeKtaa8, v2-converge §7): the CLI has already cleared
+// clean_pause at the hub; this asks the LOCAL daemon — when it is the
+// paused work item's holder — to re-validate the session and continue
+// the current step IN PLACE (SessionAttach + the recovery continuation,
+// the same semantics attaching after a restart has). A daemon that does
+// not hold the work item answers DAEMON-404; a live holder whose hub
+// flag was not cleared yet answers DAEMON-409.
+type ResumePausedResponse struct {
+	Resumed    bool   `json:"resumed"`
+	WorkItemID string `json:"work_item_id"`
+	// Outcome: attached (continued in place) | already_live | closed
+	// (re-attached, but the recovery closed the job).
+	Outcome string `json:"outcome,omitempty"`
+}
+
+func (d *DaemonClient) ResumePaused(wiID string) (*ResumePausedResponse, error) {
+	raw, err := d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/resume-paused", "", d.withOrigin(map[string]any{}), nil)
+	if err != nil {
+		return nil, err
+	}
+	var out ResumePausedResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("decode the resume-paused answer: %w", err)
+	}
+	return &out, nil
+}
+
 func (d *DaemonClient) submit(wiID, intent, priority string, models []string) (json.RawMessage, error) {
 	if priority == "" {
 		priority = "normal"

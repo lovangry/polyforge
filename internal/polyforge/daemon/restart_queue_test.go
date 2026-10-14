@@ -244,6 +244,50 @@ func TestSubmitRejectedRecordedAsEvent(t *testing.T) {
 
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
 
+// Replay-time auto discard (wi_seWTgHeKtaa8's untested gap): the
+// persisted queue's origin=auto entries must not re-enter a machine the
+// operator turned auto OFF on — the same rule the live auto-off purge
+// applies (v2-converge §5), replayed at restart (restartsignal.go).
+// An explicit (chat-origin) entry replays as before.
+func TestSubmitReplayDropsAutoOriginEntriesWhenAutoOff(t *testing.T) {
+	setGitIdentity(t)
+	hub := newFakeHub()
+	const (
+		wiAuto = "wi_r_auto"
+		wiCLI  = "wi_r_cli"
+	)
+	hub.status[wiAuto] = api.StatusQueued
+	hub.status[wiCLI] = api.StatusQueued
+	td := newTestDaemon(t, func(c *Config) {
+		c.Hub = hub
+		now := time.Now().UTC()
+		// a persisted queue from the previous, auto-ON process: one auto
+		// entry and one explicit entry, both still queued at aihub.
+		blob, _ := json.Marshal(submitQueueState{Version: 1, Entries: []qEntry{
+			{WorkItemID: wiAuto, Intent: "claim", SubmittedAt: now, EnqueuedAt: now, Origin: runtime.Origin{Kind: runtime.OriginAuto}},
+			{WorkItemID: wiCLI, Intent: "claim", SubmittedAt: now, EnqueuedAt: now, Origin: runtime.Origin{Kind: runtime.OriginChat}},
+		}})
+		if err := os.WriteFile(filepath.Join(c.DataDir, submitQueueFile), blob, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		mkBare(t, c.GitRemoteBase, wiCLI)
+	})
+	// no persisted mode file: the fresh daemon defaults to auto OFF, so
+	// the startup replay must drop the auto entry and replay the
+	// explicit one (the path the live auto-off purge mirrors). The
+	// socket file exists before Run reaches the replay, so wait for it.
+	waitFor(t, "submit_dropped event for the auto entry", 5*time.Second, func() bool {
+		return hasKind(eventKinds(td.Daemon, wiAuto), observe.EvSubmitDropped)
+	})
+	td.waitLive(t, wiCLI)
+	if _, live := td.rt.Info(wiAuto); live {
+		t.Errorf("the origin=auto entry must not replay on an auto-off machine")
+	}
+	if hub.claimCount() != 1 {
+		t.Fatalf("only the explicit claim may run (claims=%d)", hub.claimCount())
+	}
+}
+
 // A mid-flight WI with a missing capsule is blocked at aihub (SessionEnd
 // blocked naming the path, no local record) while the daemon starts and
 // another WI recovers. Every recovered WI gets daemon_restarted.

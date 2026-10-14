@@ -8,16 +8,24 @@ admin.
 
 ## Door 1 — a paused work item (hub status `paused`)
 
-The operator-pause move: a `clean_pause=false` PATCH on the hub. Nothing is
-claimed locally and no daemon route is contacted — the paused work item
-stays with its HOLDER daemon (the session's machine attaches on its next
-daemon start; a work item whose holder is gone moves with
-`pf ops end-session <id> --reason ...` then `pf submit <id>`; a live holder
-daemon does not pick this up until its next start — to continue immediately
-use `pf ops end-session` + `pf submit`).
+The operator-pause move: a `clean_pause=false` PATCH on the hub, then the
+CLI tells the local daemon (the `resume-paused` route). When this machine's
+daemon is the work item's holder it re-validates the session (hub: the
+session still holds the work item, status `paused`, `clean_pause` cleared),
+re-attaches it and continues the current step IN PLACE — the same
+semantics attaching after a daemon restart has, so a pending unanswered
+question is re-posed and the step waits for the human answer before any
+dispatch. A work item whose holder is a different machine (the local
+daemon answers `DAEMON-404`) or whose holder is gone moves with `pf ops
+end-session <id> --reason ...` then `pf submit <id>`; a holder that was
+down attaches on its next start (the restart reconciliation — the same
+attach, one daemon start later). A typed mid-flight failure (missing
+capsule, unmapped project) answers `DAEMON-409` and the work item is
+BLOCKED at aihub with the typed cause — never the restart copy.
 
-Success: `resumed <id>: clean_pause cleared; the paused work item stays
-with its holder daemon`. `--json`: the raw answer.
+Success: `resumed <id>: clean_pause cleared; the holder daemon re-attached
+the paused session and continues the current step in place`. `--json`: the
+raw answer.
 
 ## Door 2 — a blocked work item (hub status `blocked`)
 
@@ -92,7 +100,7 @@ refused before anything else happens.
 |---|---|---|
 | `CORE-404` | Unknown or invisible id (CLI precheck) | No such work item — check the `wi_` id. |
 | (no code) `submit: <id> is terminal (<status>)` | The work item is wrapped/failed/cancelled | A finished work item cannot be resumed — file a new one. |
-| `DAEMON-409` | The work item is already active or queued on this daemon | `pf watch <id> --once` shows the running attempt. |
+| `DAEMON-409` | The work item is already active or queued on this daemon, the `clean_pause` flag was not yet cleared at the hub, or the paused resume was blocked by a typed mid-flight failure (missing capsule / unmapped project — the detail names the remediation) | `pf watch <id> --once` shows the state; for a blocked one, fix the named cause, then `pf resume` again. |
 | `DAEMON-410` (`SHUTTING_DOWN`) | Graceful shutdown in progress | Wait for restart, then resume. |
 | `AUTH-403` (from the resume door) | The caller is not the work item's reporter, a project maintainer or an admin | Ask the task owner or a maintainer to continue it. |
 | `DAEMON-503` | The hub was unreachable when the daemon went to claim after the resume door | Not an error: the claim is queued in the daemon (persisted, retried with backoff) and `pf resume` answers `resumed ...: the hub is unreachable right now; the claim is queued`. Do not run `pf resume` again — it would only find the work item already queued (`DAEMON-409`). |
@@ -102,7 +110,7 @@ refused before anything else happens.
 | `CORE-409 NOT_BLOCKED` | The resume door on a work item that is no longer blocked | The state moved — check `pf queue`/`pf watch <id> --once`; a paused WI unpauses with this same verb. |
 | `CORE-409 NOT_CLAIMABLE` (from the resume door) | The blocked WI still carries a session (a half-settled close) | Nobody may resume it until the holder settles — check the holder daemon, or an admin/maintainer ends the session with `pf ops end-session`. |
 | `CORE-404` (from the resume door, on claim) | Another machine claimed the work item between the door and the claim | It resumed elsewhere — watch it there. |
-| `dial unix …` | Daemon not running | The blocked-door resume re-establishes execution, so a daemon must be involved — start the daemon or check `--socket`. |
+| `dial unix …` | Daemon not running | The blocked-door resume re-establishes execution, so a daemon must be involved — start the daemon or check `--socket`. The paused-door resume still cleared `clean_pause` at the hub; once the holder daemon starts, its restart reconciliation attaches the paused session (to continue without it, `pf ops end-session` + `pf submit`). |
 
 Do not route "continue / go on" of a **running** work item here — that is
 `watch`. The §6.4 sibling moves of Door 2 (rewind to a step, terminate

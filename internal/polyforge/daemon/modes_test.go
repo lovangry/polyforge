@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
 func TestModeCtlSwitchAndAdmission(t *testing.T) {
@@ -327,5 +328,45 @@ func TestRequeueBackoffDoesNotBlockOthers(t *testing.T) {
 	now = now.Add(time.Millisecond)
 	if e := q.Take(); e == nil {
 		t.Fatal("not taken once due")
+	}
+}
+
+// TestEnqueueIfAtomicWithAutoOffPurge pins the B3 race closure
+// (wi_seWTgHeKtaa8): the auto wave's switch re-check and its append are
+// one step under the queue lock, so an auto-off flip that lands right
+// after the re-check passed still purges the entry, and a flip that
+// landed before refuses it. Deterministic: the flip is started from
+// inside admit (i.e. while the queue lock is held).
+func TestEnqueueIfAtomicWithAutoOffPurge(t *testing.T) {
+	m := NewModeCtl()
+	if err := m.SetAuto(true); err != nil {
+		t.Fatal(err)
+	}
+	q := NewJobQueue(4, func() map[string]bool { return map[string]bool{} })
+	auto := qEntry{WorkItemID: "wi_a", Intent: "claim", Origin: runtime.Origin{Kind: runtime.OriginAuto}}
+
+	// flip lands between the re-check and the append
+	done := make(chan []qEntry)
+	ok, err := q.EnqueueIf(auto, func() bool {
+		admitted := m.AdmitAutoPull()
+		go func() {
+			_ = m.SetAuto(false)
+			dropped, _ := q.PurgeOrigin(runtime.OriginAuto)
+			done <- dropped
+		}()
+		return admitted
+	})
+	if err != nil || !ok {
+		t.Fatalf("EnqueueIf with auto on = %v, %v; want admitted", ok, err)
+	}
+	dropped := <-done
+	if len(dropped) != 1 || q.IsPending("wi_a") {
+		t.Fatalf("auto-off purge after an admitted enqueue dropped %d entries, pending=%v; want the entry purged", len(dropped), q.IsPending("wi_a"))
+	}
+
+	// flip landed before: the conditional enqueue refuses
+	ok, err = q.EnqueueIf(auto, m.AdmitAutoPull)
+	if err != nil || ok || q.IsPending("wi_a") {
+		t.Fatalf("EnqueueIf with auto off = %v, %v (pending=%v); want refused", ok, err, q.IsPending("wi_a"))
 	}
 }
