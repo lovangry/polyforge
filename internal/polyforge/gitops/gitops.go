@@ -46,6 +46,7 @@ package gitops
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -158,13 +159,40 @@ func exitCode(err error) int {
 // git runs git once with the given environment (nil = inherit) and dir.
 // It is a var so the tests can probe the argv the package builds.
 var git = func(env []string, dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	return runGit(0, env, dir, args...)
+}
+
+// gitTimed is git bounded by timeout: on expiry the whole git process
+// group is killed (git spawns remote helpers and pack-objects), so a
+// hung remote cannot hold the per-WI lock forever. A var for the same
+// test seam as git.
+var gitTimed = func(timeout time.Duration, env []string, dir string, args ...string) (string, error) {
+	return runGit(timeout, env, dir, args...)
+}
+
+// runGit runs git once; timeout 0 = unbounded.
+func runGit(timeout time.Duration, env []string, dir string, args ...string) (string, error) {
+	ctx := context.Background()
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = CEnv(env)
 	cmd.Dir = dir
+	if timeout > 0 {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+		cmd.WaitDelay = 5 * time.Second
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+	if err != nil && ctx.Err() != nil {
+		err = fmt.Errorf("timed out after %s: %w", timeout, err)
+	}
 	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
@@ -509,6 +537,11 @@ func pushTaskRefsLocked(o Opts, chainOK bool) {
 	if err != nil {
 		return // no repos/ tree: no inventory, nothing to carry
 	}
+	// ONE symlink-resolved repos dir for every check and push (the
+	// GIT_CEILING_DIRECTORIES value and the object paths agree).
+	if reposDir, err = filepath.EvalSymlinks(reposDir); err != nil {
+		return
+	}
 	type source struct{ name, objects, sha string }
 	var srcs []source
 	for _, e := range ents {
@@ -578,6 +611,13 @@ func carrierEnv(reposDir string) []string {
 	)
 }
 
+// Carrier-lane git timeouts: the read-only checks and the temp-repo
+// set-up are local and short; the push talks to the hub.
+var (
+	carrierCheckTimeout = time.Minute
+	carrierPushTimeout  = 10 * time.Minute
+)
+
 // carrierFlags lead every git call on the carrier lane: no hooks, no
 // fsmonitor (both would run programs), no credential helper (an empty
 // value resets the helper list), no http proxy.
@@ -589,41 +629,100 @@ var carrierFlags = []string{
 }
 
 // carrierSource validates the task repo repos/<name> and reads its HEAD.
-// It answers the repo's object directory (symlinks of the parents
-// resolved) and the HEAD commit SHA ("" = unborn: nothing to carry), or
-// a refusal reason. The repo must own a REAL .git directory (not a
-// symlink, not a gitfile pointing elsewhere), its object store must be a
-// real directory that borrows from no other store (no
-// objects/info/alternates), and git must resolve the repo to exactly
-// that .git. The calls only READ (rev-parse); none of them pushes or
+// reposDir is already symlink-resolved. It answers the repo's object
+// directory and the HEAD commit SHA ("" = unborn: nothing to carry), or a
+// refusal reason. The repo must own its storage outright
+// (carrierLayoutRefusal), and git must resolve the repo to exactly its
+// own .git. The calls only READ (rev-parse); none of them pushes or
 // holds the credential.
 func carrierSource(reposDir, name string) (objects, sha, reason string) {
-	realRepos, err := filepath.EvalSymlinks(reposDir)
-	if err != nil {
-		return "", "", "cannot resolve the repos directory"
-	}
-	dir := filepath.Join(realRepos, name)
+	dir := filepath.Join(reposDir, name)
 	gitDir := filepath.Join(dir, ".git")
-	if st, err := os.Lstat(gitDir); err != nil || !st.IsDir() {
-		return "", "", "repos/" + name + "/.git is not a real directory (missing, a symlink or a gitfile)"
+	if reason := carrierLayoutRefusal(gitDir); reason != "" {
+		return "", "", "repos/" + name + ": " + reason
 	}
 	objects = filepath.Join(gitDir, "objects")
-	if st, err := os.Lstat(objects); err != nil || !st.IsDir() {
-		return "", "", "repos/" + name + "/.git/objects is not a real directory"
-	}
-	if _, err := os.Lstat(filepath.Join(objects, "info", "alternates")); err == nil {
-		return "", "", "repos/" + name + " borrows objects from another store (objects/info/alternates)"
-	}
-	env := carrierEnv(realRepos)
-	out, err := git(env, dir, append(append([]string{}, carrierFlags...), "rev-parse", "--absolute-git-dir")...)
+	env := carrierEnv(reposDir)
+	// safe.directory: the repo may be owned by another uid (#135).
+	flags := append(append([]string{}, carrierFlags...), "-c", "safe.directory="+dir)
+	out, err := gitTimed(carrierCheckTimeout, env, dir, append(flags, "rev-parse", "--absolute-git-dir")...)
 	if err != nil || strings.TrimSpace(out) != gitDir {
 		return "", "", "git does not resolve repos/" + name + " to its own .git directory"
 	}
-	head, err := git(env, dir, append(append([]string{}, carrierFlags...), "rev-parse", "--verify", "-q", "HEAD^{commit}")...)
+	head, err := gitTimed(carrierCheckTimeout, env, dir, append(flags, "rev-parse", "--verify", "-q", "HEAD^{commit}")...)
 	if err != nil {
 		return objects, "", "" // unborn HEAD
 	}
 	return objects, strings.TrimSpace(head), ""
+}
+
+// carrierLayoutRefusal answers why the git dir at gitDir does not own its
+// storage outright ("" = it does). Every piece git would read refs or
+// objects through must be a real file or directory of THIS repo: .git
+// itself (not a symlink, not a gitfile), no commondir (a worktree-style
+// redirect of refs and objects), no symlink at HEAD, packed-refs,
+// anywhere under refs/, at any entry of objects/ (pack, info, the ??
+// fan-out dirs) or of objects/pack/, and no objects/info/alternates or
+// http-alternates (borrowed object stores).
+func carrierLayoutRefusal(gitDir string) string {
+	if st, err := os.Lstat(gitDir); err != nil || !st.IsDir() {
+		return ".git is not a real directory (missing, a symlink or a gitfile)"
+	}
+	if _, err := os.Lstat(filepath.Join(gitDir, "commondir")); err == nil {
+		return ".git/commondir redirects to another repository"
+	}
+	for _, rel := range []string{"HEAD", "packed-refs"} {
+		if st, err := os.Lstat(filepath.Join(gitDir, rel)); err == nil && st.Mode()&os.ModeSymlink != 0 {
+			return ".git/" + rel + " is a symlink"
+		}
+	}
+	refs := filepath.Join(gitDir, "refs")
+	if st, err := os.Lstat(refs); err == nil {
+		if !st.IsDir() {
+			return ".git/refs is not a real directory"
+		}
+		bad := ""
+		_ = filepath.WalkDir(refs, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				bad = "cannot read .git/refs"
+				return filepath.SkipAll
+			}
+			if d.Type()&os.ModeSymlink != 0 {
+				rel, _ := filepath.Rel(gitDir, path)
+				bad = ".git/" + rel + " is a symlink"
+				return filepath.SkipAll
+			}
+			return nil
+		})
+		if bad != "" {
+			return bad
+		}
+	}
+	objects := filepath.Join(gitDir, "objects")
+	if st, err := os.Lstat(objects); err != nil || !st.IsDir() {
+		return ".git/objects is not a real directory"
+	}
+	for _, dir := range []string{objects, filepath.Join(objects, "pack")} {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "cannot read " + dir
+		}
+		for _, e := range ents {
+			if e.Type()&os.ModeSymlink != 0 {
+				rel, _ := filepath.Rel(gitDir, filepath.Join(dir, e.Name()))
+				return ".git/" + rel + " is a symlink"
+			}
+		}
+	}
+	for _, alt := range []string{"alternates", "http-alternates"} {
+		if _, err := os.Lstat(filepath.Join(objects, "info", alt)); err == nil {
+			return "borrows objects from another store (objects/info/" + alt + ")"
+		}
+	}
+	return ""
 }
 
 // pushCarrier pushes sha to refs/pf-task/<name> on the WI's bare repo
@@ -631,7 +730,9 @@ func carrierSource(reposDir, name string) (objects, sha, reason string) {
 // the task repo's object store (objects/info/alternates), with the
 // carrier env plus the credential additions, a protocol allow-list of
 // the remote's own scheme, and no submodule recursion. The temporary
-// repo lives outside the capsule and is removed afterwards.
+// repo lives outside the capsule and is removed afterwards (a daemon
+// killed mid-push leaves it behind: SweepCarrierTemps). reposDir is the
+// symlink-resolved repos dir carrierSource used.
 func pushCarrier(o Opts, reposDir, objects, sha, name string, credAdditions []string) (string, error) {
 	base := ""
 	if o.GitDir != "" {
@@ -643,7 +744,7 @@ func pushCarrier(o Opts, reposDir, objects, sha, name string, credAdditions []st
 	}
 	defer os.RemoveAll(tmp)
 	env := carrierEnv(reposDir)
-	if out, err := git(env, tmp, "init", "-q", "--bare", "--template=", tmp); err != nil {
+	if out, err := gitTimed(carrierCheckTimeout, env, tmp, "init", "-q", "--bare", "--template=", tmp); err != nil {
 		return out, err
 	}
 	if err := os.MkdirAll(filepath.Join(tmp, "objects", "info"), 0o700); err != nil {
@@ -653,7 +754,7 @@ func pushCarrier(o Opts, reposDir, objects, sha, name string, credAdditions []st
 		return "", err
 	}
 	tmpFlags := append([]string{"--git-dir=" + tmp}, carrierFlags...)
-	if out, err := git(env, tmp, append(append([]string{}, tmpFlags...), "update-ref", "refs/pf-carrier/tmp", sha)...); err != nil {
+	if out, err := gitTimed(carrierCheckTimeout, env, tmp, append(append([]string{}, tmpFlags...), "update-ref", "refs/pf-carrier/tmp", sha)...); err != nil {
 		return out, err
 	}
 	scheme := "file"
@@ -668,7 +769,7 @@ func pushCarrier(o Opts, reposDir, objects, sha, name string, credAdditions []st
 		args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
 	}
 	args = append(args, o.RemoteURL, sha+":"+TaskRefName(name))
-	return git(append(env, credAdditions...), tmp, args...)
+	return gitTimed(carrierPushTimeout, append(env, credAdditions...), tmp, args...)
 }
 
 // carrierFailed raises carrier_push_failed for repo — only when the
@@ -1009,6 +1110,32 @@ func SweepAskpass(gitRoot string) error {
 			continue
 		}
 		if rerr := os.Remove(filepath.Join(dir, e.Name())); rerr != nil && firstErr == nil {
+			firstErr = rerr
+		}
+	}
+	return firstErr
+}
+
+// SweepCarrierTemps removes the pf-carrier-* temporary bare repos a
+// killed process left next to the external git-dirs (pushCarrier removes
+// its own when the call unwinds). Call it ONCE at daemon startup with
+// the same gitRoot as SweepAskpass: nothing can be live that early.
+// Best-effort — the first removal error is reported, the sweep
+// continues.
+func SweepCarrierTemps(gitRoot string) error {
+	ents, err := os.ReadDir(gitRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var firstErr error
+	for _, e := range ents {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), "pf-carrier-") {
+			continue
+		}
+		if rerr := os.RemoveAll(filepath.Join(gitRoot, e.Name())); rerr != nil && firstErr == nil {
 			firstErr = rerr
 		}
 	}

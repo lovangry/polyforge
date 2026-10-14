@@ -8,6 +8,7 @@ package gitops
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
@@ -759,6 +761,52 @@ func TestCarrierRefusesForeignGitDir(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		"commondir": func(t *testing.T, repoDir string) {
+			// Another (valid) repository's storage: git would read its
+			// refs and objects through this repo's .git.
+			other := filepath.Join(t.TempDir(), "other")
+			mustRun(t, "git", "init", "-q", "-b", "main", other)
+			mustRun(t, "git", "-C", other, "commit", "-q", "--allow-empty", "-m", "another work item")
+			if err := os.WriteFile(filepath.Join(repoDir, ".git", "commondir"), []byte(filepath.Join(other, ".git")+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"http-alternates": func(t *testing.T, repoDir string) {
+			info := filepath.Join(repoDir, ".git", "objects", "info")
+			if err := os.MkdirAll(info, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(info, "http-alternates"), []byte("http://elsewhere/objects\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"symlinked-packed-refs": func(t *testing.T, repoDir string) {
+			mustRun(t, "git", "-C", repoDir, "pack-refs", "--all")
+			symlinkAway(t, filepath.Join(repoDir, ".git", "packed-refs"))
+		},
+		"symlinked-refs":       func(t *testing.T, repoDir string) { symlinkAway(t, filepath.Join(repoDir, ".git", "refs")) },
+		"symlinked-refs-heads": func(t *testing.T, repoDir string) { symlinkAway(t, filepath.Join(repoDir, ".git", "refs", "heads")) },
+		"symlinked-HEAD":       func(t *testing.T, repoDir string) { symlinkAway(t, filepath.Join(repoDir, ".git", "HEAD")) },
+		"symlinked-objects-pack": func(t *testing.T, repoDir string) {
+			if err := os.MkdirAll(filepath.Join(repoDir, ".git", "objects", "pack"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			symlinkAway(t, filepath.Join(repoDir, ".git", "objects", "pack"))
+		},
+		"symlinked-fanout": func(t *testing.T, repoDir string) {
+			objects := filepath.Join(repoDir, ".git", "objects")
+			ents, err := os.ReadDir(objects)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range ents {
+				if len(e.Name()) == 2 {
+					symlinkAway(t, filepath.Join(objects, e.Name()))
+					return
+				}
+			}
+			t.Fatal("no loose-object fan-out dir to symlink")
+		},
 		"alternates": func(t *testing.T, repoDir string) {
 			info := filepath.Join(repoDir, ".git", "objects", "info")
 			if err := os.MkdirAll(info, 0o755); err != nil {
@@ -793,5 +841,129 @@ func TestCarrierRefusesForeignGitDir(t *testing.T) {
 				t.Fatalf("event body = %v", bodies[0])
 			}
 		})
+	}
+}
+
+// symlinkAway moves path to a temp location and leaves a symlink to it
+// in its place (the same content, reached through a link).
+func symlinkAway(t *testing.T, path string) {
+	t.Helper()
+	other := filepath.Join(t.TempDir(), filepath.Base(path))
+	if err := os.Rename(path, other); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The in-task-repo reads carry -c safe.directory=<repo> (they keep
+// working once the repo belongs to another uid, #135).
+func TestCarrierChecksCarrySafeDirectory(t *testing.T) {
+	setIdentity(t)
+	o, base := taskOpts(t, "wi_task10")
+	mkBare(t, o.RemoteURL, false)
+	mkTaskCapsule(t, o)
+	mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
+	repos, err := filepath.EvalSymlinks(filepath.Join(o.CapsuleDir, capsule.DirRepos))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "safe.directory=" + filepath.Join(repos, "demo-src")
+	var mu sync.Mutex
+	var revParse [][]string
+	gitArgsProbe = func(args []string) {
+		for _, a := range args {
+			if a == "rev-parse" {
+				mu.Lock()
+				revParse = append(revParse, append([]string{}, args...))
+				mu.Unlock()
+			}
+		}
+	}
+	t.Cleanup(func() { gitArgsProbe = nil })
+	if _, _, _, err := CommitPush(o, "boundary"); err != nil {
+		t.Fatalf("CommitPush: %v", err)
+	}
+	seen := 0
+	for _, args := range revParse {
+		if strings.Contains(strings.Join(args, " "), "--absolute-git-dir") || strings.Contains(strings.Join(args, " "), "HEAD^{commit}") {
+			seen++
+			if !strings.Contains(strings.Join(args, " "), want) {
+				t.Fatalf("in-repo read without %s: %q", want, args)
+			}
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("saw %d carrier reads, want 2: %q", seen, revParse)
+	}
+}
+
+// A hung hub cannot hold the per-WI lock forever: the carrier push is
+// bounded (carrierPushTimeout) and its git process group is killed.
+func TestCarrierPushTimesOut(t *testing.T) {
+	setIdentity(t)
+	o, base := taskOpts(t, "wi_task11")
+	mkBare(t, o.RemoteURL, false)
+	mkTaskCapsule(t, o)
+	mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() { // accept and never answer
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { _ = c.Close() })
+		}
+	}()
+	prev := carrierPushTimeout
+	carrierPushTimeout = 2 * time.Second
+	t.Cleanup(func() { carrierPushTimeout = prev })
+	repos, err := filepath.EvalSymlinks(filepath.Join(o.CapsuleDir, capsule.DirRepos))
+	if err != nil {
+		t.Fatal(err)
+	}
+	objects, sha, reason := carrierSource(repos, "demo-src")
+	if reason != "" || sha == "" {
+		t.Fatalf("carrierSource = %q, %q", sha, reason)
+	}
+	o.RemoteURL = "http://" + ln.Addr().String() + "/wi_task11.git"
+	start := time.Now()
+	_, err = pushCarrier(o, repos, objects, sha, "demo-src", nil)
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("pushCarrier against a hung hub = %v, want a timeout", err)
+	}
+	if d := time.Since(start); d > 20*time.Second {
+		t.Fatalf("the timed-out push took %s", d)
+	}
+}
+
+// Startup sweep: pf-carrier-* leftovers next to the git-dirs go, nothing
+// else does.
+func TestSweepCarrierTemps(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{"pf-carrier-123", "pf-carrier-abc/objects", "wi_x.git", "askpass"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := SweepCarrierTemps(root); err != nil {
+		t.Fatalf("SweepCarrierTemps: %v", err)
+	}
+	ents, _ := os.ReadDir(root)
+	var left []string
+	for _, e := range ents {
+		left = append(left, e.Name())
+	}
+	if strings.Join(left, ",") != "askpass,wi_x.git" {
+		t.Fatalf("left after the sweep: %v", left)
+	}
+	if err := SweepCarrierTemps(filepath.Join(root, "absent")); err != nil {
+		t.Fatalf("an absent root must be a no-op: %v", err)
 	}
 }

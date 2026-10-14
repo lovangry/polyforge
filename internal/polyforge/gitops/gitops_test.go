@@ -36,6 +36,13 @@ func init() {
 		}
 		return wrapped(env, dir, args...)
 	}
+	wrappedTimed := gitTimed
+	gitTimed = func(timeout time.Duration, env []string, dir string, args ...string) (string, error) {
+		if gitArgsProbe != nil {
+			gitArgsProbe(args)
+		}
+		return wrappedTimed(timeout, env, dir, args...)
+	}
 }
 
 func setIdentity(t *testing.T) {
