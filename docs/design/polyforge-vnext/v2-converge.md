@@ -99,8 +99,11 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 | 细分 | 判据 | 处理 |
 |---|---|---|
-| 模型类 | 错误文本命中模型类特征（模型名不可解析、401/403/鉴权失败、quota / insufficient / billing / credit 等额度·权限问题），或退出前最后信号为"本轮出错"且文本不是纯限流 | 同 `model_error`：换模型（F4 教训：模型 pin 失败必须推进候选）。模型类文本判在限流类之前：同时带 429 的"exceeded your current quota"仍换模型 |
-| 限流类（polyforge#147 D7） | 错误文本**只**命中瞬时限流特征（429 / rate limit / too many requests / overloaded），且不命中模型类特征 | `rate_limited`：原模型退避重试，不推进候选指针、不计失败计数 |
+| 模型类 | 错误文本命中额度·鉴权特征（401/403/鉴权失败/api key、quota / insufficient / billing / credit）或模型名不可解析，或退出前最后信号为"本轮出错"且文本不属限流类/上游瞬时类 | 同 `model_error`：换模型（F4 教训：模型 pin 失败必须推进候选）。额度·鉴权文本最先判：同时带 429 或连接中断特征（"429 … exceeded your current quota"、"insufficient balance … connection reset"）仍立即换模型 |
+| 限流类（polyforge#147 D7） | 错误文本命中瞬时限流特征（429 / rate limit / too many requests / overloaded），且不命中额度·鉴权特征 | `rate_limited`：原模型退避重试，不推进候选指针、不计失败计数 |
+| 上游瞬时类（wi_seWTgHeKtaa8） | harness 报告的上游返回损坏或上游流中断：工具调用参数 / JSON 不完整·截断·畸形、空回复（0 token）、上游连接 reset / refused / closed / EOF；不命中额度·鉴权与限流特征 | `upstream_transient`：原模型按 D7 退避重试，**最多 2 次**，第 3 次即归档为模型类（`exit_model_class`）并换模型；不计失败计数。裸的 "invalid …"（工具名、请求参数）、上下文超长、driver 自身的本地 I/O 错误（如 "read transcript: unexpected EOF"）都**不**属此类 |
+
+**文本分类顺序**（`driver/supervision.go` `classifyWaitFailure`）：机器类 → 正常结束一轮后干净退出（`ended_without_result`）→ 额度·鉴权（换模型）→ 限流（同模型）→ 上游瞬时（同模型，界 2）→ 模型名不可解析（换模型）→ 本轮出错（模型类）→ 其余。非进程退出（driver 自身失败）不做上游瞬时匹配。
 | 机器类 | driver 自身 I/O 错误（ENOSPC、EACCES 等）或翻译器上报的宿主错误 | 机器问题 |
 | 其余 | — | 同模型重试 |
 
@@ -114,6 +117,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 | `model_error`、`model_hung`、退出（模型类） | 换下一个候选模型 |
 | `step_timeout_slow_model` | **放宽 T（翻倍，写入 `execution.json`）后换下一个候选模型**（polyforge#147 D6）：新候选在**放宽后的完整额度**下运行，累计耗时连续结转但严格低于翻倍后的界——绝不在启动瞬间即被判超时 |
 | `rate_limited`（429 / rate limit / too many requests / overloaded；额度/账单/权限类不在此列，归模型类换模型） | **不换模型**：原模型退避重试（polyforge#147 D7），退避 1s 起逐次翻倍、单次上限 300s；**退避等待计入该步累计 T**；**不另设重试次数上限**，唯一的界是该步累计 T（T 耗尽即走既有超时处理）；**不放宽 T**（只有超时类死因放宽）；不计入失败计数 |
+| `upstream_transient`（上游返回损坏 / 上游流中断，见上表） | **不换模型**：原模型按 D7 同一退避重试（1s 起翻倍、单次上限 300s，**退避计入该步累计 T**），不推进候选指针、不计失败计数；**连续 2 次后**第 3 次归档为 `exit_model_class` → 换下一个候选（界只由 attempts 归档里尾部连续的 `upstream_transient` 计数，崩溃恢复后的 driver 读到同样的剩余次数） |
 | `tool_hung` | 同模型重试，并**放宽 Y**（同 T 的放宽规则） |
 | `step_timeout_long_task` | 同模型重试（**不换模型**）并放宽 T（翻倍并持久化）；再超时 → 同样再翻倍 T 并持久化，然后 blocked（人工"继续"在新放宽的界下运行，不会一启动就超时） |
 | 机器问题 | blocked，通知人，不换模型 |
@@ -128,7 +132,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 **失败计数（r2 补）**
 - 存放：`execution.json` 该 step 的字段（attempts 记录带 cause 子类）。
-- 计入：上表除"daemon 重启"与"限流类 `rate_limited`"（polyforge#147 D7：退避重试只受 T 约束）外的所有死因。**信封被拒不计入**——polyforge#147 C4 起它不再走"进程内重试耗尽后重启 driver"的升级车道：进程内重试 3 次仍不合格 → 该步直接 blocked，原因码 `result_invalid`，不重启 driver、不路由 `on_fail`（rewind 只留给评审 FAIL 裁决）。
+- 计入：上表除"daemon 重启"、"限流类 `rate_limited`"（polyforge#147 D7：退避重试只受 T 约束）与界内的"上游瞬时类 `upstream_transient`"外的所有死因。**信封被拒不计入**——polyforge#147 C4 起它不再走"进程内重试耗尽后重启 driver"的升级车道：进程内重试 3 次仍不合格 → 该步直接 blocked，原因码 `result_invalid`，不重启 driver、不路由 `on_fail`（rewind 只留给评审 FAIL 裁决）。
 - 清零：gate rewind 回到该步、换到新候选模型、人工"继续"。
 - daemon 重启触发的中断**不归档为失败、不推进候选指针**；一般地，被中断的 attempt 永不推进候选指针。（现状：`FaultClass` 分类层已删除，改为**死因规则**——只有模型类死因 `model_error`、`model_hung`、`step_timeout_slow_model`、`exit_model_class` 推进候选指针；指针在 gate_fail rewind 时重置；见 `driver/candidates.go`、`driver/supervision.go`。事件体与 attempts 记录带 `failure_cause`，不再有 `fault_class`。）
 - （现状：候选列表五级优先，高到低：`pf submit --models a,b,c` 的手工列表（仅由本 daemon 保存、按 WI、作用于该 WI 的每一步；随 submit 队列落盘，认领时写入 daemon 数据目录的 `manual-models.json`（不进 capsule），本机 daemon 重启、恢复、`pf resume` 重新认领均沿用，WI 终态（wrapped/failed/canceled）时删除；在另一台机器上重新认领则没有该列表，使用那台机器自己的设置）> 工作区 yaml 文件的 `models.<project>.<kind>` > `models.<project>.default` > bundle 步骤自带 `model_candidates` > bundle `defaults.model_candidates`；推进/重置语义不变。见 `workspace/compose.go`。）
@@ -272,6 +276,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 
 - "resume"现有 5 种含义 → 对人只保留 **暂停 / 继续**；系统内部自动处理统一称 **恢复（recover）**，不再叫 resume。
 - blocked 两扇门（unblock / resume-blocked）→ **继续 / 放弃**两个动作（terminate 门已删，polyforge#149）。
+- **暂停后的"继续"（wi_seWTgHeKtaa8）**：`pf resume <wi>`（WI 为 paused）先在 aihub 清 `clean_pause`，再调本机 daemon 的 `POST /jobs/{wi}/resume-paused`：本机 daemon 若持有该 paused 记录，**立即原地继续**——与重启时相同的流程（session verify → SessionAttach → 恢复引擎续跑当前步；未答问题重新提出并等待人回答），不必等 daemon 重启。daemon 回答 `attached`（原地继续）/ `already_live`（已在跑，幂等）/ `closed`（已 attach，但恢复续跑当场把 job 收尾——终态裁决或重拉耗尽——不再原地继续）；拒绝：DAEMON-404（本机不持有，CLI 提示到持有机器上 resume）、DAEMON-409（`clean_pause` 未清 / session 已不持有 / capsule 缺失则置 blocked）、DAEMON-503（aihub 不可达，未继续）。hub 侧已清 flag 而 daemon 拒绝或不可达时，flag 保持清除，持有 daemon 下次启动的重启对账照常 attach。
 - **"继续"的范围（r2 补）**：默认由**原持有 daemon 原地继续**；跨 daemon 继续前，必须确认 aihub 上的 capsule 版本等于原 daemon 封存时的版本，否则拒绝（#116 教训：防止拿到 blocked 之前的旧状态）。
 - 继续 / 放弃的权限（已定）：**任务负责人、项目 maintainer、admin** 均可；顺带修 resume-blocked 只查 key scope 不查成员。
 - WI 依赖关系保留（#120 已解冻）。
