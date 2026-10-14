@@ -304,8 +304,9 @@ func New(cfg Config) (*Daemon, error) {
 	cfg.fill()
 
 	// addendum 2 (owner ruling A): the dedicated step agent directory is
-	// synced at daemon start (and re-checked before every spawn by the
-	// spawner itself). A source that is explicitly configured but cannot
+	// synced at daemon start — the only point that also prunes entries
+	// outside the minimal set; the spawner refreshes the allowlisted
+	// members before every spawn. A source that is explicitly configured but cannot
 	// present its credentials refuses startup; the implicit default
 	// without file credentials carries on with a warning.
 	rtCfg := runtime.Config{

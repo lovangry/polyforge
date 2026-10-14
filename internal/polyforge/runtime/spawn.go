@@ -29,11 +29,11 @@ import (
 // injected at derivation; a capsule's materialized step-agent definitions
 // are a different resource family and stay reachable.
 //
-// --no-extensions is DELIBERATELY ABSENT and must stay absent: it
-// silences the operator's extension UI noise but also removes the
-// harness-native subagent tool — which is extension-provided — and with
-// it the whole step-agent dispatch path; the harness has no built-in
-// subagent facility to fall back to.
+// --no-extensions is DELIBERATELY ABSENT and must stay absent: the
+// subagent tool is not a pi builtin but an EXTENSION — on the operator's
+// machine the one at <operator agent dir>/extensions/subagent/ — and
+// --no-extensions would drop it, and with it the whole step-agent
+// dispatch path.
 //
 // The residual exposure this profile could never close — extension-
 // registered HARNESS BACKGROUND TASKS (the operator's user-level
@@ -41,12 +41,16 @@ import (
 // directory's settings.json) — is closed MECHANICALLY instead
 // (addendum 2, owner ruling A): the step process runs with
 // PI_CODING_AGENT_DIR pointing at the dedicated daemon-owned step
-// agent directory (runtime/stepagentdir.go), a minimal snapshot
-// (auth.json/models.json/agents — never settings.json) that is
-// re-synced before every spawn. A global reinstall lands in the
-// operator's directory and never reaches the step process; the
-// isolation is the harness adapter layer's guarantee (see
-// docs/design/polyforge-vnext/v2-converge.md), not an instruction.
+// agent directory (runtime/stepagentdir.go), a minimal snapshot —
+// auth.json, models.json, agents/ and exactly ONE extension,
+// extensions/subagent/ (pi auto-loads global extensions from
+// <agent dir>/extensions/, which is how the subagent tool reaches the
+// step process) — and never settings.json, so no package loads. The
+// allowlisted members are refreshed before every spawn; a global
+// reinstall lands in the operator's directory and never reaches the
+// step process. The isolation is the harness adapter layer's guarantee
+// (see docs/design/polyforge-vnext/v2-converge.md §2.7), not an
+// instruction.
 var piIsolationFlags = []string{
 	"--no-skills",
 	"--no-context-files",
@@ -173,9 +177,9 @@ func (s *piSpawner) bin() string {
 //
 // The operator's agent-directory settings no longer leak into the step
 // process at all (addendum 2): the dedicated step agent directory
-// (PI_CODING_AGENT_DIR, re-synced before every spawn) holds only the
-// minimal set — credentials, model configuration, subagent definitions —
-// and NO settings.json, so no operator preference (a defaultModel
+// (PI_CODING_AGENT_DIR, refreshed before every spawn) holds only the
+// minimal set — credentials, model configuration, subagent definitions,
+// the subagent extension — and NO settings.json, so no operator preference (a defaultModel
 // override, a package declaration) applies. The old "residual settings
 // pollution, deliberately accepted" caveat is resolved by that
 // relocation; the argv pin stays for the loud-failure property above.
@@ -218,7 +222,8 @@ func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 
 // Spawn derives one persistent agent process: process group (the agent is
 // its own group leader so the cleanup layers can collect step agents and
-// command children), the dedicated step agent directory re-synced BEFORE
+// command children), the dedicated step agent directory's allowlisted
+// members refreshed (never pruned — see stepagentdir.go) BEFORE
 // the process is born (a torn credential copy is a spawn-refusing error,
 // never a silently degraded step agent), identity journal BEFORE the
 // spawn returns, then the initial prompt as the session's first command.
@@ -227,7 +232,7 @@ func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, erro
 		return nil, fmt.Errorf("runtime: spawn without an initial prompt")
 	}
 	if s.cfg.DataDir != "" {
-		if err := s.cfg.SyncStepAgentDir(); err != nil {
+		if err := s.cfg.refreshStepAgentDir(); err != nil {
 			return nil, err
 		}
 	}

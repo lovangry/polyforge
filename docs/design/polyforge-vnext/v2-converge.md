@@ -168,11 +168,13 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 **禁止 step agent 使用 harness 后台任务，是 harness 适配层的责任，不是写进提示词的纪律。** 后台任务会让一个步骤在它的派生进程之外留下活动，监督面（判死、step 结束、派生计数）全部失真；靠"规则里写了不许用"约束的只是诚实的 agent。
 
-pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的数据目录下维护 `<data-dir>/step-agent/`，派生每个 step 进程时注入 `PI_CODING_AGENT_DIR=<data-dir>/step-agent`（会话另置于 `PI_CODING_AGENT_SESSION_DIR=<data-dir>/step-agent-sessions/`，实时 transcript 定位器跟着同一个根走）。该目录是 operator agent 目录的**最小快照**——只有 `auth.json`（模型服务凭证）、`models.json`（模型服务配置）、`agents/`（子 agent 定义），**没有 `settings.json`**，而用户级 package（例如提供后台任务工具的 `npm:pi-background-tasks`）正是在 `settings.json` 里声明的：没有声明就没有加载，后台任务工具对 step agent **机械不可见**，与提示词无关。
+pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的数据目录下维护 `<data-dir>/step-agent/`，派生每个 step 进程时注入 `PI_CODING_AGENT_DIR=<data-dir>/step-agent`（会话另置于 `PI_CODING_AGENT_SESSION_DIR=<data-dir>/step-agent-sessions/`，实时 transcript 定位器跟着同一个根走）。该目录是 operator agent 目录的**最小快照**——只有 `auth.json`（模型服务凭证）、`models.json`（模型服务配置，保留源文件权限）、`agents/`（子 agent 定义）、`extensions/subagent/`（子 agent **工具**本身），**没有 `settings.json`**，而用户级 package（例如提供后台任务工具的 `npm:pi-background-tasks`）正是在 `settings.json` 里声明的：没有声明就没有加载，后台任务工具对 step agent **机械不可见**，与提示词无关。
 
-- 拷贝而非链接：快照不跟随 operator 后续改动（包括全局重装），也没有任何符号链接把专用目录变成整个 operator 目录的窗口；daemon 启动时同步一次，**每次派生前再核对一次**（源文件大小+mtime 变化即重拷），凭证不可读 = 大声拒绝派生，绝不降级运行。
+- **子 agent 工具如何送达**：它不是 pi 内建工具，而是 operator agent 目录下的扩展 `extensions/subagent/`；pi 只从 `<agent 目录>/extensions/` 自动发现全局扩展（`resource-loader` / `package-manager` 的全局 extensions 根）。所以快照**恰好**拷贝 `extensions/subagent/` 这一个子目录，其余扩展一律不带（例如 `extensions/polyforge` 是交互会话用的），`settings.json` 与 packages 永远不带。
+- 拷贝而非链接：快照不跟随 operator 后续改动（包括全局重装），也没有任何符号链接把专用目录变成整个 operator 目录的窗口（树内符号链接跳过不拷）。**每次派生前**只刷新白名单成员（源文件大小+mtime 变化即重拷，源里没了就删）；清除白名单以外的条目**只在 daemon 启动时**做——那时本 daemon 没有存活的 step 进程，不会把文件从运行中的 step 进程脚下抽走。凭证不可读 = 大声拒绝派生，绝不降级运行。
+- **凭证限制**：拷贝的 `auth.json` 支持 API-key 条目。OAuth 条目在 pi 刷新令牌之前可用；pi 会把刷新后的令牌写进**副本**，而下一次同步发现副本与 operator 文件不一致，就用 operator 的（旧）条目覆盖它——step 侧的刷新结果会丢失。没有为此设机制：step agent 应使用 API-key 凭证。
 - 位置在数据目录下，**绝不在 capsule 内**：capsule 会提交并推送到 aihub，且对 agent 可写。
-- `--no-extensions` 仍然**不传**：子 agent 工具由扩展提供，关掉它等于关掉整条 step-agent 派发路径；隔离由目录而非开关完成。
+- `--no-extensions` 仍然**不传**：子 agent 工具就是上面那个扩展，关掉它等于关掉整条 step-agent 派发路径；隔离由目录（只带这一个扩展）而非开关完成。
 - **任何未来的 harness 在接入前，必须提供等价的保证**（一个 harness 若无法从启动配置上关掉后台任务族，就不具备接入资格）——这是适配层的准入条件，写在这里而不是写在执行者规则里。
 - 与 #135（独立 agent 用户）方向一致：该目录届时对 step agent 用户只读，daemon 仍是唯一写入者。
 

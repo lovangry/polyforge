@@ -6,7 +6,11 @@ package runtime
 // minimal snapshot — it resolves its model service credentials and
 // answers a prompt — and (b) see no harness background-task facility,
 // because the dedicated directory declares no packages even when the
-// operator's own directory does.
+// operator's own directory does, while (c) the subagent tool — the
+// extension at <operator agent dir>/extensions/subagent/, carried into
+// the snapshot — IS in its tool inventory. The inventory is read from the
+// harness itself: the RPC export_html command embeds the session's tool
+// list (base64 JSON in the session-data script element).
 //
 // OPT-IN, like the repo's other real-world drives (cf.
 // POLYFORGE_TEST_REAL_GITHUB in test/v1_s19_ship_pr_test.go): it burns
@@ -16,6 +20,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -42,6 +47,9 @@ func TestStepAgentRealPiDedicatedDirectory(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(src, "auth.json")); err != nil {
 		t.Skipf("no model service credentials at %s/auth.json: %v", src, err)
+	}
+	if _, err := os.Stat(filepath.Join(src, "extensions", "subagent")); err != nil {
+		t.Skipf("no subagent extension at %s/extensions/subagent: %v", src, err)
 	}
 
 	capDir := t.TempDir()
@@ -126,4 +134,71 @@ func TestStepAgentRealPiDedicatedDirectory(t *testing.T) {
 			t.Fatalf("the step process can call a background tool: %s", line)
 		}
 	}
+
+	// (c) the tool inventory, straight from the harness: subagent is
+	// there, no background-task tool is.
+	tools := realPiToolInventory(t, h)
+	if !tools["subagent"] {
+		t.Fatalf("the step process lost the subagent tool (inventory: %v)", tools)
+	}
+	for name := range tools {
+		if strings.Contains(strings.ToLower(name), "background") {
+			t.Fatalf("the step process can call a background tool %q (inventory: %v)", name, tools)
+		}
+	}
+}
+
+// realPiToolInventory asks the live harness to export its session to HTML
+// (RPC export_html) and decodes the tool names embedded in it.
+func realPiToolInventory(t *testing.T, h AgentHandle) map[string]bool {
+	t.Helper()
+	p, ok := h.(*proc)
+	if !ok {
+		t.Fatalf("unexpected handle type %T", h)
+	}
+	out := filepath.Join(t.TempDir(), "export.html")
+	blob, _ := json.Marshal(map[string]string{"id": "pf-tools", "type": "export_html", "outputPath": out})
+	p.mu.Lock()
+	_, err := p.stdin.Write(append(blob, '\n'))
+	p.mu.Unlock()
+	if err != nil {
+		t.Fatalf("export_html command: %v", err)
+	}
+	var raw []byte
+	for deadline := time.Now().Add(time.Minute); time.Now().Before(deadline); time.Sleep(300 * time.Millisecond) {
+		if raw, err = os.ReadFile(out); err == nil && strings.Contains(string(raw), "</html>") {
+			break
+		}
+	}
+	const open = `<script id="session-data" type="application/json">`
+	html := string(raw)
+	i := strings.Index(html, open)
+	if i < 0 {
+		t.Fatalf("no session-data element in the export (%d bytes)", len(raw))
+	}
+	rest := html[i+len(open):]
+	j := strings.Index(rest, "</script>")
+	if j < 0 {
+		t.Fatal("unterminated session-data element")
+	}
+	dec, err := base64.StdEncoding.DecodeString(strings.TrimSpace(rest[:j]))
+	if err != nil {
+		t.Fatalf("session-data is not base64: %v", err)
+	}
+	var data struct {
+		Tools []struct {
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(dec, &data); err != nil {
+		t.Fatalf("session-data is not JSON: %v", err)
+	}
+	names := map[string]bool{}
+	for _, tl := range data.Tools {
+		names[tl.Name] = true
+	}
+	if len(names) == 0 {
+		t.Fatal("the export carries no tool inventory")
+	}
+	return names
 }
