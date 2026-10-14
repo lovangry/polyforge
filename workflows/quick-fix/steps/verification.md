@@ -128,6 +128,11 @@ default branch moved on before delivery, the `deliver` step re-runs exactly thes
 the merged head, and the driver accepts the delivery without a human only if they match. Keep
 incidental inspection commands (`cat`, `grep`, `git log`) out of it.
 
+If you recorded `pre_existing` failures, run the bar with exactly those tests excluded (e.g.
+`go test ./... -skip '^(TestA|TestB)$'`) and list that command — not the failing one — in
+`test_bar`: a test-bar command that exits non-zero always routes a delivery onto a moved
+default branch to a human.
+
 ## Honesty
 
 Do not report `pass` on a check you skipped because it seemed slow or you assumed it

@@ -819,7 +819,14 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 	}
 	if d.wi.CapsuleDir != "" {
 		spec.ReposDir = filepath.Join(d.wi.CapsuleDir, capsule.DirRepos)
-		spec.AuthoredTests = authoredTestsBefore(d.workflow, outputs, stepID)
+		// deliver is exempt from the authored-tests gate: merging the
+		// latest default branch legitimately changes an authored test file
+		// upstream also edited, and restoring the author commit's blob
+		// would undo upstream's edit. Verification passed on the verified
+		// head; anything hand-made since is escalated by deliver_facts.go.
+		if stepID != deliverStepID {
+			spec.AuthoredTests = authoredTestsBefore(d.workflow, outputs, stepID)
+		}
 	}
 	return spec
 }

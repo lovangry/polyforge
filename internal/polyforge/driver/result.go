@@ -273,11 +273,19 @@ type ResultSpec struct {
 //     (checkTestFilesCommitted) — rejected like the evidence gate;
 //  6. the declared output schema (OutputSchema set): a completed
 //     result's output must validate against the step definition's
-//     `output:` schema (polyforge#164 H3);
-//  7. the authored-tests gate (ReposDir and AuthoredTests set): the
-//     test files an earlier step authored must be unchanged since its
-//     commit, unless a human answered in this attempt chain (then
-//     res.rebaseline is set) (polyforge#164 H4);
+//     `output:` schema (polyforge#164 H3) — recorded as a violation,
+//     not rejected, while enforceOutputSchemas is false;
+//     6b. the pre-existing-failure boundary (any completed step,
+//     checkPreExisting): no repro check or authored/regression test may
+//     be classified pre_existing, a pre_existing check must name its base
+//     commit and be listed in pre_existing_failures, and a bug-fix
+//     verification pass must show the reproduced bug's repro check
+//     passing (polyforge#164 S6);
+//  7. the authored-tests gate (ReposDir and AuthoredTests set; the
+//     driver never sets AuthoredTests for `deliver`): the test files an
+//     earlier step authored must be unchanged since its commit, unless a
+//     human answered in this attempt chain (then res.rebaseline is set)
+//     (polyforge#164 H4);
 //  8. the delivery binding (the `deliver` step only, deliverBinding):
 //     recorded pushes target only the feature branch, merges use
 //     --merge, and a completed pass that merged outside the merge rule

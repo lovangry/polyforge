@@ -458,3 +458,78 @@ func TestDeliverQuickFixEligibility(t *testing.T) {
 		t.Fatalf("quick-fix hand-resolved conflict eligible=%v (%s)", ok, why)
 	}
 }
+
+// polyforge#164 x #166: the authored-tests gate (H4) does not judge the
+// deliver step. Merging the latest default branch, which also edited an
+// authored test file, changes that file's blob since the author commit;
+// gate 7 would refuse the delivery and tell the agent to restore the
+// author commit's version, undoing upstream's edit.
+func TestDeliverExemptFromAuthoredTestsGate(t *testing.T) {
+	repos := deliverCapsule(t)
+	dir := filepath.Join(repos, "demo")
+	up := filepath.Join(t.TempDir(), "up")
+	tgit(t, filepath.Dir(up), "clone", "-q", filepath.Join(filepath.Dir(filepath.Dir(repos)), "origin.git"), up)
+	upstream := func(body, msg string) {
+		dwrite(t, filepath.Join(up, "x_test.go"), body)
+		tgit(t, up, "add", "-A")
+		tgit(t, up, "commit", "-q", "-m", msg)
+		tgit(t, up, "push", "-q", "origin", "HEAD:main")
+	}
+	// The test file exists on main; the work item picks it up, then
+	// e2e-author adds its acceptance test to it (verification passes there).
+	upstream("base\n", "upstream adds x_test.go")
+	tgit(t, dir, "fetch", "-q", "origin")
+	tgit(t, dir, "merge", "-q", "--no-edit", "origin/main")
+	dwrite(t, filepath.Join(dir, "x_test.go"), "base\nauthored\n")
+	tgit(t, dir, "commit", "-q", "-am", "author tests")
+	authored := tgit(t, dir, "rev-parse", "HEAD")
+	verified := authored
+	pushFeature(t, dir)
+	// main moves on and edits the same file; deliver merges it (clean).
+	upstream("upstream\nbase\n", "upstream edits x_test.go")
+	tgit(t, dir, "fetch", "-q", "origin")
+	tgit(t, dir, "merge", "-q", "--no-edit", "origin/main")
+	pushFeature(t, dir)
+	if got, _ := os.ReadFile(filepath.Join(dir, "x_test.go")); string(got) != "upstream\nbase\nauthored\n" {
+		t.Fatalf("fixture: want a clean merge of both edits, got %q", got)
+	}
+
+	// The driver's spec for deliver carries no authored-tests baseline...
+	capsuleDir := filepath.Dir(repos)
+	d, err := New(Config{
+		WI:       WIInfo{ID: "wi_d", CapsuleDir: capsuleDir, BundleName: "b"},
+		ExecPath: filepath.Join(capsuleDir, capsule.ExecutionJSON),
+		Workflow: &Workflow{Steps: []StepSpec{spec("e2e-author"), spec("code"), spec(deliverStepID)}, MaxTotal: 4, MaxPerStep: 2},
+		Spawner:  &fakeSpawner{},
+		Log:      &eventLog{},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	d.mu.Lock()
+	d.exec.Steps["e2e-author"] = &capsule.Step{Status: capsule.StepDone, Output: map[string]any{
+		"test_files": []any{"x_test.go"}, testFilesCommitKey: map[string]any{"demo": authored}}}
+	d.mu.Unlock()
+	if at := d.buildResultSpec("code", 1).AuthoredTests; at == nil || len(at.Files) != 1 {
+		t.Fatalf("a non-deliver step stays under the authored-tests gate: %+v", at)
+	}
+	spec := d.buildResultSpec(deliverStepID, 1)
+	if spec.AuthoredTests != nil {
+		t.Fatalf("deliver must not be judged by the authored-tests gate: %+v", spec.AuthoredTests)
+	}
+	// ...so the delivery of the merged head is accepted.
+	spec.HasReview, spec.ReviewPassed = true, true
+	spec.VerifiedHeads = map[string]string{"demo": verified}
+	spec.VerifiedTestBar = []testBarCmd{{Repo: "demo", Command: "make test"}}
+	evidence := append(ev(goodPush), CommandEvidence{Argv: []string{"sh", "-c", "cd repos/demo && git merge --no-edit origin/main"}, DurationMs: 9},
+		CommandEvidence{Argv: []string{"sh", "-c", "cd repos/demo && make test"}, DurationMs: 9})
+	if err := ValidateStepResult(deliverRes(OutcomeCompleted, mergedOut, evidence), spec); err != nil {
+		t.Fatalf("a clean delivery merge touching an authored test must be accepted: %v", err)
+	}
+	// The scenario does reach gate 7 when a baseline is set (what the
+	// exemption prevents).
+	spec.AuthoredTests = &AuthoredTests{Files: []string{"x_test.go"}, Baseline: map[string]string{"demo": authored}}
+	if err := ValidateStepResult(deliverRes(OutcomeCompleted, mergedOut, evidence), spec); err == nil || !strings.Contains(err.Error(), "changed authored test files") {
+		t.Fatalf("fixture: with a baseline the merge would trip gate 7, got %v", err)
+	}
+}

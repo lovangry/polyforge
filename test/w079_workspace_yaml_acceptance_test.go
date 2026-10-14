@@ -900,13 +900,18 @@ func TestW079SkillTeachesModelsYaml(t *testing.T) {
 	}
 }
 
-// TestW079ShipFragmentRoutesRepoPathsViaRegistry: the verb fragments that
-// name repos/<name> worktrees say the inventory is the aihub registry's,
-// never the yaml's. The ship fragment was the one that did; since pf ship
-// is gone (polyforge#166: delivery is the workflows' deliver step) no
-// fragment routes repo paths today, so there is no floor on how many are
-// checked; one that does again must still name the registry.
-func TestW079ShipFragmentRoutesRepoPathsViaRegistry(t *testing.T) {
+// TestW079RepoInventoryComesFromTheRegistry: SKILL.md teaches that the
+// repo inventory (and clone URLs) come from the aihub project registry and
+// that the cli.toml [workspace] mapping is the only placement source —
+// never the yaml. Any verb fragment that names repos/<name> worktrees must
+// say the same. (The ship fragment used to be the one that did; pf ship is
+// gone — polyforge#166 — so the SKILL.md sentence is the pinned subject.)
+func TestW079RepoInventoryComesFromTheRegistry(t *testing.T) {
+	skill := strings.Join(strings.Fields(w079Doc(t, "skills", "polyforge", "SKILL.md")), " ")
+	const rule = "The repo inventory and clone URLs always come from the aihub project registry; the cli.toml `[workspace]` mapping is the only placement source."
+	if !strings.Contains(skill, rule) {
+		t.Fatalf("SKILL.md no longer teaches the registry rule: %q", rule)
+	}
 	verbsDir := filepath.Join(v1Root(t), "skills", "polyforge", "verbs")
 	ents, err := os.ReadDir(verbsDir)
 	if err != nil {
