@@ -128,27 +128,25 @@ func spawnEnv(t *testing.T) (*StepSpawnAdapter, *captureSpawner, string) {
 	return ad, sp, capDir
 }
 
-// grillDone lays out the post-grill capsule: the handoff artifact, the
-// declared fix inputs and grill's archived envelope carrying the
-// handoff_ref.
+// grillDone lays out the post-grill capsule: the artifacts the next
+// step reads by path convention, the handoff FILE at the convention path the next inherit step reads
+// (artifacts/handoff-grill.md — polyforge#147: path convention, no
+// digest), and grill's archived envelope (minimal contract).
 func grillDone(t *testing.T, capDir string) {
 	t.Helper()
 	writeCapsuleFile(t, capDir, "artifacts/fix-memo.md", "the micro-spec body")
 	writeCapsuleFile(t, capDir, "artifacts/grill-qa.md", "the q/a log")
+	writeCapsuleFile(t, capDir, "artifacts/handoff-grill.md", "handoff from grill: the micro-spec is at artifacts/fix-memo.md")
 	writeArchivedResult(t, capDir, "grill", 1, &StepResult{
-		ProtocolVersion: 1,
-		ResultID:        "319584c8-10e7-5703-8b0f-4af0a03f8657",
-		WIID:            "wi_sp",
-		StepID:          "grill",
-		SpawnN:          1,
-		Outcome:         OutcomeCompleted,
-		Output:          json.RawMessage(`{}`),
-		HandoffRef:      &ArtifactRef{Path: "artifacts/fix-memo.md", SHA256: hashOfFile(t, capDir, "artifacts/fix-memo.md"), Bytes: 19},
+		WIID:    "wi_sp",
+		StepID:  "grill",
+		SpawnN:  1,
+		Outcome: OutcomeCompleted,
+		Output:  json.RawMessage(`{}`),
 	})
-	// the acceptance gate: the envelope counts only once execution.json
-	// records the step done with that result_id
+	// the acceptance gate: execution.json records the step done
 	writeCapsuleFile(t, capDir, "runtime-state/execution.json",
-		`{"steps":{"grill":{"status":"done","attempts":[{"accepted_result_id":"319584c8-10e7-5703-8b0f-4af0a03f8657"}]}}}`)
+		`{"steps":{"grill":{"status":"done"}}}`)
 }
 
 // ---------------------------------------------------------------------------
@@ -190,13 +188,12 @@ func TestSpawnStepInheritPromptAssembly(t *testing.T) {
 	for _, want := range []string{
 		"fix: implement the micro-spec", // step definition body
 		"Handoff from step \"grill\"",   // handoff section
-		"artifacts/fix-memo.md",         // handoff path
-		"the micro-spec body",           // handoff content
-		"the q/a log",                   // declared input content
+		"artifacts/handoff-grill.md",    // the handoff file (path convention)
+		"handoff from grill",            // handoff content
 		"FAIL: tests red",               // rewind verdict
 		"q_1", "yes, vendored",          // Q&A history
 		"runtime-state/pending-results/2.json", // delivery path
-		"handoff_ref",                          // fix declares handoff
+		"artifacts/handoff-fix.md",             // fix declares handoff: the convention path
 		"INHERIT",                              // context note
 	} {
 		if !strings.Contains(prompt, want) {
@@ -225,8 +222,10 @@ func TestSpawnStepFreshPromptOmitsHandoff(t *testing.T) {
 	if strings.Contains(prompt, "tools: [go]") {
 		t.Fatalf("step-definition frontmatter must be stripped\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "the fix summary") {
-		t.Fatalf("prompt missing declared input content\n%s", prompt)
+	// Nothing is injected: a fresh step reads its upstream artifacts by
+	// path convention (polyforge#147 — the inputs lane is retired).
+	if strings.Contains(prompt, "the fix summary") {
+		t.Fatalf("fresh prompt must not inject artifact content\n%s", prompt)
 	}
 	if strings.Contains(prompt, "the micro-spec body") || strings.Contains(prompt, "Handoff from step") {
 		t.Fatalf("fresh prompt must not carry a handoff\n%s", prompt)
@@ -236,7 +235,7 @@ func TestSpawnStepFreshPromptOmitsHandoff(t *testing.T) {
 	}
 	// verification declares no handoff: the contract must not demand one
 	if strings.Contains(prompt, "DECLARES handoff") {
-		t.Fatalf("fresh non-handoff step must not owe a handoff_ref\n%s", prompt)
+		t.Fatalf("fresh non-handoff step must not owe a handoff artifact\n%s", prompt)
 	}
 }
 
@@ -338,13 +337,13 @@ func TestSpawnStepInputFormErrors(t *testing.T) {
 	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "nope", SpawnN: 1}); err == nil {
 		t.Fatal("unknown step must fail")
 	}
-	// missing declared input (grill-qa.md removed)
+	// A retired declared-input file's absence is NO LONGER an error:
+	// the step reads what it needs by path convention (polyforge#147).
 	if err := os.Remove(filepath.Join(capDir, "artifacts", "grill-qa.md")); err != nil {
 		t.Fatal(err)
 	}
-	_, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 2})
-	if err == nil || !strings.Contains(err.Error(), "grill-qa.md") {
-		t.Fatalf("missing declared input must fail naming it, got %v", err)
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 2}); err != nil {
+		t.Fatalf("a missing artifact must not break dispatch: %v", err)
 	}
 
 	// missing step definition
@@ -380,6 +379,25 @@ func TestSpawnStepFirstStepHasNoHandoffSection(t *testing.T) {
 	p, _ := sp.last()
 	if strings.Contains(p.InitialPrompt, "Handoff from step") {
 		t.Fatalf("first step must not carry a handoff\n%s", p.InitialPrompt)
+	}
+}
+
+// TestSpawnStepInheritMissingHandoffFileOmitsSection: a done handoff
+// producer that never wrote artifacts/handoff-<id>.md does not fail the
+// dispatch — the inherit step's prompt simply lacks the handoff section
+// (01-workflow-skills.md §4.4a).
+func TestSpawnStepInheritMissingHandoffFileOmitsSection(t *testing.T) {
+	ad, sp, capDir := spawnEnv(t)
+	grillDone(t, capDir)
+	if err := os.Remove(filepath.Join(capDir, "artifacts", "handoff-grill.md")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 2}); err != nil {
+		t.Fatalf("a missing handoff file must not fail the dispatch: %v", err)
+	}
+	p, _ := sp.last()
+	if strings.Contains(p.InitialPrompt, "Handoff from step") {
+		t.Fatalf("a missing handoff file must omit the section\n%s", p.InitialPrompt)
 	}
 }
 
@@ -425,14 +443,11 @@ func TestSpawnStepGatePromptStatesVerdictBinding(t *testing.T) {
 
 func validEnvelope(wi, step string, n int64) []byte {
 	res := &StepResult{
-		ProtocolVersion: 1,
-		ResultID:        "162bc0dd-9635-5323-b170-99044b484a69",
-		WIID:            wi,
-		StepID:          step,
-		SpawnN:          n,
-		Outcome:         OutcomeCompleted,
-		Output:          json.RawMessage(`{"summary":"done"}`),
-		Artifacts:       []ArtifactRef{},
+		WIID:    wi,
+		StepID:  step,
+		SpawnN:  n,
+		Outcome: OutcomeCompleted,
+		Output:  json.RawMessage(`{"summary":"done"}`),
 	}
 	blob, _ := json.MarshalIndent(res, "", "  ")
 	return blob
@@ -464,8 +479,8 @@ func TestStepRunWaitCollectsAndArchivesEnvelope(t *testing.T) {
 	if err := json.Unmarshal(raw, &archived); err != nil {
 		t.Fatalf("archived envelope unparsable: %v", err)
 	}
-	if archived.ResultID != res.ResultID {
-		t.Fatalf("archived result_id %q != %q", archived.ResultID, res.ResultID)
+	if archived.Outcome != OutcomeCompleted || archived.StepID != "verification" {
+		t.Fatalf("archived envelope lost its binding: %+v", archived)
 	}
 	// the process was torn down after collection
 	_, h := sp.last()
@@ -547,7 +562,7 @@ func TestStepRunWaitTornWriteHeals(t *testing.T) {
 	}
 	drop := pendingResultPath(capDir, 8)
 	// a write in flight: torn JSON first, the complete envelope after
-	writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/pending-results/8.json", `{"protocol_version":1`)
+	writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/pending-results/8.json", `{"wi_id":"wi_sp"`)
 	go func() {
 		time.Sleep(8 * time.Millisecond)
 		if err := os.WriteFile(drop, validEnvelope("wi_sp", "verification", 8), 0o644); err != nil {
@@ -558,7 +573,7 @@ func TestStepRunWaitTornWriteHeals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
-	if res.ResultID != "162bc0dd-9635-5323-b170-99044b484a69" {
+	if res.Outcome != OutcomeCompleted || res.StepID != "verification" {
 		t.Fatalf("healed envelope: %+v", res)
 	}
 }

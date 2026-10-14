@@ -491,11 +491,18 @@ func TestV3GrepCleanDeletedFaces(t *testing.T) {
 	}
 }
 
+// v3D15ReplayFixture is the one collected data file the scan skips.
+const v3D15ReplayFixture = "internal/polyforge/supervise/testdata/pi-session-replay.jsonl"
+
 // v3WalkTextFiles walks root's regular files, skipping .git/, the frozen
-// v0/ archive, markdown (excluded from the gate by the spec), and
-// non-regular entries (symlinks — e.g. the shared-checkout links the
-// capsule materialization creates — and binary-looking files, sniffed
-// by a NUL byte in the first 512 bytes).
+// v0/ archive, the D15 replay fixture (v3D15ReplayFixture: captured pi
+// session records whose content legitimately discusses the retired
+// faces it replays — collected data, not an authored code/build
+// surface; every other testdata file is still scanned), markdown
+// (excluded from the gate by the spec), and non-regular entries
+// (symlinks — e.g. the shared-checkout links the capsule materialization
+// creates — and binary-looking files, sniffed by a NUL byte in the first
+// 512 bytes).
 func v3WalkTextFiles(root string, fn func(path string, raw []byte)) error {
 	return filepath.WalkDir(root, func(path string, de os.DirEntry, err error) error {
 		if err != nil {
@@ -510,6 +517,9 @@ func v3WalkTextFiles(root string, fn func(path string, raw []byte)) error {
 		}
 		if !de.Type().IsRegular() {
 			return nil // symlinks and special files are not repo bytes
+		}
+		if path == filepath.Join(root, filepath.FromSlash(v3D15ReplayFixture)) {
+			return nil
 		}
 		if strings.HasSuffix(path, ".md") {
 			return nil

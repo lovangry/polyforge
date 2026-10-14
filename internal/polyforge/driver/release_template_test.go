@@ -77,8 +77,10 @@ func TestReleaseBundleCarriesNoPrivateProcedure(t *testing.T) {
 	}
 }
 
-// TestReleaseBundleShape pins the step list, gates, evidence flags, the
-// absence of rewinds, and the per-step contract text.
+// TestReleaseBundleShape pins the step list, gates, context policy, the
+// evidence flags (the V4 command-evidence gate), the absence of rewinds,
+// the path-convention artifact hand-over and the per-step contract text.
+// The bundle carries none of the retired frontmatter keys (inputs).
 func TestReleaseBundleShape(t *testing.T) {
 	wf, err := LoadWorkflow(bundlePath("release"))
 	if err != nil {
@@ -97,17 +99,17 @@ func TestReleaseBundleShape(t *testing.T) {
 	if got, want := strings.Join(ids, ","), "release,verify,deploy"; got != want {
 		t.Fatalf("release bundle steps = %s, want %s", got, want)
 	}
-	if in := wf.step("verify").Inputs; len(in) != 1 || in[0].Artifact != "artifacts/release-record.json" {
-		t.Fatalf("verify must declare artifacts/release-record.json as its input, got %v", in)
-	}
-	if in := wf.step("deploy").Inputs; len(in) != 1 || in[0].Artifact != "artifacts/verified-version.json" {
-		t.Fatalf("deploy must declare artifacts/verified-version.json as its only version input, got %v", in)
+	wfText := readBundleFile(t, "release", "workflow.md")
+	for _, retired := range []string{"inputs: [", "handoff_ref", "sha256"} {
+		if strings.Contains(wfText, retired) {
+			t.Fatalf("release workflow.md still carries the retired %q", retired)
+		}
 	}
 
 	rel := readBundleFile(t, "release", "steps", "release.md")
 	for _, needle := range []string{
 		"`.polyforge/release.sh`", "PF-RELEASE-AMBIGUOUS_OWNER", "--verify", "git fetch origin",
-		"git ls-remote --tags origin", "verbatim", "enum: [pass, fail]",
+		"git ls-remote --tags origin", "verbatim", "enum: [pass, fail]", "artifacts/release-record.json", "a completed result without evidence is refused",
 	} {
 		if !strings.Contains(rel, needle) {
 			t.Fatalf("release step lost its contract text %q", needle)
@@ -118,14 +120,14 @@ func TestReleaseBundleShape(t *testing.T) {
 	}
 
 	ver := readBundleFile(t, "release", "steps", "verify.md")
-	for _, needle := range []string{"release-record.json", "verified-version.json", "ls-remote", "merge-base --is-ancestor", "--verify V", "immutab", "gh release view"} {
+	for _, needle := range []string{"release-record.json", "verified-version.json", "ls-remote", "merge-base --is-ancestor", "--verify V", "immutab", "gh release view", "a completed result without command evidence is refused"} {
 		if !strings.Contains(ver, needle) {
 			t.Fatalf("verify step lost its check text %q", needle)
 		}
 	}
 
 	dep := readBundleFile(t, "release", "steps", "deploy.md")
-	for _, needle := range []string{"`.polyforge/deploy.sh`", "--confirm V", "PF-DEPLOY-AMBIGUOUS_OWNER", "defer", `"latest"`, "enum: [pass, defer, fail]", "rolled_back"} {
+	for _, needle := range []string{"`.polyforge/deploy.sh`", "--confirm V", "PF-DEPLOY-AMBIGUOUS_OWNER", "defer", `"latest"`, "enum: [pass, defer, fail]", "rolled_back", "artifacts/verified-version.json", "a completed result without evidence is refused"} {
 		if !strings.Contains(dep, needle) {
 			t.Fatalf("deploy step lost its contract text %q", needle)
 		}

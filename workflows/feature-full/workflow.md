@@ -3,14 +3,14 @@ name: feature-full
 steps:
   - { id: grill, context_policy: fresh, handoff: true, kind: qa, budget: { wall_minutes: 30 } }
   - { id: spec, context_policy: inherit, handoff: true, kind: spec, budget: { wall_minutes: 15 } }
-  - { id: grill-review, context_policy: fresh, handoff: true, kind: qa, requires_human_answer: true, gate: true, budget: { wall_minutes: 30 }, on_fail: { action: rewind, target: spec } }
+  - { id: grill-review, context_policy: fresh, handoff: true, kind: qa, requires_human_answer: true, gate: true, budget: { wall_minutes: 30 }, on_fail: { target: spec } }
   - { id: plan, context_policy: inherit, handoff: true, kind: author, budget: { wall_minutes: 15 } }
   - { id: e2e-author, context_policy: fresh, handoff: true, kind: author, budget: { wall_minutes: 15 } }
   - { id: e2e-baseline, context_policy: fresh, handoff: true, kind: code, gate: false, budget: { wall_minutes: 20 } }
   - { id: code, context_policy: inherit, handoff: true, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: e2e-run, context_policy: fresh, handoff: true, kind: code, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: code } }
-  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: code } }
-  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: code } }
+  - { id: e2e-run, context_policy: fresh, handoff: true, kind: code, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
+  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
+  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: code } }
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 ---
@@ -28,7 +28,7 @@ grill --> spec --> grill-review --> plan --> e2e-author --> e2e-baseline --> cod
 ```
 
 The four gate FAIL edges, each declared in the frontmatter as that gate's `on_fail`
-rewind target: `grill-review` --> `spec`, `e2e-run` --> `code`, `review` --> `code`,
+rewind target: `grill-review` --> `spec`, `e2e-run` --> `code`, `review` --> `code`
 and `verification` --> `code`.
 
 The flow has two front-loaded interactive checkpoints (`grill`, `grill-review`) that
@@ -87,8 +87,8 @@ gates, two distinct targets (`spec`, `code`). This section only explains
   step consuming the verdict text (the flow does not need a third rewind target for
   this).
 - **`verification` FAILs -> rewind to `code`.** Verification is the last machine gate:
-  it re-runs the full green bar as the final mechanical check, after `review`; a failure here means the implementation itself needs another pass,
-  not the plan.
+  it re-runs the full green bar as the final mechanical check, after `review`; a
+  failure here means the implementation itself needs another pass, not the plan.
 
 Workflow-level rewind bounds: this bundle's frontmatter deliberately omits the
 `rewind` block, so the driver defaults apply — `max_total: 4`, `max_per_step: 2`. A gate that keeps failing past those bounds ends

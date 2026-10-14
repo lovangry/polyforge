@@ -1,6 +1,6 @@
 ---
 name: quick-fix
-description: Light remediation flow - one interactive checkpoint, a single fix pass, and a machine gate, sized for small well-understood changes.
+description: Light remediation flow - one interactive checkpoint, a single fix pass and a machine gate, sized for small well-understood changes.
 rewind:
   max_total: 2
   max_per_step: 2
@@ -9,7 +9,7 @@ defaults:
 steps:
   - { id: grill, context_policy: fresh, handoff: true, kind: spec, budget: { wall_minutes: 30 } }
   - { id: fix, context_policy: inherit, handoff: true, kind: code, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { action: rewind, target: fix } }
+  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, on_fail: { target: fix } }
 ---
 
 # quick-fix — light remediation flow
@@ -28,7 +28,7 @@ grill --> fix --> verification
 
 The flow collapses the feature-full clarification trio (`grill` -> `spec` ->
 `grill-review`) into ONE front-loaded interactive checkpoint (`grill`), then runs a
-single fix pass, and one machine-checkable gate. It is for work whose
+single fix pass and one machine-checkable gate. It is for work whose
 scope is already small and well understood: a bounded bug fix, a small config or
 dependency change, a tiny feature. If a WI routed here turns out to need a real spec or a
 separate review pass, that is a signal it was misrouted — cancel and re-file against
@@ -54,7 +54,7 @@ file under `artifacts/`; no step declares frontmatter `inputs:`, so downstream s
 
 ## Rewind boundaries
 
-The one gate in this flow declares `on_fail: {action: rewind, target: fix}` — this section explains the choice. A rewind target must exist in the `steps` array and sit strictly
+The lane's one gate declares `on_fail: {target: fix}` — this section explains the choice. A rewind target must exist in the `steps` array and sit strictly
 earlier than the failing step:
 
 - **`verification` FAILs -> rewind to `fix`.** Verification is the machine gate

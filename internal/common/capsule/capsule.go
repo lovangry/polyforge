@@ -166,22 +166,10 @@ type StepSupervision struct {
 	// relaxation doubles); zero = never relaxed.
 	RelaxedToolMs int64 `json:"relaxed_tool_ms,omitempty"`
 	RelaxedWallMs int64 `json:"relaxed_wall_ms,omitempty"`
-	// RuntimeBaseMs is the part of the step's booked wall time the T clock
-	// no longer counts: a switch to a new candidate model (or a human
-	// continue) starts a fresh T window instead of handing the newcomer a
-	// budget the previous one already spent. The cumulative step runtime
-	// T is judged against is budget_consumed.wall_ms - runtime_base_ms.
-	RuntimeBaseMs int64 `json:"runtime_base_ms,omitempty"`
 	// NextDispatch shapes the next dispatch after a failure: "" resumes
 	// the transcript, "fresh" starts a new conversation with the previous
 	// transcript as read-only reference. Cleared by the next step_start.
 	NextDispatch string `json:"next_dispatch,omitempty"`
-	// RejectRelaunches counts the driver relaunches a persistently
-	// rejected result envelope forced (the in-process rejection bound
-	// spent). Persisted because the in-memory rejection counter dies with
-	// the driver; the bound blocks the step. Reset by an accepted result
-	// and by a human continue.
-	RejectRelaunches int `json:"reject_relaunches,omitempty"`
 }
 
 // NextDispatchFresh is the StepSupervision.NextDispatch value that
@@ -198,9 +186,6 @@ type Attempt struct {
 	RewindGate     string          `json:"rewind_gate,omitempty"`
 	InterruptedAt  string          `json:"interrupted_at,omitempty"`
 	Detail         string          `json:"detail,omitempty"`
-	// AcceptedResultID is the R13 envelope result_id committed at the
-	// R14 commit point — populated only for accepted step results.
-	AcceptedResultID string `json:"accepted_result_id,omitempty"`
 	// FailureCause is the supervision sub-class of an infra_failure
 	// attempt (harness_silent, model_error, model_hung, tool_hung,
 	// step_timeout_long_task, step_timeout_slow_model, exit_model_class,
@@ -209,9 +194,7 @@ type Attempt struct {
 }
 
 type Budget struct {
-	USD    float64 `json:"usd"`
-	WallMs int64   `json:"wall_ms"`
-	Tokens int64   `json:"tokens"`
+	WallMs int64 `json:"wall_ms"`
 }
 
 type RepoRef struct {
