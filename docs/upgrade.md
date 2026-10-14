@@ -245,3 +245,31 @@ upgrading check each work machine and each task repo:
 - the `polyforge/<project>-<seq>` branches it pushes are the only refs it
   writes; nothing merges without a PR (`gh pr merge --merge`) or a human's
   answer.
+
+## Workflow structure simplification (polyforge#165)
+
+`feature-full` drops from 11 to 9 steps: `e2e-baseline` merges into
+`e2e-author` and `e2e-run` merges into `verification`; every delivery
+bundle now runs `verification → review → deliver` (`chore` swapped its
+`review` and `verification`). No migration is shipped; what an in-flight
+work item meets depends on how its driver next starts:
+
+- **Same-daemon recovery** (daemon restart, crash recovery, a paused work
+  item re-attached by its holder) relaunches from the capsule's own
+  materialized bundle snapshot, never from the checkout: the work item
+  finishes on the bundle it was claimed on.
+- **Re-claim** (`pf resume` of a blocked work item, or a claim by another
+  machine) clones the capsule fresh and materializes the daemon's
+  CURRENT `--workflows-dir` checkout. The `execution.json` of every
+  claimed `feature-full` work item carries an entry for all 11 old steps
+  (the driver seeds them at the first start, whatever the position), so the
+  driver refuses the start and the work item lands `blocked` with the
+  reason `execution.json records step(s) "e2e-baseline", "e2e-run" that
+  workflow bundle "feature-full" no longer has …`. Resuming it again
+  repeats the refusal; cancel it and re-file. A `chore` work item keeps
+  its step ids and continues in the new order.
+
+Therefore update the workflows checkout only when no `feature-full` work
+item is claimed and unfinished (queued ones are fine: they have no
+`execution.json` yet), or accept that a blocked one must be re-filed.
+`pf queue` lists them.

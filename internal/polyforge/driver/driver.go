@@ -27,6 +27,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -984,10 +986,21 @@ func loadExecution(path string, wi WIInfo, wf *Workflow) (*capsule.Execution, bo
 	if exec.Steps == nil {
 		exec.Steps = map[string]*capsule.Step{}
 	}
+	// A step the workflow no longer has means the bundle changed under an
+	// in-flight work item (a re-claim materializes the daemon's current
+	// checkout, which an upgrade may have restructured). It cannot be
+	// continued on this bundle: refuse loudly, naming every such step —
+	// the claim lands the WI blocked with this text as its reason.
+	var removed []string
 	for id := range exec.Steps {
 		if _, ok := wf.indexOf(id); !ok {
-			return nil, false, fmt.Errorf("driver: execution.json records step %q which is not in the workflow (bundle divergence?)", id)
+			removed = append(removed, strconv.Quote(id))
 		}
+	}
+	if len(removed) > 0 {
+		sort.Strings(removed)
+		return nil, false, fmt.Errorf("driver: execution.json records step(s) %s that workflow bundle %q no longer has — the bundle changed under this in-flight work item (a step was removed or renamed); it cannot continue on the current bundle: cancel it and re-file",
+			strings.Join(removed, ", "), wi.BundleName)
 	}
 	for _, spec := range wf.Steps {
 		if _, ok := exec.Steps[spec.ID]; !ok {

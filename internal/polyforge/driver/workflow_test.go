@@ -289,3 +289,40 @@ func TestShippedBundlesValidate(t *testing.T) {
 		}
 	}
 }
+
+// TestNewRefusesExecutionWithRemovedSteps (polyforge#165 rollout): an
+// in-flight feature-full WI's execution.json carries an entry for EVERY
+// step of the bundle it was claimed on (the skeleton seeds them all),
+// including e2e-baseline and e2e-run. Same-daemon recovery relaunches
+// from the capsule's own materialized snapshot (the old bundle) and is
+// unaffected; a re-claim materializes the daemon's current checkout,
+// where those steps no longer exist. The driver must refuse that start
+// loudly, naming every removed step (the claim then lands the WI
+// blocked with this reason) — never crash or continue on a mismatched
+// graph.
+func TestNewRefusesExecutionWithRemovedSteps(t *testing.T) {
+	capDir := t.TempDir()
+	execJSON := `{"work_item_id":"wi_old","workflow_status":"blocked","current_step":"code","steps":{` +
+		`"grill":{"status":"done"},"spec":{"status":"done"},"grill-review":{"status":"done"},"plan":{"status":"done"},` +
+		`"e2e-author":{"status":"done"},"e2e-baseline":{"status":"done"},"code":{"status":"in_progress"},` +
+		`"e2e-run":{"status":"pending"},"review":{"status":"pending"},"verification":{"status":"pending"},"deliver":{"status":"pending"}}}`
+	execPath := filepath.Join(capDir, "execution.json")
+	if err := os.WriteFile(execPath, []byte(execJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(Config{
+		WI:        WIInfo{ID: "wi_old", CapsuleDir: capDir, BundleName: "feature-full"},
+		ExecPath:  execPath,
+		BundleDir: filepath.Join("..", "..", "..", "workflows", "feature-full"),
+		Spawner:   &fakeSpawner{},
+		Log:       &eventLog{},
+	})
+	if err == nil {
+		t.Fatal("an execution.json naming removed steps must refuse the driver start")
+	}
+	for _, want := range []string{`"e2e-baseline", "e2e-run"`, `"feature-full"`, "cancel it and re-file"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal must name %s: %v", want, err)
+		}
+	}
+}
