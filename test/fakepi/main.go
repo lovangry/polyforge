@@ -199,6 +199,20 @@ func emitAssistantTurn(d *driveEnv, text, errMsg string) {
 	}
 }
 
+// emitErrorRound streams one error-ended assistant turn the way pi does
+// when the provider call fails before any content (no deltas), closing
+// with agent_end carrying willRetry (true while pi's own auto-retry
+// still has attempts left).
+func emitErrorRound(errMsg string, willRetry bool) {
+	message := map[string]any{"role": "assistant", "content": []any{}, "stopReason": "error", "errorMessage": errMsg}
+	emitRecord(map[string]any{"type": "agent_start"})
+	emitRecord(map[string]any{"type": "turn_start"})
+	emitRecord(map[string]any{"type": "message_start", "message": map[string]any{"role": "assistant", "content": []any{}}})
+	emitRecord(map[string]any{"type": "message_end", "message": message})
+	emitRecord(map[string]any{"type": "turn_end", "message": message, "toolResults": []any{}})
+	emitRecord(map[string]any{"type": "agent_end", "messages": []any{message}, "willRetry": willRetry})
+}
+
 // emitOpenTurn opens a turn and never closes it: the in-flight silence
 // the hang watchdog discriminates on.
 func emitOpenTurn() {

@@ -321,7 +321,7 @@ func (d *Driver) Run(ctx context.Context) error {
 			d.emit("step_dead", map[string]any{
 				"step": stepID, "spawn_n": n, "cause": verdict.Cause, "evidence": verdict.Evidence,
 			})
-			if blocked, ferr := d.failDispatch(ctx, stepID, n, dispatchedAt, string(verdict.Cause), -1, verdict.Evidence); ferr != nil {
+			if blocked, ferr := d.failDispatch(ctx, stepID, n, dispatchedAt, verdictCause(*verdict), -1, verdict.Evidence); ferr != nil {
 				return ferr
 			} else if blocked {
 				return nil

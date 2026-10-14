@@ -109,6 +109,13 @@ type planAction struct {
 	// agent_end all carry stopReason=error), then parks alive without ever
 	// writing the envelope.
 	ErrorTurn string `json:"error_turn,omitempty"`
+	// ErrorRetries prefixes the ErrorTurn with that many rounds of pi's
+	// own auto-retry (agent-session.js: the error-ended turn closes with
+	// agent_end willRetry=true, then auto_retry_start), ending with
+	// auto_retry_end success=false after the final error turn — the
+	// sequence a real pi emits for an error text it deems retryable
+	// (429, overloaded, ...). The process still parks alive afterwards.
+	ErrorRetries int `json:"error_retries,omitempty"`
 	// EndTurn is the ok-ended twin of ErrorTurn (rule 1b): the dispatch
 	// emits an assistant turn that ends NORMALLY, then parks alive without
 	// ever writing the envelope.
@@ -331,7 +338,16 @@ func (d *driveEnv) runEnvelopeAction(act planAction) {
 	if act.ErrorTurn != "" {
 		// F5: a turn that ends on a fatal provider error, then nothing.
 		d.journal("error_turn", map[string]any{"step": act.ID, "error": act.ErrorTurn, "spawn_n": d.spawnN})
+		for i := 1; i <= act.ErrorRetries; i++ {
+			emitErrorRound(act.ErrorTurn, true)
+			emitRecord(map[string]any{"type": "auto_retry_start", "attempt": i, "maxAttempts": act.ErrorRetries,
+				"delayMs": 10, "errorMessage": act.ErrorTurn})
+		}
 		emitAssistantTurn(d, "the provider connection dropped mid-reply", act.ErrorTurn)
+		if act.ErrorRetries > 0 {
+			emitRecord(map[string]any{"type": "auto_retry_end", "success": false, "attempt": act.ErrorRetries,
+				"finalError": act.ErrorTurn})
+		}
 		parkForever()
 		return
 	}
