@@ -88,11 +88,6 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/v1/memories", s.auth(s.hCreateMemory))
 	m.HandleFunc("GET /api/v1/memories/search", s.auth(s.hSearchMemory))
 	m.HandleFunc("GET /api/v1/memories/{id}", s.auth(s.hGetMemory))
-	// The memory index-rebuild endpoint is deleted (polyforge#149
-	// dead-code): the boot-time reconcile is the only rebuild. A literal
-	// 404 tombstone is registered so the dead path cannot ride the {id}
-	// wildcard to a 405 ambiguity — the answer is a plain not-found.
-	m.HandleFunc("POST /api/v1/memories/rebuild-index", http.NotFound)
 	m.HandleFunc("POST /api/v1/memories/{id}/redact", s.auth(s.hRedactMemory))
 
 	// Admin face.

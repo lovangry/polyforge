@@ -419,8 +419,7 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 // copy: the blocked exits are continue (`pf resume`) and abandon
 // (`pf cancel`). Returns true when it answered; a non-blocked work item
 // falls through to the caller's terminalOf/404.
-func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi, reason string) bool {
-	_ = reason
+func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi string) bool {
 	item, err := d.hub.GetWorkItem(wi)
 	if err != nil || item == nil || item.Status != api.StatusBlocked {
 		return false
@@ -435,7 +434,7 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 	wi = d.canonWI(wi) // a slug spelling closes the canonical job (F2)
 	ji, ok := d.rt.Info(wi)
 	if !ok {
-		if d.parkedWIClose(w, wi, reason) {
+		if d.parkedWIClose(w, wi) {
 			return
 		}
 		if st, terr := d.terminalOf(wi); terr == nil {

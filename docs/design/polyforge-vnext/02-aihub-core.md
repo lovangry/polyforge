@@ -53,7 +53,7 @@
 **单 active Service**：一个 AIHub 部署中，任何时刻至多一个 aihub 进程可写 Core（`00-architecture.md#§2.3` INV-2）。保证手段三层：
 
 1. **部署层**：一期一台主机一个 systemd 单元，systemd 保证单实例。
-2. **文件锁层**：进程启动时对 `<data_dir>/service.lock` 取排他非阻塞锁；取锁失败即立即退出（锁被占用的启动期拒绝）。
+2. **文件锁层**：进程启动时对 `<data_dir>/service.lock` 取排他非阻塞锁；取锁失败即退出（`CORE-508 LOCK_HELD`）。
 3. **Core 层**：service 自注册行（§4.10）记录 `service_id` 与心跳时间戳；所有写 API 校验调用方携带的 `service_id` 等于当前注册行，不等即拒绝（`CORE-509 STALE_SERVICE`）——防止「旧进程未死透、新进程已接管」的双写窗口。
 
 ### 2.3 owner generation（权威定义：概念与生命周期；存储见 §4.3） <!-- §2.3 -->
@@ -483,7 +483,7 @@ CREATE TABLE service_secret_epochs (
 
 **计数口径（权威，A6 修复；B06 裁定后计数为 25；基线修订 polyforge#3 补 G 组行 26 后为 26——理由：§4.2a 定义了 wi_dependencies 完整写路径，原清单漏列其路由）**：本表是 AIHub HTTP API 的唯一 canonical 端点清单（`00-architecture.md#§5` 所引「26 个端点分组」即本表），任何文档不得在别处另行枚举 AIHub 端点。计数单位 = **端点行**：A–D 组每行是一个 method+path 端点（唯一例外：行 3 把 `/work-items/{id}` 同路径的 GET（详情）与 PATCH（更新）合并计 1 行——两方法共享同一路径、同一鉴权与 §4.10 权限面）；E 组每行是一个**操作组**（组内可含多条 method+path，计 1 行）；F 组每行是一个资源的 CRUD 面（同资源路径族计 1 行）。业务面 26 行逐字可复算：
 
-**26 = WI 业务 6（行 1–6）+ 执行权 7（行 7–13）+ 同步 7（行 14–20）+ 机器 1（行 21）+ Memory 4 组（行 22–25）+ 依赖边 1 组（行 26，基线修订 polyforge#3）**
+**26 = WI 业务 6（行 1–6）+ 执行权 7（行 7–13）+ 同步 7（行 14–20）+ 机器 1（行 21）+ Memory 4 组（行 22–25；行 25 `memories/rebuild-index` 已由 polyforge#149 删除，表中不再列出，索引重建只在 aihub 启动时 reconcile）+ 依赖边 1 组（行 26，基线修订 polyforge#3）**
 
 F 组管理面（users/api-keys/projects CRUD + admin/backup + service/rotate-secret）单列 M1–M5 共 5 行：同端口、同鉴权，属 `pf` 管理 CLI 的 CRUD 面，不在 26 端点计数口径内（该口径只覆盖业务/执行/同步/机器/Memory/依赖边面）。清单外的旧端点行全部删除：workflow-pin（§4.5 已改为创建事务内部步骤，无独立端点）、bundle 注册表与文件取回端点（§4.4 裁定删除）、`pause`/`block`/`wrap`/`fail` 四个分立端点（合并为行 9 的 `end-generation` 四合一）、`resume`（并入行 7：§2.3 裁定 resume 即新一次 claim）、事件流分立读写端点（读取并入行 3 的 `include=events`，追加由 Core 状态机事务内部完成，§5.1c）、`reauthorize` 独立端点（§6.6 改为 claim 幂等重放流程，无独立端点）与 service 自管理操作（`service/heartbeat` 已由行 21 承载、`whoami` 由 `pf` 读本地配置不设端点、`rotate-secret` 归管理面 M5 行——均不占业务 26 端点行）。
 
@@ -514,11 +514,10 @@ F 组管理面（users/api-keys/projects CRUD + admin/backup + service/rotate-se
 | 20 | POST | `/api/v1/work-items/{id}/capsule-data/revert-tombstone` | 人（admin）经部署 CLI 触发 | 24h 撤销窗内撤销删除保护（`05-sync-revision-recovery.md#§2.10` 的入口）：将 `capsule_tombstones` 的 `pending` 行置为 `reverted`，硬删除不再执行；无 `pending` tombstone 可撤销 → `SYNC-410` | SYNC-404 / SYNC-410 |
 | **D. 机器（1 行：行 21）** | | | | | |
 | 21 | POST | `/api/v1/machines/heartbeat` | Daemon（machine api_key；首次注册由部署操作员以任一合法 human/admin api_key 发起） | 心跳 upsert（§4.10）：无该 `machine_id` 行则以本次调用完成注册（注册即首次心跳：同一事务建 machine user、绑定 `machines.user_id`、签发机器 api_key——明文仅响应一次），已有行仅刷新 `last_heartbeat_at`/`runtime_version`；幂等 | CORE-400 / CORE-401 |
-| **E. Memory（4 组 = 4 行：行 22–25；签名、写序与错误码权威在 `06-memory-search.md#§5.1`）** | | | | | |
+| **E. Memory（3 组 = 3 行：行 22–24；签名、写序与错误码权威在 `06-memory-search.md#§5.1`）** | | | | | |
 | 22 | POST/GET/PATCH | `/api/v1/memories`、`/api/v1/memories/{id}` | 客户端（WI Agent 经 Daemon 本地认证代理；人经 `pf` CLI） | 【CRUD 组】创建（POST，服务端分配 `mem_id`）/ 详情（GET，`format=html` 返回派生）/ 更新（PATCH，生成新版本 + FTS 先删后插）；三步写序与 `backupBarrier` 权威在 `06-memory-search.md#§5.2` | MEM-400 / MEM-404 / MEM-409 〔#111分类：删→驱动〕 |
 | 23 | GET | `/api/v1/memories/search?q=&type=&tags=&limit=` | 同上 | 【检索组】实时文本检索（FTS trigram，§4.9）；两层过滤顺序（project membership 先行）权威在 `06-memory-search.md#§4.5` | MEM-400 / MEM-404 / MEM-503 |
 | 24 | POST/GET | `/api/v1/memories/{id}/redact`、`/api/v1/memories/{id}/share`、`/api/v1/share/<token>` | 客户端（`share` 仅该条 Memory 的 owner）；`/api/v1/share/<token>` 为**匿名只读消费**——无需 api_key | 【条目动作组】redact 软删除 / share 生成 owner 显式分享链接（A18 裁定：显式例外，不构成第六种 visibility）/ 匿名消费：`GET /share/<token>` 仅返回 token 对应的**单条** Memory 只读视图（无列表、无检索、无任何写操作、token 由 share 生成时随机签发且不可枚举；middleware 对该路径跳过 api_key/membership 校验，除该单条外不暴露任何对象存在性信息）；同组计 1 组 | MEM-403 / MEM-404 / MEM-409 |
-| 25 | POST | （memory 索引重建端点已删除，polyforge#149 dead-code：HTTP 面未注册） | — | 【重建组】`memory_fts` 全量重建不再走在线端点——aihub 启动时自动 reconcile（`RebuildIndex` 方法的唯一调用方，`cmd/aihub/main.go`） | — |
 | **F. 管理面（M1–M5，共 5 行；同端口同鉴权，`pf` 管理 CLI 的 CRUD/服务自管理面，不在 25 端点计数口径内）** | | | | | |
 | M1 | POST/GET/PATCH | `/api/v1/users`、`/api/v1/users/{id}` | 人（admin）经 `pf` 管理 CLI | users CRUD（human/machine 身份、display_name、全局 `role`，§4.10） | CORE-400 / CORE-403 / CORE-404 |
 | M2 | POST/GET/DELETE | `/api/v1/api-keys`、`/api/v1/api-keys/{id}` | 人（admin）经 `pf` 管理 CLI | api-keys CRUD（签发明文仅响应一次、只存哈希；可选 project scope（§4.10）；撤销置 `revoked_at`） | CORE-400 / CORE-403 / CORE-404 |
@@ -623,6 +622,7 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 | CORE-503 | Core 忙（事务超时） |
 | CORE-504 | 进度不可得（read-through 无可读对象，§5.2） |
 | CORE-507 | 本地存储不可用（写失败、磁盘满） |
+| CORE-508 | service.lock 已被持有（启动期） |
 | — | （启动期锁拒绝：`cmd/aihub` 的文件锁直接退出，不经注册表错误码——polyforge#149 删除了未用的注册表常量） |
 | CORE-509 | STALE_SERVICE：service_id 非当前注册行 |
 
@@ -761,7 +761,7 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 - 非活跃 WI 取消测试：分别对 `queued`/`paused`/`blocked`（含由 `failed_gate`/`failed_rewind_exhausted` 映射而来的 `blocked`）构造 cancel 请求，断言均无需持有活跃 generation 令牌即可成功。
 - 凭证轮换测试：轮换后旧 token 在宽限期内仍可验证但提示 `secret_epoch`；宽限期外旧 token 拒绝为 `secret_rotated_expired`；`reauthorize` 成功后 generation 不变但 token 已更新；重放旧 `idempotency_key` 在轮换后不返回已失效 token。
 - 预算口径测试：断言 Core 的 `work_items` 行在预算增量前后字节不变（Core 不持有预算数据，polyforge#149）。
-- **可注入故障类别**：SQLite 文件损坏（预期 `CORE-507` 停服 + 备份恢复路径）；磁盘满（预期写失败原子回滚，无半写）；kill -9 写事务中（预期 WAL 回放后无半写）；service.lock 双进程（预期第二进程立即退出，启动期锁拒绝）；心跳停止超过阈值（预期机器标记 stale、其 running WI 不出现在就绪队列任一数组（§5.1b）且无自动接管）。
+- **可注入故障类别**：SQLite 文件损坏（预期 `CORE-507` 停服 + 备份恢复路径）；磁盘满（预期写失败原子回滚，无半写）；kill -9 写事务中（预期 WAL 回放后无半写）；service.lock 双进程（预期 `CORE-508` 第二进程退出）；心跳停止超过阈值（预期机器标记 stale、其 running WI 不出现在就绪队列任一数组（§5.1b）且无自动接管）。
 
 ## 11. 迁移与 rollout <!-- §11 -->
 

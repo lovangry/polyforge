@@ -1,28 +1,15 @@
-// Package workflow defines the workflow-bundle digest contract shared by pf
-// (materialization into capsules: digest verification of the copied bundle)
-// and aihub (serves bundle bytes, validates digests at claim time).
+// Package workflow is the minimal workflow-bundle frontmatter read surface
+// shared by pf: the model-candidate fields that drive model selection.
 //
-// Design authority: docs/design/polyforge-vnext/01-workflow-skills.md,
-// digest rules pinned by the golden vectors in digest_test.go (the retired v0
-// implementation lives in git history).
+// Design authority: docs/design/polyforge-vnext/01-workflow-skills.md.
 package workflow
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"os"
-	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
-
-// FileEntry is one file in the bundle digest input set.
-type FileEntry struct {
-	Path   string `json:"path"`
-	Sha256 string `json:"sha256"` // LF-normalized content SHA-256, lowercase hex
-	Bytes  uint64 `json:"bytes"`
-}
 
 // ---------------------------------------------------------------------------
 // Minimal frontmatter read surface (the F4 lane: candidate-chain
@@ -111,30 +98,4 @@ func ReadFrontmatter(path string) (*Frontmatter, error) {
 		return nil, err
 	}
 	return &fm, nil
-}
-
-// Digest computes the canonical bundle digest: files sorted by path
-// (codepoint order), each contributing path+sha+8-byte LE byte length, then
-// the whole buffer is SHA-256'd. Keep byte-for-byte stable so pinned digests
-// stay verifiable; golden vectors live in digest_test.go. (This is NOT the
-// RFC 8785 canonical-JSON digest of the retired v0 tree.)
-func Digest(files []FileEntry) string {
-	sorted := make([]FileEntry, len(files))
-	copy(sorted, files)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
-
-	var buf strings.Builder
-	for _, f := range sorted {
-		norm := strings.ReplaceAll(f.Path, "\r\n", "\n")
-		buf.WriteString(norm)
-		buf.WriteString(f.Sha256)
-		var lenBuf [8]byte
-		n := uint64(f.Bytes)
-		for i := 0; i < 8; i++ {
-			lenBuf[i] = byte(n >> (8 * i))
-		}
-		buf.Write(lenBuf[:])
-	}
-	sum := sha256.Sum256([]byte(buf.String()))
-	return hex.EncodeToString(sum[:])
 }

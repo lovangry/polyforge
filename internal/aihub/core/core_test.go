@@ -27,7 +27,14 @@ type testEnv struct {
 
 func newEnv(t *testing.T) *testEnv {
 	t.Helper()
-	db, err := Open(t.TempDir())
+	return newEnvAt(t, t.TempDir())
+}
+
+// newEnvAt opens (or creates) the database in dataDir and seeds the
+// admin user, a writer and project alpha through the live write paths.
+func newEnvAt(t *testing.T, dataDir string) *testEnv {
+	t.Helper()
+	db, err := Open(dataDir)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}

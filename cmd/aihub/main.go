@@ -23,6 +23,7 @@ import (
 	"github.com/silgrid/polyforge/internal/aihub/git"
 	"github.com/silgrid/polyforge/internal/aihub/memory"
 	"github.com/silgrid/polyforge/internal/aihub/server"
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/version"
 )
 
@@ -39,7 +40,7 @@ func lockDataDir(dataDir string) (func(), error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
-		return nil, core.Fail("CORE-508", "LOCK_HELD", "another aihub process holds %s/service.lock", dataDir)
+		return nil, core.Fail(api.ErrCoreLockHeld, "LOCK_HELD", "another aihub process holds %s/service.lock", dataDir)
 	}
 	return func() {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
