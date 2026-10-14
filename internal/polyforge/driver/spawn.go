@@ -159,8 +159,8 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		Gate:                    spec.Gate,
 		PriorRejection:          sp.PriorRejection,
 		PriorEndedWithoutResult: sp.PriorEndedWithoutResult,
-
-		RequiresHumanAnswer: spec.RequiresHumanAnswer,
+		RequireCommandEvidence:  spec.RequiresCommandEvidence || sp.StepID == verificationStepID,
+		RequiresHumanAnswer:     spec.RequiresHumanAnswer,
 	}
 	if policy == ContextInherit {
 		h, err := a.resolveHandoff(sp.StepID)
@@ -316,6 +316,10 @@ type promptParts struct {
 	// PriorEndedWithoutResult: the previous dispatch's turn ended without
 	// the result envelope being written (retry feedback).
 	PriorEndedWithoutResult bool
+	// RequireCommandEvidence marks a step whose completed result must
+	// carry command_evidence (verification / requires_command_evidence):
+	// the contract states the entry shape and the rule.
+	RequireCommandEvidence bool
 	// RequiresHumanAnswer marks a requires_human_answer step: the
 	// contract states that a human answer must precede completion.
 	RequiresHumanAnswer bool
@@ -397,6 +401,10 @@ func assembleStepPrompt(p promptParts) string {
 // driver re-binds a completed envelope carrying one fail-closed.
 func deliveryContract(p promptParts) string {
 	rel := capsule.DirRuntimeState + "/" + dirPendingResults + "/" + strconv.FormatInt(p.SpawnN, 10) + ".json"
+	evidenceLine := ""
+	if p.RequireCommandEvidence {
+		evidenceLine = "  \"command_evidence\": [],\n"
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "\n# Result delivery\n\n"+
 		"When this step reaches an outcome, write exactly ONE JSON object — the polyforge result envelope — "+
@@ -408,13 +416,20 @@ func deliveryContract(p promptParts) string {
 		"  \"spawn_n\": %d,\n"+
 		"  \"outcome\": \"completed\" | \"gate_failed\" | \"needs_input\" | \"incomplete\",\n"+
 		"  \"output\": { },\n"+
+		"%s"+
 		"  \"submitted_at\": \"<RFC3339>\"\n"+
-		"}\n```\n\n", p.WIID, p.StepID, p.SpawnN)
+		"}\n```\n\n", p.WIID, p.StepID, p.SpawnN, evidenceLine)
 	b.WriteString("Rules: `output` is a JSON object; every file this step produced that downstream steps or the owner consume is written under `artifacts/` and named by its path in the step's own instructions — the driver and downstream readers work by path convention, never by manifest")
 	if p.HandoffDue {
 		b.WriteString("; this step DECLARES handoff, so write the handoff file at `artifacts/handoff-" + p.StepID + ".md` — the next inherit step reads it by that path convention")
 	}
 	b.WriteString("; a `needs_input` result carries `question_id` and `question` instead. End your turn once the file is written.\n")
+	if p.RequireCommandEvidence {
+		b.WriteString("\nCommand evidence: this step requires `command_evidence` — a list of OBJECTS " +
+			"`{\"argv\": [\"go\", \"test\", \"./...\"], \"exit_code\": 0, \"duration_ms\": 1200}`, never strings. " +
+			"Run at least one real check command and report every command you ran with its measured `duration_ms` (> 0); " +
+			"an empty list, an entry without `argv`, or one without a positive `duration_ms` is rejected. Never fabricate an entry.\n")
+	}
 	if p.RequiresHumanAnswer {
 		b.WriteString("\nHuman answer: this step requires a human answer before completion: return `needs_input` first; " +
 			"a `completed` envelope without an answer in this round is rejected.\n")
@@ -827,8 +842,55 @@ func (r *stepRun) collect() (*StepResult, error) {
 	}
 	var res StepResult
 	if err := json.Unmarshal(raw, &res); err != nil {
+		// Tolerant re-parse: step agents persistently write command_evidence
+		// as a string list instead of the object array. Re-parse with a
+		// string-tolerant shadow and salvage the envelope (the evidence
+		// descriptions become log notes, not machine-parsed objects).
+		var shadow struct {
+			CommandEvidence json.RawMessage `json:"command_evidence"`
+		}
+		if json.Unmarshal(raw, &shadow) == nil {
+			// Zero out the malformed field and re-parse the rest.
+			var m map[string]interface{}
+			var dropped []string
+			if json.Unmarshal(raw, &m) == nil {
+				// Keep the well-formed object entries (a mixed or partly
+				// string-typed list must not drop real evidence before the
+				// V4 gate looks at it); string entries are discarded.
+				delete(m, "command_evidence")
+				var elems []json.RawMessage
+				if json.Unmarshal(shadow.CommandEvidence, &elems) == nil {
+					kept := []json.RawMessage{}
+					for i, el := range elems {
+						var ce CommandEvidence
+						t := strings.TrimSpace(string(el))
+						switch {
+						case !strings.HasPrefix(t, "{"):
+							dropped = append(dropped, fmt.Sprintf("command_evidence[%d] is not an OBJECT", i))
+						default:
+							if uerr := json.Unmarshal(el, &ce); uerr != nil {
+								dropped = append(dropped, fmt.Sprintf("command_evidence[%d] could not be decoded: %v (started_at must be RFC3339, argv a string list, numbers numeric)", i, uerr))
+							} else {
+								kept = append(kept, el)
+							}
+						}
+					}
+					if len(kept) > 0 {
+						m["command_evidence"] = kept
+					}
+				}
+				if cleaned, jerr := json.Marshal(m); jerr == nil {
+					res = StepResult{} // the failed first decode leaves partial fields (e.g. a zeroed evidence entry)
+					if uerr := json.Unmarshal(cleaned, &res); uerr == nil {
+						res.evidenceDropped = dropped
+						goto parsed
+					}
+				}
+			}
+		}
 		return nil, fmt.Errorf("envelope at %s is not valid JSON: %w", r.dropPath, err)
 	}
+parsed:
 	// Light completion checks — the identity fields a minimal-contract
 	// envelope may leave to the dispatch are filled from the dispatch
 	// identity; the fence and the closed sets are enforced (full

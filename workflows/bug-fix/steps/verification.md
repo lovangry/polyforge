@@ -83,13 +83,14 @@ quality belongs here (`review` handles that next).
 Do not report `pass` on a check you skipped because it seemed slow — mark it `skipped`
 with a reason. A false `pass` here hands a broken fix to `review` and, from there, to whoever ships it.
 
-## Evidence obligation
+## Evidence obligation (hard gate)
 
-This step cannot honestly complete without having RUN the checks it reports. The result
-envelope is the minimal contract (outcome + output), so the evidence rides your `output`:
-report every command you ran as an entry of an output field named `commands`, each with
-its exact `argv`, its real `exit_code` and its measured wall time in `duration_ms`
-(> 0). Your obligations:
+This step cannot complete without structured command evidence, and the driver enforces it
+mechanically: the result envelope you write must carry
+`command_evidence: [{argv, exit_code, duration_ms}]` with AT LEAST ONE entry, every entry
+with a non-empty `argv` and a measured `duration_ms` greater than 0. An empty list, an entry
+without `argv`, or an entry with no positive `duration_ms` is rejected and this step is
+re-dispatched. Your obligations:
 
 - You MUST actually run at least one check command (the project's verification bar: build,
   lint, tests, and the original repro where this step names one) before you complete. This

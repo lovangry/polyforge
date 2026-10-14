@@ -48,8 +48,7 @@ This step runs the project's own release procedure against the freshly fetched o
 default-branch head. It is a **dispatcher plus preconditions**, not a procedure: the
 procedure belongs to the project's repository, and nothing here may be improvised or
 worked around. Everything below is done with your `bash` tool, and every command you
-run is command evidence: report each one as an entry of the output field `commands`
-(`argv`, `exit_code`, `duration_ms`), and never complete without having run them.
+run is recorded as command evidence (a completed result without evidence is refused).
 
 ## 1. Ownership resolution
 
@@ -103,7 +102,7 @@ neither skip nor replace them). Decide the bump argument:
 The run can be long (a full test gate plus build and publish). Make sure it survives your
 tool's per-command timeout, for example start it in the background with its output going
 to `artifacts/release.log` and its exit code written to a file, then poll until it
-finishes; record the invocation as a `commands` entry with its real duration.
+finishes; record the invocation as command evidence with its real duration.
 
 A nonzero exit is a release failure: `verdict: fail`, never something to work around.
 Your `fail_reason` must say what the procedure printed and what (tag, image, release

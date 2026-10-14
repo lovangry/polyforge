@@ -162,7 +162,9 @@ func v4WriteFile(t *testing.T, capDir, rel, content string) {
 // outcome/output pair plus the dispatch identity (wi/step/spawn — the
 // fence the drop path itself encodes), and NONE of the retired protocol
 // fields (no version stamp, no envelope id, no artifact manifest, no
-// handoff digest reference, no structured evidence list, no timestamp).
+// handoff digest reference, no timestamp). The V4 command evidence is
+// NOT retired: an evidence-owing step's envelope adds command_evidence
+// (see v4WithEvidence).
 func v4MinimalEnvelope(wi, step string, n int, outcome string) map[string]any {
 	return map[string]any{
 		"wi_id":   wi,
@@ -171,6 +173,16 @@ func v4MinimalEnvelope(wi, step string, n int, outcome string) map[string]any {
 		"outcome": outcome,
 		"output":  map[string]any{"summary": "minimal contract envelope from the v4 scenario"},
 	}
+}
+
+// v4WithEvidence adds the V4 command evidence an evidence-owing step
+// (verification) owes on a completed result: the driver refuses one
+// without it.
+func v4WithEvidence(env map[string]any) map[string]any {
+	env["command_evidence"] = []any{map[string]any{
+		"argv": []any{"go", "test", "./..."}, "exit_code": 0, "duration_ms": 40,
+	}}
+	return env
 }
 
 // v4HealthyTail is the healthy continuation of the quick-fix lane
@@ -281,7 +293,7 @@ func TestV4MinimalContractEnvelopesAccepted(t *testing.T) {
 	waitSpawnCount(t, d, wi, 3, 60*time.Second)
 	v4WriteEnvelope(t, capDir, 3, v4MinimalEnvelope(wi, "fix", 3, "completed"))
 	waitSpawnCount(t, d, wi, 4, 60*time.Second)
-	v4WriteEnvelope(t, capDir, 4, v4MinimalEnvelope(wi, "verification", 4, "completed"))
+	v4WriteEnvelope(t, capDir, 4, v4WithEvidence(v4MinimalEnvelope(wi, "verification", 4, "completed")))
 
 	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
 
@@ -910,21 +922,19 @@ func v4RetiredTokens() []string {
 		v4Tok("result", "_id"),
 		v4Tok("protocol", "_version"),
 		v4Tok("handoff", "_ref"),
-		v4Tok("command", "_evidence"),
-		v4Tok("Tolerant", " re-parse"),
+		// (command_evidence, its tolerant re-parse and the
+		// requires_command_evidence key are NOT retired: the V4
+		// command-evidence gate stays in the driver.)
 		v4Tok("may ", "omit"),
 		// C5: the unused frontmatter keys and their mirrors.
 		v4Tok("Input", "Ref"),
 		v4Tok("ext", "Output"),
-		v4Tok("Requires", "CommandEvidence"),
-		v4Tok("Require", "CommandEvidence"),
 		v4Tok("Include", "Verdict"),
 		v4Tok("Silence", "Minutes"),
 		v4Tok("Tool", "Minutes"),
 		v4Tok(`yaml:"`, `inputs"`),
 		v4Tok(`yaml:"`, `outputs"`),
 		v4Tok(`yaml:"`, `schema"`),
-		v4Tok(`yaml:"`, `requires_command_evidence"`),
 		v4Tok(`yaml:"`, `silence_minutes"`),
 		v4Tok(`yaml:"`, `tool_minutes"`),
 		v4Tok(`yaml:"`, `include_verdict"`),

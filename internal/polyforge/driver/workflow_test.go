@@ -3,9 +3,10 @@ package driver
 // workflow_ext_test.go: the extended frontmatter read surface — the
 // context_policy / handoff parse, the inherit default, the
 // gate-must-be-fresh rule, and the deliberate IGNORANCE of the retired
-// keys (polyforge#147: inputs / outputs / schema /
-// requires_command_evidence / silence_minutes / tool_minutes /
-// include_verdict / on_fail action are no longer read at all).
+// keys (polyforge#147: inputs / outputs / schema / silence_minutes /
+// tool_minutes / include_verdict / on_fail action are no longer read at
+// all). requires_command_evidence is NOT retired: it feeds the V4
+// command-evidence gate.
 
 import (
 	"os"
@@ -140,7 +141,6 @@ func TestRetiredFrontmatterKeysAreIgnored(t *testing.T) {
 		"      - /abs/also-escapes.md\n" +
 		"    outputs:\n" +
 		"      - { path: ../out.md, schema: dictionary }\n" +
-		"    requires_command_evidence: true\n" +
 		"    silence_minutes: 11\n" +
 		"    tool_minutes: 22\n" +
 		"  - id: g\n" +

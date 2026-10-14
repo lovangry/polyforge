@@ -46,8 +46,7 @@ This step deploys the version the `verify` step passed, by running the project's
 deploy procedure. It is a dispatcher: the procedure belongs to the repository and is
 never improvised or worked around. It always runs when the project has a procedure;
 there is no skip condition. Everything is done with your `bash` tool and every command
-is command evidence: report each one as an entry of the output field `commands`
-(`argv`, `exit_code`, `duration_ms`), and never complete without having run them.
+is recorded as command evidence (a completed result without evidence is refused).
 
 ## 1. The version
 
@@ -81,7 +80,7 @@ In the owner repo, put the clone on the verified tree (`git fetch origin`,
 the real run; if the procedure refuses, that refusal is the result. The run can be long:
 keep it alive across your tool's per-command timeout (background it with its output in
 `artifacts/deploy.log` and its exit code in a file, then poll) and record the invocation
-as a `commands` entry with its real duration. Do not interrupt it once it has started: the
+as command evidence with its real duration. Do not interrupt it once it has started: the
 procedure holds a lock and owns its own rollback.
 
 ## 4. Judge the result

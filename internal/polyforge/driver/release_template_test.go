@@ -78,10 +78,9 @@ func TestReleaseBundleCarriesNoPrivateProcedure(t *testing.T) {
 }
 
 // TestReleaseBundleShape pins the step list, gates, context policy, the
-// absence of rewinds, the path-convention artifact hand-over and the
-// per-step contract text. The bundle carries none of the retired
-// frontmatter keys (inputs, requires_command_evidence): the evidence rides
-// the output's `commands` field under the minimal envelope contract.
+// evidence flags (the V4 command-evidence gate), the absence of rewinds,
+// the path-convention artifact hand-over and the per-step contract text.
+// The bundle carries none of the retired frontmatter keys (inputs).
 func TestReleaseBundleShape(t *testing.T) {
 	wf, err := LoadWorkflow(bundlePath("release"))
 	if err != nil {
@@ -90,8 +89,8 @@ func TestReleaseBundleShape(t *testing.T) {
 	var ids []string
 	for _, s := range wf.Steps {
 		ids = append(ids, s.ID)
-		if !s.Gate || s.ContextPolicy != ContextFresh {
-			t.Fatalf("step %q must be gate + fresh (gate=%v ctx=%q)", s.ID, s.Gate, s.ContextPolicy)
+		if !s.Gate || s.ContextPolicy != ContextFresh || !s.RequiresCommandEvidence {
+			t.Fatalf("step %q must be gate + fresh + requires_command_evidence (gate=%v ctx=%q evidence=%v)", s.ID, s.Gate, s.ContextPolicy, s.RequiresCommandEvidence)
 		}
 		if s.OnFail != nil {
 			t.Fatalf("step %q must not declare on_fail: a failed release or deploy must terminate, never rewind into a re-release (immutability)", s.ID)
@@ -101,7 +100,7 @@ func TestReleaseBundleShape(t *testing.T) {
 		t.Fatalf("release bundle steps = %s, want %s", got, want)
 	}
 	wfText := readBundleFile(t, "release", "workflow.md")
-	for _, retired := range []string{"requires_command_evidence", "inputs: [", "handoff_ref", "sha256"} {
+	for _, retired := range []string{"inputs: [", "handoff_ref", "sha256"} {
 		if strings.Contains(wfText, retired) {
 			t.Fatalf("release workflow.md still carries the retired %q", retired)
 		}
@@ -110,7 +109,7 @@ func TestReleaseBundleShape(t *testing.T) {
 	rel := readBundleFile(t, "release", "steps", "release.md")
 	for _, needle := range []string{
 		"`.polyforge/release.sh`", "PF-RELEASE-AMBIGUOUS_OWNER", "--verify", "git fetch origin",
-		"git ls-remote --tags origin", "verbatim", "enum: [pass, fail]", "artifacts/release-record.json", "`commands`",
+		"git ls-remote --tags origin", "verbatim", "enum: [pass, fail]", "artifacts/release-record.json", "a completed result without evidence is refused",
 	} {
 		if !strings.Contains(rel, needle) {
 			t.Fatalf("release step lost its contract text %q", needle)
@@ -121,14 +120,14 @@ func TestReleaseBundleShape(t *testing.T) {
 	}
 
 	ver := readBundleFile(t, "release", "steps", "verify.md")
-	for _, needle := range []string{"release-record.json", "verified-version.json", "ls-remote", "merge-base --is-ancestor", "--verify V", "immutab", "gh release view", "`commands`"} {
+	for _, needle := range []string{"release-record.json", "verified-version.json", "ls-remote", "merge-base --is-ancestor", "--verify V", "immutab", "gh release view", "a completed result without command evidence is refused"} {
 		if !strings.Contains(ver, needle) {
 			t.Fatalf("verify step lost its check text %q", needle)
 		}
 	}
 
 	dep := readBundleFile(t, "release", "steps", "deploy.md")
-	for _, needle := range []string{"`.polyforge/deploy.sh`", "--confirm V", "PF-DEPLOY-AMBIGUOUS_OWNER", "defer", `"latest"`, "enum: [pass, defer, fail]", "rolled_back", "artifacts/verified-version.json", "`commands`"} {
+	for _, needle := range []string{"`.polyforge/deploy.sh`", "--confirm V", "PF-DEPLOY-AMBIGUOUS_OWNER", "defer", `"latest"`, "enum: [pass, defer, fail]", "rolled_back", "artifacts/verified-version.json", "a completed result without evidence is refused"} {
 		if !strings.Contains(dep, needle) {
 			t.Fatalf("deploy step lost its contract text %q", needle)
 		}

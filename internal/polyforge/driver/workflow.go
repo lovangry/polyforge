@@ -58,6 +58,9 @@ type StepSpec struct {
 	// may not complete until a human answered at least one of its
 	// questions in the current attempt chain (ResultSpec.HumanAnswers).
 	RequiresHumanAnswer bool
+	// RequiresCommandEvidence mirrors `requires_command_evidence: true`
+	// (the V4 gate; implied for a step whose id is "verification").
+	RequiresCommandEvidence bool
 	// The step's wall-budget estimate (budget.wall_minutes, T's base).
 	WallMinutes int
 }
@@ -129,12 +132,13 @@ func parseWorkflow(front []byte) (*Workflow, error) {
 	}
 	for _, s := range doc.Steps {
 		step := StepSpec{
-			ID:                  s.ID,
-			Gate:                s.Gate,
-			Handoff:             s.Handoff,
-			ContextPolicy:       s.ContextPolicy,
-			RequiresHumanAnswer: s.RequiresHumanAnswer,
-			ModelCandidates:     s.ModelCandidates,
+			ID:                      s.ID,
+			Gate:                    s.Gate,
+			Handoff:                 s.Handoff,
+			ContextPolicy:           s.ContextPolicy,
+			RequiresHumanAnswer:     s.RequiresHumanAnswer,
+			RequiresCommandEvidence: s.RequiresCommandEvidence,
+			ModelCandidates:         s.ModelCandidates,
 		}
 		if s.Budget != nil {
 			step.WallMinutes = s.Budget.WallMinutes
@@ -204,14 +208,15 @@ type extRewind struct {
 }
 
 type extStep struct {
-	ID                  string     `yaml:"id"`
-	Gate                bool       `yaml:"gate"`
-	Handoff             bool       `yaml:"handoff"`
-	RequiresHumanAnswer bool       `yaml:"requires_human_answer"`
-	ContextPolicy       string     `yaml:"context_policy"`
-	ModelCandidates     []string   `yaml:"model_candidates"`
-	OnFail              *extOnFail `yaml:"on_fail"`
-	Budget              *extBudget `yaml:"budget"`
+	ID                      string     `yaml:"id"`
+	Gate                    bool       `yaml:"gate"`
+	Handoff                 bool       `yaml:"handoff"`
+	RequiresHumanAnswer     bool       `yaml:"requires_human_answer"`
+	RequiresCommandEvidence bool       `yaml:"requires_command_evidence"`
+	ContextPolicy           string     `yaml:"context_policy"`
+	ModelCandidates         []string   `yaml:"model_candidates"`
+	OnFail                  *extOnFail `yaml:"on_fail"`
+	Budget                  *extBudget `yaml:"budget"`
 }
 
 type extBudget struct {

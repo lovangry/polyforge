@@ -3,8 +3,8 @@ package test
 // v2_step_text_contract_test.go: content floor for the workflow step
 // texts the Go execution driver pastes verbatim into step prompts. The
 // only delivery contract is the result envelope (needs_input +
-// question_id/question; answers return under "# Answered questions").
-// The retired WI-Agent protocol
+// question_id/question; answers return under "# Answered questions";
+// verification carries command_evidence). The retired WI-Agent protocol
 // (flush, pending_question, execution.json writes) must not be taught.
 
 import (
@@ -53,11 +53,7 @@ func TestV2StepTextsTeachNoRetiredWIAgentProtocol(t *testing.T) {
 	}
 }
 
-// TestV2VerificationStepsReportCommandsInOutput: the verification step
-// texts still demand that real check commands RAN and are reported —
-// but in the step's own `output` (polyforge#147: the envelope is the
-// minimal contract, so no envelope-level evidence field is taught).
-func TestV2VerificationStepsReportCommandsInOutput(t *testing.T) {
+func TestV2VerificationStepsRequireCommandEvidence(t *testing.T) {
 	files, _ := filepath.Glob(filepath.Join(v1Root(t), "workflows", "*", "steps", "verification.md"))
 	if len(files) == 0 {
 		t.Fatal("no verification step texts found")
@@ -67,14 +63,16 @@ func TestV2VerificationStepsReportCommandsInOutput(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		text := string(b)
-		for _, want := range []string{"actually run at least one check command", "measured, > 0", "`commands`"} {
-			if !strings.Contains(text, want) {
-				t.Errorf("%s evidence obligation must state %q", f, want)
+		if !strings.Contains(string(b), "command_evidence: [{argv, exit_code, duration_ms}]") {
+			t.Errorf("%s must instruct command_evidence: [{argv, exit_code, duration_ms}]", f)
+		}
+		for _, want := range []string{"AT LEAST ONE entry", "actually run at least one check command", "measured, > 0"} {
+			if !strings.Contains(string(b), want) {
+				t.Errorf("%s evidence obligation must state %q (driver gate: >=1 entry, argv, duration_ms>0)", f, want)
 			}
 		}
-		if strings.Contains(text, "command_evidence") {
-			t.Errorf("%s still teaches the retired envelope evidence field", f)
+		if strings.Contains(string(b), "leave `command_evidence` empty") {
+			t.Errorf("%s still permits an empty command_evidence, which the driver rejects", f)
 		}
 	}
 }

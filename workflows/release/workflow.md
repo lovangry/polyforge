@@ -7,9 +7,9 @@ rewind:
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
-  - { id: release, context_policy: fresh, handoff: false, kind: code, gate: true, budget: { wall_minutes: 45 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: verify, context_policy: fresh, handoff: false, kind: gate, gate: true, budget: { wall_minutes: 20 }, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3] }
-  - { id: deploy, context_policy: fresh, handoff: false, kind: code, gate: true, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: release, context_policy: fresh, handoff: false, kind: code, gate: true, requires_command_evidence: true, budget: { wall_minutes: 45 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: verify, context_policy: fresh, handoff: false, kind: gate, gate: true, requires_command_evidence: true, budget: { wall_minutes: 20 }, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3] }
+  - { id: deploy, context_policy: fresh, handoff: false, kind: code, gate: true, requires_command_evidence: true, budget: { wall_minutes: 30 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
 ---
 
 # release - release lane
@@ -40,10 +40,8 @@ release --> verify --> deploy
 | `deploy` | code | yes | runs `.polyforge/deploy.sh <version> --confirm <version>` for the verified version only; defers when the project has no deploy procedure |
 
 Every step is `gate: true` (fresh context, a `fail` verdict is routed as a gate failure)
-and owes command evidence: the result envelope is the minimal contract (outcome +
-output), so each step reports every command it ran in an output field named `commands`
-(`argv`, `exit_code`, `duration_ms`), and its step file forbids completing without
-having run them.
+and requires command evidence (`requires_command_evidence: true`): a completed result
+without recorded commands is refused.
 
 ## Artifact flow between steps
 

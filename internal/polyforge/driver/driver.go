@@ -772,8 +772,8 @@ func (d *Driver) validateResultStrict(res *StepResult, stepID string, n int64) e
 }
 
 // buildResultSpec assembles the read-only validation snapshot from the
-// driver's current durable state (gate policy, human-answer duty and
-// the answers of the current attempt chain).
+// driver's current durable state (gate policy, human-answer duty, the
+// answers of the current attempt chain and the command-evidence duty).
 func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 	spec := ResultSpec{
 		WIID:   d.wi.ID,
@@ -790,6 +790,10 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 	if ss := d.workflow.step(stepID); ss != nil {
 		spec.Gate = ss.Gate
 		spec.RequiresHumanAnswer = ss.RequiresHumanAnswer
+		spec.RequireCommandEvidence = ss.RequiresCommandEvidence
+	}
+	if stepID == verificationStepID {
+		spec.RequireCommandEvidence = true
 	}
 	return spec
 }

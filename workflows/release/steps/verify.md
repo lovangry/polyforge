@@ -55,8 +55,7 @@ output:
 You are the lane's judgment gate over the release. You start from a clean context and
 you do **not** trust the previous step's claims: its record is an input to check, not a
 fact. Every check below is a command you run yourself, and the commands are your
-evidence: report each one as an entry of the output field `commands` (`argv`,
-`exit_code`, `duration_ms`); never complete without having run them. The remote is the
+evidence (a completed result without command evidence is refused). The remote is the
 source of truth, not the local clone and not the previous step's report.
 
 ## Inputs

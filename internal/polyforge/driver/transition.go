@@ -407,6 +407,9 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 		if err != nil {
 			return err
 		}
+		if len(res.CommandEvidence) > 0 {
+			out["commands"] = res.CommandEvidence // B10: the only accepted command evidence
+		}
 		st.Status = capsule.StepDone
 		st.Output = out
 		// Commit point: archive the accepted attempt (the step's attempt

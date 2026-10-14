@@ -109,14 +109,39 @@ func (o Outcome) Valid() bool {
 // by path convention, and an envelope missing any retired field is
 // never judged invalid for its absence.
 type StepResult struct {
-	WIID        string          `json:"wi_id"`
-	StepID      string          `json:"step_id"`
-	SpawnN      int64           `json:"spawn_n"` // fencing: only the current spawn's results count
-	Outcome     Outcome         `json:"outcome"`
-	Output      json.RawMessage `json:"output"`                // step-specific output JSON, schema-checked
-	QuestionID  string          `json:"question_id,omitempty"` // set when Outcome == needs_input
-	Question    string          `json:"question,omitempty"`    // the question text for needs_input
-	SubmittedAt time.Time       `json:"submitted_at,omitempty"`
+	WIID       string          `json:"wi_id"`
+	StepID     string          `json:"step_id"`
+	SpawnN     int64           `json:"spawn_n"` // fencing: only the current spawn's results count
+	Outcome    Outcome         `json:"outcome"`
+	Output     json.RawMessage `json:"output"`                // step-specific output JSON, schema-checked
+	QuestionID string          `json:"question_id,omitempty"` // set when Outcome == needs_input
+	Question   string          `json:"question,omitempty"`    // the question text for needs_input
+	// CommandEvidence is the V4 command-evidence list: required (and
+	// checked) only on a step that owes it (ResultSpec.RequireCommandEvidence).
+	CommandEvidence []CommandEvidence `json:"command_evidence,omitempty"`
+	SubmittedAt     time.Time         `json:"submitted_at,omitempty"`
+
+	// evidenceDropped records why the tolerant re-parse discarded
+	// command_evidence entries (set by the collector, never serialized);
+	// the evidence gate quotes it so a rejection names the real reason.
+	evidenceDropped []string
+}
+
+// verificationStepID is the conventional id of the V4 verification step:
+// a completed result for it owes command evidence (ResultSpec.RequireCommandEvidence).
+const verificationStepID = "verification"
+
+// CommandEvidence is one recorded command the step process ran, kept in
+// the envelope for audit (the operator face renders it). Validation of
+// an evidence-owing step checks argv non-emptiness and duration_ms > 0
+// (checkCommandEvidence); exit_code and started_at are not enforced.
+type CommandEvidence struct {
+	Argv       []string  `json:"argv"`
+	Cwd        string    `json:"cwd"`
+	ExitCode   int       `json:"exit_code"`
+	StartedAt  time.Time `json:"started_at"`
+	DurationMs int64     `json:"duration_ms"`
+	LogPath    string    `json:"log_path"`
 }
 
 // Validation verdicts.
@@ -147,6 +172,11 @@ type ResultSpec struct {
 	// the step (see currentChainAnswers). Answers only enter the record
 	// through the answer transition, so every entry is a human's.
 	HumanAnswers int
+	// RequireCommandEvidence mirrors requires_command_evidence: true (or
+	// the step id "verification"): an accepted completed result must carry
+	// at least one command_evidence entry, each with a non-empty argv and
+	// duration_ms > 0 (the V4 gate; exit_code presence is not checkable).
+	RequireCommandEvidence bool
 }
 
 // ValidateStepResult runs the staging gates over one envelope:
@@ -182,7 +212,10 @@ type ResultSpec struct {
 //     gate and the workflow proceeds, while a fail verdict (with its
 //     fail_reason) still re-binds to gate_failed. A binding error is
 //     an envelope rejection (the in-process retry lane), never a
-//     silent reclassification.
+//     silent reclassification;
+//  4. the V4 command-evidence gate (RequireCommandEvidence steps): a
+//     completed result must carry at least one command_evidence entry,
+//     each with a non-empty argv and duration_ms > 0.
 //
 // The minimal contract: an envelope missing the retired protocol
 // fields is never judged invalid for its absence — there is no
@@ -243,6 +276,37 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 	if delivered == OutcomeCompleted {
 		if err := releaseVerdictBinding(res); err != nil {
 			return err
+		}
+	}
+	// 4. the V4 command-evidence gate: a completed result (after the
+	// verdict re-bind) of an evidence-owing step must carry well-formed
+	// command_evidence.
+	if res.Outcome == OutcomeCompleted && spec.RequireCommandEvidence {
+		if err := checkCommandEvidence(res.CommandEvidence); err != nil {
+			if len(res.evidenceDropped) > 0 {
+				err = fmt.Errorf("%w (entries dropped while parsing the envelope: %s)", err, strings.Join(res.evidenceDropped, "; "))
+			}
+			return fmt.Errorf("driver: step %q completed without verification evidence: %w", spec.StepID, err)
+		}
+	}
+	return nil
+}
+
+// checkCommandEvidence enforces the V4 evidence shape: at least one entry,
+// every entry with a non-empty argv and duration_ms > 0. exit_code's
+// zero value is legitimate and its presence cannot be checked on the
+// decoded struct, so it is not enforced. An entry the tolerant re-parse
+// could not decode never reaches here as a struct (see evidenceDropped).
+func checkCommandEvidence(ev []CommandEvidence) error {
+	if len(ev) == 0 {
+		return errors.New("command_evidence is empty — a verification step must carry at least one entry, each an OBJECT {\"argv\": [...], \"exit_code\": N, \"duration_ms\": N} (duration_ms > 0)")
+	}
+	for i, e := range ev {
+		if len(e.Argv) == 0 || strings.TrimSpace(strings.Join(e.Argv, "")) == "" {
+			return fmt.Errorf("command_evidence[%d] has an empty argv", i)
+		}
+		if e.DurationMs <= 0 {
+			return fmt.Errorf("command_evidence[%d] (%s) has no duration_ms (must be > 0)", i, e.Argv[0])
 		}
 	}
 	return nil

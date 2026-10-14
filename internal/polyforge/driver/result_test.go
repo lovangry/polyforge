@@ -167,10 +167,36 @@ func TestStepResultJSONRoundTrip(t *testing.T) {
 			t.Fatalf("envelope JSON must carry tag %q", tag)
 		}
 	}
-	// The retired protocol fields must not reappear on the wire.
+	// The retired protocol fields must not reappear on the wire; an
+	// envelope without evidence carries no command_evidence key either.
 	for _, tag := range []string{"protocol_version", "result_id", "artifacts", "handoff_ref", "command_evidence"} {
 		if _, ok := probe[tag]; ok {
-			t.Fatalf("minimal-contract envelope must not carry retired tag %q", tag)
+			t.Fatalf("minimal-contract envelope must not carry tag %q", tag)
 		}
+	}
+	// The V4 command evidence (the one field an evidence-owing step's
+	// envelope adds) round-trips under its command_evidence tag.
+	f.res.Outcome, f.res.QuestionID, f.res.Question = OutcomeCompleted, "", ""
+	f.res.CommandEvidence = []CommandEvidence{{
+		Argv: []string{"go", "test", "./..."}, Cwd: "/w/repo", ExitCode: 0, DurationMs: 4242, LogPath: "logs/v.log",
+	}}
+	raw, err = json.Marshal(f.res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe = nil
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := probe["command_evidence"]; !ok {
+		t.Fatalf("an evidence-carrying envelope must serialize command_evidence: %s", raw)
+	}
+	back = StepResult{}
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if len(back.CommandEvidence) != 1 || back.CommandEvidence[0].DurationMs != 4242 ||
+		len(back.CommandEvidence[0].Argv) != 3 {
+		t.Fatalf("round trip lost command evidence: %+v", back.CommandEvidence)
 	}
 }

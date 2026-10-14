@@ -340,6 +340,10 @@ func TestTransitionStepResultCompleted(t *testing.T) {
 	mustInit(t, d)
 	mustStart(t, d, "a", 1)
 	res := completedResult("a", 1, `{"summary":"A"}`)
+	res.CommandEvidence = []CommandEvidence{{
+		Argv: []string{"go", "test", "./..."}, Cwd: "/w", ExitCode: 0,
+		StartedAt: time.Now(), DurationMs: 1200, LogPath: "logs/a.log",
+	}}
 	if err := d.transition(TransitionRequest{Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: res}); err != nil {
 		t.Fatalf("result: %v", err)
 	}
@@ -347,10 +351,15 @@ func TestTransitionStepResultCompleted(t *testing.T) {
 	if st.Status != capsule.StepDone || st.Output["summary"] != "A" {
 		t.Fatalf("completed must record done + output: %+v", st)
 	}
-	// The stored output is the envelope's output VERBATIM: the driver
-	// adds no evidence key of its own (polyforge#147 C5).
-	if _, ok := st.Output["commands"]; ok {
-		t.Fatalf("the driver must not synthesize an evidence key: %+v", st.Output)
+	// Snapshot deep-copies via JSON, so the evidence comes back as the
+	// generic decode — assert on the re-marshaled shape (B10 keys).
+	cmds, ok := st.Output["commands"].([]any)
+	if !ok || len(cmds) != 1 {
+		t.Fatalf("B10 command evidence must land in output.commands: %+v", st.Output["commands"])
+	}
+	cmd, _ := cmds[0].(map[string]any)
+	if cmd["log_path"] != "logs/a.log" || cmd["duration_ms"] != float64(1200) {
+		t.Fatalf("bad evidence entry: %+v", cmd)
 	}
 }
 
