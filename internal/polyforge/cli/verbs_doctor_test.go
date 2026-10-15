@@ -275,3 +275,79 @@ func TestDoctorUsageErrorExit2(t *testing.T) {
 		t.Fatalf("doctor --bogus: exit %d, want 2", code)
 	}
 }
+
+// TestDoctorWorkspaceYamlReportsUnknownStepKeys (polyforge#169): a
+// per-step key of a mapped workspace's .polyforge.yaml that is no step
+// id of the daemon's installed workflows fails the check, naming the
+// key; a known step id passes; without the daemon's workflows dir the
+// keys are unjudged (warn, never a faked pass).
+func TestDoctorWorkspaceYamlReportsUnknownStepKeys(t *testing.T) {
+	wf := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(wf, "quick-fix"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wf, "quick-fix", "workflow.md"), []byte("---\nsteps:\n  - { id: fix }\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"machine_id":"m-y","workflows_dir":"`+wf+`","jobs":[],"queue":{}}`)
+	})
+	sock := newFakeDaemon(t, mux)
+	srv := aiSever(t, &reqRecorder{}, map[string]bool{"polyforge": true}, 0, "")
+	env := doctorServerConfig(t, srv.URL, "k", sock, "polyforge")
+	yaml := filepath.Join(filepath.Dir(env["XDG_CONFIG_HOME"]), "ws-polyforge", ".polyforge.yaml")
+
+	if err := os.WriteFile(yaml, []byte("steps:\n  polyforge:\n    default: { models: [a] }\n    fix: { models: [b] }\n    gate: { models: [c] }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, doc := doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "fail" || !strings.Contains(detail, "steps.polyforge.gate") || strings.Contains(detail, "steps.polyforge.fix") {
+		t.Fatalf("unknown step key: %s %q, want fail naming only steps.polyforge.gate", st, detail)
+	}
+
+	if err := os.WriteFile(yaml, []byte("steps:\n  polyforge:\n    fix: { models: [b] }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, doc = doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "pass" {
+		t.Fatalf("known step key: %s %q, want pass", st, detail)
+	}
+
+	if err := os.WriteFile(yaml, []byte("models:\n  polyforge:\n    fix: [b]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, doc = doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "fail" || !strings.Contains(detail, "`models:` was replaced by `steps:`") {
+		t.Fatalf("legacy models: section: %s %q, want fail with the migration message", st, detail)
+	}
+
+	if err := os.WriteFile(yaml, []byte("steps:\n  ghost:\n    fix: { models: [b] }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, doc = doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "fail" || !strings.Contains(detail, "ghost are not mapped to this workspace in cli.toml (it maps: polyforge)") {
+		t.Fatalf("unmapped project: %s %q, want fail naming it", st, detail)
+	}
+
+	env = doctorServerConfig(t, srv.URL, "k", liveDaemonSocket(t, "m-old"), "polyforge")
+	yaml = filepath.Join(filepath.Dir(env["XDG_CONFIG_HOME"]), "ws-polyforge", ".polyforge.yaml")
+	if err := os.WriteFile(yaml, []byte("steps:\n  polyforge:\n    fix: { models: [b] }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, doc = doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "warn" || !strings.Contains(detail, "reported no workflows dir") {
+		t.Fatalf("no workflows dir reported: %s %q, want warn", st, detail)
+	}
+
+	env = doctorServerConfig(t, srv.URL, "k", filepath.Join(t.TempDir(), "dead.sock"), "polyforge")
+	yaml = filepath.Join(filepath.Dir(env["XDG_CONFIG_HOME"]), "ws-polyforge", ".polyforge.yaml")
+	if err := os.WriteFile(yaml, []byte("steps:\n  polyforge:\n    fix: { models: [b] }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, doc = doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "warn" || !strings.Contains(detail, "daemon is unreachable") {
+		t.Fatalf("daemon unreachable: %s %q, want warn naming it", st, detail)
+	}
+}

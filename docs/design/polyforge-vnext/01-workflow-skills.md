@@ -13,7 +13,7 @@
 ### 1.1 范围 <!-- §1.1 -->
 
 - 【polyforge#106 修订】skill 的权威布局与内容边界（§2.1/§3）：路由 skill（`skills/polyforge/`）与 step skill（`workflows/<bundle>/agents/*.md`，即 step agent 定义文件）；原 agent 侧执行 skill 已随 WI-Agent 引擎删除，workflow 的执行引擎是 Daemon 内的 Go driver。
-- `workflow.md` 的两段构成（§4.1/§4.4）：YAML frontmatter 是本 WI 执行图的**唯一结构 schema**（steps 顺序/id/kind/interactive/gate/on_fail/budget/model_candidates，及 workflow 级声明），达到「任一 frontmatter 可据此机械校验」的程度；Markdown 正文是流程级说明，由 WI Agent（wi agent）第 0 步加载。
+- `workflow.md` 的两段构成（§4.1/§4.4）：YAML frontmatter 是本 WI 执行图的**唯一结构 schema**（steps 顺序/id/interactive/gate/on_fail/budget/model_candidates，及 workflow 级声明），达到「任一 frontmatter 可据此机械校验」的程度；Markdown 正文是流程级说明，由 WI Agent（wi agent）第 0 步加载。
 - bundle 引用规则（§4.5：引用即 `bundle_name`，digest 链已删）与 bundle 的加载期结构校验（§4.1：工作机 driver 加载已物化 bundle 时执行；Core 侧落库只有 `bundle_name`，权威见 `02-aihub-core.md#§4.4`/`#§4.5`）。
 - model_candidates 的声明与切换语义（§4.1/§6.3）；grill（interactive，位于 spec 之前 + spec 产物的总结性确认问答）与 e2e-author（§4.2/§4.3）；参考流程 grill → spec → grill-review → plan → e2e-author → code → verification → review → deliver（review 可处于流程中的任意位置，§4.2；polyforge#165 起 9 步）。
 - 预算（budget）声明的层次与超预算行为（§6.6）。
@@ -107,8 +107,7 @@ Step 元素字段：
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `id` | string | 必填 | 非空，steps 内唯一（V2）；同时是 step skill 文件名绑定：`steps/<id>.md` |
-| `kind` | string | 可选（随仓 bundle 每步都声明） | one of `qa`\|`spec`\|`author`\|`code`\|`gate`\|`review`（V8）；workspace yaml 按 kind 配置模型列表的键，也是分类分桶（§9）的依据 |
+| `id` | string | 必填 | 非空，steps 内唯一（V2）；同时是 step skill 文件名绑定：`steps/<id>.md`，也是 workspace yaml `steps.<project>.<step-id>.models` 的键（同名步骤跨 bundle 共用一个键） |
 | `interactive` | bool | 可选，缺省 false | true 表示需要人在会话内驱动（grill/grill-review 等）；无位置限制 |
 | `gate` | bool | 可选，缺省 false | true 表示本 step 产出业务判定（review/verification/grill-review 皆可）；`interactive` 与 `gate` 可同时为 true |
 | `on_fail` | OnFail | 可选，仅 `gate: true` 的 step 允许携带（V5） | `OnFail = {target: 更早的 step id（必填）}`——声明即 rewind 边；未声明 `on_fail` 即 §6.2 第 1 步的 `failed_gate` 终止。gate FAIL 判定全文一律随 `pending_rewind_input` 送达 target（polyforge#147 C5：`action` 与 `include_verdict` 键已删除，判定转发无条件） |
@@ -128,30 +127,29 @@ v1 schema 不声明任何 step 级 isolation 类键名；v1 不引入 per-step i
 | V2 | `steps` 非空；每个 step 有非空 `id`，且 `id` 在 steps 内唯一 |
 | V3 | `steps` 数组顺序即唯一执行序；schema 不存在 `position`/排序类声明，不存在第二个顺序来源（由结构本身保证，无独立检查） |
 | V5 | `on_fail` 只出现在 `gate: true` 的 step；`on_fail.target` 必须是 `steps` 中存在且数组位置严格早于本 step 的 step id |
-| V8 | `kind` 若声明，取值必须属于 `qa`\|`spec`\|`author`\|`code`\|`gate`\|`review`（与 workspace yaml 按 kind 配置模型列表的键集合是同一个集合）；未声明 `kind` 合法，该 step 只是不匹配任何按 kind 的模型列表。`kind: review` 的 step 可处于数组内任意位置（含最后） |
 | V11 | `context_policy` ∈ `inherit`\|`fresh`（缺省 `inherit`）；`gate: true` 的 step 必须是 `fresh` |
 
-只有上表规则被执行。旧表中的 V1（拒绝未知键、拒绝 YAML tag）、V4（interactive 位置）、V6（数值 >0）、V7（agents 文件存在性）、V9（model_candidates 格式）、V10（qa 早于 spec），以及「AIHub 创建时校验、`CORE-400` + `rule_id`」条款已删除：代码不执行它们（文档与代码冲突时以代码为准）。保留的规则沿用原编号，删除的编号不复用。「V4 命令取证门禁」（§4.4a）是结果信封门禁，与这里删掉的 frontmatter 规则 V4 只是同名，不受影响、继续执行。
+只有上表规则被执行。旧表中的 V1（拒绝未知键、拒绝 YAML tag）、V4（interactive 位置）、V6（数值 >0）、V7（agents 文件存在性）、V9（model_candidates 格式）、V10（qa 早于 spec）、V8（step `kind` 取值集合；polyforge#169 删除了 step `kind` 这一概念，旧 bundle 快照里遗留的 `kind:` 作为未知键被忽略），以及「AIHub 创建时校验、`CORE-400` + `rule_id`」条款已删除：代码不执行它们（文档与代码冲突时以代码为准）。保留的规则沿用原编号，删除的编号不复用。「V4 命令取证门禁」（§4.4a）是结果信封门禁，与这里删掉的 frontmatter 规则 V4 只是同名，不受影响、继续执行。
 
 ### 4.2 参考流程（review 可处于任意位置） <!-- §4.2 -->
 
 vNext 自带参考 bundle `feature-full`（`workflows/feature-full/`），frontmatter `steps` 数组顺序为：
 
-1. `grill`（`kind: qa`，`interactive: true`，非 gate）
-2. `spec`（`kind: spec`；消费 `grill` 的问答记录产物）
-3. `grill-review`（`kind: qa`，`interactive: true` 且 `gate: true`；消费 `spec` 的产物；`on_fail: {target: spec}`）
-4. `plan`（`kind: author`；消费 `spec` 的产物）
-5. `e2e-author`（`kind: author`，`requires_command_evidence: true`；消费 `spec` 的产物，在 code 之前只为新行为编写端到端验收场景、提交，并在同一步内对实现前的树只跑这些作者文件，证明每个场景都是断言级红；输出 `baseline[]`）
-6. `code`（`kind: code`；消费 `plan` 的产物与 `e2e-author` 证明为红的验收 bar，经 inherit 交接续上 `e2e-author` 的会话）
-7. `verification`（`kind: gate`，`gate: true`；机器闸：跑完整测试 bar，并给出作者场景的逐场景结果；`on_fail: {target: code}`）
-8. `review`（`kind: review`，`gate: true`；读完整 diff（含测试提交）与 verification 报告做判断；`on_fail: {target: code}`）
-9. `deliver`（`kind: code`，`gate: true`，`requires_command_evidence: true`；合并、推送特性分支、PR；`on_fail: {target: code}`）
+1. `grill`（`interactive: true`，非 gate）
+2. `spec`（消费 `grill` 的问答记录产物）
+3. `grill-review`（`interactive: true` 且 `gate: true`；消费 `spec` 的产物；`on_fail: {target: spec}`）
+4. `plan`（消费 `spec` 的产物）
+5. `e2e-author`（`requires_command_evidence: true`；消费 `spec` 的产物，在 code 之前只为新行为编写端到端验收场景、提交，并在同一步内对实现前的树只跑这些作者文件，证明每个场景都是断言级红；输出 `baseline[]`）
+6. `code`（消费 `plan` 的产物与 `e2e-author` 证明为红的验收 bar，经 inherit 交接续上 `e2e-author` 的会话）
+7. `verification`（`gate: true`；机器闸：跑完整测试 bar，并给出作者场景的逐场景结果；`on_fail: {target: code}`）
+8. `review`（`gate: true`；读完整 diff（含测试提交）与 verification 报告做判断；`on_fail: {target: code}`）
+9. `deliver`（`gate: true`，`requires_command_evidence: true`；合并、推送特性分支、PR；`on_fail: {target: code}`）
 
 （polyforge#165：`e2e-baseline` 并入 `e2e-author`，`e2e-run` 并入 `verification`；所有交付 bundle 统一为 `… → verification → review → deliver`。）
 
 （2026-10-13 起 feature-full / bug-fix / quick-fix 不再含 `release` 槽位，见下方「发版独立成 bundle」。）
 
-**发版独立成 bundle（2026-10-13 裁定，取代下面三段 release 槽位 / dispatcher / deploy-face 的现行行为）**：feature-full、bug-fix、quick-fix 的 `release` step 已删除（chore 本来就没有）；发版与部署**只**经 `workflows/release/` 这个项目无关的 bundle 发生，作为单独的 WI 提交。三步：`release`（`kind: code`，`gate: true`：capsule 内 fetch 并重置到 origin 默认分支头、记录发版前远端 tag 列表、探测 `.polyforge/release.sh` 支持 `--verify`、跑 `.polyforge/release.sh [bump]`，bump 逐字取自 WI 目标；owner 规则不变——零 owner → **FAIL**（不再 defer：没有 procedure 的发版 WI 是错误）、恰一 owner → 执行、≥2 → FAIL `PF-RELEASE-AMBIGUOUS_OWNER`）→ `verify`（`kind: gate`，`gate: true`，fresh 上下文，不信任上一步：发版 commit 与 origin 头、新 tag 存在且指向发版 commit、发版前每个 tag 仍指向同一对象（不可变）、发版说明非空，最后 `release.sh --verify <version>`，全部命令取证）→ `deploy`（`kind: code`，`gate: true`：只部署 verify 通过并写入 `artifacts/verified-version.json` 的版本，绝不用 "latest"；owner 为携带 `.polyforge/deploy.sh` 的 repo，**零 owner → `defer`**，≥2 → FAIL，执行 `.polyforge/deploy.sh <v> --confirm <v>`；procedure 以新版本在线或已回滚结束，回滚 = step FAIL）。三步均声明 `requires_command_evidence: true`（V4 命令取证门禁保留在 driver：completed 结果不带合格 `command_evidence` 即被机械拒收），均不声明 frontmatter `inputs:`（polyforge#147 C5 已删该键）：上游产物（`artifacts/release-record.json`、`artifacts/verified-version.json`）按路径约定读取；三步均不声明 `on_fail`：失败即终止（`failed_gate`），不得 rewind 回 release——已发布的 tag / release / image 不可变，回退重发会撞版本或静默烧版本，重发由人另提新 WI。verdict 词汇（driver 的 release verdict binding 机械强制，作用于最小信封的 `output` 顶层字段，polyforge#147 C10 对该绑定的删除被本裁定取代）：`release` 为闭集 `[pass, fail]`（pass 欠非空 `version` 与至少一条 `artifacts_published`），`deploy` 为 `[pass, defer, fail]`（pass 欠非空 `version`），defer 只在 `deploy` 合法。原「deploy 永远只由人触发」的合同同时被取代：deploy procedure 现在由 release bundle 的 `deploy` step 触发，防线改为 `--confirm <version>`（必须等于位置参数版本）、服务器侧锁与失败自动回滚，均在 `.polyforge/deploy.sh` 内。
+**发版独立成 bundle（2026-10-13 裁定，取代下面三段 release 槽位 / dispatcher / deploy-face 的现行行为）**：feature-full、bug-fix、quick-fix 的 `release` step 已删除（chore 本来就没有）；发版与部署**只**经 `workflows/release/` 这个项目无关的 bundle 发生，作为单独的 WI 提交。三步：`release`（`gate: true`：capsule 内 fetch 并重置到 origin 默认分支头、记录发版前远端 tag 列表、探测 `.polyforge/release.sh` 支持 `--verify`、跑 `.polyforge/release.sh [bump]`，bump 逐字取自 WI 目标；owner 规则不变——零 owner → **FAIL**（不再 defer：没有 procedure 的发版 WI 是错误）、恰一 owner → 执行、≥2 → FAIL `PF-RELEASE-AMBIGUOUS_OWNER`）→ `verify`（`gate: true`，fresh 上下文，不信任上一步：发版 commit 与 origin 头、新 tag 存在且指向发版 commit、发版前每个 tag 仍指向同一对象（不可变）、发版说明非空，最后 `release.sh --verify <version>`，全部命令取证）→ `deploy`（`gate: true`：只部署 verify 通过并写入 `artifacts/verified-version.json` 的版本，绝不用 "latest"；owner 为携带 `.polyforge/deploy.sh` 的 repo，**零 owner → `defer`**，≥2 → FAIL，执行 `.polyforge/deploy.sh <v> --confirm <v>`；procedure 以新版本在线或已回滚结束，回滚 = step FAIL）。三步均声明 `requires_command_evidence: true`（V4 命令取证门禁保留在 driver：completed 结果不带合格 `command_evidence` 即被机械拒收），均不声明 frontmatter `inputs:`（polyforge#147 C5 已删该键）：上游产物（`artifacts/release-record.json`、`artifacts/verified-version.json`）按路径约定读取；三步均不声明 `on_fail`：失败即终止（`failed_gate`），不得 rewind 回 release——已发布的 tag / release / image 不可变，回退重发会撞版本或静默烧版本，重发由人另提新 WI。verdict 词汇（driver 的 release verdict binding 机械强制，作用于最小信封的 `output` 顶层字段，polyforge#147 C10 对该绑定的删除被本裁定取代）：`release` 为闭集 `[pass, fail]`（pass 欠非空 `version` 与至少一条 `artifacts_published`），`deploy` 为 `[pass, defer, fail]`（pass 欠非空 `version`），defer 只在 `deploy` 合法。原「deploy 永远只由人触发」的合同同时被取代：deploy procedure 现在由 release bundle 的 `deploy` step 触发，防线改为 `--confirm <version>`（必须等于位置参数版本）、服务器侧锁与失败自动回滚，均在 `.polyforge/deploy.sh` 内。
 
 **release step（发版钩子，定稿裁定）**〔已被 2026-10-13「发版独立成 bundle」取代，保留为历史〕：release 是 bundle 内的一个普通 step 槽位——平台零发版专用代码，全部复用既有 step 机器（inputs/output schema/worktree/预算/rewind/边界同步）。不新增 step kind：沿用 `code`（缺省，产生版本号 commit/tag 的 diff）或 `gate`（纯验证型发版），按项目自选；失败语义建议 `gate: true`——发版失败属业务判定，走既有有界 `on_fail` rewind。`agents/release.md` 是随参考 bundle 交付的模板骨架（版本号来源/构建/打 tag/上传目标/渠道晋升，全为 TODO 占位），各项目在各自 bundle 中自填——发版逻辑 per-project，多项目天然隔离。平台自身的发版（`aihub` 服务二进制与工作机二进制二产物）是同一钩子的一个实例，不另立发版模型；`pf upgrade` 只是消费已发布制品的部署管道（`07-deployment-pilot.md#§6`）。
 
@@ -168,7 +166,7 @@ vNext 自带参考 bundle `feature-full`（`workflows/feature-full/`），frontm
 - step 间数据流不入结构 schema（§4.1）：上游产物落 Capsule `artifacts/` 与 `execution.json` 的 `steps.<id>.output`（`03-execution-capsule.md#§4.2`），下游 step 的 agent 指令（§4.4 正文）按产物路径约定读取。grill 的问答记录（`artifacts/grill-qa.md`，§4.3）即按此约定被 `spec` 与 `grill-review` 消费。
 - `grill` 在 `spec` 之前、`grill-review` 在 `spec` 之后：两者都是普通 step，位置由数组顺序表达；两者的位置都由 bundle 作者在数组中排定（不校验），`grill-review`（`gate: true` 的 qa step）同理。
 - `grill-review` 是两段式 grill 的既定实现（不是待设计的回调）：其 PASS/FAIL 判定复用 §6.2 既有 rewind 机制；FAIL 且目标为 `spec` 时，FAIL 判定全文随目标 step 的输入一并送回（无条件），不引入任何新状态或恢复机制。
-- `review` 的位置自由度由 `kind: review` 表达（可插在任意合法位置）；WI 创建固化后，执行序即 frontmatter `steps` 数组顺序，运行时不再漂移。
+- `review` 的位置由 `steps` 数组顺序表达（可插在任意合法位置）；WI 创建固化后，执行序即 frontmatter `steps` 数组顺序，运行时不再漂移。
 
 ### 4.3 grill 的两段式行为 <!-- §4.3 -->
 
@@ -202,7 +200,7 @@ frontmatter 字段：
 | `output` | 硬必需 | JSON Schema；执行该 step 的 step agent 的最终输出必须是符合本 schema 的 JSON |
 | `model` | 禁止出现 | 模型选择是流程作者的决定，唯一载体是 workflow.md frontmatter 的 `model_candidates`（§4.1，INV-1g）；`model` 键不被读取 |
 
-不存在 `kind`/`phase`/`title`/`budget_hint` 或任何其他 frontmatter 字段：step 的 `kind`、调度与预算声明全部在 workflow.md frontmatter（§4.1），不在 step skill 内重复。
+不存在 `kind`/`phase`/`title`/`budget_hint` 或任何其他 frontmatter 字段：step 的调度与预算声明全部在 workflow.md frontmatter（§4.1），不在 step skill 内重复。
 
 **校验时机与生效**：AIHub 创建事务不解析 agents frontmatter——不做校验（§4.5，`02-aihub-core.md#§4.5`）；`internal/workflow/schema` 提供本表校验库，供 bundle 测试与执行侧告警使用，不阻塞创建；派发时由 harness 适配器按 `03-execution-capsule.md#§4.5` 的物化产物解析生效。
 
@@ -283,7 +281,7 @@ step 单次执行尝试的消耗；workflow 级上界限制整个 WI 生命周�
 
 1. 按执行图（frontmatter `steps` 数组顺序，V3 已保证其即执行序）逐个执行。
 2. 每个 step 执行完成后，其结果写入 Capsule 的 `runtime-state/execution.json`（`03-execution-capsule.md#§4`），随后按 `00-architecture.md#§4.3` 的四类触发时机之一提交一次同步发布。
-3. `kind: review` 的 step 已在创建时定位于数组内的固定位置（V8），运行时不再跳转或漂移。
+3. `review` step 已在创建时定位于数组内的固定位置（V3），运行时不再跳转或漂移。
 
 ### 6.2 业务 gate FAIL → 有界 on_fail rewind <!-- §6.2 -->
 
@@ -368,7 +366,7 @@ step 单次执行尝试的消耗；workflow 级上界限制整个 WI 生命周�
 
 ## 9. 监控 <!-- §9 -->
 
-- 按 step `kind` 分桶的 step 时长分布。
+- 按 step id 分桶的 step 时长分布。
 - gate FAIL 发生率；rewind 次数分布（相对 `max_total` 的占用比例）。
 - 基础设施失败触发的 resume 次数（持续偏高提示环境不稳定，而非 workflow 设计问题）；候选切换次数分布（相对各 step 生效候选列表长度的占用比例）。
 - `OVER_BUDGET`（`WF-103`）触发次数，按维度（requests/tokens/wall_minutes）与层级（step/workflow）分列。

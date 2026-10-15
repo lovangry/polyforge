@@ -56,9 +56,16 @@ no user file is ever written — the user pastes the snippet.
 
 ## Workspace yaml
 
-`pf doctor` reads cli.toml only. A workspace's `.polyforge.yaml` (per-project
-model candidates) is validated by the daemon before each claim, not by
-doctor: an invalid file shows up as a DAEMON-414 refusal on `pf submit`.
+The `workspace yaml` check loads every mapped workspace's `.polyforge.yaml`
+with the daemon's own loader, so it fails exactly where a claim would be
+refused (DAEMON-414): a malformed shape (each entry is
+`steps.<project>.<default|step-id>: { models: [...] }`), a leftover
+pre-#169 top-level `models:` section (with the migration hint), a step id
+not in the daemon's installed workflows, or a project cli.toml does not
+map to that workspace. Step ids are judged against the workflows dir the
+daemon reports on its socket; with the daemon down (or too old to report
+it) the check is a `warn`, never a faked pass. No mapped workspace
+carrying a yaml is a pass.
 
 ## Success
 

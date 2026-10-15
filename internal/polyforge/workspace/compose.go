@@ -8,22 +8,22 @@ package workspace
 //
 // The chain, outermost first (five levels):
 //
-//	manual `pf submit --models` > yaml models.<project>.<kind> >
-//	bundle step-level model_candidates > yaml models.<project>.default >
+//	manual `pf submit --models` > yaml steps.<project>.<step-id>.models >
+//	bundle step-level model_candidates > yaml steps.<project>.default.models >
 //	bundle defaults.model_candidates
 //
 // A step's own list outranks the project yaml `default` (polyforge#164,
 // H10): the yaml default is the project's fallback for steps that make
 // no choice of their own, so a bundle step that pins its model (e.g. an
 // Opus-first root-cause, a flash-first verification) keeps it. A yaml
-// kind list still overrides the step — it is the project's explicit
-// per-kind decision.
+// step-id list still overrides the step — it is the project's explicit
+// per-step decision.
 //
 // The manual list is the per-work-item level: when present it is the
 // candidate chain of EVERY step of that work item.
 //
-// The kind is the step's V8 KIND, not its id — a `code` list governs
-// EVERY kind:code step of the bundle. Resolution is non-merge: the first
+// The key is the step id: a `fix` list governs the `fix` step of every
+// bundle that has one. Resolution is non-merge: the first
 // PRESENT level wholly replaces the others. Presence is "declared": a
 // declared-but-empty list is a PRESENT level that governs — it yields no
 // switchable chain (the harness adapter's default model stays in
@@ -69,7 +69,7 @@ func ComposeCandidates(fm *workflow.Frontmatter, cfg *Config, project string, ma
 // composeStep resolves one step's effective list through the chain; pm
 // is the claimed project's yaml entry (nil when it has none).
 func composeStep(fm *workflow.Frontmatter, pm map[string][]string, s workflow.FrontmatterStep) []string {
-	if list, ok := pm[s.Kind]; ok {
+	if list, ok := pm[s.ID]; ok {
 		return list
 	}
 	if s.ModelCandidates != nil {

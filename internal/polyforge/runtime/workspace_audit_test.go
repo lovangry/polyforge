@@ -48,7 +48,7 @@ func newAuditRuntime(t *testing.T, repos []api.ProjectRepo) (*Runtime, string) {
 	sp := &scriptedSpawner{}
 	cfg := Config{
 		MachineID:     "m-test",
-		Mapping:       mappingFor(ws, "proj"),
+		Mapping:       mappingFor(ws, "proj", "other"),
 		DataDir:       filepath.Join(t.TempDir(), "data"),
 		AgentStarter:  scriptedEngineStarter(sp),
 		MaxRecoveries: 2,
@@ -71,7 +71,7 @@ func newAuditRuntime(t *testing.T, repos []api.ProjectRepo) (*Runtime, string) {
 // dead-code sweep.
 func TestGovernedClaimWritesAuditRecord(t *testing.T) {
 	r, ws := newAuditRuntime(t, nil)
-	writeWorkspaceYaml(t, ws, "models:\n  proj:\n    default: [w79/flow-a, w79/flow-b]\n")
+	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    default: { models: [w79/flow-a, w79/flow-b] }\n")
 
 	if err := r.Start(context.Background(), "wi_w079aud"); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -88,11 +88,11 @@ func TestGovernedClaimWritesAuditRecord(t *testing.T) {
 	}
 }
 
-// A yaml that lists only ANOTHER project, and a no-yaml claim, record NO
+// A yaml that lists only ANOTHER (mapped) project, and a no-yaml claim, record NO
 // audit content — the legacy fields (including the Repos name→SHA
 // baselines) are unchanged.
 func TestUngovernedClaimWritesNoAuditContent(t *testing.T) {
-	for _, yaml := range []string{"", "models:\n  other:\n    default: [w79/x]\n"} {
+	for _, yaml := range []string{"", "steps:\n  other:\n    default: { models: [w79/x] }\n"} {
 		registryURL, remoteHead := w079Remote(t, "registry.txt", "registry marker\n")
 		r, ws := newAuditRuntime(t, []api.ProjectRepo{{Name: "w079reg", URL: registryURL}})
 		if yaml != "" {
