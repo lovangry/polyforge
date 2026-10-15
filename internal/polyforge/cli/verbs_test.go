@@ -148,8 +148,10 @@ func TestVerbFileShowAndEditRequestShape(t *testing.T) {
 	if code, _, stderr := runPf(t, env, "file", "show", "wi_abc"); code != 0 {
 		t.Fatalf("show: code=%d stderr=%s", code, stderr)
 	}
-	if got := rec.last(); got.Method != "GET" || got.Path != "/api/v1/work-items/wi_abc" {
-		t.Errorf("show request = %s %s", got.Method, got.Path)
+	// The human face reads the record, then its dependency block (#161).
+	if all := rec.all(); len(all) != 2 || all[0].Method != "GET" || all[0].Path != "/api/v1/work-items/wi_abc" ||
+		all[1].Method != "GET" || all[1].Path != "/api/v1/work-items/wi_abc/dependencies" {
+		t.Errorf("show requests = %+v", all)
 	}
 
 	if code, _, stderr := runPf(t, env, "file", "edit", "wi_abc", "--priority", "low"); code != 0 {

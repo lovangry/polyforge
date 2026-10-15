@@ -11,6 +11,7 @@ package driver
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -28,15 +29,12 @@ defaults:
   model_candidates: [prov/a, prov/b]
 steps:
   - id: grill
-    kind: spec
     context_policy: fresh
     handoff: true
   - id: fix
-    kind: code
     context_policy: inherit
     handoff: true
   - id: verification
-    kind: gate
     gate: true
     context_policy: fresh
     on_fail: { target: fix }
@@ -177,7 +175,7 @@ func TestValidateStepIdentity(t *testing.T) {
 		t.Fatal("nil workflow must be refused")
 	}
 	// missing id
-	wf, err = parseWorkflow([]byte("steps:\n  - { kind: code }\n"))
+	wf, err = parseWorkflow([]byte("steps:\n  - { gate: true }\n"))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -238,19 +236,23 @@ func TestNewSurfacesWorkflowParseError(t *testing.T) {
 	}
 }
 
-// TestValidateKindVocabulary (#118): a declared kind outside the closed
-// vocabulary is refused at load; an undeclared kind is legal.
-func TestValidateKindVocabulary(t *testing.T) {
-	wf, err := parseWorkflow([]byte("steps:\n  - { id: s, kind: coder }\n"))
+// TestLoadWorkflowIgnoresRetiredKind (polyforge#169): the step `kind`
+// is retired, but a bundle snapshot materialized before the change (an
+// existing capsule recovered by the same daemon) still carries it — the
+// load must succeed and parse exactly like the kind-free bundle.
+func TestLoadWorkflowIgnoresRetiredKind(t *testing.T) {
+	dir := t.TempDir()
+	old := "---\nsteps:\n  - { id: fix, kind: code, context_policy: inherit }\n  - { id: verification, kind: gate, gate: true, context_policy: fresh, on_fail: { target: fix } }\n---\n"
+	if err := os.WriteFile(filepath.Join(dir, "workflow.md"), []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wf, err := LoadWorkflow(dir)
 	if err != nil {
-		t.Fatalf("parse: %v", err)
+		t.Fatalf("an old snapshot carrying kind: must load, got %v", err)
 	}
-	if err := validateWorkflow(wf); err == nil || !strings.Contains(err.Error(), `unknown kind "coder"`) {
-		t.Fatalf("a misspelled kind must be refused, got %v", err)
-	}
-	wf = mustParseExt(t, "steps:\n  - { id: s, kind: author }\n  - { id: t }\n")
-	if wf.step("s").Kind != "author" || wf.step("t").Kind != "" {
-		t.Fatalf("kind parse: %+v", wf.Steps)
+	want := mustParseExt(t, "steps:\n  - { id: fix, context_policy: inherit }\n  - { id: verification, gate: true, context_policy: fresh, on_fail: { target: fix } }\n")
+	if !reflect.DeepEqual(wf, want) {
+		t.Fatalf("kind-carrying parse %+v differs from the kind-free %+v", wf, want)
 	}
 }
 

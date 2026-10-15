@@ -57,7 +57,8 @@ EXTENDED_GLOB and starts a comment after whitespace.
 
 | Intent (EN / 中文) | Fragment | Face |
 |---|---|---|
-| file a new work item / create a ticket / new task / 建票 / 新建任务 / 提个需求 | `verbs/file.md` (create) | AIHub |
+| file a new work item / create a ticket / new task / 建票 / 新建任务 / 提个需求 | `verbs/file.md` (create; check `pf queue --project P` first and add `--after <execution ticket>` when it clearly touches the same work as a queued/running one) | AIHub |
+| run it after X / this waits for X / drop that dependency / who is it waiting for / 等 X 做完再做 / 加依赖 / 去掉依赖 / 它在等谁 | `verbs/file.md` (`dep add` / `dep rm` / `dep list`) | AIHub |
 | edit a work item / update goal or content / 改一下目标 / 编辑这个票 / 更新优先级 | `verbs/file.md` (edit) | AIHub |
 | show me this work item / 看看这个票 / 详情 | `verbs/file.md` (show) | AIHub |
 | what's ready / what can I claim today / show the queue / 今天有什么活 / 就绪队列 | `verbs/queue.md` | AIHub |
@@ -216,9 +217,11 @@ Five standing rules, binding on every polyforge session:
    executor, specify the outcome plus its acceptance criteria — never an
    execution path.
 5. **Workspace model pinning lives in `.polyforge.yaml`.** A workspace
-   root may carry a `.polyforge.yaml` whose only section is `models`:
-   per project, a `default` candidate list and/or per-step-kind lists
-   (kinds `qa`, `spec`, `author`, `code`, `gate`, `review`). The daemon
+   root may carry a `.polyforge.yaml` whose only section is `steps`: per
+   project, a `default` entry and/or entries keyed by step id (`fix`,
+   `code`, `review`, ... — a key must be a step id of the installed
+   workflows), each `{ models: [...] }` (`models` is an entry's only key).
+   The daemon
    reads it fresh before every claim; an invalid file refuses the claim
    (DAEMON-414) WITHOUT claiming — the work item stays queued for other
    machines. The repo inventory and clone URLs always come from the aihub

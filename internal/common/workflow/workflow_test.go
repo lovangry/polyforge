@@ -18,9 +18,7 @@ defaults:
   model_candidates: [prov-a/model-a1, prov-a/model-a2, prov-b/model-b1]
 steps:
   - id: draft
-    kind: author
   - id: gate
-    kind: gate
     model_candidates: [prov-b/model-b2]
 ---
 
@@ -105,15 +103,50 @@ func TestReadFrontmatterAbsentConditions(t *testing.T) {
 	}
 }
 
-// TestKindVocabulary pins the closed step-kind set the driver validates
-// bundle kinds against and the workspace loader validates per-kind keys
-// against.
-func TestKindVocabulary(t *testing.T) {
-	want := "qa spec author code gate review"
-	if got := strings.Join(KindVocabulary, " "); got != want {
-		t.Fatalf("kind vocabulary %q, want %q", got, want)
+// TestStepIDs pins the legal per-step keys of the workspace yaml: the
+// union of the step ids of the installed bundles. A bundle snapshot still
+// carrying the retired `kind:` reads unchanged; a torn bundle contributes
+// nothing; an unreadable dir is an error.
+func TestStepIDs(t *testing.T) {
+	dir := t.TempDir()
+	write := func(bundle, body string) {
+		if err := os.MkdirAll(filepath.Join(dir, bundle), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, bundle, "workflow.md"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if !ValidKind("gate") || ValidKind("") || ValidKind("verify") {
-		t.Fatal("ValidKind must accept exactly the vocabulary")
+	write("a", "---\nsteps:\n  - { id: fix, kind: code }\n  - { id: review, kind: review }\n---\n")
+	write("b", "---\nsteps:\n  - { id: fix }\n  - { id: deploy }\n---\n")
+	write("torn", "---\nsteps: [unclosed\n---\n")
+	ids, err := StepIDs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 3 || !ids["fix"] || !ids["review"] || !ids["deploy"] {
+		t.Fatalf("step ids = %v, want fix, review, deploy", ids)
+	}
+	if _, err := StepIDs(filepath.Join(dir, "missing")); err == nil {
+		t.Fatal("an unreadable workflows dir must be an error")
+	}
+}
+
+// TestShippedBundlesCarryNoKind: the step `kind` concept is retired
+// (polyforge#169); no shipped bundle may still declare it.
+func TestShippedBundlesCarryNoKind(t *testing.T) {
+	paths, _ := filepath.Glob("../../../workflows/*/workflow.md")
+	if len(paths) == 0 {
+		t.Fatal("no shipped bundles found")
+	}
+	for _, p := range paths {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		front, _, _ := SplitFrontmatter(raw)
+		if strings.Contains(string(front), "kind:") {
+			t.Errorf("%s: frontmatter still declares the retired step kind", p)
+		}
 	}
 }

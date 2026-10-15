@@ -128,6 +128,25 @@ the v2.4.x DDL. `deploy/sql/v2.5.0/probe.sql` answers 0 when the table is
 gone and the column exists (a database created by v2.5.0 is already in
 that shape).
 
+## Work item dependencies (polyforge#161)
+
+**Deploy aihub before upgrading the CLI.** `pf file create --after` sends
+its blockers in the create body (`after: [...]`); an older aihub ignores
+the unknown key and files the work item WITHOUT the dependency, silently.
+`pf file dep add|rm|list` and `pf file show` use endpoints every aihub
+already has.
+
+- Semantics change: only a **wrapped** blocker releases its dependent. A
+  failed or canceled blocker now keeps the dependent queued (before, any
+  terminal status released it); remove the edge with `pf file dep rm` to
+  proceed. Production held 0 dependency rows, so nothing existing changes.
+- A `blocks` blocker must be an execution ticket (bundle bound);
+  re-adding an existing edge is a no-op instead of a CORE-500.
+- No window SQL: the new index `idx_dep_blocked` is in the DDL that
+  `core.Open` runs on every start (`CREATE INDEX IF NOT EXISTS`), so it is
+  built on the first boot of the new server. An older server ignores it,
+  so a rollback needs nothing either.
+
 ## Optional: stale `waiting_on` cleanup (manual, NOT in the window)
 
 The server's `waiting_on` value domain dropped the `gate` and
@@ -147,7 +166,8 @@ WHERE waiting_on = 'gate' OR waiting_on LIKE 'runtime:%';
 ## No auto migration
 
 `core.Open` never rewrites an existing database: the DDL is
-`CREATE TABLE IF NOT EXISTS` and gains nothing else. An old-schema
+`CREATE TABLE/INDEX IF NOT EXISTS` — a missing table or index is created,
+nothing existing is altered (no column is added or changed). An old-schema
 database is not repaired at boot, and the new server cannot create
 projects on it (the dead `projects.identifier_hash NOT NULL` column has
 no default). The upgrade is always the deploy.sh window SQL described
@@ -273,3 +293,168 @@ Therefore update the workflows checkout only when no `feature-full` work
 item is claimed and unfinished (queued ones are fine: they have no
 `execution.json` yet), or accept that a blocked one must be re-filed.
 `pf queue` lists them.
+
+## Step `kind` removed; `.polyforge.yaml` is `steps.<project>.<step-id>.models` (polyforge#169)
+
+The step `kind` (`qa`/`spec`/`author`/`code`/`gate`/`review`) is gone: the
+shipped bundles no longer declare it and the driver no longer validates
+it. Its only use was grouping steps for the workspace yaml's model lists.
+The workspace yaml is now keyed by **step id**, under a new top-level
+`steps:` section:
+
+```yaml
+# Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
+steps:
+  <project>:
+    default:   { models: [...] }
+    <step-id>: { models: [...] }
+```
+
+A step-id key governs the step with that id in every bundle that has one
+(`fix` covers bug-fix's and quick-fix's `fix`). A step entry's only key
+is `models` for now (any other key — `harness` included — is refused,
+naming it). YAML anchors and aliases work as usual
+(`models: &x [...]`, `{ models: *x }`).
+
+**No backward compatibility — edit all three workspace files together
+with the deploy.** A file that still has the top-level `models:` section
+is refused at every claim (DAEMON-414: "top-level `models:` was replaced
+by `steps:` (polyforge#169) — move models.<project>.<key>: [...] to
+steps.<project>.<key>.models: [...] (see docs/upgrade.md)"), the work
+item stays queued, and `pf doctor` reports the same under `workspace
+yaml`. Deploying this version therefore requires rewriting osp-ws,
+gmi-ws and yf-ws's `.polyforge.yaml` (below) at the same time; until a
+file is rewritten, no work item of that workspace's projects is claimed
+on that machine.
+
+Typo protection: every non-`default` key must be a step id of the
+workflows the daemon runs (its `--workflows-dir`). Any other key refuses
+the claim with DAEMON-414 before anything is claimed — the work item
+stays queued — and `pf doctor` names every unknown key
+(`steps.<project>.<key>`). A workflows dir with no readable bundle
+refuses with "no workflows found in <dir>". So a retired kind that is
+not also a step id (`qa`, `author`, `gate`) refuses; `code`, `spec` and
+`review` load but mean only the step with that id. Likewise every
+project key under `steps:` must be a project cli.toml maps to that
+workspace, and a `models` list's ids are trimmed and must be non-empty,
+unique strings (the `pf submit --models` rules) written as plain
+strings — numbers, YAML tags and aliased items (`[&m a, *m]`) are
+refused. YAML merge keys (`<<`) are refused at every level; share lists
+with anchors instead (`models: &x [...]` / `{ models: *x }`, as in the
+blocks below). The file must hold exactly one YAML document.
+
+Step-id keys are checked against the workflows dir at every claim, not
+once: before deploying a workflows release that removes or renames a
+step id named in a workspace yaml, delete or rename that key first
+(`pf doctor` flags it) — otherwise every claim in that workspace is
+refused (DAEMON-414), and a work item whose claim was already open when
+the daemon restarted (claiming-journal replay) ends `blocked` instead.
+The same holds for the `models:` → `steps:` rewrite above.
+
+Old bundle snapshots: a capsule claimed before the upgrade carries a
+materialized bundle whose frontmatter still says `kind: …`. The parser
+ignores the field, so same-daemon recovery of such a capsule loads it
+unchanged. The model lists such a work item uses were composed at claim
+time and snapshotted, so it keeps them (recovery never re-reads the
+yaml).
+
+### Old kind → step ids (current bundles)
+
+| old kind | step ids it covered |
+|---|---|
+| `qa` | `grill` (feature-full), `grill-review` (feature-full), `root-cause` (bug-fix) |
+| `spec` | `spec` (feature-full), `grill` (quick-fix) |
+| `author` | `plan` (feature-full, chore), `e2e-author` (feature-full) |
+| `code` | `code` (feature-full, chore), `repro` (bug-fix), `fix` (bug-fix, quick-fix), `deliver` (feature-full, bug-fix, chore, quick-fix), `release`, `deploy` (release) |
+| `gate` | `verification` (feature-full, bug-fix, chore, quick-fix), `verify` (release) |
+| `review` | `review` (feature-full, bug-fix, chore) |
+
+`grill` is one key for both lanes (it was `qa` in feature-full and `spec`
+in quick-fix).
+
+### The three workspaces
+
+All three declare only `default` and `code` today, in the old `models:`
+shape. Besides the shape change, the old `code:` (a kind) covered every
+kind:code step; as a step id it governs only the `code` step
+(feature-full, chore). To keep today's behaviour, give each old kind:code
+step id (`code`, `fix`, `repro`, `deliver`, `release`, `deploy`) the same
+list through a YAML anchor. Note that today the `code` list also
+overrides `release` and `deploy`'s own bundle pins
+(`[sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5]`); dropping
+those two keys lets the bundle pins govern instead. Replace each file's
+header precedence comment (it states the pre-#164 order `project <kind>
+> project default > workflow step model_candidates`) with the line below.
+
+osp-ws (`/root/code/aicoding/osp-ws/.polyforge.yaml`):
+
+```yaml
+# Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
+steps:
+  polyforge:
+    default: { models: &osp-default [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra] }
+    code: { models: &osp-code [sub2api-glm/glm-5.3, sub2api-glm/glm-5.3-flash, sub2api-claude/pi-claude-opus-5] }
+    fix: { models: *osp-code }
+    repro: { models: *osp-code }
+    deliver: { models: *osp-code }
+    release: { models: *osp-code }
+    deploy: { models: *osp-code }
+  pi:
+    default: { models: *osp-default }
+    code: { models: *osp-code }
+    fix: { models: *osp-code }
+    repro: { models: *osp-code }
+    deliver: { models: *osp-code }
+    release: { models: *osp-code }
+    deploy: { models: *osp-code }
+  tsshd:
+    default: { models: *osp-default }
+    code: { models: *osp-code }
+    fix: { models: *osp-code }
+    repro: { models: *osp-code }
+    deliver: { models: *osp-code }
+    release: { models: *osp-code }
+    deploy: { models: *osp-code }
+```
+
+gmi-ws (`/root/code/aicoding/gmi-ws/.polyforge.yaml`):
+
+```yaml
+# Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
+steps:
+  ieops:
+    default: { models: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra] }
+    code: { models: &gmi-code [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+    fix: { models: *gmi-code }
+    repro: { models: *gmi-code }
+    deliver: { models: *gmi-code }
+    release: { models: *gmi-code }
+    deploy: { models: *gmi-code }
+```
+
+(gmi-ws's code list equals the release bundle's own `release`/`deploy`
+pins, so dropping those two keys changes nothing there. Also remove its
+2026-10-14 header note that flash "stays eligible for lighter kinds via
+the other chains": kinds no longer exist; flash is eligible wherever a
+list naming it governs.)
+
+yf-ws (`/root/code/aicoding/yf-ws/.polyforge.yaml`):
+
+```yaml
+# Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
+steps:
+  yingfang:
+    default: { models: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra] }
+    code: { models: &yf-code [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+    fix: { models: *yf-code }
+    repro: { models: *yf-code }
+    deliver: { models: *yf-code }
+    release: { models: *yf-code }
+    deploy: { models: *yf-code }
+```
+
+(yf-ws's header also says "a project default overrides even steps that
+pin their own models" — untrue since polyforge#164; drop it with the old
+precedence comment.)
+
+Run `pf doctor` after the edit: `workspace yaml` must pass.

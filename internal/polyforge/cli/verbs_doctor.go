@@ -12,6 +12,8 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
+	"github.com/silgrid/polyforge/internal/polyforge/mapping"
+	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // verbs_doctor.go: `pf doctor` — the daemon's single health face
@@ -27,6 +29,11 @@ import (
 //     aihub, named with its workspace on a miss; the inverse-ambiguity
 //     and duplicate refusals surface through the config check, which
 //     names both workspaces);
+//   - workspace yaml: every mapped workspace's .polyforge.yaml loads
+//     through the daemon's own loader, its per-step model keys checked
+//     against the step ids of the workflows the daemon runs (the
+//     workflows dir GET /status reports) — the same refusal a claim
+//     would meet (DAEMON-414), surfaced before any claim;
 //   - the connectivity family: server reach (any HTTP answer proves it),
 //     daemon socket (GET /status over the UDS), auth (a signed aihub
 //     read getting past the key boundary — the same read face the
@@ -64,6 +71,7 @@ const (
 	docChConfig   = "config"
 	docChMapping  = "workspace mapping"
 	docChDirs     = "workspace dirs"
+	docChYaml     = "workspace yaml"
 	docChProjects = "aihub projects"
 	docChServer   = "server reach"
 	docChSocket   = "daemon socket"
@@ -136,7 +144,7 @@ func runDoctorChecks(ctx *Context) doctorReport {
 	cfg, err := LoadConfig(ctx.ConfigPath)
 	if err != nil {
 		add(docChConfig, "fail", err.Error()+" — see the install docs for the migration steps")
-		for _, name := range []string{docChMapping, docChDirs, docChProjects, docChServer, docChSocket, docChAuth} {
+		for _, name := range []string{docChMapping, docChDirs, docChYaml, docChProjects, docChServer, docChSocket, docChAuth} {
 			add(name, "skip", "config-dependent check not run: the config could not be loaded")
 		}
 		checks = append(checks, harnessDisplayChecks()...)
@@ -181,8 +189,15 @@ func runDoctorChecks(ctx *Context) doctorReport {
 	add(docChServer, passOrFail(reachOK), reachDetail)
 
 	// Daemon socket: independent of aihub.
-	sockOK, sockDetail := probeDaemonSocket(cfg.DaemonSocket)
+	sockOK, sockDetail, workflowsDir := probeDaemonSocket(cfg.DaemonSocket)
 	add(docChSocket, passOrFail(sockOK), sockDetail)
+
+	if cfg.Mapping.Empty() {
+		add(docChYaml, "skip", "not run: the mapping is absent")
+	} else {
+		st, detail := workspaceYamlCheck(cfg.Mapping, workflowsDir, sockOK)
+		add(docChYaml, st, detail)
+	}
 
 	// Auth + project knowledge ride the aihub PROJECT read (the same
 	// face the CLI uses; no admin-only surface). Reachability gates both:
@@ -261,17 +276,44 @@ func probeServerReach(server string) (bool, string) {
 	return true, fmt.Sprintf("aihub server %s answered (HTTP %d)", server, resp.StatusCode)
 }
 
-// probeDaemonSocket dials the daemon's UDS face and asks GET /status.
-func probeDaemonSocket(sock string) (bool, string) {
+// probeDaemonSocket dials the daemon's UDS face and asks GET /status;
+// it also answers the workflows dir the daemon reports ("" when none).
+func probeDaemonSocket(sock string) (bool, string, string) {
 	c := NewDaemonClient(sock)
 	c.HTTP.Timeout = 5 * time.Second
 	raw, err := c.Status()
 	if err != nil {
-		return false, fmt.Sprintf("daemon socket %s does not answer GET /status: %v — is the daemon running?", sock, err)
+		return false, fmt.Sprintf("daemon socket %s does not answer GET /status: %v — is the daemon running?", sock, err), ""
 	}
-	var st struct {
-		MachineID string `json:"machine_id"`
-	}
+	var st StatusResponse
 	_ = json.Unmarshal(raw, &st)
-	return true, fmt.Sprintf("daemon socket %s answers (daemon %s)", sock, st.MachineID)
+	return true, fmt.Sprintf("daemon socket %s answers (daemon %s)", sock, st.MachineID), st.WorkflowsDir
+}
+
+// workspaceYamlCheck loads every mapped workspace's .polyforge.yaml the
+// way a claim does. Without the daemon's workflows dir the per-step keys
+// cannot be judged: a yaml that otherwise loads is a warn, never a pass.
+func workspaceYamlCheck(m *mapping.Plan, workflowsDir string, daemonUp bool) (string, string) {
+	var fails []string
+	present := 0
+	for _, ws := range m.Workspaces() {
+		if _, err := os.Stat(workspace.PathFor(ws)); err != nil {
+			continue
+		}
+		present++
+		if _, err := workspace.Load(ws, workflowsDir, m.ProjectsOf(ws)); err != nil {
+			fails = append(fails, err.Error())
+		}
+	}
+	switch {
+	case len(fails) > 0:
+		return "fail", strings.Join(fails, "; ") + " — a claim of these projects is refused (DAEMON-414) until fixed"
+	case present == 0:
+		return "pass", "no mapped workspace carries a " + workspace.FileName
+	case workflowsDir == "" && !daemonUp:
+		return "warn", fmt.Sprintf("%d %s file(s) parse, but the per-step keys are unchecked: the daemon is unreachable, so its workflows dir is unknown", present, workspace.FileName)
+	case workflowsDir == "":
+		return "warn", fmt.Sprintf("%d %s file(s) parse, but the per-step keys are unchecked: the daemon reported no workflows dir (an older daemon?)", present, workspace.FileName)
+	}
+	return "pass", fmt.Sprintf("%d %s file(s) load; every per-step key is a step id of %s", present, workspace.FileName, workflowsDir)
 }

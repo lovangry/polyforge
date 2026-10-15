@@ -68,7 +68,7 @@
 ### 2.4 assignee / waiting_on（权威定义） <!-- §2.4 -->
 
 - **assignee**：当前对 WI 拥有执行权的身份（human 或 machine 的 user id）；活跃 generation 行的 owner 即当前 assignee。历史 assignee 可从 `owner_generations` 追溯。
-- **waiting_on**：WI 当前等待的对象，正交于状态机的状态标注，取值域：`owner`（等人决策/输入）、`runtime:<machine_id>`（等机器恢复）、`dependency:<wi_id>`（等依赖 WI）、`gate`（等业务闸判定，短暂）、空值（无需等待）。`waiting_on` 非空是「被阻塞」的可见信号；就绪队列据此过滤（§5.1）。
+- **waiting_on**：WI 当前等待的对象，正交于状态机的状态标注，人工/客户端写入（`PATCH`），取值域：`owner`（等人决策/输入）、`dependency:<slug>`（人工注记的等待对象）、空值（无需等待）；`gate` 与 `runtime:*` 已删除（polyforge#149）。`waiting_on` 非空是「被阻塞」的可见信号；就绪队列据此过滤（§5.1）。`blocks` 依赖边**不**写 `waiting_on`：依赖等待由派生只读字段 `waiting_for` 呈现（§4.2a）。
 
 ### 2.5 状态机（WI 生命周期，Core 权威） <!-- §2.5 -->
 
@@ -185,14 +185,20 @@ CREATE TABLE wi_dependencies (
 );
 ```
 
-**kind 语义**：`blocks`——blocking 未终态时 blocked 不入就绪队列（blocked WI 的 `waiting_on` 取值 `dependency:<wi_id>`（§2.4）以本表对应 `blocks` 边为其持久化依据）；`supersedes`——新 WI 取代旧 WI；`related`——纯关联标注，无调度语义。两端不得为同一 WI（`CORE-400`）。
+**kind 语义**：`blocks`——blocking 未 `wrapped` 时 blocked 不入就绪队列、认领被拒（`CORE-409 DEPENDENCY_BLOCKED`）；边本身就是依赖等待的唯一持久化，不物化 `waiting_on`、不迁移状态；`supersedes`——新 WI 取代旧 WI；`related`——纯关联标注，无调度语义。两端不得为同一 WI（`CORE-400`）。
 
 **写路径约束（SQLite DDL 无法表达跨表/条件自引用约束，全部在创建/删改边事务内强制）**：
 
 - **同 project 硬边界**：边两端必须属于同一 project；跨 project 依赖边一律拒绝（`CORE-400`）。无调用方可见性的 project 中的 WI 本身不可见（§4.10），不会成为边端。
 - **防环**：`blocks` 边写入前，在既有 `blocks` 边集合上做有向可达性检测，会构成有向环（含自环）→ `CORE-409`（`reason=DEPENDENCY_CYCLE`）；`supersedes` 边同样检测（supersedes 链不得成环）；`related` 无方向语义，不参与环检测。
-- **父不可依赖子**：任一端为 epic 父票、另一端为其直接子票（经 `work_items.parent_id` 关联）的任何 `kind` 边一律拒绝（`CORE-400`，`reason=PARENT_CHILD_DEPENDENCY`）：父票不得依赖其子票，子票也不得以依赖边反向引用父票——依赖边不得用于回绕 epic 层级。
+- **blocker 必须是执行票（polyforge#161）**：`blocks` 边的 blocking 方必须已绑 bundle（`bundle_name` 非空）；登记票与 epic 父票（父票恒为登记票，§4.4）永远不会 `wrapped`，以其为 blocker 一律拒绝（`CORE-400`，`reason=BLOCKER_NOT_EXECUTABLE`，「先绑 bundle」）。这也覆盖「子票等其 epic 父票」的情形；不另设父子专用规则。对称地，仍是任一 `blocks` 边 blocker 的 WI 不得解绑 bundle（`PATCH bundle_name=null` → `CORE-400`，`reason=BLOCKER_STILL_BLOCKS`，列出被阻塞票，先删边）；改绑另一 bundle 仍允许。
+- **幂等**：重复添加已存在的边是 no-op，答复当前依赖视图。
+- **不做存在性探测**：建边/删边/建票 `after` 中指向调用方不可读 project 的 WI，与不存在的 WI 答同一 `CORE-404`（`work item <ref>`）。
 - 删除边即物理删除行；依赖关系变更不新增 `wi_events` 事件类型（`§5.1a` 枚举不变）。
+- **只有 wrapped 放行（polyforge#161）**：blocker 为 `failed`/`canceled` 时 blocked 继续等待，不自动放行；只想表达先后顺序时由人删边（`pf file dep rm`）——删边就是覆盖，不设 `--force`。手动 `pf submit` 被阻塞的票同样被认领拒绝，票留在 `queued`。
+- **等待可见（只读派生）**：WI 视图（详情与列表）带 `waiting_for: [{slug, status}]`——仅 `queued` WI 的未 wrapped `blocks` blocker，不落库、不是状态，就绪队列分段不变。列边端点的每条边带对方的 `slug` 与 `status`；建边/删边的两端（path `{id}`、body `blocking_wi_id`、path `{blocking_id}`）均接受 id 或 slug。
+- **建票即建边**：`POST /api/v1/work-items` 的 body 可带 `after: [id|slug, ...]`（≤20）；每项按上述规则（解析 slug、同 project、blocker 必须是执行票）在建票事务内校验并写入 `blocks` 边，任一项不合法 → 整个建票被拒（类型化错误），什么都不写。新票没有出边，建票时不可能成环。
+- **CLI 面**：`pf file create --after <id|slug>`（可重复，随建票 body 发送，原子）、`pf file dep add <blocking> <blocked>` / `rm` / `list <id>`、`pf file show` 渲染依赖块。CLI 只开放 `blocks`；`supersedes`/`related` 服务端暂留、无 CLI 入口。
 
 **`parent_id`（epic-lite）约束（写路径强制）**：
 
@@ -524,7 +530,7 @@ F 组管理面（users/api-keys/projects CRUD + admin/backup + service/rotate-se
 | M4 | POST | `/api/v1/admin/backup` | 人（admin）经 `pf` 管理 CLI | 按需触发 `<data_dir>/backups` 快照（§11 每日热备之外的显式触发入口） | CORE-403 / CORE-507 |
 | M5 | POST | `/api/v1/service/rotate-secret` | 人（admin）经 `pf` 管理 CLI / 启动自检自动触发 | 凭证轮换两模式（§6.6：`grace` 宽限 / `rollback` 立即失效，body `{mode, grace_seconds?}`）；`whoami`/心跳残余语义不设端点（whoami 由 `pf` 读本地配置，心跳已由行 21 承载） | CORE-403 / CORE-400 |
 | **G. 依赖边（1 组 = 1 行：行 26；基线修订 polyforge#3 所补——§4.2a 定义了 wi_dependencies 的完整写路径，原清单漏列其路由；路由形状照现役 aihub precedent，语义一律按本文：同 project 硬边界、只标 waiting_on 不迁移状态。排列在 F 组之后仅为不重编号（M1–M5 标号被跨文档引用），行 26 属业务面计数）** | | | | | |
-| 26 | POST/GET/DELETE | `/api/v1/work-items/{id}/dependencies`、`/api/v1/work-items/{id}/dependencies/{blocking_id}/{kind}` | `pf` CLI | 【依赖边 CRUD 组】建边（POST，body `{blocking_wi_id, kind?}`，kind 缺省 `blocks`，path `{id}` = 被阻塞方）/ 列边（GET，返回 `blocking` 与 `blocked_by` 两组清单，与行 3 `include=deps` 同构）/ 删边（DELETE，物理删除行，§4.2a）。全部写路径约束在 §4.2a 事务内强制：同 project 硬边界、防环（`CORE-409 DEPENDENCY_CYCLE`）、父不可依赖子；授权：对该 project 的 writer+ 或 admin（§4.10）。`blocks` 边只物化 `waiting_on=dependency:<wi_id>`（§2.4），**不迁移状态**——依赖等待的 `queued` WI 不出现在就绪队列任何段（§5.1b：无可执行性即不呈现，不存在 `blocked` 数组；依赖等待的可见性经行 3 `include=deps` 与本组列边端点获取），不沿用现役 aihub 的 queued→blocked 状态迁移；删除边时按剩余未终态边重派 `waiting_on` | CORE-400（含 PARENT_CHILD_DEPENDENCY）/ CORE-403 / CORE-404 / CORE-409（DEPENDENCY_CYCLE） |
+| 26 | POST/GET/DELETE | `/api/v1/work-items/{id}/dependencies`、`/api/v1/work-items/{id}/dependencies/{blocking_id}/{kind}` | `pf` CLI | 【依赖边 CRUD 组】建边（POST，body `{blocking_wi_id, kind?}`，kind 缺省 `blocks`，path `{id}` = 被阻塞方）/ 列边（GET，返回 `blocking` 与 `blocked_by` 两组清单，与行 3 `include=deps` 同构）/ 删边（DELETE，物理删除行，§4.2a）。全部写路径约束在 §4.2a 事务内强制：同 project 硬边界、防环（`CORE-409 DEPENDENCY_CYCLE`）、blocker 必须是执行票（`CORE-400 BLOCKER_NOT_EXECUTABLE`）、重复边幂等；`blocking_wi_id` 与 path 两端均接受 id 或 slug；授权：对该 project 的 writer+ 或 admin（§4.10）。`blocks` 边**不写 `waiting_on`、不迁移状态**——只有 `wrapped` 的 blocker 放行；依赖等待的 `queued` WI 不出现在就绪队列任何段（§5.1b：无可执行性即不呈现，不存在 `blocked` 数组；依赖等待的可见性经 WI 视图的派生字段 `waiting_for`、行 3 `include=deps` 与本组列边端点获取，每条边带对方 `slug`/`status`） | CORE-400（含 BLOCKER_NOT_EXECUTABLE）/ CORE-403 / CORE-404 / CORE-409（DEPENDENCY_CYCLE） |
 
 **generation 凭证（能力令牌，不可伪造）**：`claim`（§6.2）成功时签发一个 capability token：`token = HMAC-SHA256(service_secret[epoch], wi_id + "|" + generation + "|" + machine_id)`，其中 `service_secret[epoch]` 为当前生效或宽限期内的历史 secret（§6.6）。第 3 类端点（见下）以 `X-PF-Generation-Token: <token>` 传递；`g`（generation 整数）仍可同传供日志可读性，但校验以 token 为准。Core 用当前及宽限期内的历史 `service_secret` 逐一重算并常量时间比对：
 
@@ -558,7 +564,7 @@ token 与 `(wi_id, generation, machine_id)` 三元绑定；换机器重放同一
 }
 ```
 
-- **`items`（可执行段）**：`status='queued'` 且 `waiting_on IS NULL` 且无未终态 `blocks` 依赖边（§4.2a）的执行票。**恒排除 `bundle_name IS NULL` 的登记票**（§4.4：不可 claim），也排除一切终态与 `running`/`paused`/`blocked` 状态的 WI；因未终态 `blocks` 边而等待的 `queued` WI 同样**不出现**（无 `blocked` 数组承载等待面，依赖等待的可见性经行 3 `include=deps` 与行 26 列边端点获取）。
+- **`items`（可执行段）**：`status='queued'` 且 `waiting_on IS NULL` 且无未 `wrapped` 的 `blocks` 依赖边（§4.2a；failed/canceled blocker 不放行）的执行票。**恒排除 `bundle_name IS NULL` 的登记票**（§4.4：不可 claim），也排除一切终态与 `running`/`paused`/`blocked` 状态的 WI；因未 `wrapped` 的 `blocks` 边而等待的 `queued` WI 同样**不出现**（无 `blocked` 数组承载等待面，依赖等待的可见性经 WI 视图派生字段 `waiting_for`（列表与详情）、行 3 `include=deps` 与行 26 列边端点获取）。
 - **`running` / `paused`（可见性段）**：当前处于 `running` 与 `paused` 状态的 WI 的只读可见面（供人/工具观察），不参与认领判定。
 - **排序**：各段内均按 `priority`（`urgent`→`high`→`normal`→`low`）→ `created_at`（先创建在前）。
 - **v1 无分页**：全量返回，不设 cursor/limit；规模出现压力后再议（§12）。
@@ -609,7 +615,7 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 
 | 码 | 语义 |
 |---|---|
-| CORE-400 | 请求非法（字段/类型/UNKNOWN_EVENT_TYPE/EXECUTION_STATE_REJECTED/INVENTORY_DUPLICATE_NAME/INVENTORY_URL_NOT_ALLOWED/INVENTORY_SUBDIR_UNSUPPORTED/INVENTORY_BASE_UNSUPPORTED/REPO_NOT_IN_PROJECT/parent_id 与依赖边约束（§4.2a：PARENT_DEPTH/PARENT_NOT_REGISTRY/PARENT_PROJECT_MISMATCH/PARENT_CHILD_DEPENDENCY）/创建时 workflow.md frontmatter 校验失败——`detail` 携带命中 `rule_id`，§4.5） |
+| CORE-400 | 请求非法（字段/类型/UNKNOWN_EVENT_TYPE/EXECUTION_STATE_REJECTED/INVENTORY_DUPLICATE_NAME/INVENTORY_URL_NOT_ALLOWED/INVENTORY_SUBDIR_UNSUPPORTED/INVENTORY_BASE_UNSUPPORTED/REPO_NOT_IN_PROJECT/parent_id 与依赖边约束（§4.2a：PARENT_DEPTH/PARENT_NOT_REGISTRY/PARENT_PROJECT_MISMATCH/BLOCKER_NOT_EXECUTABLE；跨 project 依赖边）/创建时 workflow.md frontmatter 校验失败——`detail` 携带命中 `rule_id`，§4.5） |
 | CORE-401 | 凭证缺失或无效 |
 | CORE-403 | token 或授权校验失败；body 携带 `reason`：`stale_generation`（fencing，§6.4）\|`secret_rotated_expired`（§6.6 宽限轮换后的过期）\|`secret_rolled_back`（§6.6 mode=rollback 作废：token 的 epoch 已被回滚标记 retired，**不可重新授权**，唯一出路是 admin force-takeover）\|`forbidden`（角色/权限不足，如非 admin 调 force-takeover/budget-increments、无 membership 访问他 project 对象，§4.10） |
 | CORE-404 | 对象不存在（含权限硬边界下的「按不存在处理」，§4.10） |
@@ -680,7 +686,7 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 
 1. **`queued`**：该 WI 从未发生过任何 claim，不存在 `owner_generations` 行。授权：调用方为 `reporter`、该 project 的 maintainer 或 `role='admin'`。成功后 `status → cancelled`，`closed_at` 赋值，不涉及任何 generation 行。
 2. **`paused`**：全部历史 generation 均已结束（§2.5）。授权同上。成功后 `status → cancelled`，不要求先 `resume`。
-3. **`blocked`**：同样无活跃 generation（无论进入 `blocked` 的原因是 `waiting_on=owner`、`waiting_on=dependency:*`、还是§6.4 提到的 workflow `failed_gate`/`failed_rewind_exhausted` 映射而来）。授权同上。成功后 `status → cancelled`，**不要求先 `unblock` 或重新执行任何 step**。
+3. **`blocked`**：同样无活跃 generation（无论进入 `blocked` 的原因是 `waiting_on=owner`、还是§6.4 提到的 workflow `failed_gate`/`failed_rewind_exhausted` 映射而来）。授权同上。成功后 `status → cancelled`，**不要求先 `unblock` 或重新执行任何 step**。
 
 **workflow 失败终态的映射与可取消性**：`01-workflow-skills.md#§6.5` 定义的 `failed_gate`/`failed_rewind_exhausted` 是 Capsule 侧（`execution.json.workflow_status`，`03-execution-capsule.md#§4.2`）终态，WI Agent 检测到这两种终态后，按 §6.4 的 flush 证据协议调用 `block` 端点（`waiting_on=owner`）。Core 侧只接收并落盘这一次状态迁移本身（`status=blocked`、`waiting_on=owner`，以及 §5.1a 通用 `blocked` 事件 `{generation, reason?}`）；具体是 `failed_gate` 还是 `failed_rewind_exhausted` 这一区分不随事件或任何字段进入 Core（Core 不新增专属事件类型来承载它，INV-2c），该区分永远只能从 Capsule 的 `execution.json` 或 read-through（§5.2）读到。进入 `blocked` 之后，该 WI 就是本节定义的普通 `blocked` WI，可直接按上述第 3 条取消，**不要求先重新执行任何 step 才能取消**。 〔#111分类：删→驱动〕
 

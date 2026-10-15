@@ -7,9 +7,9 @@ rewind:
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
-  - { id: release, context_policy: fresh, handoff: false, kind: code, gate: true, requires_command_evidence: true, budget: { wall_minutes: 45 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: verify, context_policy: fresh, handoff: false, kind: gate, gate: true, requires_command_evidence: true, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3] }
-  - { id: deploy, context_policy: fresh, handoff: false, kind: code, gate: true, requires_command_evidence: true, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: release, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, budget: { wall_minutes: 45 }, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: verify, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3] }
+  - { id: deploy, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
 ---
 
 # release - release lane
@@ -33,11 +33,11 @@ dispatches to them, then checks their result independently.
 release --> verify --> deploy
 ```
 
-| step | kind | gate | what it does |
-|---|---|---|---|
-| `release` | code | yes | preconditions, then runs the repo's `.polyforge/release.sh [bump]` |
-| `verify` | gate | yes | fresh-context, command-evidenced audit of what `release` claims, then `release.sh --verify <version>` |
-| `deploy` | code | yes | runs `.polyforge/deploy.sh <version> --confirm <version>` for the verified version only; defers when the project has no deploy procedure |
+| step | gate | what it does |
+|---|---|---|
+| `release` | yes | preconditions, then runs the repo's `.polyforge/release.sh [bump]` |
+| `verify` | yes | fresh-context, command-evidenced audit of what `release` claims, then `release.sh --verify <version>` |
+| `deploy` | yes | runs `.polyforge/deploy.sh <version> --confirm <version>` for the verified version only; defers when the project has no deploy procedure |
 
 Every step is `gate: true` (fresh context, a `fail` verdict is routed as a gate failure)
 and requires command evidence (`requires_command_evidence: true`): a completed result

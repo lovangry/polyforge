@@ -1,15 +1,15 @@
 ---
 name: feature-full
 steps:
-  - { id: grill, context_policy: fresh, handoff: true, kind: qa }
-  - { id: spec, context_policy: inherit, handoff: true, kind: spec }
-  - { id: grill-review, context_policy: fresh, handoff: true, kind: qa, requires_human_answer: true, gate: true, on_fail: { target: spec } }
-  - { id: plan, context_policy: inherit, handoff: true, kind: author }
-  - { id: e2e-author, context_policy: fresh, handoff: true, kind: author, requires_command_evidence: true }
-  - { id: code, context_policy: inherit, handoff: true, kind: code }
-  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, on_fail: { target: code }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, on_fail: { target: code } }
-  - { id: deliver, context_policy: fresh, handoff: false, kind: code, gate: true, requires_command_evidence: true, on_fail: { target: code } }
+  - { id: grill, context_policy: fresh, handoff: true }
+  - { id: spec, context_policy: inherit, handoff: true }
+  - { id: grill-review, context_policy: fresh, handoff: true, requires_human_answer: true, gate: true, on_fail: { target: spec } }
+  - { id: plan, context_policy: inherit, handoff: true }
+  - { id: e2e-author, context_policy: fresh, handoff: true, requires_command_evidence: true }
+  - { id: code, context_policy: inherit, handoff: true }
+  - { id: verification, context_policy: fresh, handoff: false, gate: true, on_fail: { target: code }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: review, context_policy: fresh, handoff: false, gate: true, on_fail: { target: code } }
+  - { id: deliver, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, on_fail: { target: code } }
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 ---

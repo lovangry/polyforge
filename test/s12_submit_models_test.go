@@ -2,7 +2,7 @@ package test
 
 // s12_submit_models_test.go: `pf submit <wi> --models a,b,c` — the manual
 // per-work-item candidate list, the top of the five-level precedence
-// (manual > yaml kind > bundle step > yaml default > bundle defaults).
+// (manual > yaml step id > bundle step > yaml default > bundle defaults).
 // Observed through the real pf/aihub/fakepi binaries: the model pinned on
 // each step in execution.json and the capsule.json audit.
 
@@ -21,7 +21,7 @@ import (
 func TestS12ManualModelsBeatYamlAndAdvanceOnModelFailure(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	w079Yaml(t, ws, "models:\n  e2e:\n    default: [s12-yaml-def]\n    code: [s12-yaml-code]\n")
+	w079Yaml(t, ws, "steps:\n  e2e:\n    default: { models: [s12-yaml-def] }\n    fix: { models: [s12-yaml-code] }\n")
 	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
 
 	wi := w113NewWI(t, inst, "e2e", "s12 manual models",
@@ -81,7 +81,7 @@ func TestS12ManualModelsBadInputRefused(t *testing.T) {
 func TestS12ManualModelsSurviveDaemonRestart(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	w079Yaml(t, ws, "models:\n  e2e:\n    code: [s12-y1, s12-y2]\n")
+	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [s12-y1, s12-y2] }\n")
 	sock := filepath.Join(shortTmp("/tmp", "s12sock"), "d.sock")
 	dataDir := t.TempDir()
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
@@ -103,7 +103,7 @@ func TestS12ManualModelsSurviveDaemonRestart(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	d.crash()
-	w079Yaml(t, ws, "models:\n  e2e:\n    code: [s12-n1]\n")
+	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [s12-n1] }\n")
 	d2 := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptSock(sock), w113DOptDataDir(dataDir))
 	d2.start()
 	defer d2.stop()

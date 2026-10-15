@@ -56,7 +56,16 @@ type CreateRequest struct {
 	// shape. It is decoded only to be refused (INVENTORY_BASE_UNSUPPORTED):
 	// a frozen base is not supported and must not be silently dropped.
 	RepoInventoryBase json.RawMessage `json:"repo_inventory_base"`
+	// After (polyforge#161) names the work items (id or slug) this one
+	// runs after: one `blocks` edge per entry, written INSIDE the create
+	// transaction under the AddDependency rules (same project, blocker
+	// must be an execution ticket). Any bad entry refuses the whole
+	// create — nothing is written.
+	After []string `json:"after"`
 }
+
+// maxAfter caps the create-time blockers of one work item.
+const maxAfter = 20
 
 // terminal statuses (common/api vocabulary, single-l "canceled").
 func isTerminal(status string) bool {
@@ -181,6 +190,27 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 		req.ParentID = nil
 	}
 
+	// Create-time blockers (polyforge#161): resolved and validated before
+	// anything is written.
+	if len(req.After) > maxAfter {
+		return nil, Fail(api.ErrCoreBadInput, "", "too many after entries (max %d)", maxAfter)
+	}
+	var blockers []string
+	seenBlocker := map[string]bool{}
+	for _, ref := range req.After {
+		bid, err := resolveWith(tx, strings.TrimSpace(ref))
+		if err != nil {
+			return nil, err
+		}
+		if err := checkBlockerTx(tx, bid, ref, projectID); err != nil {
+			return nil, err
+		}
+		if !seenBlocker[bid] {
+			seenBlocker[bid] = true
+			blockers = append(blockers, bid)
+		}
+	}
+
 	// Repo inventory (02 §4.6): resolved INSIDE the create transaction
 	// against the project's repos, so a refused create persists nothing.
 	if err := refuseRepoInventoryBase(req.RepoInventoryBase); err != nil {
@@ -236,10 +266,42 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 	if err := appendEventTx(tx, id, now, req.Reporter, "work_item_filed", nil); err != nil {
 		return nil, err
 	}
+	// The new work item has no outgoing edge yet, so no cycle is possible.
+	for _, bid := range blockers {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO wi_dependencies(blocking_wi_id, blocked_wi_id, kind, created_at)
+			VALUES (?1,?2,'blocks',?3)`, bid, id, now); err != nil {
+			return nil, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return m.Get(id, GetOptions{})
+}
+
+// checkBlockerTx enforces the blocker-side rules of a `blocks` edge
+// (polyforge#161): the blocker exists, lives in projectID (dependency
+// edges never cross projects) and is an execution ticket — a ticket with
+// no bundle (registration ticket or epic) can never wrap, so an edge
+// onto it would wait forever. ref is the caller's spelling for errors.
+func checkBlockerTx(q queryRower, blockingID, ref, projectID string) error {
+	var proj string
+	var bundle sql.NullString
+	err := q.QueryRow(`SELECT project_id, bundle_name FROM work_items WHERE id=?1`, blockingID).Scan(&proj, &bundle)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Fail(api.ErrCoreNotFound, "", "work item %s", ref)
+	}
+	if err != nil {
+		return err
+	}
+	if proj != projectID {
+		return Fail(api.ErrCoreBadInput, "", "dependency edges cannot cross projects")
+	}
+	if !bundle.Valid || bundle.String == "" {
+		return Fail(api.ErrCoreBadInput, "BLOCKER_NOT_EXECUTABLE",
+			"blocker %s must be an execution ticket — bind a bundle first (a registration ticket or epic never wraps)", ref)
+	}
+	return nil
 }
 
 func nullableString(p *string) any {
@@ -251,6 +313,12 @@ func nullableString(p *string) any {
 
 // Resolve maps an id or a "<project>#<seq>" slug to the work-item id.
 func (m *WIManager) Resolve(idOrSlug string) (string, error) {
+	return resolveWith(m.db, idOrSlug)
+}
+
+// resolveWith is Resolve on a given reader (the create transaction must
+// resolve on its own connection: the store is single-connection).
+func resolveWith(q queryRower, idOrSlug string) (string, error) {
 	if strings.HasPrefix(idOrSlug, "wi_") {
 		return idOrSlug, nil
 	}
@@ -264,7 +332,7 @@ func (m *WIManager) Resolve(idOrSlug string) (string, error) {
 		return "", Fail(api.ErrCoreNotFound, "", "work item %s", idOrSlug)
 	}
 	var id string
-	err = m.db.QueryRow(`SELECT w.id FROM work_items w JOIN projects p ON p.id=w.project_id
+	err = q.QueryRow(`SELECT w.id FROM work_items w JOIN projects p ON p.id=w.project_id
 		WHERE p.name=?1 AND w.seq=?2`, project, seq).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", Fail(api.ErrCoreNotFound, "", "work item %s", idOrSlug)
@@ -528,6 +596,39 @@ func diagnoseR2Window(q queryRower, wiID string) error {
 	return nil
 }
 
+// refuseUnbindWhileBlockingTx refuses unbinding the bundle of a work item
+// that is still the blocker of a `blocks` edge (polyforge#161): without a
+// bundle it can never wrap, so its dependents would wait forever.
+// Rebinding to another bundle stays allowed.
+func refuseUnbindWhileBlockingTx(tx *sql.Tx, wiID string) error {
+	rows, err := tx.Query(`SELECT p.name, w.seq FROM wi_dependencies d
+		JOIN work_items w ON w.id = d.blocked_wi_id
+		JOIN projects p ON p.id = w.project_id
+		WHERE d.blocking_wi_id=?1 AND d.kind='blocks' ORDER BY w.seq`, wiID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var dependents []string
+	for rows.Next() {
+		var project string
+		var seq int64
+		if err := rows.Scan(&project, &seq); err != nil {
+			return err
+		}
+		dependents = append(dependents, project+"#"+strconv.FormatInt(seq, 10))
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(dependents) > 0 {
+		return Fail(api.ErrCoreBadInput, "BLOCKER_STILL_BLOCKS",
+			"cannot unbind the bundle: this work item still blocks %s — remove the edges first (`pf file dep rm`)",
+			strings.Join(dependents, ", "))
+	}
+	return nil
+}
+
 // Patch updates the mutable field set. fields maps field name → raw JSON.
 func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*api.WorkItem, error) {
 	// Bundle fields (w140): parsed up front (pure — no DB access); the R2
@@ -649,6 +750,9 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 			if err := refuseBundleWithChildrenTx(tx, id); err != nil {
 				return nil, err
 			}
+		} else if err := refuseUnbindWhileBlockingTx(tx, id); err != nil {
+			// polyforge#161: an unbound blocker could never wrap.
+			return nil, err
 		}
 		name := bundleRef(bp.Name)
 		sets = append(sets, "bundle_name=?")
@@ -910,28 +1014,40 @@ type Deps struct {
 	BlockedBy []Edge `json:"blocked_by"` // these block this WI
 }
 
+// Edge is one dependency edge seen from one side: the OTHER work item's
+// id plus (additive, polyforge#161) its slug and current status, so a
+// client renders "blocked by polyforge#164 (running)" without a second
+// read.
 type Edge struct {
-	WI   string `json:"wi_id"`
-	Kind string `json:"kind"`
+	WI     string `json:"wi_id"`
+	Kind   string `json:"kind"`
+	Slug   string `json:"slug"`
+	Status string `json:"status"`
 }
 
 func (m *WIManager) Dependencies(wiID string) (*Deps, error) {
 	out := &Deps{Blocking: []Edge{}, BlockedBy: []Edge{}}
-	rows, err := m.db.Query(`SELECT blocking_wi_id, blocked_wi_id, kind FROM wi_dependencies
-		WHERE blocking_wi_id=?1 OR blocked_wi_id=?1`, wiID)
+	rows, err := m.db.Query(`SELECT d.blocking_wi_id, d.blocked_wi_id, d.kind, p.name, o.seq, o.status
+		FROM wi_dependencies d
+		JOIN work_items o ON o.id = CASE WHEN d.blocking_wi_id=?1 THEN d.blocked_wi_id ELSE d.blocking_wi_id END
+		JOIN projects p ON p.id = o.project_id
+		WHERE d.blocking_wi_id=?1 OR d.blocked_wi_id=?1
+		ORDER BY o.seq, d.kind`, wiID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var blocking, blocked, kind string
-		if err := rows.Scan(&blocking, &blocked, &kind); err != nil {
+		var blocking, blocked, kind, project, status string
+		var seq int64
+		if err := rows.Scan(&blocking, &blocked, &kind, &project, &seq, &status); err != nil {
 			return nil, err
 		}
+		slug := project + "#" + strconv.FormatInt(seq, 10)
 		if blocking == wiID {
-			out.Blocking = append(out.Blocking, Edge{WI: blocked, Kind: kind})
+			out.Blocking = append(out.Blocking, Edge{WI: blocked, Kind: kind, Slug: slug, Status: status})
 		} else {
-			out.BlockedBy = append(out.BlockedBy, Edge{WI: blocking, Kind: kind})
+			out.BlockedBy = append(out.BlockedBy, Edge{WI: blocking, Kind: kind, Slug: slug, Status: status})
 		}
 	}
 	return out, rows.Err()
@@ -939,7 +1055,8 @@ func (m *WIManager) Dependencies(wiID string) (*Deps, error) {
 
 // AddDependency creates a dependency edge with the v0 write-path rules:
 // same-project hard boundary, no self edge, cycle detection for
-// blocks/supersedes.
+// blocks/supersedes; a `blocks` blocker must be an execution ticket
+// (polyforge#161). Adding an existing edge is idempotent.
 func (m *WIManager) AddDependency(blocking, blocked, kind string) error {
 	if kind == "" {
 		kind = "blocks"
@@ -975,6 +1092,11 @@ func (m *WIManager) AddDependency(blocking, blocked, kind string) error {
 	if projBlocking != projBlocked {
 		return Fail(api.ErrCoreBadInput, "", "dependency edges cannot cross projects")
 	}
+	if kind == "blocks" {
+		if err := checkBlockerTx(tx, blocking, blocking, projBlocked); err != nil {
+			return err
+		}
+	}
 	if kind != "related" {
 		reaches, err := reachesTx(tx, blocked, blocking, kind)
 		if err != nil {
@@ -984,7 +1106,9 @@ func (m *WIManager) AddDependency(blocking, blocked, kind string) error {
 			return Fail(api.ErrCoreConflict, "DEPENDENCY_CYCLE", "edge would close a dependency cycle")
 		}
 	}
-	if _, err := tx.Exec(`INSERT INTO wi_dependencies(blocking_wi_id, blocked_wi_id, kind, created_at)
+	// Re-adding an existing edge is a no-op (the caller gets the current
+	// view), never a raw constraint failure.
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO wi_dependencies(blocking_wi_id, blocked_wi_id, kind, created_at)
 		VALUES (?1,?2,?3,?4)`, blocking, blocked, kind, Now()); err != nil {
 		return err
 	}

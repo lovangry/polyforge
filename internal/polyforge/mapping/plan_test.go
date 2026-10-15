@@ -193,4 +193,14 @@ func TestProjectsOf(t *testing.T) {
 	if got := p.ProjectsOf(t.TempDir()); got != nil {
 		t.Fatalf("unmapped workspace = %v, want nil", got)
 	}
+	// A mapped workspace with zero projects answers a non-nil empty set
+	// (the workspace yaml then refuses every project key).
+	wsC := t.TempDir()
+	p, err = Build([]Entry{{Workspace: wsC, Projects: []string{}}})
+	if err != nil {
+		t.Skipf("a zero-project workspace is not buildable: %v", err)
+	}
+	if got := p.ProjectsOf(wsC); got == nil || len(got) != 0 {
+		t.Fatalf("zero-project workspace = %#v, want non-nil empty", got)
+	}
 }

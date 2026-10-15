@@ -86,7 +86,10 @@ type statusResponse struct {
 	// [workspace] path the daemon routes capsules into, in mapping
 	// declaration order. A multi-workspace daemon must never present one
 	// workspace as if it were the only one.
-	Workspaces   []string    `json:"workspaces"`
+	Workspaces []string `json:"workspaces"`
+	// WorkflowsDir is the workflows dir bundles run from (absolute; pf
+	// doctor checks the workspace yaml's step-id keys against it).
+	WorkflowsDir string      `json:"workflows_dir,omitempty"`
 	ShuttingDown bool        `json:"shutting_down"`
 	Jobs         []statusJob `json:"jobs"`
 	Queue        queueStats  `json:"queue"`
@@ -680,6 +683,7 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 		DisplayName:  d.cfg.DisplayName,
 		Auto:         d.modes.Auto(),
 		Workspaces:   d.cfg.Mapping.Workspaces(),
+		WorkflowsDir: d.cfg.WorkflowsDir,
 		ShuttingDown: d.modes.ShuttingDown(),
 		Jobs:         jobs,
 		Queue: queueStats{

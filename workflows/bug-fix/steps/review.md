@@ -125,8 +125,7 @@ these present:
 
 ## Position in the flow
 
-This step is declared `kind: review` in the workflow frontmatter, which the schema
-grants positional freedom — in every delivery bundle that has a review it sits between `verification` and
+In every delivery bundle that has a review this step sits between `verification` and
 `deliver` because ship-readiness judgment needs both the mechanical results and the
 evidence chain in hand.
 

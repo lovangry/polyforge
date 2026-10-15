@@ -16,7 +16,7 @@ import (
 )
 
 // frontmatterBundle writes a demo bundle whose workflow.md carries real
-// frontmatter (kinds + candidate layers) and answers the workflows dir.
+// frontmatter (candidate layers) and answers the workflows dir.
 func frontmatterBundle(t *testing.T, frontmatter string) (workflowsDir string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -38,9 +38,9 @@ name: demo-bundle
 defaults:
   model_candidates: [prov/weak-a, prov/weak-b]
 steps:
-  - { id: grill, kind: spec }
-  - { id: fix, kind: code, model_candidates: [prov/flash, prov/glm] }
-  - { id: release, kind: code, model_candidates: [prov/glm] }
+  - { id: grill }
+  - { id: fix, model_candidates: [prov/flash, prov/glm] }
+  - { id: release, model_candidates: [prov/glm] }
 ---
 
 # demo
@@ -74,7 +74,7 @@ func TestClaimComposeRidesTheJob(t *testing.T) {
 	r.cfg.GitRemoteBase = hub.capsuleRepoBase
 	r.cfg.WorkflowsDir = wfDir
 
-	writeWorkspaceYaml(t, ws, "models:\n  proj:\n    code: [w79/code-a, w79/code-b]\n")
+	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [w79/code-a, w79/code-b] }\n")
 	if err := r.Start(context.Background(), "wi_w079comp"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -86,13 +86,13 @@ func TestClaimComposeRidesTheJob(t *testing.T) {
 	got := j.stepCandidates
 	j.mu.Unlock()
 	if got["fix"] == nil || got["fix"][0] != "w79/code-a" || got["fix"][1] != "w79/code-b" {
-		t.Fatalf("fix effective list %v, want [w79/code-a w79/code-b] (the per-kind pin replaces the bundle step-level list)", got["fix"])
+		t.Fatalf("fix effective list %v, want [w79/code-a w79/code-b] (the per-step pin replaces the bundle step-level list)", got["fix"])
 	}
-	if got["release"] == nil || got["release"][0] != "w79/code-a" {
-		t.Fatalf("release effective list %v, want [w79/code-a] (every kind:code step)", got["release"])
+	if got["release"] == nil || got["release"][0] != "prov/glm" {
+		t.Fatalf("release effective list %v, want its own [prov/glm] (a step-id key governs that step only)", got["release"])
 	}
 	if got["grill"] == nil || got["grill"][0] != "prov/weak-a" {
-		t.Fatalf("grill effective list %v, want the bundle weak default (kind spec unlisted)", got["grill"])
+		t.Fatalf("grill effective list %v, want the bundle weak default (grill unlisted)", got["grill"])
 	}
 	if err := r.Stop(context.Background(), "wi_w079comp", protocol.FinishWrapped); err != nil {
 		t.Fatalf("Stop: %v", err)

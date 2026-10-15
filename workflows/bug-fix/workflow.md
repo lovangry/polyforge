@@ -7,16 +7,16 @@ rewind:
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
-  - { id: repro, context_policy: fresh, handoff: true, kind: code }
+  - { id: repro, context_policy: fresh, handoff: true }
   # root-cause is a gate: it must run FRESH (the judge never inherits the
   # judged conversation — driver rule, separation of powers) and takes the
   # repro record (artifacts/repro.md) by path convention: it reads the
   # artifact, not the chat.
-  - { id: root-cause, context_policy: fresh, handoff: true, kind: qa, gate: true, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3], on_fail: { target: repro } }
-  - { id: fix, context_policy: inherit, handoff: true, kind: code }
-  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, on_fail: { target: fix }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: review, context_policy: fresh, handoff: false, kind: review, gate: true, on_fail: { target: fix } }
-  - { id: deliver, context_policy: fresh, handoff: false, kind: code, gate: true, requires_command_evidence: true, on_fail: { target: fix } }
+  - { id: root-cause, context_policy: fresh, handoff: true, gate: true, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3], on_fail: { target: repro } }
+  - { id: fix, context_policy: inherit, handoff: true }
+  - { id: verification, context_policy: fresh, handoff: false, gate: true, on_fail: { target: fix }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: review, context_policy: fresh, handoff: false, gate: true, on_fail: { target: fix } }
+  - { id: deliver, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, on_fail: { target: fix } }
 ---
 
 # bug-fix — root-cause lane
@@ -40,7 +40,7 @@ writes a fix, and the fix is validated by the same artifact that originally fail
 whose root cause is already obvious from the WI text belongs on `quick-fix` instead; a
 bug that turns out to need design decisions belongs on `feature-full`.
 
-## Why `root-cause` is a gate (`kind: qa`, `gate: true`)
+## Why `root-cause` is a gate (`gate: true`)
 
 Any step may carry `gate: true`: the flag means "this step produces a business verdict"
 (review, verification and grill-review are examples, not an exclusive set). Root-cause analysis
@@ -54,7 +54,7 @@ structurally load-bearing rather than cosmetic:
   correct bounded
   response is better evidence, not a blind fix attempt.
 - This lane has no spec step (bugs spec their corrected behavior inside the fix memo/
-  commits, not via a dedicated authoring step), so its `kind: qa` step is declared in its
+  commits, not via a dedicated authoring step), so its diagnosis step is declared in its
   gate form, like feature-full's `grill-review`.
 
 ## Artifact flow between steps

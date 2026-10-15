@@ -146,7 +146,7 @@ func TestBridgeForwardsStepCandidates(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(bundle, "steps"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	front := "---\nname: wf\ndefaults:\n  model_candidates: [bundle-weak]\nsteps:\n  - { id: fix, kind: code }\n---\n# body\n"
+	front := "---\nname: wf\ndefaults:\n  model_candidates: [bundle-weak]\nsteps:\n  - { id: fix }\n---\n# body\n"
 	if err := os.WriteFile(filepath.Join(bundle, "workflow.md"), []byte(front), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestBridgeWiresDriverEventsAndSupervisionLink(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(bundle, "steps"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	front := "---\nname: wf\ndefaults:\n  model_candidates: [m-a]\nsteps:\n  - { id: fix, kind: code }\n---\n# body\n"
+	front := "---\nname: wf\ndefaults:\n  model_candidates: [m-a]\nsteps:\n  - { id: fix }\n---\n# body\n"
 	if err := os.WriteFile(filepath.Join(bundle, "workflow.md"), []byte(front), 0o644); err != nil {
 		t.Fatal(err)
 	}
