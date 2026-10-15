@@ -57,15 +57,17 @@ the user saying "init workspace".
 4. **Optionally write `.polyforge.yaml`** at the workspace root to pin
    model candidates per project, in the exact closed schema the loader
    enforces (any other key, a duplicate key, a type mismatch, a per-step
-   key that is no step id of the installed workflows or an empty model id
-   refuses to load):
+   key that is no step id of the installed workflows, a step-entry key
+   other than `models`, a top-level `models:` section (the pre-#169 shape)
+   or an empty model id refuses to load):
 
    ```yaml
-   models:
-     polyforge:                       # one entry per project of this workspace
-       default: ["model-a", "model-b"]   # optional: steps without a list of their own
-       fix: ["model-c"]                  # optional: per step id (the step
-                                         # with that id in every bundle)
+   # Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
+   steps:
+     polyforge:                               # one entry per project of this workspace
+       default: { models: ["model-a", "model-b"] }  # optional: steps without a list of their own
+       fix: { models: ["model-c"] }           # optional: per step id (the step
+                                              # with that id in every bundle)
    ```
 
    Precedence for a step of the claimed project: `pf submit --models`,

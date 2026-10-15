@@ -74,7 +74,7 @@ func TestClaimComposeRidesTheJob(t *testing.T) {
 	r.cfg.GitRemoteBase = hub.capsuleRepoBase
 	r.cfg.WorkflowsDir = wfDir
 
-	writeWorkspaceYaml(t, ws, "models:\n  proj:\n    fix: [w79/code-a, w79/code-b]\n")
+	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [w79/code-a, w79/code-b] }\n")
 	if err := r.Start(context.Background(), "wi_w079comp"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

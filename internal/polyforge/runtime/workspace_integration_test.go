@@ -75,8 +75,8 @@ func TestTwoWorkspacesTwoYamlsOneDaemon(t *testing.T) {
 	r, _, wsA, wsB := twoWorkspaceRuntime(t)
 
 	// wsA: a project default. wsB: a per-step pin.
-	writeWorkspaceYaml(t, wsA, "models:\n  proj-a:\n    default: [w079a-flow, w079a-flow2]\n")
-	writeWorkspaceYaml(t, wsB, "models:\n  proj-b:\n    fix: [w079b-code]\n")
+	writeWorkspaceYaml(t, wsA, "steps:\n  proj-a:\n    default: { models: [w079a-flow, w079a-flow2] }\n")
+	writeWorkspaceYaml(t, wsB, "steps:\n  proj-b:\n    fix: { models: [w079b-code] }\n")
 
 	if err := r.Start(context.Background(), "wi_w079intA"); err != nil {
 		t.Fatalf("Start A: %v", err)
@@ -102,7 +102,7 @@ func TestTwoWorkspacesTwoYamlsOneDaemon(t *testing.T) {
 
 	// Per-claim freshness: an edit between claims governs the NEXT claim
 	// (the audit field is gone; neither capsule carries the deleted key).
-	writeWorkspaceYaml(t, wsA, "models:\n  proj-a:\n    default: [w079-edit-v2]\n")
+	writeWorkspaceYaml(t, wsA, "steps:\n  proj-a:\n    default: { models: [w079-edit-v2] }\n")
 	if err := r.Start(context.Background(), "wi_w079intA2"); err != nil {
 		t.Fatalf("Start A2: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestSiblingProjectUnaffectedAndSharedYamlRefusesBoth(t *testing.T) {
 	r.cfg.GitRemoteBase = hub.capsuleRepoBase
 	r.cfg.WorkflowsDir = wfDir
 
-	writeWorkspaceYaml(t, ws, "models:\n  p1:\n    default: [w79/p1]\n")
+	writeWorkspaceYaml(t, ws, "steps:\n  p1:\n    default: { models: [w79/p1] }\n")
 	if err := r.Start(context.Background(), "wi_w079s1"); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +178,7 @@ func TestSiblingProjectUnaffectedAndSharedYamlRefusesBoth(t *testing.T) {
 	// The shared yaml is torn: BOTH projects refuse with DAEMON-414 and
 	// neither reaches the aihub claim.
 	claims := hub.claimCount()
-	writeWorkspaceYaml(t, ws, "models:\n  p1:\n    fix: [\n")
+	writeWorkspaceYaml(t, ws, "steps:\n  p1:\n    fix: [\n")
 	for _, wi := range []string{"wi_w079s3", "wi_w079s4"} {
 		err := r.Start(context.Background(), wi)
 		ae, ok := err.(*api.Error)

@@ -8,8 +8,8 @@ package workspace
 //
 // The chain, outermost first (five levels):
 //
-//	manual `pf submit --models` > yaml models.<project>.<step-id> >
-//	bundle step-level model_candidates > yaml models.<project>.default >
+//	manual `pf submit --models` > yaml steps.<project>.<step-id>.models >
+//	bundle step-level model_candidates > yaml steps.<project>.default.models >
 //	bundle defaults.model_candidates
 //
 // A step's own list outranks the project yaml `default` (polyforge#164,

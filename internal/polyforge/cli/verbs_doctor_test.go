@@ -299,15 +299,15 @@ func TestDoctorWorkspaceYamlReportsUnknownStepKeys(t *testing.T) {
 	env := doctorServerConfig(t, srv.URL, "k", sock, "polyforge")
 	yaml := filepath.Join(filepath.Dir(env["XDG_CONFIG_HOME"]), "ws-polyforge", ".polyforge.yaml")
 
-	if err := os.WriteFile(yaml, []byte("models:\n  polyforge:\n    default: [a]\n    fix: [b]\n    gate: [c]\n"), 0o600); err != nil {
+	if err := os.WriteFile(yaml, []byte("steps:\n  polyforge:\n    default: { models: [a] }\n    fix: { models: [b] }\n    gate: { models: [c] }\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, _, doc := doctorStatus(t, env, "--json", "doctor")
-	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "fail" || !strings.Contains(detail, "models.polyforge.gate") || strings.Contains(detail, "models.polyforge.fix") {
-		t.Fatalf("unknown step key: %s %q, want fail naming only models.polyforge.gate", st, detail)
+	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "fail" || !strings.Contains(detail, "steps.polyforge.gate") || strings.Contains(detail, "steps.polyforge.fix") {
+		t.Fatalf("unknown step key: %s %q, want fail naming only steps.polyforge.gate", st, detail)
 	}
 
-	if err := os.WriteFile(yaml, []byte("models:\n  polyforge:\n    fix: [b]\n"), 0o600); err != nil {
+	if err := os.WriteFile(yaml, []byte("steps:\n  polyforge:\n    fix: { models: [b] }\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, _, doc = doctorStatus(t, env, "--json", "doctor")
@@ -315,9 +315,17 @@ func TestDoctorWorkspaceYamlReportsUnknownStepKeys(t *testing.T) {
 		t.Fatalf("known step key: %s %q, want pass", st, detail)
 	}
 
+	if err := os.WriteFile(yaml, []byte("models:\n  polyforge:\n    fix: [b]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, doc = doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "fail" || !strings.Contains(detail, "`models:` was replaced by `steps:`") {
+		t.Fatalf("legacy models: section: %s %q, want fail with the migration message", st, detail)
+	}
+
 	env = doctorServerConfig(t, srv.URL, "k", liveDaemonSocket(t, "m-old"), "polyforge")
 	yaml = filepath.Join(filepath.Dir(env["XDG_CONFIG_HOME"]), "ws-polyforge", ".polyforge.yaml")
-	if err := os.WriteFile(yaml, []byte("models:\n  polyforge:\n    fix: [b]\n"), 0o600); err != nil {
+	if err := os.WriteFile(yaml, []byte("steps:\n  polyforge:\n    fix: { models: [b] }\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, _, doc = doctorStatus(t, env, "--json", "doctor")
@@ -327,7 +335,7 @@ func TestDoctorWorkspaceYamlReportsUnknownStepKeys(t *testing.T) {
 
 	env = doctorServerConfig(t, srv.URL, "k", filepath.Join(t.TempDir(), "dead.sock"), "polyforge")
 	yaml = filepath.Join(filepath.Dir(env["XDG_CONFIG_HOME"]), "ws-polyforge", ".polyforge.yaml")
-	if err := os.WriteFile(yaml, []byte("models:\n  polyforge:\n    fix: [b]\n"), 0o600); err != nil {
+	if err := os.WriteFile(yaml, []byte("steps:\n  polyforge:\n    fix: { models: [b] }\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, _, doc = doctorStatus(t, env, "--json", "doctor")

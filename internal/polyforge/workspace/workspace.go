@@ -1,24 +1,25 @@
-// Package workspace implements the workspace-level model-candidates
+// Package workspace implements the workspace-level per-step settings
 // file — `.polyforge.yaml` at a workspace root — as ONE strict-schema
-// loader shared by every consumer: the daemon's pre-claim read and the
-// candidate-precedence compose. There is no second parser and no second
-// strictness implementation.
+// loader shared by every consumer: the daemon's pre-claim read, pf doctor
+// and the candidate-precedence compose. There is no second parser and no
+// second strictness implementation.
 //
 // The grammar is closed:
 //
-//	models:                          # optional section
+//	steps:                           # optional section
 //	  <project-name>:                # one entry per project of this workspace
-//	    default: ["id", ...]         # optional: every step of this project
-//	    <step-id>: ["id", ...]       # optional: the steps with this id, in
+//	    default: { models: [...] }   # optional: every step of this project
+//	    <step-id>: { models: [...] } # optional: the steps with this id, in
 //	                                 # every bundle (fix, code, review, ...)
 //
-// Model ids are non-empty strings. Any key not shown here — at any
-// level — is a load error, as are duplicate keys, type mismatches, an
-// empty project entry, empty model-id strings and a per-step key that is
-// no step id of the installed workflows (a typo would otherwise silently
-// govern nothing). The
-// retired `projects:` and `workflow_defaults:` sections are therefore
-// unknown keys like any other: an old-shape file fails loudly.
+// A step entry's only key is `models` (a list of non-empty model ids).
+// Any key not shown here — at any level — is a load error, as are
+// duplicate keys, type mismatches, an empty project entry, empty model-id
+// strings and a per-step key that is no step id of the installed
+// workflows (a typo would otherwise silently govern nothing). The retired
+// top-level `models:` section (the pre-#169 shape) refuses with a
+// migration message; `projects:` / `workflow_defaults:` are unknown keys
+// like any other.
 //
 // Presence semantics: an ABSENT file and an EMPTY or comments-only file
 // both answer (nil, nil) — absent-equivalent, never an error. A file
@@ -28,8 +29,8 @@
 // wholly governs (yielding no switchable chain rather than a
 // fall-through). Absent keys fall through per the precedence chain
 // (compose.go), five levels, highest first: manual `pf submit --models`
-// (per work item, every step) > models.<project>.<step-id> > bundle step
-// model_candidates > models.<project>.default > bundle
+// (per work item, every step) > steps.<project>.<step-id>.models > bundle
+// step model_candidates > steps.<project>.default.models > bundle
 // defaults.model_candidates.
 package workspace
 
@@ -54,9 +55,26 @@ const DefaultKey = "default"
 
 // Config is the parsed `.polyforge.yaml`.
 type Config struct {
-	// Models is project name → (DefaultKey or a step id → candidate list).
-	Models map[string]map[string][]string `yaml:"models"`
+	// Models is project name → (DefaultKey or a step id → candidate
+	// list): steps.<project>.<key>.models, flattened for the compose.
+	Models map[string]map[string][]string
 }
+
+// fileDoc is the on-disk shape. Models is the retired pre-#169 section,
+// decoded only so its presence refuses with a migration message.
+type fileDoc struct {
+	Steps  map[string]map[string]*stepEntry `yaml:"steps"`
+	Models yaml.Node                        `yaml:"models"`
+}
+
+// stepEntry is one steps.<project>.<key> mapping; `models` is its only key.
+type stepEntry struct {
+	Models []string `yaml:"models"`
+}
+
+// LegacyModelsReason is the refusal of a file still using the retired
+// top-level `models:` section (no backward compatibility).
+const LegacyModelsReason = "top-level `models:` was replaced by `steps:` (polyforge#169) — move models.<project>.<key>: [...] to steps.<project>.<key>.models: [...] (see docs/upgrade.md)"
 
 // Error is the typed load failure: the file that refused and the
 // reason. Every consumer surfaces it verbatim — the file name and the
@@ -94,18 +112,37 @@ func Load(workspaceRoot, workflowsDir string) (*Config, error) {
 // parse strictly decodes and validates one yaml document. Split from
 // Load so tests can feed bytes directly.
 func parse(path string, raw []byte, workflowsDir string) (*Config, error) {
-	var cfg Config
+	var doc fileDoc
 	dec := yaml.NewDecoder(strings.NewReader(string(raw)))
 	dec.KnownFields(true) // any key outside the closed vocabulary is an error
-	if err := dec.Decode(&cfg); err != nil {
+	if err := dec.Decode(&doc); err != nil {
 		if err.Error() == "EOF" {
 			// An empty (or comments-only) document: absent-equivalent.
 			return nil, nil
 		}
-		return nil, &Error{Path: path, Reason: strings.ReplaceAll(err.Error(), "\n", "; ")}
+		reason := strings.ReplaceAll(err.Error(), "\n", "; ")
+		reason = strings.ReplaceAll(reason, "not found in type workspace.stepEntry", "is not allowed in a step entry (only `models`)")
+		reason = strings.ReplaceAll(reason, "not found in type workspace.fileDoc", "is not a top-level key (only `steps`)")
+		return nil, &Error{Path: path, Reason: reason}
 	}
-	if cfg.Models == nil {
+	if doc.Models.Kind != 0 {
+		return nil, &Error{Path: path, Reason: LegacyModelsReason}
+	}
+	if doc.Steps == nil {
 		return nil, nil // a file declaring nothing governs nothing
+	}
+	cfg := &Config{Models: make(map[string]map[string][]string, len(doc.Steps))}
+	for project, keys := range doc.Steps {
+		if len(keys) == 0 {
+			return nil, &Error{Path: path, Reason: fmt.Sprintf("steps.%s: entry is empty — declare %s or a step id, or remove it", project, DefaultKey)}
+		}
+		cfg.Models[project] = make(map[string][]string, len(keys))
+		for key, e := range keys {
+			if e == nil || e.Models == nil {
+				return nil, &Error{Path: path, Reason: fmt.Sprintf("steps.%s.%s.models: must be a list of model ids", project, key)}
+			}
+			cfg.Models[project][key] = e.Models
+		}
 	}
 	var steps map[string]bool
 	if workflowsDir != "" {
@@ -114,32 +151,26 @@ func parse(path string, raw []byte, workflowsDir string) (*Config, error) {
 			return nil, &Error{Path: path, Reason: fmt.Sprintf("the installed workflows are unreadable, so the step-id keys cannot be checked: %v", err)}
 		}
 	}
-	if err := validate(path, &cfg, steps, workflowsDir); err != nil {
+	if err := validate(path, cfg, steps, workflowsDir); err != nil {
 		return nil, err
 	}
-	return &cfg, nil
+	return cfg, nil
 }
 
-// validate enforces the content rules the yaml decoder cannot express:
+// validate enforces the content rules the decoder cannot express:
 // non-empty model ids and the per-project key set (DefaultKey or a step
 // id in steps; every unknown key is named, sorted — or, when the
 // workflows dir holds no readable bundle at all, that fact).
 func validate(path string, cfg *Config, steps map[string]bool, workflowsDir string) error {
 	var unknown []string
 	for project, keys := range cfg.Models {
-		if len(keys) == 0 {
-			return &Error{Path: path, Reason: fmt.Sprintf("models.%s: entry is empty — declare %s or a step-id list, or remove it", project, DefaultKey)}
-		}
 		for key, list := range keys {
 			if key != DefaultKey && steps != nil && !steps[key] {
-				unknown = append(unknown, fmt.Sprintf("models.%s.%s", project, key))
-			}
-			if list == nil {
-				return &Error{Path: path, Reason: fmt.Sprintf("models.%s.%s: must be a list of model ids", project, key)}
+				unknown = append(unknown, fmt.Sprintf("steps.%s.%s", project, key))
 			}
 			for i, id := range list {
 				if strings.TrimSpace(id) == "" {
-					return &Error{Path: path, Reason: fmt.Sprintf("models.%s.%s[%d]: model ids must be non-empty strings", project, key, i)}
+					return &Error{Path: path, Reason: fmt.Sprintf("steps.%s.%s.models[%d]: model ids must be non-empty strings", project, key, i)}
 				}
 			}
 		}

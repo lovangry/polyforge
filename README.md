@@ -465,19 +465,21 @@ mapping; the auto-pull covers all mapped projects. `pf doctor` checks
 the mapping.
 
 Per-project model candidates. A workspace root may carry a
-`.polyforge.yaml` whose only section is `models` (strict: unknown keys at
+`.polyforge.yaml` whose only section is `steps` (strict: unknown keys at
 any level, duplicate keys, type mismatches, empty model ids and a
 per-step key that is no step id of the daemon's installed workflows are
-load errors; the old `projects:` / `workflow_defaults:` shapes fail
-loudly):
+load errors; a step entry's only key is `models`; the pre-#169
+top-level `models:` section and the old `projects:` / `workflow_defaults:`
+shapes fail loudly):
 
 ```yaml
-models:
-  polyforge:                          # a project of this workspace
-    default: ["model-a", "model-b"]   # optional: steps without a list of their own
-    fix: ["model-c"]                  # optional: one step id (fix, code,
-                                      # review, deliver, ...) — the step
-                                      # with that id in every bundle
+# Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
+steps:
+  polyforge:                                # a project of this workspace
+    default: { models: ["model-a", "model-b"] }  # optional: steps without a list of their own
+    fix: { models: ["model-c"] }            # optional: one step id (fix, code,
+                                            # review, deliver, ...) — the step
+                                            # with that id in every bundle
 ```
 
 For a step of the claimed project the list is, highest first: the work
@@ -493,8 +495,9 @@ file refuses the work item with DAEMON-414 (`pf submit` shows it; auto-pull
 skips that project and logs once) and nothing is claimed, so the work item
 stays queued for other machines. Repo lists and clone URLs always come from
 the aihub project registry. `pf doctor` reports the same refusal (an
-unknown per-step key included) before any claim. Upgrading from the
-retired per-kind keys: see [docs/upgrade.md](docs/upgrade.md).
+unknown per-step key and a leftover `models:` section included) before
+any claim. Upgrading from the pre-#169 shape: see
+[docs/upgrade.md](docs/upgrade.md).
 
 Supervision bounds (v2-converge 2.4) — Go duration strings (e.g. `700ms`,
 `5m`), flags only (no environment fallbacks). Omitting a flag, or passing
