@@ -89,6 +89,11 @@ type StepSpawnAdapter struct {
 	// every dispatch folds the step process's stdout records into the
 	// dispatch's Tracker on it. nil = no harness tracking.
 	Link *supervise.Link
+	// ClaudeConfigDir is the step claude processes' CLAUDE_CONFIG_DIR the
+	// spawner hard-set (polyforge#171: <harness-root>/claude-config). The
+	// claude resume decision locates the previous dispatch's native
+	// session explicitly under it — never by the daemon's process env.
+	ClaudeConfigDir string
 	// PollInterval is the envelope-collection cadence (tests tighten
 	// it; default defaultEnvelopePoll).
 	PollInterval time.Duration
@@ -195,7 +200,10 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 			// claude resumes its NATIVE session (outside the capsule) by
 			// the uuid the daemon minted; a session that never reached
 			// disk, or an id that is not ours in shape, starts fresh.
-			if harness.LocateClaudeSession(prev.HarnessSession, a.WI.CapsuleDir) != "" {
+			// polyforge#171: the session is looked up under the
+			// claude-config dir the adapter carries (the spawner's
+			// CLAUDE_CONFIG_DIR) — never by the daemon's process env.
+			if harness.LocateClaudeSession(prev.HarnessSession, a.ClaudeConfigDir, a.WI.CapsuleDir) != "" {
 				hsession = prev.HarnessSession
 			} else {
 				resume = false

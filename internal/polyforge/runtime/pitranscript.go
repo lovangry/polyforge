@@ -131,15 +131,17 @@ func LocateLiveTranscript(sessionsRoot, capsuleDir string, notBefore time.Time) 
 }
 
 // LocateTranscript is the per-harness live-transcript locator both sync
-// points share (polyforge#159): pi's newest session file of the capsule
-// since the spawn moment; claude's native session file by the uuid the
-// daemon minted for the dispatch (only a canonical uuid is looked up —
-// the id may come from the agent-writable spawn journal).
-func LocateTranscript(sessionsRoot, capsuleDir string, spawnAt time.Time, h, session string) string {
+// points share (polyforge#159, dispatched by harness per #171 ruling 7):
+// pi → the harness session store's newest session file of the capsule
+// since the spawn moment; claude → its native session file under the
+// claude-config dir the caller names, by the uuid the daemon minted for
+// the dispatch (only a canonical uuid is looked up — the id may come
+// from the agent-writable spawn journal).
+func LocateTranscript(piSessionsRoot, claudeConfigDir, capsuleDir string, spawnAt time.Time, h, session string) string {
 	if harness.Of(h) == harness.Claude {
-		return harness.LocateClaudeSession(session, capsuleDir)
+		return harness.LocateClaudeSession(session, claudeConfigDir, capsuleDir)
 	}
-	return LocateLiveTranscript(sessionsRoot, capsuleDir, spawnAt)
+	return LocateLiveTranscript(piSessionsRoot, capsuleDir, spawnAt)
 }
 
 // syncLiveTranscript copies the CURRENT dispatch's live harness
@@ -176,7 +178,7 @@ func (r *Runtime) syncLiveTranscript(capsuleDir string) {
 		fmt.Fprintf(os.Stderr, "runtime: transcript sync skipped: the latest spawn-journal line names an untrusted destination %q\n", last.Transcript)
 		return
 	}
-	src := LocateTranscript(r.cfg.StepAgentSessionsDir(), capsuleDir, spawnAt, last.Harness, last.HarnessSession)
+	src := LocateTranscript(r.cfg.StepAgentSessionsDir(), r.cfg.ClaudeConfigDir(), capsuleDir, spawnAt, last.Harness, last.HarnessSession)
 	if src == "" || src == dst {
 		return
 	}

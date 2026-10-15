@@ -98,6 +98,12 @@ type Config struct {
 	// start is a re-derivation ("" on a fresh claim). Operator-shaped
 	// causes archive nothing — a deliberate stop is not a model verdict.
 	InterruptedCause string
+	// ClaudeConfigDir is the step claude processes' CLAUDE_CONFIG_DIR
+	// (polyforge#171: <harness-root>/claude-config, hard-set by the
+	// spawner) — the claude resume decision locates a previous dispatch's
+	// native session explicitly by it; the locator never consults the
+	// daemon's process env.
+	ClaudeConfigDir string
 	// Log receives the driver's events (the daemon's durable per-WI
 	// event log); nil = driver events go to stderr only.
 	Log driver.EventLogger
@@ -139,9 +145,10 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 
 	// Build the step spawn adapter (per-step process derivation).
 	adapter, err := driver.NewStepSpawnAdapter(driver.StepSpawnAdapter{
-		WI:      wiInfo,
-		Spawner: cfg.Spawner,
-		Link:    cfg.Link,
+		WI:              wiInfo,
+		Spawner:         cfg.Spawner,
+		Link:            cfg.Link,
+		ClaudeConfigDir: cfg.ClaudeConfigDir,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("bridge: adapter: %w", err)

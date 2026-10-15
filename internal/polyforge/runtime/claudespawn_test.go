@@ -164,13 +164,16 @@ func TestHarnessSpawnerRefusesUnknownHarness(t *testing.T) {
 // by the journaled uuid) onto that dispatch's own capsule file — on a
 // resumed dispatch too (the native file is outside the capsule).
 func TestSyncLiveTranscriptClaude(t *testing.T) {
-	cfgDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", cfgDir)
+	// polyforge#171: the locator takes the claude-config dir explicitly
+	// off the runtime config's harness root; the daemon process env is
+	// never consulted (the child env is the only place that matters).
+	root := t.TempDir()
 	capDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(capDir, "session"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	native := filepath.Join(cfgDir, "projects", harness.ClaudeProjectDirName(capDir), testSession+".jsonl")
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(t.TempDir(), "elsewhere"))
+	native := filepath.Join(root, "claude-config", "projects", harness.ClaudeProjectDirName(capDir), testSession+".jsonl")
 	if err := os.MkdirAll(filepath.Dir(native), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +188,7 @@ func TestSyncLiveTranscriptClaude(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(capDir, "runtime-state", "spawn-journal.jsonl"), []byte(line), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r := &Runtime{}
+	r := &Runtime{cfg: Config{HarnessRoot: root}}
 	r.syncLiveTranscript(capDir)
 	got, err := os.ReadFile(dst)
 	if err != nil || !strings.Contains(string(got), `"assistant"`) {

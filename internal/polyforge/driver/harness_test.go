@@ -101,8 +101,8 @@ func TestHarnessSwitchSkipsIncompatible(t *testing.T) {
 // never resumes.
 func TestAdapterClaudeSessionAndResume(t *testing.T) {
 	cfgDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", cfgDir)
 	ad, sp, capDir := spawnEnv(t)
+	ad.ClaudeConfigDir = cfgDir
 
 	run, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "grill", WIID: "wi_sp", SpawnN: 1, Harness: "claude", Model: "claude-opus-5-5"})
 	if err != nil {

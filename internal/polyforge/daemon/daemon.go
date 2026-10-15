@@ -366,6 +366,10 @@ func New(cfg Config) (*Daemon, error) {
 				StepCandidates:   in.StepCandidates,
 				StepHarness:      in.StepHarness,
 				InterruptedCause: in.InterruptedCause,
+				// polyforge#171: the resume decision for claude dispatches
+				// locates the native session under the claude-config dir
+				// the spawner hard-set (never the daemon's process env).
+				ClaudeConfigDir: rtCfg.ClaudeConfigDir(),
 				// driver events land in the durable per-WI event log
 				// (monotonic ids); the supervision link is the WI's
 				// shared driver <-> supervisor channel
@@ -415,7 +419,7 @@ func New(cfg Config) (*Daemon, error) {
 		// resolver lets CLI-side route calls by the operator's spelling
 		// (a "<project>#<seq>") find the canonically-keyed monitor.
 		LocateLive: func(capsuleDir string, spawnAt time.Time, harness, session string) string {
-			return runtime.LocateTranscript(rtCfg.StepAgentSessionsDir(), capsuleDir, spawnAt, harness, session)
+			return runtime.LocateTranscript(rtCfg.StepAgentSessionsDir(), rtCfg.ClaudeConfigDir(), capsuleDir, spawnAt, harness, session)
 		},
 		Resolve: d.resolveWI,
 		// M4 wiring: the periodic session revalidation rides the monitor
