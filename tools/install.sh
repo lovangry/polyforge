@@ -1,14 +1,25 @@
 #!/bin/sh
 # polyforge bootstrap — complete machine setup in one command.
 # Installs/updates (idempotent: a second run changes nothing):
-#   1. pf binary        — latest release, SHA-verified, daemon stopped first
+#   1. pf binary        — latest release, SHA-verified; on an upgrade the
+#        daemon's restart loop (tmux session polyforge-daemon) is stopped
+#        FIRST, then the daemon is shut down gracefully, then the binary
+#        is swapped (no old daemon revived by the loop, no two daemons
+#        racing for the socket)
 #   2. config           — created once, NEVER rewritten
 #   3. release + skills — own checkout of the release tag in
 #        ~/.local/share/polyforge/release/<VER> (stable symlink release/current,
-#        swapped atomically, previous version kept); then, independently:
-#        Claude Code: skill replaced wholesale + SessionStart hook registered
-#        once in ~/.claude/settings.json; pi: package entry pinned to <VER>
-#   4. daemon           — started with -workflows-dir release/current/workflows
+#        swapped atomically, previous version kept); the harnesses REFERENCE
+#        it, nothing is copied or cloned again (polyforge#174):
+#        Claude Code: ~/.claude/skills/polyforge is a symlink to
+#        release/current/skills/polyforge (an old copied directory is
+#        replaced) + SessionStart hook registered once in
+#        ~/.claude/settings.json; pi: one local package entry naming
+#        release/current in pi's settings (replaces the old
+#        git:...silgrid/polyforge.git@<ver> entry)
+#   4. daemon           — `pf daemon ensure`: the restart loop in tmux runs
+#        the daemon with -workflows-dir release/current/workflows; after a
+#        reboot the harness adapters run the same ensure at session start
 #   5. verify
 #
 # Usage (new machine):
@@ -32,6 +43,18 @@ RELEASE_DIR="$DAEMON_DATA/release"
 WORKFLOWS="$RELEASE_DIR/current/workflows"
 PI_SETTINGS="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/settings.json"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+
+# The tmux session hosting the daemon restart loop (pf daemon ensure).
+LOOP_SESSION="polyforge-daemon"
+
+# tmux_q: tmux on the user's default server, whatever tmux this shell
+# runs inside.
+tmux_q() { env -u TMUX -u TMUX_PANE tmux "$@"; }
+
+# loop_running: the restart loop's tmux session exists.
+loop_running() {
+  command -v tmux >/dev/null 2>&1 && tmux_q has-session -t "=$LOOP_SESSION" 2>/dev/null
+}
 
 # daemon_running: true while a daemon answers on the socket, or still
 # holds its data-dir lock (quiescing after the socket went quiet). The
@@ -71,9 +94,16 @@ else
     [ "$GOT" = "$EXP" ] || { echo "ERROR: SHA mismatch"; rm -rf "$TMP"; exit 1; }
   fi
   mkdir -p "$(dirname "$BIN")"
-  # stop the daemon gracefully, then wait until it is really gone: the
+  # Upgrade order: (1) stop the restart loop, so nothing revives the old
+  # daemon — the daemon inside it ignores the hangup and keeps running;
+  # (2) stop the daemon gracefully and wait until it is really gone: the
   # binary is never swapped under a live daemon. The wait must exceed the
-  # daemon's graceful ShutdownBudget (5 minutes), hence 330s.
+  # daemon's graceful ShutdownBudget (5 minutes), hence 330s; (3) swap;
+  # step 4 starts the new daemon through `pf daemon ensure`.
+  if loop_running; then
+    tmux_q kill-session -t "=$LOOP_SESSION" 2>/dev/null || true
+    echo "   stopped the daemon restart loop (tmux session $LOOP_SESSION)"
+  fi
   if daemon_running; then
     echo "   stopping daemon (graceful)"
     if [ -x "$BIN" ] && "$BIN" ops shutdown >/dev/null 2>&1; then
@@ -190,19 +220,28 @@ fi
 SRC_SKILL="$RELEASE_DIR/current/skills/polyforge"
 
 # --- Claude Code (independent of pi) ---
+# The skill is a symlink to the release checkout: a release switch is the
+# release/current swap above, nothing to copy (Claude Code follows
+# symlinked skill dirs).
 if [ -d "$HOME/.claude" ] || command -v claude >/dev/null 2>&1; then
   CSK="$HOME/.claude/skills/polyforge"
   mkdir -p "$HOME/.claude/skills"
-  if [ -d "$CSK" ] && diff -r "$SRC_SKILL" "$CSK" >/dev/null 2>&1; then
-    echo "   claude skill $VER already current"
+  if [ -L "$CSK" ] && [ "$(readlink "$CSK")" = "$SRC_SKILL" ]; then
+    echo "   claude skill -> release/current already"
   else
-    # replace wholesale: copy beside, swap, drop the old (no stale files)
-    rm -rf "$CSK.new.$$" "$CSK.old.$$"
-    cp -R "$SRC_SKILL" "$CSK.new.$$"
-    [ -d "$CSK" ] && mv "$CSK" "$CSK.old.$$"
-    mv "$CSK.new.$$" "$CSK"
-    rm -rf "$CSK.old.$$"
-    echo "   claude skill replaced from $VER"
+    if [ -L "$CSK" ]; then
+      rm -f "$CSK"
+    elif [ -e "$CSK" ]; then
+      # the pre-#174 layout: a copy this installer made of a release;
+      # moved out of skills/ first (a second polyforge skill dir there
+      # would load twice), then dropped
+      rm -rf "$HOME/.claude/.polyforge-skill-old.$$"
+      mv "$CSK" "$HOME/.claude/.polyforge-skill-old.$$"
+      rm -rf "$HOME/.claude/.polyforge-skill-old.$$"
+      echo "   claude skill: removed the old copied directory"
+    fi
+    ln -s "$SRC_SKILL" "$CSK"
+    echo "   claude skill -> $SRC_SKILL"
   fi
   HOOK="$CSK/hooks/claude-session-start.sh"
   [ -x "$HOOK" ] || chmod +x "$HOOK"
@@ -242,54 +281,62 @@ PYEOF
 fi
 
 # --- pi (independent of Claude Code) ---
-# `pi install <src>@<ref>` REPLACES an existing entry of the same repo at
-# another ref (package-manager.js addSourceToSettings), so the pin check
-# reads the settings entry, never the checkout.
-if command -v pi >/dev/null 2>&1; then
-  PI_SRC="git:git@github.com:$REPO.git"
-  pi_pin() { # print "<n-entries> <refs...>" ; with "fix" dedupe to $VER
-    python3 - "$PI_SETTINGS" "$REPO" "$VER" "$1" <<'PYEOF'
+# One LOCAL package entry naming release/current (pi loads a local path in
+# place, never copies it; the release's package.json declares the skill
+# and the pf-chat extension). Written straight into pi's settings: it
+# replaces any git entry of this repo (the pre-#174 `pi install
+# git:...@<ver>` clone) and duplicates; other packages are untouched.
+if command -v pi >/dev/null 2>&1 || [ -d "$(dirname "$PI_SETTINGS")" ]; then
+  python3 - "$PI_SETTINGS" "$REPO" "$RELEASE_DIR/current" <<'PYEOF' || echo "   WARN: could not set the pi package entry in $PI_SETTINGS"
 import json, os, re, shutil, sys, time
-path, repo, ver, mode = sys.argv[1:5]
-try:
-    cfg = json.load(open(path))
-except (OSError, ValueError):
-    print("0"); sys.exit(0)
-pk = cfg.get("packages") or []
+path, repo, rel = sys.argv[1:4]
+cfg, existed = {}, os.path.exists(path)
+if existed:
+    try:
+        cfg = json.load(open(path))
+    except ValueError as e:
+        print("   %s is not valid JSON (%s); pi package NOT set" % (path, e)); sys.exit(1)
+    if not isinstance(cfg, dict):
+        print("   %s is not a JSON object; pi package NOT set" % path); sys.exit(1)
+pk = cfg.get("packages")
+if pk is None:
+    pk = []
+if not isinstance(pk, list):
+    print("   unexpected packages shape in %s; pi package NOT set" % path); sys.exit(1)
+base, home = os.path.dirname(path), os.path.expanduser("~")
 def src(e): return e if isinstance(e, str) else (e.get("source", "") if isinstance(e, dict) else "")
-def mine(e): return re.search(r"github\.com[:/]" + re.escape(repo) + r"(\.git)?(@|$)", src(e)) is not None
-idx = [i for i, e in enumerate(pk) if mine(e)]
-if mode == "fix" and len(idx) > 1:
-    keep = next((i for i in idx if src(pk[i]).endswith("@" + ver)), idx[-1])
+def local(s):
+    if not s or s.startswith(("npm:", "git:", "git@", "github.com")) or "://" in s: return None
+    if s == "~" or s.startswith("~/"): s = home + s[1:]
+    return os.path.normpath(os.path.join(base, s))
+def ours(e):
+    s = src(e)
+    return re.search(r"github\.com[:/]" + re.escape(repo) + r"(\.git)?(@|$)", s) is not None or local(s) == os.path.normpath(rel)
+idx = [i for i, e in enumerate(pk) if ours(e)]
+if len(idx) == 1 and pk[idx[0]] == rel:
+    print("   pi package -> release/current already"); sys.exit(0)
+was = [src(pk[i]) for i in idx]
+new = [e for i, e in enumerate(pk) if i not in idx]
+new.insert(idx[0] if idx else len(new), rel)
+cfg["packages"] = new
+os.makedirs(base, exist_ok=True)
+if existed:
     shutil.copy2(path, "%s.bak-polyforge-%s" % (path, time.strftime("%Y%m%d%H%M%S")))
-    cfg["packages"] = [e for i, e in enumerate(pk) if i not in idx or i == keep]
-    with open(path + ".tmp", "w") as f:
-        json.dump(cfg, f, indent=2); f.write("\n")
-    os.replace(path + ".tmp", path)
-    pk = cfg["packages"]; idx = [i for i, e in enumerate(pk) if mine(e)]
-print("%d %s" % (len(idx), " ".join((re.search(r"@([^@/:]+)$", src(pk[i])) or [0, "-"])[1] for i in idx)))
+with open(path + ".tmp", "w") as f:
+    json.dump(cfg, f, indent=2); f.write("\n")
+os.replace(path + ".tmp", path)
+print("   pi package -> %s%s (restart pi sessions to load)" % (rel, (" (replaced: " + ", ".join(was) + ")") if was else ""))
 PYEOF
-  }
-  if [ "$(pi_pin check)" = "1 $VER" ]; then
-    echo "   pi package already pinned to $VER"
-  else
-    pi install "$PI_SRC@$VER" >/dev/null 2>&1 || echo "   WARN: pi install $PI_SRC@$VER failed"
-    # pi replaces a same-repo entry; only a hand-made duplicate needs cleanup
-    PIN=$(pi_pin fix)
-    if [ "$PIN" = "1 $VER" ]; then
-      echo "   pi package pinned to $VER (restart session to load)"
-    else
-      echo "   WARN: pi package entry not at $VER (settings: $PIN) — check $PI_SETTINGS"
-    fi
-  fi
 fi
 # Progress display: the same judgement as `pf doctor` (reads only; a
 # warn row carries the copyable snippet, a skip row names an absent
 # harness — user files are never edited).
 "$BIN" doctor --harness 2>/dev/null | sed -e '/^ok:/d' -e '/^$/d' -e 's/^/   /'
 
-# ─── 4. daemon: start only when a real mapping exists ────────────────
+# ─── 4. daemon: started only through `pf daemon ensure` ────────────
 echo "== 4/5 daemon"
+# the fix for a live daemon without its restart loop (same as pf doctor)
+ENSURE_FIX="pf ops shutdown && while pf ops status >/dev/null 2>&1; do sleep 2; done; pf daemon ensure"
 if [ ! -d "$WORKFLOWS" ]; then
   echo "   SKIP: $WORKFLOWS missing (release checkout incomplete) — daemon needs workflows"
 elif [ -S "$DAEMON_SOCKET" ] && curl -s --unix-socket "$DAEMON_SOCKET" http://localhost/status 2>/dev/null | grep -q machine_id; then
@@ -319,14 +366,16 @@ PYEOF
   if [ -n "$RUN_WF" ] && [ "$RUN_WF" != "$WORKFLOWS" ]; then
     echo "   ACTION: daemon runs with -workflows-dir $RUN_WF; restart it with -workflows-dir $WORKFLOWS (pf ops shutdown, wait for jobs to drain, rerun this installer)"
   fi
+  if ! loop_running; then
+    echo "   ACTION: the daemon runs without its restart loop (no tmux session $LOOP_SESSION): a crash is not restarted. When no job needs it, restart it under the loop: $ENSURE_FIX"
+  fi
 elif ! grep -q '^[[:space:]]*\[workspace' "$CFG"; then
   # polyforge#113: no real mapping in the config — the daemon would
   # refuse to start anyway. Do not launch it; the operator adds the
   # mapping first (the migration/template guidance from step 2).
   echo "   SKIP: no [workspace] mapping in $CFG yet — the daemon refuses to start until one exists"
-  echo "   add a mapping (see the migration steps above or the commented template in the config), then: pf daemon"
+  echo "   add a mapping (see the migration steps above or the commented template in the config), then: pf daemon ensure"
 else
-  MACHINE_ID=$(hostname -s | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
   # The installer (not the daemon) owns workspace creation: the daemon
   # requires every mapped workspace dir to pre-exist and creates only
   # capsules/ inside each.
@@ -335,27 +384,19 @@ else
     printf 'capsules/\n' >> "$DAEMON_DATA/ws/.gitignore"
     echo "   added capsules/ to $DAEMON_DATA/ws/.gitignore (daemon never touches .gitignore)"
   fi
-  # polyforge#113: the mapping-bearing config is the daemon's only
-  # workspace source — the daemon argv carries neither a workspace nor a
-  # project flag, ever. The api_key is read from the same config, so it
-  # never appears in argv. The daemon's OWN persisted settings (and its
-  # first-boot defaults) govern auto and max-concurrent-jobs — the
-  # installer never forces operator settings on the argv (audit B4: an
-  # upgrade must not wipe daemon-state.json's auto/max).
-  nohup "$BIN" daemon \
-    --config "$CFG" \
-    -machine-id "m-$MACHINE_ID" \
-    -data-dir "$DAEMON_DATA" \
-    -socket "$DAEMON_SOCKET" \
-    -workflows-dir "$WORKFLOWS" \
-    > "$DAEMON_DATA/daemon.log" 2>&1 &
-  DAEMON_PID=$!
-  sleep 3
-  if curl -s --unix-socket "$DAEMON_SOCKET" http://localhost/status 2>/dev/null | grep -q machine_id; then
-    echo "   daemon started (m-$MACHINE_ID, pid $DAEMON_PID)"
-    echo "   NOTE: if heartbeat fails, admin must register m-$MACHINE_ID first"
+  # `pf daemon ensure` owns the launch (polyforge#174): the restart loop
+  # in tmux runs the canonical argv — --config, -machine-id (recorded
+  # daemon-id, else m-<short hostname>), -data-dir, -socket and
+  # -workflows-dir release/current/workflows. polyforge#113: the
+  # mapping-bearing config is the daemon's only workspace source and
+  # carries the api_key, so neither appears in argv; auto and
+  # max-concurrent-jobs stay the daemon's persisted settings (audit B4).
+  if ENSURE_OUT=$(POLYFORGE_DATA_DIR="$DAEMON_DATA" "$BIN" daemon ensure --config "$CFG" 2>&1); then
+    printf '%s\n' "$ENSURE_OUT" | sed 's/^/   /'
+    echo "   NOTE: if heartbeat fails, admin must register this daemon's id (pf ops status shows it)"
   else
-    echo "   WARN: daemon may need admin to register m-$MACHINE_ID"
+    printf '%s\n' "$ENSURE_OUT" | sed 's/^/   /'
+    echo "   WARN: the daemon is not answering yet (a new machine id may need admin registration)"
     echo "   check: tail $DAEMON_DATA/daemon.log"
   fi
 fi

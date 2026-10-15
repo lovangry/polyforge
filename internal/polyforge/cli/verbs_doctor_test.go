@@ -113,8 +113,12 @@ func TestDoctorHealthyMachineAllPassExit0(t *testing.T) {
 	sock := liveDaemonSocket(t, "m-h")
 	env := doctorServerConfig(t, srv.URL, "k_ok", sock, "polyforge")
 	env["HOME"] = displayHome(t, `{"statusLine":{"type":"command","command":"pf watch --statusline --harness-session -"}}`,
-		`{"packages":["git:git@github.com:silgrid/polyforge.git@v9"]}`)
+		`{"packages":["~/.local/share/polyforge/release/current"]}`)
 	env["PI_CODING_AGENT_DIR"] = ""
+	env["POLYFORGE_DATA_DIR"] = ""
+	layoutRelease(t, env["HOME"])
+	layoutClaudeLink(t, env["HOME"])
+	env["PATH"] = fakeTmuxPath(t, 0) // the restart loop is up (polyforge#174)
 	code, stdout, doc := doctorStatus(t, env, "--json", "doctor")
 	if code != 0 {
 		t.Fatalf("healthy machine: exit %d, want 0 (output %s)", code, stdout)
@@ -254,8 +258,9 @@ func TestDoctorUnloadableConfigDoesNotFakeGreen(t *testing.T) {
 	}
 	skips := 0
 	for _, c := range doc.Checks {
-		if c.Name == docChClaudeDisplay || c.Name == docChPiDisplay {
-			continue // config-independent (polyforge#142)
+		switch c.Name {
+		case docChClaudeDisplay, docChPiDisplay, docChClaudeLayout, docChPiLayout, docChV1Leftovers:
+			continue // the config-independent harness family (polyforge#142, #174)
 		}
 		if c.Status == "skip" {
 			skips++

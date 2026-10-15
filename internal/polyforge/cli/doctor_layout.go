@@ -1,0 +1,353 @@
+package cli
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/silgrid/polyforge/internal/polyforge/supervisor"
+)
+
+// doctor_layout.go (polyforge#174): the install-layout half of the
+// harness family plus the daemon supervision check.
+//
+//   - pi install layout: tools/install.sh references the local release
+//     checkout (<data-dir>/release/current) as a pi package — no git
+//     clone; anything else is a warn naming the fix.
+//   - claude install layout: ~/.claude/skills/polyforge is a symlink to
+//     release/current/skills/polyforge; a copied directory (the old
+//     layout) or another target is a warn.
+//   - v1 harness leftovers: the v1 aihub bridge (pi package from
+//     GMISWE/ieops-aihub, ~/.pi/agent/extensions/polyforge), v1 Claude
+//     skills (using-polyforge, pf-*) and v1 Claude plugins. Warn only,
+//     with copy-paste cleanup commands that back up first; nothing is
+//     ever removed by the doctor.
+//   - daemon supervision: a live daemon under the tmux restart loop (or
+//     an active systemd unit) passes; a live unsupervised daemon warns
+//     with the fix; a dead daemon is the "daemon socket" fail.
+//
+// Like the display checks these never fail (presentation/migration, not
+// health): pass, warn or skip.
+
+const (
+	docChClaudeLayout = "claude install layout"
+	docChPiLayout     = "pi install layout"
+	docChV1Leftovers  = "v1 harness leftovers"
+	docChSupervision  = "daemon supervision"
+)
+
+// v1ClaudeSkills are the v1 Claude Code skills (00-architecture §11.1).
+var v1ClaudeSkills = []string{
+	"using-polyforge", "pf-spec", "pf-plan", "pf-retro", "pf-crystallize", "pf-revise",
+	"pf-project", "pf-user", "pf-sync", "pf-release", "pf-init", "pf-doctor", "pf-update",
+}
+
+// v1PkgRe matches a pi package / extension source of the v1 aihub repo.
+var v1PkgRe = regexp.MustCompile(`(?i)ieops-aihub`)
+
+// v1ExtFileRe matches a settings-listed v1 bridge extension file.
+var v1ExtFileRe = regexp.MustCompile(`(^|/)polyforge/index\.(js|ts)$`)
+
+// polyforgeDataDir is the daemon data dir tools/install.sh uses.
+func polyforgeDataDir(home string) string {
+	if d := os.Getenv("POLYFORGE_DATA_DIR"); d != "" {
+		return d
+	}
+	return filepath.Join(home, ".local", "share", "polyforge")
+}
+
+// releaseCurrent is the stable release checkout link.
+func releaseCurrent(home string) string {
+	return filepath.Join(polyforgeDataDir(home), "release", "current")
+}
+
+// piSettings is the slice of pi's settings.json the doctor reads.
+type piSettings struct {
+	Packages   []json.RawMessage `json:"packages"`
+	Extensions []any             `json:"extensions"`
+}
+
+// readPiSettings loads <agentDir>/settings.json (exists=false when absent).
+func readPiSettings(agentDir string) (cfg piSettings, exists bool, err error) {
+	path := filepath.Join(agentDir, "settings.json")
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return cfg, false, nil
+	}
+	if err != nil {
+		return cfg, true, err
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return cfg, true, fmt.Errorf("%s does not parse as a settings object: %v", path, err)
+	}
+	return cfg, true, nil
+}
+
+// pkgSource answers a packages entry's source (a string, or an object's
+// "source").
+func pkgSource(p json.RawMessage) string {
+	var s string
+	if json.Unmarshal(p, &s) == nil {
+		return s
+	}
+	var o struct {
+		Source string `json:"source"`
+	}
+	_ = json.Unmarshal(p, &o)
+	return o.Source
+}
+
+// piLocalPath resolves a pi package source that is a local path the way
+// pi does (`~` → home, relative → from the settings file's dir); "" for
+// npm/git/url sources.
+func piLocalPath(src, agentDir, home string) string {
+	s := strings.TrimSpace(src)
+	switch {
+	case s == "", strings.HasPrefix(s, "npm:"), strings.HasPrefix(s, "git:"),
+		strings.Contains(s, "://"), strings.HasPrefix(s, "git@"), strings.HasPrefix(s, "github.com"):
+		return ""
+	case s == "~":
+		return home
+	case strings.HasPrefix(s, "~/"):
+		return filepath.Join(home, s[2:])
+	case filepath.IsAbs(s):
+		return filepath.Clean(s)
+	}
+	return filepath.Join(agentDir, s)
+}
+
+// piLayoutCheck judges whether pi references polyforge the way
+// tools/install.sh sets it up: one local package entry naming
+// <data-dir>/release/current.
+func piLayoutCheck(agentDir, home string) doctorCheck {
+	c := doctorCheck{Name: docChPiLayout}
+	if st, err := os.Stat(agentDir); err != nil || !st.IsDir() {
+		c.Status, c.Detail = "skip", "no "+agentDir+": pi is not set up here"
+		return c
+	}
+	rel := releaseCurrent(home)
+	fix := "re-run tools/install.sh (it writes the local package entry \"" + rel + "\" in place of a git entry)"
+	cfg, exists, err := readPiSettings(agentDir)
+	if err != nil {
+		c.Status, c.Detail = "warn", "cannot tell: "+err.Error()
+		return c
+	}
+	if !exists {
+		c.Status, c.Detail = "warn", "no polyforge pi package: "+filepath.Join(agentDir, "settings.json")+" does not exist — "+fix
+		return c
+	}
+	var git, other []string
+	current := false
+	for _, p := range cfg.Packages {
+		src := pkgSource(p)
+		if polyforgePkgRe.MatchString(src) {
+			git = append(git, src)
+			continue
+		}
+		lp := piLocalPath(src, agentDir, home)
+		if lp == "" {
+			continue
+		}
+		if lp == filepath.Clean(rel) {
+			current = true
+		} else if _, serr := os.Stat(filepath.Join(lp, "skills", "polyforge", "SKILL.md")); serr == nil {
+			other = append(other, src)
+		}
+	}
+	switch {
+	case len(git) > 0:
+		c.Status, c.Detail = "warn", "pi loads polyforge from a git clone ("+strings.Join(git, ", ")+"), not the local release — "+fix
+	case len(other) > 0:
+		c.Status, c.Detail = "warn", "pi loads polyforge from "+strings.Join(other, ", ")+", not the release tools/install.sh manages ("+rel+") — "+fix
+	case !current:
+		c.Status, c.Detail = "warn", "no polyforge pi package in "+filepath.Join(agentDir, "settings.json")+" — "+fix
+	default:
+		if _, serr := os.Stat(filepath.Join(rel, "package.json")); serr != nil {
+			c.Status, c.Detail = "warn", "the pi package entry names "+rel+", but no release is checked out there — re-run tools/install.sh"
+			return c
+		}
+		c.Status, c.Detail = "pass", "pi package "+rel+" (the local release checkout; a release switch takes effect at the next pi session)"
+	}
+	return c
+}
+
+// claudeLayoutCheck judges whether Claude Code's polyforge skill is the
+// symlink tools/install.sh creates.
+func claudeLayoutCheck(home string) doctorCheck {
+	c := doctorCheck{Name: docChClaudeLayout}
+	dir := filepath.Join(home, ".claude")
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		c.Status, c.Detail = "skip", "no "+dir+": Claude Code is not set up here"
+		return c
+	}
+	want := filepath.Join(releaseCurrent(home), "skills", "polyforge")
+	skill := filepath.Join(dir, "skills", "polyforge")
+	fix := "re-run tools/install.sh (it links " + skill + " -> " + want + ")"
+	st, err := os.Lstat(skill)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		c.Status, c.Detail = "warn", "the polyforge skill is not installed for Claude Code — "+fix
+	case err != nil:
+		c.Status, c.Detail = "warn", "cannot tell: "+err.Error()
+	case st.Mode()&os.ModeSymlink != 0:
+		target, _ := os.Readlink(skill)
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(skill), target)
+		}
+		if filepath.Clean(target) != filepath.Clean(want) {
+			c.Status, c.Detail = "warn", skill+" links to "+target+", not the release tools/install.sh manages — "+fix
+		} else if _, serr := os.Stat(filepath.Join(skill, "SKILL.md")); serr != nil {
+			c.Status, c.Detail = "warn", skill+" links to "+want+", but no release is checked out there — re-run tools/install.sh"
+		} else {
+			c.Status, c.Detail = "pass", skill+" -> "+want
+		}
+	default:
+		c.Status, c.Detail = "warn", skill+" is a copied directory (the layout before polyforge#174), not a link to the release — "+fix
+	}
+	return c
+}
+
+// v1LeftoversCheck finds v1 polyforge artifacts still installed in a
+// harness and prints backup-first cleanup commands.
+func v1LeftoversCheck(home, agentDir string) doctorCheck {
+	c := doctorCheck{Name: docChV1Leftovers}
+	var found, cmds, manual []string
+	backup := `B="$HOME/polyforge-v1-backup-$(date +%Y%m%d%H%M%S)"; mkdir -p "$B"`
+	cmds = append(cmds, backup)
+
+	// pi: settings packages / extensions, the auto-loaded extension dir
+	if cfg, exists, err := readPiSettings(agentDir); exists && err == nil {
+		settings := filepath.Join(agentDir, "settings.json")
+		var piCmds []string
+		for _, p := range cfg.Packages {
+			if src := pkgSource(p); v1PkgRe.MatchString(src) {
+				found = append(found, "pi package "+src)
+				piCmds = append(piCmds, "pi remove "+shellQuote(src))
+			}
+		}
+		for _, x := range cfg.Extensions {
+			if e, ok := x.(string); ok && (v1PkgRe.MatchString(e) || v1ExtFileRe.MatchString(e)) {
+				found = append(found, "pi settings extension "+e)
+				manual = append(manual, "delete the extensions entry "+e+" from "+settings)
+			}
+		}
+		if len(piCmds) > 0 || len(manual) > 0 {
+			cmds = append(cmds, "cp -a "+shellQuote(settings)+` "$B/pi-settings.json"`)
+			cmds = append(cmds, piCmds...)
+		}
+	}
+	for _, name := range []string{"polyforge", "polyforge.ts", "polyforge.js"} {
+		p := filepath.Join(agentDir, "extensions", name)
+		if _, err := os.Lstat(p); err == nil {
+			found = append(found, "pi auto-loaded extension "+p)
+			cmds = append(cmds, "mv "+shellQuote(p)+` "$B/pi-extension-`+name+`"`)
+		}
+	}
+
+	// Claude Code: v1 skills and plugins
+	claude := filepath.Join(home, ".claude")
+	for _, name := range v1ClaudeSkills {
+		p := filepath.Join(claude, "skills", name)
+		if _, err := os.Lstat(p); err == nil {
+			found = append(found, "claude skill "+p)
+			cmds = append(cmds, "mv "+shellQuote(p)+` "$B/claude-skill-`+name+`"`)
+		}
+	}
+	plugins := v1ClaudePlugins(claude)
+	if len(plugins) > 0 {
+		cmds = append(cmds,
+			"{ cp -a "+shellQuote(filepath.Join(claude, "plugins", "installed_plugins.json"))+` "$B/" 2>/dev/null || true; }`,
+			"{ cp -a "+shellQuote(filepath.Join(claude, "settings.json"))+` "$B/claude-settings.json" 2>/dev/null || true; }`)
+		for _, p := range plugins {
+			found = append(found, "claude plugin "+p)
+			cmds = append(cmds, "claude plugin uninstall "+shellQuote(p))
+		}
+	}
+	if len(found) == 0 {
+		c.Status, c.Detail = "pass", "no v1 polyforge artifacts in the pi or Claude Code setup"
+		return c
+	}
+	c.Status = "warn"
+	c.Detail = "v1 polyforge artifacts are still installed (" + strings.Join(found, "; ") +
+		") — they hook the same session events as the v2 adapters; remove them (backup first, then restart the harness sessions): " +
+		strings.Join(cmds, " && ")
+	if len(manual) > 0 {
+		c.Detail += " — then, by hand (the settings file is backed up in $B): " + strings.Join(manual, "; ")
+	}
+	return c
+}
+
+// v1ClaudePlugins answers the installed Claude Code plugins that belong
+// to v1 polyforge (named polyforge, or from the ieops-aihub marketplace).
+func v1ClaudePlugins(claudeDir string) []string {
+	seen := map[string]bool{}
+	match := func(key string) {
+		name, market, _ := strings.Cut(key, "@")
+		if name == "polyforge" || v1PkgRe.MatchString(market) {
+			seen[key] = true
+		}
+	}
+	if raw, err := os.ReadFile(filepath.Join(claudeDir, "plugins", "installed_plugins.json")); err == nil {
+		var doc struct {
+			Plugins map[string]json.RawMessage `json:"plugins"`
+		}
+		if json.Unmarshal(raw, &doc) == nil {
+			for k := range doc.Plugins {
+				match(k)
+			}
+		}
+	}
+	if raw, err := os.ReadFile(filepath.Join(claudeDir, "settings.json")); err == nil {
+		var doc struct {
+			EnabledPlugins map[string]json.RawMessage `json:"enabledPlugins"`
+		}
+		if json.Unmarshal(raw, &doc) == nil {
+			for k := range doc.EnabledPlugins {
+				match(k)
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// shellQuote single-quotes s for a copy-paste command.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// ensureFixCommand restarts an unsupervised live daemon under the loop:
+// a graceful stop (running jobs are checkpointed), wait for the socket to
+// go quiet, then ensure.
+const ensureFixCommand = "pf ops shutdown && while pf ops status >/dev/null 2>&1; do sleep 2; done; pf daemon ensure"
+
+// supervisionCheck judges whether a live daemon is supervised.
+func supervisionCheck(daemonUp bool) doctorCheck {
+	c := doctorCheck{Name: docChSupervision}
+	if !daemonUp {
+		c.Status, c.Detail = "skip", "not run: the daemon does not answer — start it: pf daemon ensure"
+		return c
+	}
+	loop, err := supervisor.LoopRunning()
+	switch {
+	case loop:
+		c.Status, c.Detail = "pass", "the daemon runs under the restart loop in tmux session "+supervisor.SessionName+" (a crash is restarted within ~5s; after a reboot the next harness session runs pf daemon ensure)"
+	case supervisor.SystemdActive():
+		c.Status, c.Detail = "pass", "systemd unit "+supervisor.SystemdUnit+" is active"
+	case errors.Is(err, supervisor.ErrNoTmux):
+		c.Status, c.Detail = "warn", "the daemon runs without supervision and tmux is not installed: a crash is not restarted — install tmux, then: "+ensureFixCommand
+	default:
+		c.Status, c.Detail = "warn", "the daemon runs without supervision (no tmux session "+supervisor.SessionName+", no active "+supervisor.SystemdUnit+"): a crash is not restarted — restart it under the loop (graceful; running jobs are checkpointed first): "+ensureFixCommand
+	}
+	return c
+}

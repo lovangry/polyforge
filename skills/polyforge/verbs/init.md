@@ -23,8 +23,16 @@ curl -s -H "Authorization: token $(gh auth token)" \
 
 Install and upgrade are the same command: run it again any time to
 upgrade in place. The script installs the `pf` binary (SHA-verified),
-writes the client config, installs this routing skill, and — on execution
-machines — starts the local daemon. Prerequisites (a personal API key,
+writes the client config, keeps a checkout of the release at
+`~/.local/share/polyforge/release/current` that both harnesses reference
+(pi: one local package entry naming it; Claude Code:
+`~/.claude/skills/polyforge` as a symlink into it — no copy, no second
+clone), and — on execution machines — starts the local daemon through
+`pf daemon ensure` (a restart loop in tmux session `polyforge-daemon`;
+an upgrade stops that loop, shuts the daemon down gracefully, swaps the
+binary and ensures again). After a container or machine restart the next
+pi or Claude Code session runs the same ensure; nothing else needs to be
+started by hand. Prerequisites (a personal API key,
 `gh` authenticated) and flags live in the README install section and
 `tools/install.sh`; this fragment deliberately does not duplicate them.
 
@@ -103,7 +111,7 @@ work item stays queued, so fix the file and resubmit.
 ## Verify
 
 ```
-pf doctor           # machine face: config + [workspace] mapping + connectivity
+pf doctor           # machine face: config + [workspace] mapping + connectivity + supervision + harness layout
 cat <workspace>/.polyforge.yaml   # the model pins the daemon reads (if any)
 ```
 

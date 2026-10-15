@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-
-	"github.com/silgrid/polyforge/internal/version"
 )
 
 // doctor_display.go: the harness progress-display checks of `pf doctor`
@@ -59,7 +57,11 @@ func harnessDisplayChecks() []doctorCheck {
 	if piDir == "" {
 		piDir = filepath.Join(home, ".pi", "agent")
 	}
-	return []doctorCheck{claudeDisplayCheck(home), piDisplayCheck(piDir)}
+	return []doctorCheck{
+		claudeDisplayCheck(home), piDisplayCheck(piDir, home),
+		claudeLayoutCheck(home), piLayoutCheck(piDir, home),
+		v1LeftoversCheck(home, piDir),
+	}
 }
 
 // runsPfStatusline reports whether shell text invokes the progress face
@@ -185,19 +187,17 @@ func claudeDisplayCheck(home string) doctorCheck {
 }
 
 // piDisplayCheck judges whether pi loads the pf-chat extension: the
-// polyforge pi package (which carries it) or the extension file itself
-// is listed in pi's settings.
-func piDisplayCheck(agentDir string) doctorCheck {
+// polyforge pi package (which carries it: the local release checkout
+// tools/install.sh references, any local checkout carrying pf-chat, or a
+// git entry of the repo) or the extension file itself is listed in pi's
+// settings.
+func piDisplayCheck(agentDir, home string) doctorCheck {
 	c := doctorCheck{Name: docChPiDisplay}
 	if st, err := os.Stat(agentDir); err != nil || !st.IsDir() {
 		c.Status, c.Detail = "skip", "no "+agentDir+": pi is not set up here"
 		return c
 	}
-	src := "git:git@github.com:silgrid/polyforge.git"
-	if version.Version != "dev" {
-		src += "@" + version.Version
-	}
-	hint := "will not show: the polyforge pi package (pf-chat extension) is not installed — run: pi install " + src
+	hint := "will not show: the polyforge pi package (pf-chat extension) is not installed — re-run tools/install.sh, or add the local release \"" + releaseCurrent(home) + "\" to packages in " + filepath.Join(agentDir, "settings.json")
 	path := filepath.Join(agentDir, "settings.json")
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -228,6 +228,12 @@ func piDisplayCheck(agentDir string) doctorCheck {
 		if polyforgePkgRe.MatchString(s) {
 			c.Status, c.Detail = "pass", fmt.Sprintf("pi package %s carries the pf-chat extension", s)
 			return c
+		}
+		if lp := piLocalPath(s, agentDir, home); lp != "" {
+			if _, err := os.Stat(filepath.Join(lp, "skills", "polyforge", "extensions", "pf-chat.ts")); err == nil {
+				c.Status, c.Detail = "pass", fmt.Sprintf("pi package %s carries the pf-chat extension", s)
+				return c
+			}
 		}
 	}
 	for _, x := range cfg.Extensions {

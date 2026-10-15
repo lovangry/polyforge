@@ -2,10 +2,14 @@
 
 CLI-meta verb: one command reports whether this machine can do its job —
 the config, the `[workspace]` mapping (polyforge#113) and the three
-connectivity faces (aihub server reach, local daemon socket, auth), plus
-whether each harness will display polyforge progress. It
-is a pure read face: nothing is mutated, nothing is auto-fixed (there is
-no `--fix`; remediation is always manual, the check detail names it).
+connectivity faces (aihub server reach, local daemon socket, auth), whether
+the daemon runs under supervision, plus the harness family: whether each
+harness will display polyforge progress, whether it references the release
+the way `tools/install.sh` sets it up, and whether v1 polyforge artifacts are
+still installed. It is a pure read face: nothing is mutated, nothing is
+auto-fixed (there is no `--fix`; remediation is always manual, the check
+detail names it). The one remediation the agent runs itself is the
+daemon-down case: `pf daemon ensure`, then `pf doctor` again.
 
 ## Triggers
 
@@ -21,8 +25,9 @@ no `--fix`; remediation is always manual, the check detail names it).
 pf doctor [--harness] [--json]
 ```
 
-`--harness` runs only the two progress-display checks (no config, no
-network); `tools/install.sh` prints its rows.
+`--harness` runs only the harness family (progress display, install
+layout, v1 leftovers — no config, no network); `tools/install.sh` prints
+its rows.
 
 Exit codes follow the repo convention: 0 every check passes, 1 any check
 fails, 2 usage errors. `--json` emits one machine document:
@@ -40,11 +45,23 @@ fails, 2 usage errors. `--json` emits one machine document:
 | `harness claude` | when some resolved candidate is `claude:…`: the daemon finds the claude binary (see below) | the binary the daemon could not resolve |
 | `aihub projects` | every mapped project is known to aihub (the project read face) | the project AND its workspace, named (an ambiguous inverse or duplicate surfaces through the config check, both workspaces named) |
 | `server reach` | aihub answers at all (any HTTP answer counts) | the dial failure |
-| `daemon socket` | the local daemon answers GET /status over its unix socket | the socket path and the dial error — start the daemon |
+| `daemon socket` | the local daemon answers GET /status over its unix socket | the socket path and the dial error — the daemon is down: run `pf daemon ensure` (starts it under its restart loop), then re-run the doctor |
 | `auth` | the api key gets past aihub's auth boundary (the same signed read the projects check uses) | the typed 401/403 answer — fix `api_key` |
 
 Checks that cannot be proven (config unloadable, aihub unreachable) are
 reported `skip` — a skip never pretends to be a pass.
+
+## Daemon supervision (polyforge#174 — `warn` never moves the exit code)
+
+| Result | When | What to tell the user |
+|---|---|---|
+| `pass` | the daemon answers and tmux session `polyforge-daemon` (the restart loop `pf daemon ensure` creates) exists — or a systemd unit `polyforge-daemon.service` is active | — |
+| `warn` | the daemon answers but nothing supervises it (e.g. started by hand or by an older installer with `nohup`): a crash is not restarted | Relay the fix from the detail when no job needs the daemon: `pf ops shutdown && while pf ops status >/dev/null 2>&1; do sleep 2; done; pf daemon ensure` (graceful — running jobs are checkpointed first). Without tmux installed: install it first. |
+| `skip` | the daemon does not answer | The `daemon socket` row fails: run `pf daemon ensure`. |
+
+The loop restarts crashes within ~5s; tmux does not survive a container or
+machine restart — the next pi or Claude Code session start runs
+`pf daemon ensure` and brings it back.
 
 ## Progress display (presentation only — never `fail`, never moves the exit code)
 
@@ -55,6 +72,19 @@ reported `skip` — a skip never pretends to be a pass.
 
 The judgement is static: the statusLine command is read, never run, and
 no user file is ever written — the user pastes the snippet.
+
+## Install layout and v1 leftovers (presentation only — never `fail`)
+
+| Check | `pass` | `warn` (detail carries the fix) | `skip` |
+|---|---|---|---|
+| `claude install layout` | `~/.claude/skills/polyforge` is a symlink to `<data-dir>/release/current/skills/polyforge` | a copied directory (the pre-#174 layout), a link elsewhere, no skill, or a link with no release behind it → re-run `tools/install.sh` | no `~/.claude` |
+| `pi install layout` | pi's settings `packages` hold the local release `<data-dir>/release/current` | a `git:…silgrid/polyforge.git@<ver>` entry (the old clone), another polyforge checkout, no entry, or no release behind it → re-run `tools/install.sh` | no pi agent dir |
+| `v1 harness leftovers` | no v1 artifact | any of: a pi package from `GMISWE/ieops-aihub`, a v1 bridge extension listed in pi's settings or present at `~/.pi/agent/extensions/polyforge`, a v1 Claude skill (`using-polyforge`, `pf-*`), a v1 Claude plugin (`polyforge@…`, the ieops-aihub marketplace) — the detail lists each and one copy-paste command line that first backs everything up into `~/polyforge-v1-backup-<timestamp>/`, then removes them (`pi remove`, `mv`, `claude plugin uninstall`) | — |
+
+v1 artifacts hook the same session events as the v2 adapters (pi loads
+`~/.pi/agent/extensions/*` and package extensions side by side), so show
+the user the command and let them run it; restart the harness sessions
+afterwards. The doctor never deletes anything itself.
 
 ## Workspace yaml
 
@@ -105,11 +135,12 @@ per check with its status and detail; `--json` prints the document only.
 | exit 1, `workspace dirs` fail | a mapped directory is missing | Create it (the daemon never does) or fix the `[workspace]` key. |
 | exit 1, `aihub projects` fail | a mapped project is unknown to aihub, or the project read fails | File/register the project on aihub or fix the mapping; the detail names the project and its workspace. |
 | exit 1, `server reach` fail | aihub unreachable | Check `--server` / the config's `server` and whether the aihub host is up. |
-| exit 1, `daemon socket` fail | no live daemon | Start it (`pf daemon`); the config's `[workspace]` mapping must be real first. |
+| exit 1, `daemon socket` fail | no live daemon | Run `pf daemon ensure` (it refuses, naming the reason, while the config has no real `[workspace]` mapping or the release workflows are missing), then re-run `pf doctor`. |
 | exit 1, `auth` fail | the credential is rejected | Fix the api key (config `api_key` / `PF_API_KEY`). |
 | exit 1, `harness claude` fail | a candidate is `claude:…` but the daemon cannot find the claude binary | Install/log in Claude Code on the machine or set `claude_bin`; or drop the `claude:` candidates. |
 | exit 2 | usage error (unknown flag) | Fix the invocation. |
 
 A `dial unix …` inside the daemon-socket check's detail means the daemon
 is not running on this machine — it is a finding, not a crash of the
-doctor itself.
+doctor itself. The same holds for every execution-plane verb: on
+`dial unix …` run `pf daemon ensure`, then retry the verb once.

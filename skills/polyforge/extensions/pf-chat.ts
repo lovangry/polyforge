@@ -16,6 +16,18 @@
 // `pf chat init` is retried every RESTART_MS until the session ends, so a
 // daemon that comes up after the pi session (e.g. after a reboot) is picked
 // up without reopening the session.
+//
+// Self-healing (polyforge#174): when the first `pf chat init` of a session
+// fails, the extension runs `pf daemon ensure` once (in the background,
+// bounded by ENSURE_MS) — after a container or machine restart nothing else
+// brings the daemon back — and retries init right after it; the RESTART_MS
+// retry loop stays the fallback. pi replays session_start when pi-web
+// resumes its sessions after a restart; ensure is idempotent and
+// file-locked, so many sessions resuming at once start one daemon.
+//
+// Step agents never load this file (the daemon runs them against its own
+// agent dir, without the user's packages); PF_WI_ID below is the second
+// fence.
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { isToolCallEventType, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -23,6 +35,7 @@ import { isToolCallEventType, type ExtensionAPI } from "@earendil-works/pi-codin
 const WIDGET_KEY = "polyforge";
 const POLL_MS = 2000;
 const RESTART_MS = 5000;
+const ENSURE_MS = 40000;
 
 export default function (pi: ExtensionAPI) {
   // Step agents (spawned by the daemon with PF_WI_ID in their env) are
@@ -79,6 +92,26 @@ export default function (pi: ExtensionAPI) {
     stopWatching(ctx);
     chatId = "";
     const gen = generation;
+    let ensured = false;
+
+    // ensureThenInit starts the daemon if it is down (once per session
+    // start), then asks for the chat id again; a failure falls through to
+    // the RESTART_MS retry loop.
+    const ensureThenInit = async () => {
+      let ok = false;
+      try {
+        const res = await pi.exec("pf", ["daemon", "ensure", "--timeout", "30s"], { timeout: ENSURE_MS });
+        ok = res.code === 0;
+      } catch {
+        // pf missing: the retry loop below keeps trying
+      }
+      if (gen !== generation) return;
+      if (ok) {
+        await tryInit();
+      } else {
+        initRetry = setTimeout(tryInit, RESTART_MS);
+      }
+    };
 
     // tryInit asks the daemon for this session's chat id. On failure (pf
     // missing, daemon down) it schedules itself again after RESTART_MS —
@@ -98,6 +131,11 @@ export default function (pi: ExtensionAPI) {
       }
       if (gen !== generation) return; // session ended or restarted meanwhile
       if (!id) {
+        if (!ensured) {
+          ensured = true;
+          void ensureThenInit(); // not awaited: never delays the session
+          return;
+        }
         initRetry = setTimeout(tryInit, RESTART_MS);
         return;
       }

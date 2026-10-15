@@ -51,7 +51,7 @@ confirm the first answer landed.
 | `DAEMON-404` | No local job for this work item | The work item is not running on this machine — answer from the machine that runs it. |
 | (no code) `answer: --text is required` / `… identity required` | Local usage refusal | Fill in the required flags; no request left the machine. |
 | `DAEMON-500` | Delivery failed (the driver could not take the answer) | Retry after the daemon re-derives the workflow; nothing was lost. |
-| `dial unix …` | Daemon not running | Start the daemon or check `--socket`. |
+| `dial unix …` | Daemon not running | Run `pf daemon ensure`, then retry once (or check `--socket`). |
 
 Answers bind per `question_id`: if the step re-asks, it mints a **new**
 question id — never reuse an old answer command; read the new one with

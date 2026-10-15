@@ -9,10 +9,28 @@
 # stdout would reach the model only).
 # The id is a notification label, not a credential. When pf or the daemon
 # is unavailable this exits 0 with no output.
+#
+# Before asking for the chat id it runs `pf daemon ensure` (polyforge#174):
+# a daemon that is down — after a container or machine restart nothing
+# else brings it back — is started under its tmux restart loop. Bounded
+# (ensure waits at most 15s, and `timeout` kills it at 20s), silent, and
+# it never blocks the session: any failure just leaves the chat id unset.
+# Claude Code fires SessionStart on startup, resume, clear and compact.
+#
+# Step agents never get here: the daemon runs claude steps with --bare
+# (no hooks), and a process carrying the step marker PF_WI_ID exits at
+# once as a second fence.
 
+[ -n "${PF_WI_ID:-}" ] && exit 0
 command -v pf >/dev/null 2>&1 || exit 0
 
 input=$(cat) || exit 0
+
+if command -v timeout >/dev/null 2>&1; then
+	timeout 20 pf daemon ensure --timeout 15s </dev/null >/dev/null 2>&1 || true
+else
+	pf daemon ensure --timeout 15s </dev/null >/dev/null 2>&1 || true
+fi
 
 if command -v jq >/dev/null 2>&1; then
 	sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
