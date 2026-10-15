@@ -153,3 +153,17 @@ func TestLoadStepKeysNeedTheInstalledSet(t *testing.T) {
 		t.Fatalf("an unreadable workflows dir must refuse, got %v", err)
 	}
 }
+
+// TestLoadEmptyWorkflowsDirSaysSo: an existing workflows dir with no
+// readable bundle refuses a per-step key with that fact, not by calling
+// every key unknown; a default-only yaml still loads.
+func TestLoadEmptyWorkflowsDirSaysSo(t *testing.T) {
+	empty := t.TempDir()
+	_, err := Load(writeYaml(t, "models:\n  e2e:\n    fix: [a]\n    code: [b]\n"), empty)
+	if err == nil || !strings.Contains(err.Error(), "no workflows found in "+empty) || strings.Contains(err.Error(), "unknown key") {
+		t.Fatalf("empty workflows dir: %v", err)
+	}
+	if cfg, err := Load(writeYaml(t, "models:\n  e2e:\n    default: [a]\n"), empty); err != nil || cfg == nil {
+		t.Fatalf("default-only yaml over an empty workflows dir: %+v, %v", cfg, err)
+	}
+}

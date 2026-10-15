@@ -287,6 +287,13 @@ and quick-fix's `fix`). Precedence, highest first:
     # Precedence: pf submit --models > project <step-id> > workflow step
     # model_candidates > project default > workflow defaults.
 
+Step-id keys are checked against the workflows dir at every claim, not
+once: before deploying a workflows release that removes or renames a
+step id named in a workspace yaml, delete or rename that key first
+(`pf doctor` flags it) — otherwise every claim in that workspace is
+refused (DAEMON-414), and a work item whose claim was already open when
+the daemon restarted (claiming-journal replay) ends `blocked` instead.
+
 Typo protection: every non-`default` key must be a step id of the
 workflows the daemon runs (its `--workflows-dir`). Any other key refuses
 the claim with DAEMON-414 before anything is claimed — the work item
@@ -376,7 +383,10 @@ models:
 ```
 
 (gmi-ws's code list equals the release bundle's own `release`/`deploy`
-pins, so dropping those two keys changes nothing there.)
+pins, so dropping those two keys changes nothing there. Also remove its
+2026-10-14 header note that flash "stays eligible for lighter kinds via
+the other chains": kinds no longer exist; flash is eligible wherever a
+list naming it governs.)
 
 yf-ws (`/root/code/aicoding/yf-ws/.polyforge.yaml`):
 

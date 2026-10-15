@@ -194,7 +194,7 @@ func runDoctorChecks(ctx *Context) doctorReport {
 	if cfg.Mapping.Empty() {
 		add(docChYaml, "skip", "not run: the mapping is absent")
 	} else {
-		st, detail := workspaceYamlCheck(cfg.Mapping.Workspaces(), workflowsDir)
+		st, detail := workspaceYamlCheck(cfg.Mapping.Workspaces(), workflowsDir, sockOK)
 		add(docChYaml, st, detail)
 	}
 
@@ -292,7 +292,7 @@ func probeDaemonSocket(sock string) (bool, string, string) {
 // workspaceYamlCheck loads every mapped workspace's .polyforge.yaml the
 // way a claim does. Without the daemon's workflows dir the per-step keys
 // cannot be judged: a yaml that otherwise loads is a warn, never a pass.
-func workspaceYamlCheck(workspaces []string, workflowsDir string) (string, string) {
+func workspaceYamlCheck(workspaces []string, workflowsDir string, daemonUp bool) (string, string) {
 	var fails []string
 	present := 0
 	for _, ws := range workspaces {
@@ -309,8 +309,10 @@ func workspaceYamlCheck(workspaces []string, workflowsDir string) (string, strin
 		return "fail", strings.Join(fails, "; ") + " — a claim of these projects is refused (DAEMON-414) until fixed"
 	case present == 0:
 		return "pass", "no mapped workspace carries a " + workspace.FileName
+	case workflowsDir == "" && !daemonUp:
+		return "warn", fmt.Sprintf("%d %s file(s) parse, but the per-step keys are unchecked: the daemon is unreachable, so its workflows dir is unknown", present, workspace.FileName)
 	case workflowsDir == "":
-		return "warn", fmt.Sprintf("%d %s file(s) parse, but the per-step keys are unchecked: the daemon reported no workflows dir", present, workspace.FileName)
+		return "warn", fmt.Sprintf("%d %s file(s) parse, but the per-step keys are unchecked: the daemon reported no workflows dir (an older daemon?)", present, workspace.FileName)
 	}
 	return "pass", fmt.Sprintf("%d %s file(s) load; every per-step key is a step id of %s", present, workspace.FileName, workflowsDir)
 }

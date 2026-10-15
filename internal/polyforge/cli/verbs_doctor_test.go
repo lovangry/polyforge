@@ -321,7 +321,17 @@ func TestDoctorWorkspaceYamlReportsUnknownStepKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _, doc = doctorStatus(t, env, "--json", "doctor")
-	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "warn" {
+	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "warn" || !strings.Contains(detail, "reported no workflows dir") {
 		t.Fatalf("no workflows dir reported: %s %q, want warn", st, detail)
+	}
+
+	env = doctorServerConfig(t, srv.URL, "k", filepath.Join(t.TempDir(), "dead.sock"), "polyforge")
+	yaml = filepath.Join(filepath.Dir(env["XDG_CONFIG_HOME"]), "ws-polyforge", ".polyforge.yaml")
+	if err := os.WriteFile(yaml, []byte("models:\n  polyforge:\n    fix: [b]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, doc = doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "warn" || !strings.Contains(detail, "daemon is unreachable") {
+		t.Fatalf("daemon unreachable: %s %q, want warn naming it", st, detail)
 	}
 }

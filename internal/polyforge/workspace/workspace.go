@@ -114,7 +114,7 @@ func parse(path string, raw []byte, workflowsDir string) (*Config, error) {
 			return nil, &Error{Path: path, Reason: fmt.Sprintf("the installed workflows are unreadable, so the step-id keys cannot be checked: %v", err)}
 		}
 	}
-	if err := validate(path, &cfg, steps); err != nil {
+	if err := validate(path, &cfg, steps, workflowsDir); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
@@ -122,8 +122,9 @@ func parse(path string, raw []byte, workflowsDir string) (*Config, error) {
 
 // validate enforces the content rules the yaml decoder cannot express:
 // non-empty model ids and the per-project key set (DefaultKey or a step
-// id in steps; every unknown key is named, sorted).
-func validate(path string, cfg *Config, steps map[string]bool) error {
+// id in steps; every unknown key is named, sorted — or, when the
+// workflows dir holds no readable bundle at all, that fact).
+func validate(path string, cfg *Config, steps map[string]bool, workflowsDir string) error {
 	var unknown []string
 	for project, keys := range cfg.Models {
 		if len(keys) == 0 {
@@ -142,6 +143,9 @@ func validate(path string, cfg *Config, steps map[string]bool) error {
 				}
 			}
 		}
+	}
+	if len(unknown) > 0 && len(steps) == 0 {
+		return &Error{Path: path, Reason: fmt.Sprintf("no workflows found in %s, so no per-step key can be checked", workflowsDir)}
 	}
 	if len(unknown) > 0 {
 		sort.Strings(unknown)
