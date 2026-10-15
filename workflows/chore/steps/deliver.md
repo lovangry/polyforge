@@ -141,8 +141,8 @@ commits beyond its baseline (`git rev-list --count <baseline>..HEAD` is 0). Othe
      a `test_bar` for this repo means a human decides.
    - **A conflict:** resolve it yourself in this worktree, keeping both sides' intent,
      commit the merge, then you MUST (a) re-run the test bar as above and (b) have the
-     resolution reviewed in a FRESH context - call the `subagent` tool (a new agent with
-     no history of this conversation) and have it read only `git diff <pre_merge> HEAD` for the conflicted files and the two sides
+     resolution reviewed in a FRESH context - start a sub-agent (a new agent with no history
+     of this conversation: the `subagent` tool on pi, the `Agent` tool on Claude Code) and have it read only `git diff <pre_merge> HEAD` for the conflicted files and the two sides
      (`git show origin/<default>:<file>`, `git show <pre_merge>:<file>`) and reports
      whether the resolution drops or breaks either side. Record `llm_resolved_conflict: true`
      and the reviewer's conclusion in the delivery note. A failing re-run or a reviewer

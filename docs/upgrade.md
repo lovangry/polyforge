@@ -311,9 +311,9 @@ steps:
 ```
 
 A step-id key governs the step with that id in every bundle that has one
-(`fix` covers bug-fix's and quick-fix's `fix`). A step entry's only key
-is `models` for now (any other key — `harness` included — is refused,
-naming it). YAML anchors and aliases work as usual
+(`fix` covers bug-fix's and quick-fix's `fix`). A step entry's keys are
+`models` and — since polyforge#159, see the next section — `harness`;
+any other key is refused, naming it. YAML anchors and aliases work as usual
 (`models: &x [...]`, `{ models: *x }`).
 
 **No backward compatibility — edit all three workspace files together
@@ -458,3 +458,103 @@ pin their own models" — untrue since polyforge#164; drop it with the old
 precedence comment.)
 
 Run `pf doctor` after the edit: `workspace yaml` must pass.
+
+## Per-step harness: pi or Claude Code (polyforge#159)
+
+A step can now run on **Claude Code** instead of pi. The choice is a
+second per-step property next to `models`, in the same `steps:` entries:
+
+```yaml
+# Models: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
+# Harness: steps.<project>.<step-id>.harness > bundle step harness > steps.<project>.default.harness > bundle defaults.harness > pi
+steps:
+  polyforge:
+    default: { models: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+    review:  { models: [claude-opus-5-5, claude-sonnet-5], harness: claude }
+```
+
+- `harness` is a plain string, `pi` or `claude` (closed set; anything
+  else — `claude-code`, a list, a number — refuses the claim with
+  DAEMON-414 naming `steps.<project>.<key>.harness`). Omitted everywhere
+  = pi: **no existing file needs an edit**, every step keeps running on
+  pi exactly as before.
+- An entry may carry `harness` alone (`fix: { harness: claude }`); its
+  model list then falls through the model chain as usual.
+- The two properties resolve **independently**, each down its own chain
+  (first present level wins). There is no per-work-item harness:
+  `pf submit --models` sets the candidates of every step, each step keeps
+  its own harness. A bundle may declare `harness` on a step or under
+  `defaults` (the shipped bundles do not).
+- Like the candidates, the harness is resolved at claim time and kept by
+  the daemon (state.json); a yaml edit governs the next claim, never an
+  in-flight work item.
+
+### Which models a harness can run (compatibility)
+
+Read off the model id, no registry:
+
+| harness | model ids it runs |
+|---|---|
+| `claude` | official Claude ids: a `claude-` prefix and no `/` (`claude-opus-5-5`, `claude-sonnet-5`); aliases such as `opus` / `sonnet` are not accepted |
+| `pi` | every other id — the `provider/model` form (`sub2api-glm/glm-5.3`, `anthropic/claude-…`) |
+
+One list may mix both kinds: each step walks only the ids its harness
+runs, in order, and the model fallback (D7: switch on auth / billing /
+unknown model, same-model retry on rate limit / 5xx) skips the others.
+A step whose harness runs **none** of a non-empty candidate list is a
+configuration error: it refuses every claim of the project with
+DAEMON-414 before anything is claimed (the work item stays queued),
+e.g.
+
+```
+model/harness mismatch: polyforge/bug-fix/review: harness claude (steps.polyforge.review.harness) cannot serve any of [sub2api-glm/glm-5.3, …] (steps.polyforge.default.models)
+```
+
+So setting `harness: claude` without giving the step claude ids is
+caught at once (above). An empty or absent list is not a mismatch: the
+CLI's own default model runs. A `pf submit --models` list is checked the
+same way against the work item's bundle at submit time.
+
+### What a claude step runs
+
+```
+claude -p --bare --output-format stream-json --verbose --include-partial-messages
+  --session-id <uuid> | --resume <uuid>  [--model <claude id>]
+  --tools Bash,Read,Edit,Write,Glob,Grep,TodoWrite,Agent --allowedTools <same>
+  --permission-mode dontAsk --permission-prompts none
+  --strict-mcp-config --disable-slash-commands
+```
+
+with the capsule as cwd and the step prompt (the same text pi gets) on
+stdin. `--bare`, `--strict-mcp-config` and `--disable-slash-commands`
+give the step a clean context: no hooks, plugins, MCP servers, skills or
+CLAUDE.md of the human's. Background tasks are off
+(`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, `--bare`, and no background
+tool in `--tools`). The native session stays at
+`~/.claude/projects/…/<uuid>.jsonl` and is copied into the capsule's
+`session/` at every commit boundary; an answered question resumes the
+same session (`--resume`).
+
+**Credentials are the human's.** Log Claude Code in on the work machine
+beforehand; the daemon never reads, writes or manages a credential. If
+`ANTHROPIC_AUTH_TOKEN` is set in the daemon's environment the step
+inherits it; otherwise an `anthropic_auth_token` in cli.toml is handed to
+the step as that variable (environment only, never argv). Without either
+the CLI runs bare on whatever the human set up — note that `--bare` reads
+only `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or an `apiKeyHelper`,
+not the interactive login.
+
+New cli.toml keys (flat, optional):
+
+```toml
+claude_bin = "/root/.local/bin/claude"     # default: claude on the daemon's PATH (or --claude-bin)
+anthropic_auth_token = "…"                 # only when the daemon's env lacks ANTHROPIC_AUTH_TOKEN
+```
+
+`pf doctor` adds a `harness claude` check whenever any step resolves to
+claude: the binary must resolve on the daemon's PATH (else fail); the
+version should be a verified one (2.1.296), a credential variable should
+be set and `ANTHROPIC_BASE_URL` unset (else warn). Credential values are
+never shown — set/unset only. The check lists every claude step with the
+level its harness and models came from. `workspace yaml` now also runs
+the compatibility check above.

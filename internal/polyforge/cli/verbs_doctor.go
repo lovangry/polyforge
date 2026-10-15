@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/harness"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 	"github.com/silgrid/polyforge/internal/polyforge/workspace"
@@ -34,6 +36,14 @@ import (
 //     against the step ids of the workflows the daemon runs (the
 //     workflows dir GET /status reports) — the same refusal a claim
 //     would meet (DAEMON-414), surfaced before any claim;
+//   - the step harnesses (polyforge#159): the workspace yaml check also
+//     runs the model/harness compatibility check (the claim's own
+//     DAEMON-414 refusal); when any step resolves to the claude harness,
+//     "harness claude" judges the daemon's view of the Claude Code CLI
+//     (GET /status?harnesses=1: binary found → else fail; version in the
+//     verified set, credential variables set, ANTHROPIC_BASE_URL unset →
+//     else warn) and lists every claude step with its resolution sources.
+//     Credential values are never shown — set/unset only;
 //   - the connectivity family: server reach (any HTTP answer proves it),
 //     daemon socket (GET /status over the UDS), auth (a signed aihub
 //     read getting past the key boundary — the same read face the
@@ -76,6 +86,7 @@ const (
 	docChServer   = "server reach"
 	docChSocket   = "daemon socket"
 	docChAuth     = "auth"
+	docChClaude   = "harness claude"
 )
 
 var cmdDoctor = &Command{
@@ -144,7 +155,7 @@ func runDoctorChecks(ctx *Context) doctorReport {
 	cfg, err := LoadConfig(ctx.ConfigPath)
 	if err != nil {
 		add(docChConfig, "fail", err.Error()+" — see the install docs for the migration steps")
-		for _, name := range []string{docChMapping, docChDirs, docChYaml, docChProjects, docChServer, docChSocket, docChAuth} {
+		for _, name := range []string{docChMapping, docChDirs, docChYaml, docChClaude, docChProjects, docChServer, docChSocket, docChAuth} {
 			add(name, "skip", "config-dependent check not run: the config could not be loaded")
 		}
 		checks = append(checks, harnessDisplayChecks()...)
@@ -189,14 +200,17 @@ func runDoctorChecks(ctx *Context) doctorReport {
 	add(docChServer, passOrFail(reachOK), reachDetail)
 
 	// Daemon socket: independent of aihub.
-	sockOK, sockDetail, workflowsDir := probeDaemonSocket(cfg.DaemonSocket)
+	sockOK, sockDetail, status := probeDaemonSocket(cfg.DaemonSocket)
 	add(docChSocket, passOrFail(sockOK), sockDetail)
 
 	if cfg.Mapping.Empty() {
 		add(docChYaml, "skip", "not run: the mapping is absent")
+		add(docChClaude, "skip", "not run: the mapping is absent")
 	} else {
-		st, detail := workspaceYamlCheck(cfg.Mapping, workflowsDir, sockOK)
+		st, detail, claudeSteps := workspaceYamlCheck(cfg.Mapping, status.WorkflowsDir, sockOK)
 		add(docChYaml, st, detail)
+		st, detail = claudeHarnessCheck(claudeSteps, status.WorkflowsDir, sockOK, status.Harnesses)
+		add(docChClaude, st, detail)
 	}
 
 	// Auth + project knowledge ride the aihub PROJECT read (the same
@@ -276,44 +290,141 @@ func probeServerReach(server string) (bool, string) {
 	return true, fmt.Sprintf("aihub server %s answered (HTTP %d)", server, resp.StatusCode)
 }
 
-// probeDaemonSocket dials the daemon's UDS face and asks GET /status;
-// it also answers the workflows dir the daemon reports ("" when none).
-func probeDaemonSocket(sock string) (bool, string, string) {
+// probeDaemonSocket dials the daemon's UDS face and asks GET /status
+// (with the harness view); it also answers the parsed status — the
+// workflows dir and the harness statuses the daemon reports (zero when
+// unreachable).
+func probeDaemonSocket(sock string) (bool, string, StatusResponse) {
 	c := NewDaemonClient(sock)
-	c.HTTP.Timeout = 5 * time.Second
-	raw, err := c.Status()
-	if err != nil {
-		return false, fmt.Sprintf("daemon socket %s does not answer GET /status: %v — is the daemon running?", sock, err), ""
-	}
+	c.HTTP.Timeout = 15 * time.Second
 	var st StatusResponse
+	raw, err := c.StatusWithHarnesses()
+	if err != nil {
+		return false, fmt.Sprintf("daemon socket %s does not answer GET /status: %v — is the daemon running?", sock, err), st
+	}
 	_ = json.Unmarshal(raw, &st)
-	return true, fmt.Sprintf("daemon socket %s answers (daemon %s)", sock, st.MachineID), st.WorkflowsDir
+	return true, fmt.Sprintf("daemon socket %s answers (daemon %s)", sock, st.MachineID), st
 }
 
 // workspaceYamlCheck loads every mapped workspace's .polyforge.yaml the
-// way a claim does. Without the daemon's workflows dir the per-step keys
-// cannot be judged: a yaml that otherwise loads is a warn, never a pass.
-func workspaceYamlCheck(m *mapping.Plan, workflowsDir string, daemonUp bool) (string, string) {
+// way a claim does, and runs the claim's model/harness compatibility
+// check (polyforge#159) for every mapped project over the daemon's
+// installed workflows. Without the daemon's workflows dir neither the
+// per-step keys nor the model/harness pairs can be judged: a yaml that
+// otherwise loads is a warn, never a pass. It also answers every step
+// that resolves to the claude harness (the "harness claude" check's
+// subject).
+func workspaceYamlCheck(m *mapping.Plan, workflowsDir string, daemonUp bool) (string, string, []workspace.StepResolution) {
 	var fails []string
+	var claudeSteps []workspace.StepResolution
+	bundles, _ := workspace.Bundles(workflowsDir, "")
+	bundleNames := make([]string, 0, len(bundles))
+	for name := range bundles {
+		bundleNames = append(bundleNames, name)
+	}
+	sort.Strings(bundleNames)
 	present := 0
 	for _, ws := range m.Workspaces() {
-		if _, err := os.Stat(workspace.PathFor(ws)); err != nil {
+		_, serr := os.Stat(workspace.PathFor(ws))
+		if serr == nil {
+			present++
+		}
+		cfg, err := workspace.Load(ws, workflowsDir, m.ProjectsOf(ws))
+		if err != nil {
+			fails = append(fails, err.Error())
 			continue
 		}
-		present++
-		if _, err := workspace.Load(ws, workflowsDir, m.ProjectsOf(ws)); err != nil {
+		if workflowsDir == "" {
+			continue
+		}
+		if err := workspace.CheckHarness(ws, cfg, workflowsDir, m.ProjectsOf(ws), "", nil); err != nil {
 			fails = append(fails, err.Error())
+		}
+		for _, project := range m.ProjectsOf(ws) {
+			for _, name := range bundleNames {
+				for _, r := range workspace.ResolveSteps(name, bundles[name], cfg, project, nil) {
+					if r.Harness == harness.Claude {
+						claudeSteps = append(claudeSteps, r)
+					}
+				}
+			}
 		}
 	}
 	switch {
 	case len(fails) > 0:
-		return "fail", strings.Join(fails, "; ") + " — a claim of these projects is refused (DAEMON-414) until fixed"
+		return "fail", strings.Join(fails, "; ") + " — a claim of these projects is refused (DAEMON-414) until fixed", claudeSteps
+	case present == 0 && workflowsDir != "":
+		return "pass", "no mapped workspace carries a " + workspace.FileName + "; every bundle step's model/harness pair is runnable", claudeSteps
 	case present == 0:
-		return "pass", "no mapped workspace carries a " + workspace.FileName
+		return "pass", "no mapped workspace carries a " + workspace.FileName, claudeSteps
 	case workflowsDir == "" && !daemonUp:
-		return "warn", fmt.Sprintf("%d %s file(s) parse, but the per-step keys are unchecked: the daemon is unreachable, so its workflows dir is unknown", present, workspace.FileName)
+		return "warn", fmt.Sprintf("%d %s file(s) parse, but the per-step keys and model/harness pairs are unchecked: the daemon is unreachable, so its workflows dir is unknown", present, workspace.FileName), claudeSteps
 	case workflowsDir == "":
-		return "warn", fmt.Sprintf("%d %s file(s) parse, but the per-step keys are unchecked: the daemon reported no workflows dir (an older daemon?)", present, workspace.FileName)
+		return "warn", fmt.Sprintf("%d %s file(s) parse, but the per-step keys and model/harness pairs are unchecked: the daemon reported no workflows dir (an older daemon?)", present, workspace.FileName), claudeSteps
 	}
-	return "pass", fmt.Sprintf("%d %s file(s) load; every per-step key is a step id of %s", present, workspace.FileName, workflowsDir)
+	return "pass", fmt.Sprintf("%d %s file(s) load; every per-step key is a step id of %s and every step's harness serves its candidates", present, workspace.FileName, workflowsDir), claudeSteps
+}
+
+// claudeHarnessCheck judges the Claude Code CLI the daemon would run for
+// the steps resolving to the claude harness (polyforge#159). It never
+// shows a credential value, never logs in and never calls a model: the
+// daemon reports the binary, `claude --version` and set/unset only.
+func claudeHarnessCheck(steps []workspace.StepResolution, workflowsDir string, daemonUp bool, hs map[string]HarnessStatus) (string, string) {
+	if len(steps) == 0 {
+		if workflowsDir == "" {
+			return "pass", "no claude CLI needed as far as can be judged: the daemon's workflows are unknown, so only the workspace yaml was read"
+		}
+		return "pass", "no claude CLI needed: no step selects the claude harness (every step runs on pi)"
+	}
+	var rows []string
+	for i, r := range steps {
+		if i == 12 {
+			rows = append(rows, fmt.Sprintf("… %d more", len(steps)-i))
+			break
+		}
+		models := "the CLI's default model"
+		if len(r.Served) > 0 {
+			models = "[" + strings.Join(r.Served, ", ") + "] (" + r.ModelsFrom + ")"
+		}
+		rows = append(rows, fmt.Sprintf("%s/%s/%s: claude (%s), %s", r.Project, r.Bundle, r.Step, r.HarnessFrom, models))
+	}
+	table := fmt.Sprintf("%d step(s) run on claude: %s", len(steps), strings.Join(rows, "; "))
+	if !daemonUp {
+		return "skip", table + " — the CLI is unchecked: the daemon is unreachable"
+	}
+	h, ok := hs[harness.Claude]
+	if !ok {
+		return "warn", table + " — the CLI is unchecked: the daemon reported no harness status (an older daemon?)"
+	}
+	if !h.Found {
+		return "fail", fmt.Sprintf("%s — the claude binary %q does not resolve on the daemon's PATH: install Claude Code (logged in by a human) or set claude_bin / --claude-bin", table, h.Bin)
+	}
+	status := "pass"
+	var notes []string
+	warn := func(n string) {
+		status = "warn"
+		notes = append(notes, n)
+	}
+	switch {
+	case h.VersionError != "":
+		warn("version unknown (" + h.VersionError + ")")
+	case !h.Verified:
+		warn(fmt.Sprintf("version %s is not in the verified set (the adapter's argv/stream contract was verified on another version)", h.Version))
+	}
+	tokenSet := h.AuthTokenEnv == "set" || h.AuthTokenToml == "set"
+	switch {
+	case !tokenSet && h.APIKeyEnv != "set":
+		warn("neither ANTHROPIC_AUTH_TOKEN (env or anthropic_auth_token) nor ANTHROPIC_API_KEY is set for the daemon — `claude --bare` reads no other login, so the steps rely on the human's own setup (e.g. apiKeyHelper)")
+	case tokenSet && h.APIKeyEnv == "set":
+		warn("both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are set — which one Claude Code uses is unverified")
+	}
+	if h.BaseURLEnv == "set" {
+		warn("ANTHROPIC_BASE_URL is set in the daemon's environment: claude steps inherit it (they are meant to use the official API)")
+	}
+	detail := fmt.Sprintf("%s — %s %s at %s; auth token env %s, auth token config %s, api key env %s; background tasks %s",
+		table, h.Bin, h.Version, h.Path, h.AuthTokenEnv, h.AuthTokenToml, h.APIKeyEnv, h.BackgroundTasks)
+	if len(notes) > 0 {
+		detail += " — " + strings.Join(notes, "; ")
+	}
+	return status, detail
 }

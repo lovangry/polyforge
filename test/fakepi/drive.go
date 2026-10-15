@@ -146,6 +146,20 @@ type planAction struct {
 	// version bump inside arms the observe push round.
 	PoisonGitlink   bool `json:"poison_gitlink,omitempty"`
 	UnpoisonGitlink bool `json:"unpoison_gitlink,omitempty"`
+
+	// --- claude persona shapes (polyforge#159, claude.go) ---
+
+	// ClaudeError / ClaudeStatus / ClaudeTerminal / ClaudeMessage end the
+	// dispatch on a structured Claude Code API failure: an assistant
+	// message carrying the error category, then an error result
+	// (api_error_status, terminal_reason), then exit 1.
+	ClaudeError    string `json:"claude_error,omitempty"`
+	ClaudeStatus   int    `json:"claude_status,omitempty"`
+	ClaudeTerminal string `json:"claude_terminal,omitempty"`
+	ClaudeMessage  string `json:"claude_message,omitempty"`
+	// ClaudeRetries emits that many system/api_retry records first
+	// (Claude's own bounded retry), with ClaudeStatus / ClaudeError.
+	ClaudeRetries int `json:"claude_retries,omitempty"`
 }
 
 // plan is the whole scripted behavior of one derivation.

@@ -86,10 +86,14 @@ type Fact interface{ FactKind() string }
 
 // StepStarted announces a dispatch.
 type StepStarted struct {
-	Step           string     `json:"step"`
-	SpawnN         int64      `json:"spawn_n"`
-	Model          string     `json:"model,omitempty"`
-	Harness        string     `json:"harness"`
+	Step    string `json:"step"`
+	SpawnN  int64  `json:"spawn_n"`
+	Model   string `json:"model,omitempty"`
+	Harness string `json:"harness"`
+	// HarnessSession is the harness-native session id of the dispatch
+	// (polyforge#159: claude's --session-id/--resume uuid; "" for pi).
+	// The transcript sync locates claude's native session file by it.
+	HarnessSession string     `json:"harness_session,omitempty"`
 	PID            int        `json:"pid,omitempty"`
 	TranscriptPath string     `json:"transcript_path,omitempty"`
 	StartedAt      time.Time  `json:"started_at"`

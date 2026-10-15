@@ -114,7 +114,7 @@ type monitorCfg struct {
 	push   PushFunc
 	// locateLive resolves the live harness transcript on demand (F3);
 	// nil = the transcript sync is disabled.
-	locateLive func(capsuleDir string, spawnAt time.Time) string
+	locateLive func(capsuleDir string, spawnAt time.Time, harness, session string) string
 }
 
 // driver phases the supervisor tracks.
@@ -203,6 +203,8 @@ type Monitor struct {
 	trDst            string    // the capsule's declared session path (latest step_started)
 	trSrc            string    // the live path when known (a resumed dispatch writes into the capsule)
 	trSpawnAt        time.Time // the dispatch's birth moment
+	trHarness        string    // the dispatch's step harness (polyforge#159)
+	trSession        string    // its harness-native session id (claude's uuid)
 	transcriptWarned bool      // one transcript_missing event per dispatch
 
 	// stateMu guards the fields every goroutine (HTTP view, push
@@ -373,7 +375,10 @@ func (m *Monitor) onStepStarted(f supervise.StepStarted) {
 	// F3: the transcript sync sources from the latest step_started
 	m.trDst = f.TranscriptPath
 	m.trSpawnAt = f.StartedAt
-	if f.Resumed {
+	m.trHarness, m.trSession = f.Harness, f.HarnessSession
+	// a claude dispatch's native session lives outside the capsule even
+	// when resumed: it is always copied
+	if f.Resumed && f.Harness != "claude" {
 		m.trSrc = f.TranscriptPath // a resumed dispatch appends to the capsule file itself
 	} else {
 		m.trSrc = ""
@@ -608,6 +613,7 @@ func (m *Monitor) onRecovered(at Attach) {
 	// names its transcript: nothing to sync in between, and the dead
 	// dispatch's destination must never receive the successor's file.
 	m.trDst, m.trSrc, m.trSpawnAt = "", "", time.Time{}
+	m.trHarness, m.trSession = "", ""
 	m.stateMu.Lock()
 	m.transcriptWarned = false
 	m.recovering = false
@@ -694,10 +700,12 @@ type transcriptSnapshot struct {
 	dst     string
 	src     string
 	spawnAt time.Time
+	harness string
+	session string
 }
 
 func (m *Monitor) transcriptSnapshot() transcriptSnapshot {
-	return transcriptSnapshot{dst: m.trDst, src: m.trSrc, spawnAt: m.trSpawnAt}
+	return transcriptSnapshot{dst: m.trDst, src: m.trSrc, spawnAt: m.trSpawnAt, harness: m.trHarness, session: m.trSession}
 }
 
 // claimTranscriptWarning claims the once-per-attempt transcript_missing
@@ -725,7 +733,7 @@ func (m *Monitor) syncTranscript(s transcriptSnapshot) {
 	}
 	src := s.src
 	if src == "" && m.cfg.locateLive != nil {
-		src = m.cfg.locateLive(m.wi.CapsuleDir, s.spawnAt)
+		src = m.cfg.locateLive(m.wi.CapsuleDir, s.spawnAt, s.harness, s.session)
 	}
 	if src == "" {
 		if m.claimTranscriptWarning() {

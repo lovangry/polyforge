@@ -85,7 +85,7 @@ func TestStepBoundarySyncsTranscriptBeforePush(t *testing.T) {
 	h := newFakeHandle("ra_wi_test")
 	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
 		c.push = pushOnceRecorded(f, &sawCopy)
-		c.locateLive = func(string, time.Time) string { return f.src }
+		c.locateLive = func(string, time.Time, string, string) string { return f.src }
 	})
 	stepStarted(t, m, 1, "code", f.dst, false)
 
@@ -147,7 +147,7 @@ func TestEachStepSyncsToItsOwnTranscript(t *testing.T) {
 	var current atomic.Value // the live file the "harness" currently writes
 	current.Store(src1)
 	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.locateLive = func(string, time.Time) string { return current.Load().(string) }
+		c.locateLive = func(string, time.Time, string, string) string { return current.Load().(string) }
 		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
 			pushes.Add(1)
 			return "sha_steps", true, gitops.PushTimings{}, nil
@@ -203,7 +203,7 @@ func TestTranscriptMissingWarnsOnceAndPushProceeds(t *testing.T) {
 	var pushed atomic.Bool
 	located := 0
 	m, _ := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.locateLive = func(capsuleDir string, spawnAt time.Time) string {
+		c.locateLive = func(capsuleDir string, spawnAt time.Time, _, _ string) string {
 			located++
 			return ""
 		}

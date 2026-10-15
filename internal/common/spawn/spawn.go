@@ -17,6 +17,13 @@ type Params struct {
 	Resume         bool
 	InitialPrompt  string
 	Model          string
+	// Harness is the step harness this derivation runs on (polyforge#159;
+	// "" = pi). The runtime spawner dispatches on it.
+	Harness string
+	// HarnessSession is the harness-native session id the daemon chose
+	// for this derivation (claude: the --session-id / --resume uuid; ""
+	// for pi, whose session rides TranscriptPath).
+	HarnessSession string
 	Journal        func(pid int, startedAt string) error
 	// OnRecord, when set, receives every raw stdout record line the
 	// process emits (the harness translator's input). It runs on the

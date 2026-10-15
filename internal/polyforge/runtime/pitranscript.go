@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/common/harness"
 	"github.com/silgrid/polyforge/internal/polyforge/sessionjsonl"
 )
 
@@ -129,6 +130,18 @@ func LocateLiveTranscript(sessionsRoot, capsuleDir string, notBefore time.Time) 
 	return best
 }
 
+// LocateTranscript is the per-harness live-transcript locator both sync
+// points share (polyforge#159): pi's newest session file of the capsule
+// since the spawn moment; claude's native session file by the uuid the
+// daemon minted for the dispatch (only a canonical uuid is looked up —
+// the id may come from the agent-writable spawn journal).
+func LocateTranscript(sessionsRoot, capsuleDir string, spawnAt time.Time, h, session string) string {
+	if harness.Of(h) == harness.Claude {
+		return harness.LocateClaudeSession(session)
+	}
+	return LocateLiveTranscript(sessionsRoot, capsuleDir, spawnAt)
+}
+
 // syncLiveTranscript copies the CURRENT dispatch's live harness
 // transcript onto that dispatch's own capsule session path (the latest
 // spawn-journal entry's transcript) so a seal / pause / bounded-fail
@@ -145,11 +158,15 @@ func (r *Runtime) syncLiveTranscript(capsuleDir string) {
 		return
 	}
 	last := entries[len(entries)-1]
-	if last.Transcript == "" || last.Resume {
+	claude := harness.Of(last.Harness) == harness.Claude
+	// a resumed pi dispatch appends to the capsule file itself; a claude
+	// dispatch's native session is always outside the capsule (resumed
+	// or not), so it is always copied
+	if last.Transcript == "" || (last.Resume && !claude) {
 		return
 	}
 	spawnAt, err := time.Parse(time.RFC3339Nano, last.StartedAt)
-	if err != nil {
+	if err != nil && !claude {
 		return
 	}
 	// The journal is agent-writable: the destination is never taken from
@@ -159,7 +176,7 @@ func (r *Runtime) syncLiveTranscript(capsuleDir string) {
 		fmt.Fprintf(os.Stderr, "runtime: transcript sync skipped: the latest spawn-journal line names an untrusted destination %q\n", last.Transcript)
 		return
 	}
-	src := LocateLiveTranscript(r.cfg.HarnessSessionsRoot, capsuleDir, spawnAt)
+	src := LocateTranscript(r.cfg.HarnessSessionsRoot, capsuleDir, spawnAt, last.Harness, last.HarnessSession)
 	if src == "" || src == dst {
 		return
 	}

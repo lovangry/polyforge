@@ -48,6 +48,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/common/harness"
 	"github.com/silgrid/polyforge/internal/common/spawn"
 	"github.com/silgrid/polyforge/internal/common/workflow"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
@@ -88,8 +89,6 @@ type StepSpawnAdapter struct {
 	// every dispatch folds the step process's stdout records into the
 	// dispatch's Tracker on it. nil = no harness tracking.
 	Link *supervise.Link
-	// Harness names the harness ("" = pi); picks the translator.
-	Harness string
 	// PollInterval is the envelope-collection cadence (tests tighten
 	// it; default defaultEnvelopePoll).
 	PollInterval time.Duration
@@ -178,32 +177,61 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 	}
 
 	handle := a.sessionHandle()
-	var transcript string
+	h := harness.Of(sp.Harness)
+	var transcript, hsession string
 	resume := sp.Resume
 	if resume {
-		transcript, err = a.latestJournalTranscript(sp.StepID)
+		// Same-step continuation (an answered question, the first retry
+		// after a crash) resumes the previous dispatch's conversation only
+		// on the SAME harness: another harness's session cannot be resumed.
+		prev, err := a.latestJournalEntry(sp.StepID)
 		if err != nil {
 			return nil, err
 		}
-		if !usableTranscript(transcript) {
+		switch {
+		case harness.Of(prev.Harness) != h:
+			resume = false
+		case h == harness.Claude:
+			// claude resumes its NATIVE session (outside the capsule) by
+			// the uuid the daemon minted; a session that never reached
+			// disk, or an id that is not ours in shape, starts fresh.
+			if harness.LocateClaudeSession(prev.HarnessSession) != "" {
+				hsession = prev.HarnessSession
+			} else {
+				resume = false
+			}
+		case !usableTranscript(prev.Transcript):
 			// (also the no-journal-line-for-this-step shape: "" is unusable)
 			// nothing readable to resume (the previous dispatch died before
 			// the harness wrote its session): start the conversation fresh
 			// rather than hand the harness a path that cannot resume
-			resume, transcript = false, ""
+			resume = false
+		default:
+			transcript = prev.Transcript
 		}
 	}
 	if sp.Fresh && parts.Reference == "" {
 		// a retry starts a NEW conversation; the previous transcript, when
-		// readable, rides the prompt as a read-only reference
+		// readable, rides the prompt as a read-only reference (it may be
+		// another harness's JSONL: reference material only)
 		if prev, perr := a.latestJournalTranscript(sp.StepID); perr == nil && usableTranscript(prev) {
 			parts.Reference = prev
 		}
 	}
 	if transcript == "" {
+		// every claude dispatch — a resume included — copies its native
+		// session onto its OWN capsule file (the native file holds the
+		// whole conversation); pi writes a fresh dispatch's here
 		transcript = filepath.Join(a.WI.CapsuleDir, capsule.DirSession, "session-"+spawnToken(handle, sp.SpawnN)+".jsonl")
 	}
-	translator, sink := a.newTranslator(sp.SpawnN)
+	if h == harness.Claude && hsession == "" {
+		id, err := harness.NewSessionID()
+		if err != nil {
+			return nil, fmt.Errorf("driver: step %s: claude session id: %w", sp.StepID, err)
+		}
+		hsession = id
+	}
+	translator, sink := a.newTranslator(h, sp.SpawnN)
 	p := spawn.Params{
 		WorkItemID:     a.WI.ID,
 		CapsuleDir:     a.WI.CapsuleDir,
@@ -211,6 +239,8 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		SpawnN:         int(sp.SpawnN),
 		TranscriptPath: transcript,
 		Resume:         resume,
+		Harness:        h,
+		HarnessSession: hsession,
 		InitialPrompt:  assembleStepPrompt(parts),
 		Model:          sp.Model,
 	}
@@ -224,12 +254,12 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 	p.Journal = func(pid int, startedAt string) error {
 		return a.appendSpawnJournal(p, sp.StepID, token, pid, startedAt)
 	}
-	h, err := a.Spawner.Spawn(ctx, p)
+	proc, err := a.Spawner.Spawn(ctx, p)
 	if err != nil {
 		return nil, fmt.Errorf("driver: step %s spawn %d derivation failed: %w", sp.StepID, sp.SpawnN, err)
 	}
 	meta := RunMeta{
-		PID: h.PID(), TranscriptPath: transcript, Harness: a.harnessName(),
+		PID: proc.PID(), TranscriptPath: transcript, Harness: h, HarnessSession: hsession,
 		Granularity: supervise.GranularityToken, Resumed: resume,
 	}
 	meta.StartedAt = time.Now()
@@ -240,7 +270,7 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		capsuleRoot: a.WI.CapsuleDir,
 		wiID:        a.WI.ID,
 		sp:          sp,
-		handle:      h,
+		handle:      proc,
 		dropPath:    pendingResultPath(a.WI.CapsuleDir, sp.SpawnN),
 		poll:        a.PollInterval,
 		meta:        meta,
@@ -248,23 +278,18 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 	}, nil
 }
 
-func (a *StepSpawnAdapter) harnessName() string {
-	if a.Harness != "" {
-		return a.Harness
-	}
-	return "pi"
-}
-
 // newTranslator builds the dispatch's harness translator over its
 // Tracker (nil/nil without a link or for a harness without a translator).
-func (a *StepSpawnAdapter) newTranslator(spawnN int64) (supervise.Translator, *supervise.Tracker) {
+func (a *StepSpawnAdapter) newTranslator(h string, spawnN int64) (supervise.Translator, *supervise.Tracker) {
 	if a.Link == nil {
 		return nil, nil
 	}
 	tr := a.Link.Tracker(spawnN)
-	switch a.harnessName() {
-	case "pi":
+	switch h {
+	case harness.Pi:
 		return supervise.NewPi(tr), tr
+	case harness.Claude:
+		return supervise.NewClaude(tr), tr
 	}
 	return nil, nil
 }
@@ -642,6 +667,27 @@ func (a *StepSpawnAdapter) sessionHandle() string {
 	return s.SessionID
 }
 
+// latestJournalEntry answers the step's highest-ordinal spawn-journal
+// line declaring a transcript (the zero entry when none): the previous
+// dispatch a same-step continuation resumes — its harness, its session
+// id and its capsule transcript.
+func (a *StepSpawnAdapter) latestJournalEntry(stepID string) (capsule.SpawnJournalEntry, error) {
+	entries, err := capsule.ReadSpawnJournal(a.WI.CapsuleDir)
+	if err != nil {
+		return capsule.SpawnJournalEntry{}, fmt.Errorf("driver: resume ordered but the capsule spawn journal is unreadable: %w", err)
+	}
+	best := capsule.SpawnJournalEntry{SpawnN: -1}
+	for _, e := range entries {
+		if e.StepID == stepID && e.Transcript != "" && e.SpawnN > best.SpawnN {
+			best = e
+		}
+	}
+	if best.SpawnN < 0 {
+		return capsule.SpawnJournalEntry{}, nil
+	}
+	return best, nil
+}
+
 // latestJournalTranscript answers the resume source for a re-dispatch:
 // the highest-ordinal spawn-journal line OF THE GIVEN STEP declaring a
 // transcript (the capsule-side session copy the runtime mechanism
@@ -676,16 +722,18 @@ func (a *StepSpawnAdapter) appendSpawnJournal(p spawn.Params, stepID, token stri
 		now = a.Now()
 	}
 	entry := capsule.SpawnJournalEntry{
-		At:            now.UTC().Format(time.RFC3339Nano),
-		WorkItem:      p.WorkItemID,
-		StepID:        stepID,
-		SpawnToken:    token,
-		PID:           pid,
-		StartedAt:     startedAt,
-		SessionHandle: p.SessionHandle,
-		SpawnN:        int(p.SpawnN),
-		Resume:        p.Resume,
-		Transcript:    p.TranscriptPath,
+		At:             now.UTC().Format(time.RFC3339Nano),
+		WorkItem:       p.WorkItemID,
+		StepID:         stepID,
+		SpawnToken:     token,
+		PID:            pid,
+		StartedAt:      startedAt,
+		SessionHandle:  p.SessionHandle,
+		SpawnN:         int(p.SpawnN),
+		Resume:         p.Resume,
+		Transcript:     p.TranscriptPath,
+		Harness:        harness.Of(p.Harness),
+		HarnessSession: p.HarnessSession,
 	}
 	blob, err := json.Marshal(entry)
 	if err != nil {

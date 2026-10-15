@@ -25,6 +25,11 @@ type SpawnJournalEntry struct {
 	SpawnN        int    `json:"spawn_n"`
 	Resume        bool   `json:"resume"`
 	Transcript    string `json:"transcript"`
+	// Harness / HarnessSession (polyforge#159): the step harness of the
+	// derivation and its harness-native session id (claude's uuid; empty
+	// for pi). An entry without a harness predates #159: a pi derivation.
+	Harness        string `json:"harness,omitempty"`
+	HarnessSession string `json:"harness_session,omitempty"`
 }
 
 // ReadSpawnJournal is the one reader of the capsule spawn journal. It is

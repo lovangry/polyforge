@@ -560,6 +560,13 @@ Launch flags (with environment variable and default, where one exists):
       workflows/ checkout dir (default ./workflows)
   --pi-bin PATH
       harness binary (default pi)
+  --claude-bin PATH
+      Claude Code binary for the steps whose harness is claude
+      (config claude_bin; default claude). A claude step runs
+      claude -p --bare; the daemon never manages its credentials — the
+      CLI is logged in by a human beforehand (config anthropic_auth_token,
+      when set and ANTHROPIC_AUTH_TOKEN is not in the environment, is
+      handed to the step as that variable, never on argv)
   --harness-sessions-root PATH
       harness session store root for the live-transcript sync
       (env POLYFORGE_HARNESS_SESSIONS_ROOT; default

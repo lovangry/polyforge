@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/common/harness"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
@@ -166,6 +167,9 @@ type RunMeta struct {
 	StartedAt      time.Time
 	TranscriptPath string
 	Harness        string
+	// HarnessSession is the harness-native session id (claude's uuid;
+	// "" for pi).
+	HarnessSession string
 	Granularity    supervise.Granularity
 	Resumed        bool
 }
@@ -437,19 +441,12 @@ func (d *Driver) fact(f supervise.Fact) {
 	}
 }
 
-func (d *Driver) harnessName() string {
-	if d.cfg.Harness != "" {
-		return d.cfg.Harness
-	}
-	return "pi"
-}
-
 // announceStart sends step_started for a freshly spawned dispatch.
 func (d *Driver) announceStart(sp *StepSpawn, run StepRun, startedAt time.Time) {
 	if d.cfg.Link == nil {
 		return
 	}
-	meta := RunMeta{Harness: d.harnessName(), Granularity: supervise.GranularityToken, StartedAt: startedAt, Resumed: sp.Resume}
+	meta := RunMeta{Harness: harness.Of(sp.Harness), Granularity: supervise.GranularityToken, StartedAt: startedAt, Resumed: sp.Resume}
 	if mr, ok := run.(MetaRun); ok {
 		m := mr.Meta()
 		if m.Harness != "" {
@@ -462,6 +459,7 @@ func (d *Driver) announceStart(sp *StepSpawn, run StepRun, startedAt time.Time) 
 			meta.StartedAt = m.StartedAt
 		}
 		meta.PID, meta.TranscriptPath, meta.Resumed = m.PID, m.TranscriptPath, m.Resumed
+		meta.HarnessSession = m.HarnessSession
 	}
 	d.mu.Lock()
 	th := d.effectiveThresholdsLocked(sp.StepID, meta.Granularity)
@@ -469,7 +467,7 @@ func (d *Driver) announceStart(sp *StepSpawn, run StepRun, startedAt time.Time) 
 	d.cfg.Link.Fact(supervise.StepStarted{
 		Step: sp.StepID, SpawnN: sp.SpawnN, Model: sp.Model, Harness: meta.Harness,
 		PID: meta.PID, TranscriptPath: meta.TranscriptPath, StartedAt: meta.StartedAt,
-		Thresholds: th, Resumed: meta.Resumed,
+		Thresholds: th, Resumed: meta.Resumed, HarnessSession: meta.HarnessSession,
 	})
 }
 

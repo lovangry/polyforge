@@ -184,10 +184,30 @@ type StatusResponse struct {
 	Workspaces []string `json:"workspaces"`
 	// WorkflowsDir is the absolute workflows dir the daemon runs bundles
 	// from (pf doctor judges the workspace yaml's step-id keys by it).
-	WorkflowsDir string      `json:"workflows_dir,omitempty"`
-	ShuttingDown bool        `json:"shutting_down"`
-	Jobs         []StatusJob `json:"jobs"`
-	Queue        QueueStats  `json:"queue"`
+	WorkflowsDir string `json:"workflows_dir,omitempty"`
+	// Harnesses is the daemon's view of the step harness binaries, only
+	// on GET /status?harnesses=1 (polyforge#159).
+	Harnesses    map[string]HarnessStatus `json:"harnesses,omitempty"`
+	ShuttingDown bool                     `json:"shutting_down"`
+	Jobs         []StatusJob              `json:"jobs"`
+	Queue        QueueStats               `json:"queue"`
+}
+
+// HarnessStatus is one harness's daemon-side status: binary, version,
+// and whether the credential variables are set ("set"/"unset" — never a
+// value).
+type HarnessStatus struct {
+	Bin             string `json:"bin"`
+	Found           bool   `json:"found"`
+	Path            string `json:"path,omitempty"`
+	Version         string `json:"version,omitempty"`
+	Verified        bool   `json:"verified,omitempty"`
+	VersionError    string `json:"version_error,omitempty"`
+	AuthTokenEnv    string `json:"auth_token_env,omitempty"`
+	AuthTokenToml   string `json:"auth_token_toml,omitempty"`
+	APIKeyEnv       string `json:"api_key_env,omitempty"`
+	BaseURLEnv      string `json:"base_url_env,omitempty"`
+	BackgroundTasks string `json:"background_tasks,omitempty"`
 }
 
 // StatusJob is one jobs[] bookkeeping entry.
@@ -318,6 +338,12 @@ func (d *DaemonClient) Wrap(wiID, reason string) (json.RawMessage, error) {
 // Status returns the local jobs bookkeeping.
 func (d *DaemonClient) Status() (json.RawMessage, error) {
 	return d.do("GET", "/status", "", nil, nil)
+}
+
+// StatusWithHarnesses is GET /status?harnesses=1: the status plus the
+// daemon's view of the step harness binaries (polyforge#159; pf doctor).
+func (d *DaemonClient) StatusWithHarnesses() (json.RawMessage, error) {
+	return d.do("GET", "/status", "harnesses=1", nil, nil)
 }
 
 // OpsConfig issues one POST /ops/config operation.
