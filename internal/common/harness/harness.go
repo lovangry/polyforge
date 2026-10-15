@@ -122,20 +122,6 @@ func ValidSessionID(s string) bool {
 	return true
 }
 
-// ClaudeConfigDir answers Claude Code's config dir as the step process
-// sees it: $CLAUDE_CONFIG_DIR when the daemon's environment sets it (the
-// child inherits it), else $HOME/.claude. The daemon never sets it.
-func ClaudeConfigDir() string {
-	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
-		return d
-	}
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return ".claude"
-	}
-	return filepath.Join(home, ".claude")
-}
-
 // ClaudeProjectDirName is Claude Code's per-cwd project directory name:
 // every character outside [A-Za-z0-9] becomes '-'.
 func ClaudeProjectDirName(cwd string) string {
@@ -150,11 +136,16 @@ func ClaudeProjectDirName(cwd string) string {
 // LocateClaudeSession answers the native session file of uuid for a step
 // that ran in capsuleDir: <config dir>/projects/<dir of capsuleDir>/<uuid>.jsonl,
 // a non-empty regular file — or "" when id is not a canonical uuid or no
-// such file exists. Only the project directory of the capsule (as given,
-// or with symlinks resolved) is consulted: a same-named file of another
-// cwd is never copied or resumed.
-func LocateClaudeSession(id, capsuleDir string) string {
-	if !ValidSessionID(id) || capsuleDir == "" {
+// such file exists. configDir is EXPLICIT (polyforge#171): the caller
+// names the claude-config dir it hard-set into the child env (the
+// runtime config's ClaudeConfigDir); the locator never falls back to the
+// daemon process env (the child env is the only place CLAUDE_CONFIG_DIR
+// is ever set in production). Path stays direct concatenation (no mtime
+// locator, ruling 7). Only the project directory of the capsule (as
+// given, or with symlinks resolved) is consulted: a same-named file of
+// another cwd is never copied or resumed.
+func LocateClaudeSession(id, configDir, capsuleDir string) string {
+	if !ValidSessionID(id) || configDir == "" || capsuleDir == "" {
 		return ""
 	}
 	dirs := []string{ClaudeProjectDirName(capsuleDir)}
@@ -162,7 +153,7 @@ func LocateClaudeSession(id, capsuleDir string) string {
 		dirs = append(dirs, ClaudeProjectDirName(real))
 	}
 	for _, d := range dirs {
-		p := filepath.Join(ClaudeConfigDir(), "projects", d, id+".jsonl")
+		p := filepath.Join(configDir, "projects", d, id+".jsonl")
 		if st, err := os.Lstat(p); err == nil && st.Mode().IsRegular() && st.Size() > 0 {
 			return p
 		}

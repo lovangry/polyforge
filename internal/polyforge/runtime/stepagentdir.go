@@ -1,9 +1,10 @@
 package runtime
 
 // stepagentdir.go: the dedicated step agent directory (audit-subtraction
-// pass B, addendum 2 / owner ruling A). A step pi process runs with
+// pass B, addendum 2 / owner ruling A) and the harness-root map. A step
+// pi process runs with
 // PI_CODING_AGENT_DIR pointing at a directory the DAEMON owns under its
-// data dir — never inside a capsule (capsules are committed and pushed to
+// harness root — never inside a capsule (capsules are committed and pushed to
 // aihub and are agent-writable) and never the operator's own agent
 // directory (whose settings.json is exactly where user-level packages
 // such as npm:pi-background-tasks are declared).
@@ -57,8 +58,26 @@ package runtime
 //
 // Sessions live in a SIBLING directory (step-agent-sessions), not here,
 // so the agent dir itself stays exactly the enumerated minimal set: the
-// step process gets PI_CODING_AGENT_SESSION_DIR=<data>/step-agent-sessions
-// and the runtime's transcript locator root points at the same place.
+// step process gets PI_CODING_AGENT_SESSION_DIR=<harness-root>/
+// step-agent-sessions and the runtime's transcript locator root points
+// at the same place.
+//
+// polyforge#171 — the harness-root map: all three harness state dirs
+// derive from ONE root (Config.HarnessRoot, resolved as --harness-root
+// > POLYFORGE_HARNESS_ROOT > DataDir):
+//
+// <harness-root>/step-agent           the dedicated pi step agent dir
+// <harness-root>/step-agent-sessions  the pi steps' session store
+// <harness-root>/claude-config        claude's config dir: settings.json
+//                                     (the single credential authority
+//                                     layer), projects/, debug/
+//
+// What unifies is WHERE, not the shapes inside: the pi dirs keep their
+// enumerated-minimal-set/sibling logic, and the claude-config dir rides
+// claude's own env semantics (its settings env block, its per-cwd
+// projects/). Only a real root redirects: on a bare Config (unit
+// tests) the derivations answer the un-homed relative paths exactly as
+// they did under the pre-#171 data-dir map.
 
 import (
 	"fmt"
@@ -68,10 +87,11 @@ import (
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
 )
 
-// The dedicated directories' names under the daemon data dir.
+// The dedicated directories' names under the harness root.
 const (
 	StepAgentDirName         = "step-agent"
 	StepAgentSessionsDirName = "step-agent-sessions"
+	ClaudeConfigDirName      = "claude-config"
 )
 
 // The minimal-set file names (owner ruling A2).
@@ -83,16 +103,42 @@ const (
 	stepAgentSubagent   = "subagent" // the ONE extension carried: extensions/subagent
 )
 
-// StepAgentDir is the dedicated step agent directory under the daemon
-// data dir (A1: under the data dir, NEVER inside a capsule).
+// harnessRootResolved answers the root the Dir() derivations use: the
+// Config's HarnessRoot, else the documented DataDir default (a bare /
+// hand-assembled Config that fill() never saw keeps the pre-#171
+// default paths — the op-observable default never moves).
+func (c *Config) harnessRootResolved() string {
+	if c.HarnessRoot != "" {
+		return c.HarnessRoot
+	}
+	return c.DataDir
+}
+
+// StepAgentDir is the dedicated step agent directory under the harness
+// root (A1: never inside a capsule).
 func (c *Config) StepAgentDir() string {
-	return filepath.Join(c.DataDir, StepAgentDirName)
+	return filepath.Join(c.harnessRootResolved(), StepAgentDirName)
 }
 
 // StepAgentSessionsDir is the step processes' harness session store
 // (PI_CODING_AGENT_SESSION_DIR and the live-transcript locator root).
 func (c *Config) StepAgentSessionsDir() string {
-	return filepath.Join(c.DataDir, StepAgentSessionsDirName)
+	return filepath.Join(c.harnessRootResolved(), StepAgentSessionsDirName)
+}
+
+// ClaudeConfigDir answers the step processes' Claude Code config dir:
+// <harness-root>/claude-config — where the settings.json env block is
+// the single credential authority layer (polyforge#171) and the
+// native claude session files land under projects/<dashed cwd>/.
+// Only a real root redirects: a bare Config (unit tests)
+// answers "", so neither the spawner injects CLAUDE_CONFIG_DIR nor a
+// locator consults a wrong path.
+func (c *Config) ClaudeConfigDir() string {
+	root := c.harnessRootResolved()
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, ClaudeConfigDirName)
 }
 
 // OperatorAgentDirDefault is the default source of the minimal set: the
@@ -353,7 +399,8 @@ func (c *Config) refreshStepAgentDir() error {
 // FillDefaults applies the Config's documented defaults to a config the
 // daemon assembles by hand (runtime.New does it internally for the
 // runtime's own copy; the daemon needs the filled values — the operator
-// agent dir and the step-agent session root — before it starts the
-// runtime, to sync the dedicated directory at daemon start and to point
-// the live-transcript locator at the step processes' session store).
+// agent dir and the harness-root map — before it starts the
+// runtime, to sync the dedicated directory at daemon start and to own
+// the harness-root map the Dir() derivations sell (and so a locator
+// consults the same claude-config dir the spawner sets).
 func (c *Config) FillDefaults() { c.fill() }

@@ -207,10 +207,7 @@ func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 	// session store. Only a real runtime (DataDir set) redirects: a bare
 	// Config (unit tests of the argv shape) has no data dir to own.
 	if s.cfg.DataDir != "" {
-		sessions := s.cfg.HarnessSessionsRoot
-		if sessions == "" {
-			sessions = s.cfg.StepAgentSessionsDir()
-		}
+		sessions := s.cfg.StepAgentSessionsDir()
 		additions = append(additions,
 			"PI_CODING_AGENT_DIR="+s.cfg.StepAgentDir(),
 			"PI_CODING_AGENT_SESSION_DIR="+sessions,

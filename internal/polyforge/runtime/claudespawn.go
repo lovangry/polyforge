@@ -14,13 +14,13 @@ package runtime
 // cwd = the capsule root, own process group (as pi); stdin = the
 // assembled step prompt (the SAME text pi gets), closed once written.
 //
-// The harness is logged in by a human beforehand: the daemon only runs
-// the CLI and never reads, writes or manages a credential. When
-// ANTHROPIC_AUTH_TOKEN is set in the daemon's environment the child
-// inherits it like any variable; otherwise a cli.toml
-// `anthropic_auth_token` is passed — through the child ENVIRONMENT only,
-// never argv. Without either the CLI runs bare on whatever the human set
-// up.
+// The step's Claude Code context is daemon-owned: <harness-root>/
+// claude-config is the config dir (its settings.json env block is the
+// single credential authority layer, polyforge#159 closeout #171), so
+// the daemon hard-sets CLAUDE_CONFIG_DIR there, and switches off
+// nonessential traffic (CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1).
+// The daemon never injects a credential: none ride the environment or
+// argv — the harness's own settings.json provides them.
 //
 // Clean step context (a functional requirement, not isolation): --bare
 // skips hooks, plugins, LSP, auto-memory, CLAUDE.md discovery and the
@@ -102,19 +102,33 @@ func (s *claudeSpawner) buildCmd(p SpawnParams) (*exec.Cmd, error) {
 		"DISABLE_AUTOUPDATER=1",
 		"CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1",
 	}
-	// env beats cli.toml: an inherited ANTHROPIC_AUTH_TOKEN is left as is
-	if os.Getenv("ANTHROPIC_AUTH_TOKEN") == "" && s.cfg.AnthropicAuthToken != "" {
-		additions = append(additions, "ANTHROPIC_AUTH_TOKEN="+s.cfg.AnthropicAuthToken)
+	// polyforge#171: the step's config dir is where its credentials live
+	// (claude-config/settings.json's env block — the single authority
+	// layer); the adapter hard-sets it and never injects a credential of
+	// its own. Only a real root redirects (a bare Config has no claude
+	// config dir; the step runs on whatever its own HOME resolves to).
+	if ccDir := s.cfg.ClaudeConfigDir(); ccDir != "" {
+		additions = append(additions, "CLAUDE_CONFIG_DIR="+ccDir)
 	}
+	// the "0" value is OFF for everything CLAUDE_CONFIG_DIR-side, so the
+	// existence is the semantic (see the WI ruling 5)
+	additions = append(additions, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")
+	// Zero credential injection (polyforge#171, closing out #159's three-layer blind spot):
+	// the adapter NEVER injects ANTHROPIC_AUTH_TOKEN or any other
+	// credential — the settings.json env block under claude-config is
+	// the single authority layer, applied by claude itself.
 	// A daemon started from inside a Claude Code session inherits that
 	// session's CLAUDECODE / CLAUDE_CODE_* markers and switches; none of
-	// them may shape the step (clean context) — only the three the
-	// adapter sets above. CLAUDE_CONFIG_DIR and ANTHROPIC_* pass through.
+	// them may shape the step (clean context) — only the switches the
+	// adapter sets above. CLAUDE_CONFIG_DIR is stripped the same way: it
+	// is hard-set by the adapter (an operator env value would hijack the
+	// step's config dir and would duplicate the env entry); ANTHROPIC_*
+	// pass through.
 	inherited := newEnvSanitizer(s.cfg.EnvSecrets...).childEnv()
 	env := make([]string, 0, len(inherited)+len(additions))
 	for _, kv := range inherited {
 		name, _, _ := strings.Cut(kv, "=")
-		if name == "CLAUDECODE" || strings.HasPrefix(name, "CLAUDE_CODE_") {
+		if name == "CLAUDECODE" || strings.HasPrefix(name, "CLAUDE_CODE_") || name == "CLAUDE_CONFIG_DIR" {
 			continue
 		}
 		env = append(env, kv)

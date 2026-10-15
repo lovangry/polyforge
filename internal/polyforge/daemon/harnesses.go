@@ -6,12 +6,29 @@ package daemon
 // — judges what the daemon will actually run. Only facts are reported:
 // whether the binary resolves, its version (claude --version; cached per
 // binary path + mtime), and whether the credential variables are SET.
+//
+// polyforge#171 (ruling 8): the claude entry additionally reports the
+// harness-root layout and the single credential authority layer —
+//   - the three harness dirs' existence (step-agent, step-agent-sessions,
+//     claude-config under the daemon's harness root);
+//   - the claude-config/settings.json env block's key facts
+//     (ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, CLAUDE_CONFIG_DIR) as
+//     set/unset — values are read in-memory for the pairing heuristic
+//     and NEVER reported;
+//   - its heuristic warnings: an OAuth setup-token (sk-ant-oat01-)
+//     paired with a gateway BASE_URL is a rejected combination, and a
+//     CLAUDE_CONFIG_DIR set in the settings env block would override the
+//     adapter's hard-set value.
+//
 // No value is ever reported, no login is attempted, no model is called.
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +38,20 @@ import (
 // argv/stream contract was verified against. Another version is a doctor
 // warning, never a dispatch refusal (the CLI auto-updates).
 var verifiedClaudeVersions = map[string]bool{"2.1.296": true}
+
+// harnessDirStatus is one harness dir's existence fact (dir → path +
+// exists) of the claude status entry (polyforge#171, ruling 8).
+type harnessDirStatus struct {
+	Path   string `json:"path,omitempty"`
+	Exists bool   `json:"exists"`
+}
+
+// settingsEnvKeys are the env block keys the doctor reports facts about.
+var settingsEnvKeys = []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR"}
+
+// settingsTokenPrefix is the OAuth setup-token prefix Claude Code mints
+// (`claude setup-token`, scoped to the subscription, ~365d live).
+const settingsTokenPrefix = "sk-ant-oat01-"
 
 // harnessStatus is one harness's /status entry.
 type harnessStatus struct {
@@ -33,10 +64,21 @@ type harnessStatus struct {
 	VersionError string `json:"version_error,omitempty"`
 	// set|unset only — never a value.
 	AuthTokenEnv    string `json:"auth_token_env,omitempty"`
-	AuthTokenToml   string `json:"auth_token_toml,omitempty"`
 	APIKeyEnv       string `json:"api_key_env,omitempty"`
 	BaseURLEnv      string `json:"base_url_env,omitempty"`
 	BackgroundTasks string `json:"background_tasks,omitempty"`
+
+	// polyforge#171 claude entry:
+	// SettingsEnv is the claude-config settings.json env block's key
+	// facts (key → set|unset; values read in-memory only, never reported).
+	SettingsEnv map[string]string `json:"settings_env,omitempty"`
+	// HarnessDirs is the claude status entry's layout facts: the three
+	// harness dirs under the daemon's harness root (polyforge#171, rule 3).
+	HarnessDirs map[string]harnessDirStatus `json:"harness_dirs,omitempty"`
+	// SettingsWarning is the settings.json pairing heuristic result (the
+	// oat01+gateway-URL rejection and the CLAUDE_CONFIG_DIR override),
+	// pre-computed daemon-side (the CLI never sees a value).
+	SettingsWarning string `json:"settings_warning,omitempty"`
 }
 
 // versionCache memoizes `claude --version` per binary path + mtime.
@@ -68,16 +110,63 @@ func (d *Daemon) harnessStatuses() map[string]harnessStatus {
 		cl.Bin = "claude"
 	}
 	cl.AuthTokenEnv = setOrUnset(os.Getenv("ANTHROPIC_AUTH_TOKEN"))
-	cl.AuthTokenToml = setOrUnset(d.cfg.AnthropicAuthToken)
 	cl.APIKeyEnv = setOrUnset(os.Getenv("ANTHROPIC_API_KEY"))
 	cl.BaseURLEnv = setOrUnset(os.Getenv("ANTHROPIC_BASE_URL"))
 	cl.BackgroundTasks = "disabled by the adapter (--bare, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1, --tools allowlist)"
+	cl.SettingsEnv, cl.HarnessDirs, cl.SettingsWarning = d.claudeConfigFacts()
 	if p, err := exec.LookPath(cl.Bin); err == nil {
 		cl.Found, cl.Path = true, p
 		cl.Version, cl.VersionError = d.claudeVersion(p)
 		cl.Verified = verifiedClaudeVersions[cl.Version]
 	}
 	return map[string]harnessStatus{"pi": pi, "claude": cl}
+}
+
+// claudeConfigFacts reads the claude-config settings.json in-memory. It
+// never carries a value. Absent: all-unset facts, no warning (nothing
+// configured is exactly the doctor's "carries nothing" verdict, and the
+// in-repo fake-cfg tests below pin the un-configured default shape).
+func (d *Daemon) claudeConfigFacts() (map[string]string, map[string]harnessDirStatus, string) {
+	root := d.cfg.HarnessRoot
+	if root == "" {
+		root = d.cfg.DataDir
+	}
+	ccDir := filepath.Join(root, "claude-config")
+	dirs := map[string]harnessDirStatus{
+		"step_agent":          {Path: filepath.Join(root, "step-agent")},
+		"step_agent_sessions": {Path: filepath.Join(root, "step-agent-sessions")},
+		"claude_config":       {Path: ccDir},
+	}
+	for k, s := range dirs {
+		st, err := os.Stat(s.Path)
+		dirs[k] = harnessDirStatus{Path: s.Path, Exists: err == nil && st.IsDir()}
+	}
+	raw, err := os.ReadFile(filepath.Join(ccDir, "settings.json"))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, dirs, ""
+		}
+		return nil, dirs, "the claude-config settings.json is unreadable (" + err.Error() + ")"
+	}
+	var doc struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil || doc.Env == nil {
+		return nil, dirs, "the claude-config settings.json does not parse into an `env` block — whether the steps would run on credentials is unknowable from here"
+	}
+	facts := map[string]string{}
+	for _, k := range settingsEnvKeys {
+		facts[k] = setOrUnset(doc.Env[k])
+	}
+	var warns []string
+	token, baseUrl := doc.Env["ANTHROPIC_AUTH_TOKEN"], doc.Env["ANTHROPIC_BASE_URL"]
+	if strings.HasPrefix(token, settingsTokenPrefix) && baseUrl != "" {
+		warns = append(warns, "OAuth token (sk-ant-oat01-, a `claude setup-token` mint) paired with a gateway BASE_URL — that combination is rejected by Claude Code: use either the official API with no BASE_URL, or a gateway token; this is the doctor's pairing clause")
+	}
+	if doc.Env["CLAUDE_CONFIG_DIR"] != "" {
+		warns = append(warns, "the claude-config settings.json env block sets CLAUDE_CONFIG_DIR: remove it — the adapter hard-sets the step's config dir and the settings value overrides the adapter's")
+	}
+	return facts, dirs, strings.Join(warns, "; ")
 }
 
 // claudeVersion runs `<path> --version` (bounded), cached per path+mtime.

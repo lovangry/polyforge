@@ -84,14 +84,12 @@ type Config struct {
 	// claude (polyforge#159; --claude-bin / cli.toml claude_bin; default
 	// "claude").
 	ClaudeBin string
-	// AnthropicAuthToken is cli.toml's anthropic_auth_token: handed to a
-	// claude step as ANTHROPIC_AUTH_TOKEN (env only) when the daemon's
-	// own environment does not set it. Never reported, never logged.
-	AnthropicAuthToken string
-	// HarnessSessionsRoot overrides the harness's default session store
-	// for the live-transcript locator (F3); "" = the dedicated
-	// step-agent-sessions dir under DataDir (addendum 2).
-	HarnessSessionsRoot string
+	// HarnessRoot is the parent root of the three harness state dirs
+	// (polyforge#171: <harness-root>/step-agent, /step-agent-sessions,
+	// /claude-config). "" = the default <data-dir>; the doctor's claude
+	// entry reports the three dirs' existence and the claude-config
+	// settings.json env keys (set/unset only) off it.
+	HarnessRoot string
 	// OperatorAgentDir is the SOURCE of the dedicated step agent
 	// directory's minimal set (addendum 2, owner ruling A): the
 	// operator's agent dir by default. Explicit (flag/env) sources whose
@@ -323,8 +321,7 @@ func New(cfg Config) (*Daemon, error) {
 		WorkflowsDir:             cfg.WorkflowsDir,
 		PiBin:                    cfg.PiBin,
 		ClaudeBin:                cfg.ClaudeBin,
-		AnthropicAuthToken:       cfg.AnthropicAuthToken,
-		HarnessSessionsRoot:      cfg.HarnessSessionsRoot,
+		HarnessRoot:              cfg.HarnessRoot,
 		OperatorAgentDir:         cfg.OperatorAgentDir,
 		OperatorAgentDirExplicit: cfg.OperatorAgentDirExplicit,
 		EnvSecrets:               []string{cfg.APIKey},
@@ -337,7 +334,7 @@ func New(cfg Config) (*Daemon, error) {
 	// filled runtime value (the dedicated step-agent-sessions dir, or the
 	// operator's explicit override) governs both the child env and the
 	// live-transcript scan below.
-	cfg.HarnessSessionsRoot = rtCfg.HarnessSessionsRoot
+	cfg.HarnessRoot = rtCfg.HarnessRoot
 	// Runtime-sourced diagnostic events (a seal push that failed after
 	// its retries, pilot item 3) land in the observe lane's durable
 	// events log next to its own entries; the tap reads d.obs at call
@@ -369,6 +366,10 @@ func New(cfg Config) (*Daemon, error) {
 				StepCandidates:   in.StepCandidates,
 				StepHarness:      in.StepHarness,
 				InterruptedCause: in.InterruptedCause,
+				// polyforge#171: the resume decision for claude dispatches
+				// locates the native session under the claude-config dir
+				// the spawner hard-set (never the daemon's process env).
+				ClaudeConfigDir: rtCfg.ClaudeConfigDir(),
 				// driver events land in the durable per-WI event log
 				// (monotonic ids); the supervision link is the WI's
 				// shared driver <-> supervisor channel
@@ -418,7 +419,7 @@ func New(cfg Config) (*Daemon, error) {
 		// resolver lets CLI-side route calls by the operator's spelling
 		// (a "<project>#<seq>") find the canonically-keyed monitor.
 		LocateLive: func(capsuleDir string, spawnAt time.Time, harness, session string) string {
-			return runtime.LocateTranscript(cfg.HarnessSessionsRoot, capsuleDir, spawnAt, harness, session)
+			return runtime.LocateTranscript(rtCfg.StepAgentSessionsDir(), rtCfg.ClaudeConfigDir(), capsuleDir, spawnAt, harness, session)
 		},
 		Resolve: d.resolveWI,
 		// M4 wiring: the periodic session revalidation rides the monitor

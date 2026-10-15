@@ -275,8 +275,36 @@ func TestStepAgentDirDefaultsAndSessionsAreSeparate(t *testing.T) {
 	if cfg.OperatorAgentDirExplicit {
 		t.Fatal("a defaulted source is never explicit (its missing credentials are a warning, not a refusal)")
 	}
-	if cfg.HarnessSessionsRoot != cfg.StepAgentSessionsDir() {
-		t.Fatalf("the live-transcript locator root must follow the step processes' session store, got %q", cfg.HarnessSessionsRoot)
+	if cfg.HarnessRoot != cfg.DataDir || cfg.HarnessRoot == "" {
+		t.Fatalf("the harness root must default to the data dir (only the op-observable default path; the flag/env override moves it), got %q (data %q)", cfg.HarnessRoot, cfg.DataDir)
+	}
+	if cfg.StepAgentDir() != filepath.Join(cfg.HarnessRoot, StepAgentDirName) {
+		t.Fatalf("the dedicated dir must derive from the harness root, got %q", cfg.StepAgentDir())
+	}
+	if cfg.StepAgentSessionsDir() != filepath.Join(cfg.HarnessRoot, StepAgentSessionsDirName) {
+		t.Fatalf("the session store must derive from the harness root, got %q", cfg.StepAgentSessionsDir())
+	}
+	if rel, err := filepath.Rel(cfg.DataDir, cfg.StepAgentDir()); err != nil || strings.HasPrefix(rel, "..") {
+		t.Fatalf("the dedicated dir %s is not under the data dir %s", cfg.StepAgentDir(), cfg.DataDir)
+	}
+	// polyforge#171: the three dirs are siblings under ONE harness root.
+	if n, want := cfg.ClaudeConfigDir(), filepath.Join(cfg.HarnessRoot, ClaudeConfigDirName); n != want {
+		t.Fatalf("claude-config derivation %q, want %q", n, want)
+	}
+	if cfg.ClaudeConfigDir() == cfg.StepAgentSessionsDir() || cfg.StepAgentDir() == cfg.ClaudeConfigDir() {
+		t.Fatal("the harness dirs are not siblings under one root")
+	}
+	// an explicit harness-root override moves the whole tree, never just
+	// one dir (polyforge#171 unification)
+	over := Config{DataDir: cfg.DataDir, HarnessRoot: t.TempDir()}
+	over.FillDefaults()
+	if over.HarnessRoot == over.DataDir {
+		t.Fatal("an explicit harness root was overwritten by the data-dir default")
+	}
+	if over.StepAgentDir() != filepath.Join(over.HarnessRoot, StepAgentDirName) ||
+		over.StepAgentSessionsDir() != filepath.Join(over.HarnessRoot, StepAgentSessionsDirName) ||
+		over.ClaudeConfigDir() != filepath.Join(over.HarnessRoot, ClaudeConfigDirName) {
+		t.Fatalf("the harness-root override did not move the three dirs: %+v", over)
 	}
 	// the sessions live OUTSIDE the dedicated agent dir, so the minimal
 	// set stays exactly the enumerated one

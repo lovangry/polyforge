@@ -78,11 +78,11 @@ func TestSpawnStepAgentDirectoryEnv(t *testing.T) {
 	}
 	// an override of the sessions root governs both the locator and the
 	// child (tests, relocated installs)
-	cfg2 := Config{PiBin: "/nonexistent-pi", DataDir: t.TempDir(), HarnessSessionsRoot: "/elsewhere/sessions"}
+	cfg2 := Config{PiBin: "/nonexistent-pi", DataDir: t.TempDir(), HarnessRoot: "/elsewhere"}
 	cfg2.FillDefaults()
 	env2 := strings.Join(newPiSpawner(&cfg2).buildCmd(SpawnParams{CapsuleDir: "/caps"}).Env, "\n")
-	if !strings.Contains(env2, "PI_CODING_AGENT_SESSION_DIR=/elsewhere/sessions") {
-		t.Fatalf("an explicit sessions root must reach the child, got:\n%s", env2)
+	if !strings.Contains(env2, "PI_CODING_AGENT_SESSION_DIR=/elsewhere/step-agent-sessions") {
+		t.Fatalf("a harness-root override must move the pi session store with the root, got:\n%s", env2)
 	}
 }
 

@@ -48,12 +48,14 @@ type Config struct {
 	UserID       string        // caller identity for answer.answered_by
 	ChatID       string        // PF_CHAT_ID: the harness chat this process runs in (label, not a credential)
 	Mapping      *mapping.Plan // the workspace→projects plan of record (non-nil; possibly empty)
-	// ClaudeBin / AnthropicAuthToken are daemon-side Claude Code harness
-	// settings (polyforge#159): the claude binary of claude steps, and
-	// the token handed to them as ANTHROPIC_AUTH_TOKEN when the daemon's
-	// environment does not set it. The token is never printed.
-	ClaudeBin          string
-	AnthropicAuthToken string
+	// ClaudeBin is the daemon-side Claude Code harness setting
+	// (polyforge#159): the claude binary of claude steps. The token
+	// authority layer is <harness-root>/claude-config/settings.json's
+	// env block (polyforge#171, ruling 1) — there is NO config-file key
+	// for credentials ever again (the former anthropic_auth_token is
+	// hard-deleted, ruling 2: a residual key now fails the unknown-key
+	// parse with the startup error it deserved.
+	ClaudeBin string
 }
 
 // DefaultConfigPath returns the single documented config location:
@@ -142,8 +144,6 @@ func applyConfigFile(cfg *Config, kv map[string]string) {
 			cfg.UserID = v
 		case "claude_bin":
 			cfg.ClaudeBin = v
-		case "anthropic_auth_token":
-			cfg.AnthropicAuthToken = v
 		}
 	}
 }
@@ -177,9 +177,13 @@ type workspaceSection struct {
 	line     int
 }
 
-// The known flat keys: root-level wherever they appear in the file.
+// The known flat keys: root-level wherever they appear in the file —
+// polyforge#171 ruling 2: the former anthropic_auth_token is NOT one
+// (hard-deleted, no deprecation path), so a residual key in an old
+// cli.toml fails the unknown-key error at startup, never silent
+// acceptance. Credentials live in <harness-root>/claude-config/settings.json.
 var coreFlatKeys = map[string]bool{"server": true, "api_key": true, "daemon_socket": true, "user_id": true,
-	"claude_bin": true, "anthropic_auth_token": true}
+	"claude_bin": true}
 
 // unknownKeyError is the refusal of a top-level key outside the known set.
 type unknownKeyError struct{ key, file string }
@@ -191,8 +195,11 @@ func (e *unknownKeyError) Error() string {
 // parseConfigTOML parses the TOML subset documented for cli.toml:
 //
 //   - `key = "value"` flat string keys: the known set (server, api_key,
-//     daemon_socket, user_id, claude_bin, anthropic_auth_token) is stored; the known keys are root-level
-//     wherever they appear; any other top-level key is an error;
+//     daemon_socket, user_id, claude_bin) is stored; the known keys are root-level
+//     wherever they appear; any other top-level key is an error — a
+//     residual anthropic_auth_token from a pre-#171 deployment hits the
+//     unknown-key refusal (the credentials now live in
+//     <harness-root>/claude-config/settings.json, ruling 1-2);
 //   - one section family: `[workspace."<path>"]` (quoted key mandatory)
 //     — inside, only `projects = ["a", "b"]`.
 //

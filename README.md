@@ -444,7 +444,7 @@ the `PF_*` entries.
 | `--data-dir DIR` | `POLYFORGE_DATA_DIR` | `~/.local/share/polyforge` | Daemon state, events log and derived data. |
 | `--workflows-dir DIR` | — | `./workflows` | Workflow-bundle checkout the executor reads. |
 | `--pi-bin PATH` | — | `pi` | Harness binary the agent processes are derived from. |
-| `--harness-sessions-root DIR` | `POLYFORGE_HARNESS_SESSIONS_ROOT` | `~/.pi/agent/sessions` | Harness session store for the live-transcript sync. |
+| `--harness-root DIR` | `POLYFORGE_HARNESS_ROOT` | `<data-dir>` | Parent root of the step harness dirs: `<DIR>/step-agent` (dedicated agent dir), `/step-agent-sessions` (pi sessions) and `/claude-config` (claude config dir; its settings.json env block is the credential authority layer). The former `--harness-sessions-root` was renamed — old deployments fail loudly at startup. |
 | `--cgroup-root DIR` | `POLYFORGE_CGROUP_ROOT` | — | cgroup v2 root used for layer-0 agent cleanup. |
 | `--git-remote-base URL` | — | `<server>/git` | aihub bare-repo base URL for the capsule revision chain. |
 | `--max-concurrent-jobs N` | — | `4` | Cap on concurrently running jobs (also `pf ops max N`). |

@@ -389,6 +389,9 @@ func workspaceYamlCheck(m *mapping.Plan, workflowsDir string, daemonUp bool) (st
 // the steps resolving to the claude harness (polyforge#159). It never
 // shows a credential value, never logs in and never calls a model: the
 // daemon reports the binary, `claude --version` and set/unset only.
+// polyforge#171: the credential-present judgment keys on the claude-config
+// settings.json env block set/unset first (the single authority layer)
+// plus the daemon env; its pairing warnings render as reported.
 func claudeHarnessCheck(steps []workspace.StepResolution, workflowsDir string, daemonUp bool, hs map[string]HarnessStatus) (string, string) {
 	if len(steps) == 0 {
 		if workflowsDir == "" {
@@ -431,20 +434,69 @@ func claudeHarnessCheck(steps []workspace.StepResolution, workflowsDir string, d
 	case !h.Verified:
 		warn(fmt.Sprintf("version %s is not in the verified set (the adapter's argv/stream contract was verified on another version)", h.Version))
 	}
-	tokenSet := h.AuthTokenEnv == "set" || h.AuthTokenToml == "set"
+	tokenSet := h.AuthTokenEnv == "set" || h.SettingsEnv["ANTHROPIC_AUTH_TOKEN"] == "set"
 	switch {
 	case !tokenSet && h.APIKeyEnv != "set":
-		warn("no credential variable is visible to the daemon (neither ANTHROPIC_AUTH_TOKEN — env or anthropic_auth_token — nor ANTHROPIC_API_KEY); the credential may live in Claude Code's settings.json `env` section (applied under --bare too), which the daemon cannot see — not an error if so")
+		warn("no credential is visible (neither the daemon env ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY nor the claude-config settings.json env block); the settings.json env pair (ANTHROPIC_AUTH_TOKEN + optional ANTHROPIC_BASE_URL) must live under the claude-config dir" + harnessShapeNotes())
 	case tokenSet && h.APIKeyEnv == "set":
 		warn("both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are set — which one Claude Code uses is unverified")
 	}
-	if h.BaseURLEnv == "set" {
-		warn("ANTHROPIC_BASE_URL is set in the daemon's environment: claude steps inherit it (they are meant to use the official API)")
+	if h.SettingsWarning != "" {
+		warn(h.SettingsWarning)
 	}
-	detail := fmt.Sprintf("%s — %s %s at %s; auth token env %s, auth token config %s, api key env %s; background tasks %s",
-		table, h.Bin, h.Version, h.Path, h.AuthTokenEnv, h.AuthTokenToml, h.APIKeyEnv, h.BackgroundTasks)
+	if h.BaseURLEnv == "set" {
+		warn("ANTHROPIC_BASE_URL is set in the daemon's environment: claude steps inherit it")
+	}
+	detail := fmt.Sprintf("%s — %s %s at %s; auth token env %s, api key env %s%s; background tasks %s",
+		table, h.Bin, h.Version, h.Path, h.AuthTokenEnv, h.APIKeyEnv, settingsFacts(h), h.BackgroundTasks)
 	if len(notes) > 0 {
 		detail += " — " + strings.Join(notes, "; ")
 	}
 	return status, detail
+}
+
+// settingsFacts renders the polyforge#171 claude status facts: the dir
+// layout and the settings.json env key facts (set|unset, never values).
+func settingsFacts(h HarnessStatus) string {
+	var parts []string
+	if len(h.HarnessDirs) > 0 {
+		labels := map[string]string{
+			"step_agent":          "step agent dir",
+			"step_agent_sessions": "step agent sessions",
+			"claude_config":       "claude config dir",
+		}
+		order := []string{"step_agent", "step_agent_sessions", "claude_config"}
+		var rows []string
+		for _, name := range order {
+			d, ok := h.HarnessDirs[name]
+			if !ok {
+				continue
+			}
+			state := "present"
+			if !d.Exists {
+				state = "missing"
+			}
+			rows = append(rows, fmt.Sprintf("%s %s", labels[name], state))
+		}
+		parts = append(parts, "harness dirs: "+strings.Join(rows, ", "))
+	}
+	if len(h.SettingsEnv) > 0 {
+		rows := make([]string, 0, len(h.SettingsEnv))
+		for _, k := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR"} {
+			if v, ok := h.SettingsEnv[k]; ok {
+				rows = append(rows, k+" "+v)
+			}
+		}
+		parts = append(parts, "claude-config settings.json env: "+strings.Join(rows, ", "))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "; " + strings.Join(parts, "; ")
+}
+
+// harnessShapeNotes is the settings.json authority shape note from the
+// doctor's unconfigured credential case.
+func harnessShapeNotes() string {
+	return " (env block: ANTHROPIC_AUTH_TOKEN required, ANTHROPIC_BASE_URL optional — paired, never a project-level settings file)"
 }

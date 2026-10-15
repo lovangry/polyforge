@@ -2,7 +2,7 @@ package runtime
 
 // claudespawn_test.go: the polyforge#159 Claude Code step spawner — the
 // argv/env golden (clean context flags, the tool allowlist, background
-// off, the token only ever in the environment) and the stdin contract
+// off, the zero credential injection (polyforge#171): the token never rides env or argv from the adapter) and the stdin contract
 // (the prompt is written, then stdin is closed). No real `claude` runs:
 // the binary is a shell stand-in.
 
@@ -22,7 +22,7 @@ const testSession = "0b9f6a52-3c1d-4e8f-9a7b-1c2d3e4f5a6b"
 func TestClaudeBuildCmdArgvEnv(t *testing.T) {
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
 	os.Unsetenv("ANTHROPIC_AUTH_TOKEN")
-	sp := &claudeSpawner{cfg: &Config{ClaudeBin: "/opt/claude", MachineID: "m-1", AnthropicAuthToken: "tok-SENTINEL-159"}}
+	sp := &claudeSpawner{cfg: &Config{ClaudeBin: "/opt/claude", MachineID: "m-1"}}
 	cmd, err := sp.buildCmd(SpawnParams{WorkItemID: "wi_1", CapsuleDir: "/caps", Model: "claude-opus-5-5", HarnessSession: testSession})
 	if err != nil {
 		t.Fatal(err)
@@ -56,10 +56,19 @@ func TestClaudeBuildCmdArgvEnv(t *testing.T) {
 		}
 	}
 	env := strings.Join(cmd.Env, "\n")
-	for _, kv := range []string{"PF_WI_ID=wi_1", "PF_DAEMON_ID=m-1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1", "DISABLE_AUTOUPDATER=1", "CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1", "ANTHROPIC_AUTH_TOKEN=tok-SENTINEL-159"} {
+	for _, kv := range []string{"PF_WI_ID=wi_1", "PF_DAEMON_ID=m-1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1", "DISABLE_AUTOUPDATER=1", "CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"} {
 		if !strings.Contains(env, kv) {
 			t.Fatalf("env lacks %s", kv)
 		}
+	}
+	if strings.Contains(env, "CLAUDE_CONFIG_DIR=") {
+		t.Fatalf("a bare Config has no claude config dir to hard-set: %s", env)
+	}
+	// polyforge#171 zero-credential injection (closing out #159's toml token):
+	// no token ever rides the env from the adapter — the settings.json
+	// authority under claude-config is claude's own business.
+	if strings.Contains(env, "ANTHROPIC_AUTH_TOKEN=tok-SENTINEL-159") {
+		t.Errorf("env carries the injected token: %s", env)
 	}
 	if strings.Contains(env, "PI_CODING_AGENT_DIR") {
 		t.Fatal("a claude step gets no pi agent dir")
@@ -81,23 +90,26 @@ func TestClaudeBuildCmdArgvEnv(t *testing.T) {
 	}
 }
 
-// The daemon's own ANTHROPIC_AUTH_TOKEN wins over cli.toml: it is
-// inherited and the config value is not added; without either, no token.
+// polyforge#171 zero-credential injection (closing out #159's toml token):
+// the adapter never injects ANTHROPIC_AUTH_TOKEN from any config; an
+// inherited token (the daemon's environment) is what claude sees.
 func TestClaudeTokenPrecedence(t *testing.T) {
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "env-token")
-	sp := &claudeSpawner{cfg: &Config{AnthropicAuthToken: "toml-token"}}
+	sp := &claudeSpawner{cfg: &Config{}}
 	cmd, _ := sp.buildCmd(SpawnParams{CapsuleDir: "/c", HarnessSession: testSession})
 	env := strings.Join(cmd.Env, "\n")
-	if !strings.Contains(env, "ANTHROPIC_AUTH_TOKEN=env-token") || strings.Contains(env, "toml-token") {
-		t.Fatalf("env precedence broken")
+	if !strings.Contains(env, "ANTHROPIC_AUTH_TOKEN=env-token") {
+		t.Fatalf("the inherited token disappeared")
 	}
 	os.Unsetenv("ANTHROPIC_AUTH_TOKEN")
-	sp = &claudeSpawner{cfg: &Config{}}
 	cmd, _ = sp.buildCmd(SpawnParams{CapsuleDir: "/c", HarnessSession: testSession})
 	for _, kv := range cmd.Env {
 		if strings.HasPrefix(kv, "ANTHROPIC_AUTH_TOKEN=") {
 			t.Fatalf("no token configured, env carries %q", kv)
 		}
+	}
+	if strings.Contains(env, "toml-SENTINEL") {
+		t.Errorf("the test's argv scan already covered that")
 	}
 }
 
@@ -152,13 +164,16 @@ func TestHarnessSpawnerRefusesUnknownHarness(t *testing.T) {
 // by the journaled uuid) onto that dispatch's own capsule file — on a
 // resumed dispatch too (the native file is outside the capsule).
 func TestSyncLiveTranscriptClaude(t *testing.T) {
-	cfgDir := t.TempDir()
-	t.Setenv("CLAUDE_CONFIG_DIR", cfgDir)
+	// polyforge#171: the locator takes the claude-config dir explicitly
+	// off the runtime config's harness root; the daemon process env is
+	// never consulted (the child env is the only place that matters).
+	root := t.TempDir()
 	capDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(capDir, "session"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	native := filepath.Join(cfgDir, "projects", harness.ClaudeProjectDirName(capDir), testSession+".jsonl")
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(t.TempDir(), "elsewhere"))
+	native := filepath.Join(root, "claude-config", "projects", harness.ClaudeProjectDirName(capDir), testSession+".jsonl")
 	if err := os.MkdirAll(filepath.Dir(native), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +188,7 @@ func TestSyncLiveTranscriptClaude(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(capDir, "runtime-state", "spawn-journal.jsonl"), []byte(line), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r := &Runtime{}
+	r := &Runtime{cfg: Config{HarnessRoot: root}}
 	r.syncLiveTranscript(capDir)
 	got, err := os.ReadFile(dst)
 	if err != nil || !strings.Contains(string(got), `"assistant"`) {
@@ -182,7 +197,11 @@ func TestSyncLiveTranscriptClaude(t *testing.T) {
 }
 
 // Inherited Claude Code session markers and switches never reach the
-// step; the adapter's own three, CLAUDE_CONFIG_DIR and ANTHROPIC_* do.
+// step; the adapter's own switches do — CLAUDE_CONFIG_DIR is hard-set by
+// the adapter (polyforge#171: the claude-config dir of the harness
+// root), an inherited operator value is stripped and never duplicated,
+// and NONESSENTIAL traffic is switched off (value semantics: existence
+// is ON, so "1" is the adapter's form).
 func TestClaudeEnvStripsInheritedClaudeCode(t *testing.T) {
 	t.Setenv("CLAUDECODE", "1")
 	t.Setenv("CLAUDE_CODE_ENTRYPOINT", "cli")
@@ -190,7 +209,8 @@ func TestClaudeEnvStripsInheritedClaudeCode(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_SSE_PORT", "1234")
 	t.Setenv("CLAUDE_CONFIG_DIR", "/cfg")
 	t.Setenv("ANTHROPIC_BASE_URL", "http://x")
-	sp := &claudeSpawner{cfg: &Config{}}
+	root := t.TempDir()
+	sp := &claudeSpawner{cfg: &Config{HarnessRoot: root}}
 	cmd, err := sp.buildCmd(SpawnParams{CapsuleDir: "/c", HarnessSession: testSession})
 	if err != nil {
 		t.Fatal(err)
@@ -205,10 +225,18 @@ func TestClaudeEnvStripsInheritedClaudeCode(t *testing.T) {
 			t.Fatalf("%s leaked into the step env", gone)
 		}
 	}
+	// the adapter's hard-set wins, exactly one entry (the operator's
+	// inherited value is stripped, never duplicated)
+	if v := seen["CLAUDE_CONFIG_DIR"]; len(v) != 1 || v[0] != filepath.Join(root, "claude-config") {
+		t.Fatalf("CLAUDE_CONFIG_DIR entries %v, want exactly one %q", v, filepath.Join(root, "claude-config"))
+	}
+	if v := seen["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]; len(v) != 1 || v[0] != "1" {
+		t.Fatalf("NONESSENTIAL switch %v", v)
+	}
 	if v := seen["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"]; len(v) != 1 || v[0] != "1" {
 		t.Fatalf("background switch %v, want exactly the adapter's 1", v)
 	}
-	for _, k := range []string{"CLAUDE_CODE_STARTUP_FAILURE_RESULTS", "CLAUDE_CONFIG_DIR", "ANTHROPIC_BASE_URL"} {
+	for _, k := range []string{"CLAUDE_CODE_STARTUP_FAILURE_RESULTS", "ANTHROPIC_BASE_URL"} {
 		if len(seen[k]) != 1 {
 			t.Fatalf("%s = %v", k, seen[k])
 		}
