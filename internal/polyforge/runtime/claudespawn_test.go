@@ -56,10 +56,13 @@ func TestClaudeBuildCmdArgvEnv(t *testing.T) {
 		}
 	}
 	env := strings.Join(cmd.Env, "\n")
-	for _, kv := range []string{"PF_WI_ID=wi_1", "PF_DAEMON_ID=m-1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1", "DISABLE_AUTOUPDATER=1", "CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1", "ANTHROPIC_AUTH_TOKEN=tok-SENTINEL-159"} {
+	for _, kv := range []string{"PF_WI_ID=wi_1", "PF_DAEMON_ID=m-1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1", "DISABLE_AUTOUPDATER=1", "CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", "ANTHROPIC_AUTH_TOKEN=tok-SENTINEL-159"} {
 		if !strings.Contains(env, kv) {
 			t.Fatalf("env lacks %s", kv)
 		}
+	}
+	if strings.Contains(env, "CLAUDE_CONFIG_DIR=") {
+		t.Fatalf("a bare Config has no claude config dir to hard-set: %s", env)
 	}
 	if strings.Contains(env, "PI_CODING_AGENT_DIR") {
 		t.Fatal("a claude step gets no pi agent dir")
@@ -182,7 +185,11 @@ func TestSyncLiveTranscriptClaude(t *testing.T) {
 }
 
 // Inherited Claude Code session markers and switches never reach the
-// step; the adapter's own three, CLAUDE_CONFIG_DIR and ANTHROPIC_* do.
+// step; the adapter's own switches do — CLAUDE_CONFIG_DIR is hard-set by
+// the adapter (polyforge#171: the claude-config dir of the harness
+// root), an inherited operator value is stripped and never duplicated,
+// and NONESSENTIAL traffic is switched off (value semantics: existence
+// is ON, so "1" is the adapter's form).
 func TestClaudeEnvStripsInheritedClaudeCode(t *testing.T) {
 	t.Setenv("CLAUDECODE", "1")
 	t.Setenv("CLAUDE_CODE_ENTRYPOINT", "cli")
@@ -190,7 +197,8 @@ func TestClaudeEnvStripsInheritedClaudeCode(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_SSE_PORT", "1234")
 	t.Setenv("CLAUDE_CONFIG_DIR", "/cfg")
 	t.Setenv("ANTHROPIC_BASE_URL", "http://x")
-	sp := &claudeSpawner{cfg: &Config{}}
+	root := t.TempDir()
+	sp := &claudeSpawner{cfg: &Config{HarnessRoot: root}}
 	cmd, err := sp.buildCmd(SpawnParams{CapsuleDir: "/c", HarnessSession: testSession})
 	if err != nil {
 		t.Fatal(err)
@@ -205,10 +213,18 @@ func TestClaudeEnvStripsInheritedClaudeCode(t *testing.T) {
 			t.Fatalf("%s leaked into the step env", gone)
 		}
 	}
+	// the adapter's hard-set wins, exactly one entry (the operator's
+	// inherited value is stripped, never duplicated)
+	if v := seen["CLAUDE_CONFIG_DIR"]; len(v) != 1 || v[0] != filepath.Join(root, "claude-config") {
+		t.Fatalf("CLAUDE_CONFIG_DIR entries %v, want exactly one %q", v, filepath.Join(root, "claude-config"))
+	}
+	if v := seen["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"]; len(v) != 1 || v[0] != "1" {
+		t.Fatalf("NONESSENTIAL switch %v", v)
+	}
 	if v := seen["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"]; len(v) != 1 || v[0] != "1" {
 		t.Fatalf("background switch %v, want exactly the adapter's 1", v)
 	}
-	for _, k := range []string{"CLAUDE_CODE_STARTUP_FAILURE_RESULTS", "CLAUDE_CONFIG_DIR", "ANTHROPIC_BASE_URL"} {
+	for _, k := range []string{"CLAUDE_CODE_STARTUP_FAILURE_RESULTS", "ANTHROPIC_BASE_URL"} {
 		if len(seen[k]) != 1 {
 			t.Fatalf("%s = %v", k, seen[k])
 		}
