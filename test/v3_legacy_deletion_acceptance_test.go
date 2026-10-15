@@ -135,6 +135,7 @@ func v3StartDaemon(t *testing.T, inst *v1Install, sock, dataDir, workspace, mach
 		"--data-dir", d.dataDir,
 		"--workflows-dir", inst.workflowsPath(),
 		"--pi-bin", inst.fakepiPath,
+		"--claude-bin", "/nonexistent/claude-test-guard",
 		// polyforge#113: the mapping config is the only workspace source
 		// (and the config isolation file — never an operator's).
 		"--config", mappingConfigPath(t, d.workspace, []string{v1Project}),

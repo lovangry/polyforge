@@ -78,6 +78,15 @@ var outMu sync.Mutex
 var drv *driveEnv
 
 func main() {
+	// polyforge#159: the same binary is the fake `claude` (claude.go)
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Println(fakeClaudeVersion + " (Claude Code)")
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "-p" {
+		runClaude()
+		return
+	}
 	watchTestBinary()
 	drv = newDriveEnv()
 	if drv == nil {
@@ -281,6 +290,7 @@ func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 // injections (audit subtraction pass B) are re-sourced from here.
 type spawnJournalEntry struct {
 	PID           int    `json:"pid"`
+	Step          string `json:"step_id"`
 	WorkItem      string `json:"work_item"`
 	SessionHandle string `json:"session_handle"`
 	SpawnN        int    `json:"spawn_n"`

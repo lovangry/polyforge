@@ -80,6 +80,14 @@ type Config struct {
 	GitRemoteBase string
 	WorkflowsDir  string // daemon checkout's workflows/
 	PiBin         string
+	// ClaudeBin is the Claude Code binary for steps whose harness is
+	// claude (polyforge#159; --claude-bin / cli.toml claude_bin; default
+	// "claude").
+	ClaudeBin string
+	// AnthropicAuthToken is cli.toml's anthropic_auth_token: handed to a
+	// claude step as ANTHROPIC_AUTH_TOKEN (env only) when the daemon's
+	// own environment does not set it. Never reported, never logged.
+	AnthropicAuthToken string
 	// HarnessSessionsRoot overrides the harness's default session store
 	// for the live-transcript locator (F3); "" = the dedicated
 	// step-agent-sessions dir under DataDir (addendum 2).
@@ -95,8 +103,7 @@ type Config struct {
 	// RecallTopK is the F6-A claim-time memory snapshot's hit count
 	// (0 = the runtime default, 10; bounded at 50 there).
 	RecallTopK int
-	Auto       *bool  // initial auto switch; nil = not specified (persisted state wins; default off)
-	Harness    string // harness adapter name (default "pi")
+	Auto       *bool // initial auto switch; nil = not specified (persisted state wins; default off)
 
 	// HeartbeatEvery is the machines liveness cadence (M3): how often the
 	// daemon POSTs /api/v1/machines/heartbeat. <= 0 disables the
@@ -170,9 +177,6 @@ func (c *Config) fill() {
 	if c.MaxConcurrent <= 0 {
 		c.MaxConcurrent = 4
 	}
-	if c.Harness == "" {
-		c.Harness = "pi"
-	}
 	if c.ObservePoll == 0 {
 		c.ObservePoll = 500 * time.Millisecond
 	}
@@ -192,12 +196,14 @@ func (c *Config) fill() {
 
 // Daemon is the assembled local runtime.
 type Daemon struct {
-	chats *chatStore
-	subs  *subStore // pf watch: chat subscriptions, cursors, watcher liveness
-	cfg   Config
-	hub   Hub
-	modes *ModeCtl
-	q     *jobQueue
+	// claudeVer caches the claude --version probe of GET /status.
+	claudeVer versionCache
+	chats     *chatStore
+	subs      *subStore // pf watch: chat subscriptions, cursors, watcher liveness
+	cfg       Config
+	hub       Hub
+	modes     *ModeCtl
+	q         *jobQueue
 
 	rt  *runtime.Runtime
 	obs *observe.Observe
@@ -315,8 +321,9 @@ func New(cfg Config) (*Daemon, error) {
 		DataDir:                  cfg.DataDir,
 		GitRemoteBase:            cfg.GitRemoteBase,
 		WorkflowsDir:             cfg.WorkflowsDir,
-		Harness:                  cfg.Harness,
 		PiBin:                    cfg.PiBin,
+		ClaudeBin:                cfg.ClaudeBin,
+		AnthropicAuthToken:       cfg.AnthropicAuthToken,
 		HarnessSessionsRoot:      cfg.HarnessSessionsRoot,
 		OperatorAgentDir:         cfg.OperatorAgentDir,
 		OperatorAgentDirExplicit: cfg.OperatorAgentDirExplicit,
@@ -360,14 +367,14 @@ func New(cfg Config) (*Daemon, error) {
 				SpawnN:           in.SpawnN,
 				Spawner:          in.Spawner,
 				StepCandidates:   in.StepCandidates,
+				StepHarness:      in.StepHarness,
 				InterruptedCause: in.InterruptedCause,
 				// driver events land in the durable per-WI event log
 				// (monotonic ids); the supervision link is the WI's
 				// shared driver <-> supervisor channel
-				Log:     d.driverLog(),
-				Link:    d.sup.Link(in.WI),
-				Limits:  cfg.Supervision.limits(),
-				Harness: cfg.Harness,
+				Log:    d.driverLog(),
+				Link:   d.sup.Link(in.WI),
+				Limits: cfg.Supervision.limits(),
 			})
 		}
 	}
@@ -410,8 +417,8 @@ func New(cfg Config) (*Daemon, error) {
 		// commit-boundary sync calls; the F2 slug
 		// resolver lets CLI-side route calls by the operator's spelling
 		// (a "<project>#<seq>") find the canonically-keyed monitor.
-		LocateLive: func(capsuleDir string, spawnAt time.Time) string {
-			return runtime.LocateLiveTranscript(cfg.HarnessSessionsRoot, capsuleDir, spawnAt)
+		LocateLive: func(capsuleDir string, spawnAt time.Time, harness, session string) string {
+			return runtime.LocateTranscript(cfg.HarnessSessionsRoot, capsuleDir, spawnAt, harness, session)
 		},
 		Resolve: d.resolveWI,
 		// M4 wiring: the periodic session revalidation rides the monitor
@@ -957,7 +964,7 @@ func (d *Daemon) fetchAutoWave() {
 	var items []api.WorkItem
 	denied := false
 	for _, project := range d.cfg.Mapping.Projects() {
-		if _, lerr := d.rt.LoadWorkspace(project); lerr != nil {
+		if _, lerr := d.rt.LoadWorkspace(project, "", nil); lerr != nil {
 			if d.yamlRefused == nil {
 				d.yamlRefused = map[string]string{}
 			}

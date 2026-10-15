@@ -36,6 +36,7 @@ import (
 	"github.com/santhosh-tekuri/jsonschema/v5"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/common/harness"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
@@ -74,6 +75,14 @@ type Config struct {
 	// governs and means no switchable chain. A step absent from the map
 	// (or a nil map) keeps the bundle's own resolution.
 	StepCandidates map[string][]string
+	// StepHarness is the polyforge#159 effective per-step harness map
+	// (claim-time compose, snapshotted daemon-side like StepCandidates).
+	// A step it keys runs on that harness; a step absent from it (or a
+	// nil map) keeps the bundle's own choice, else pi. The candidate
+	// list a step walks is its effective list FILTERED to the ids its
+	// harness serves (harness.Serves): an incompatible candidate is
+	// skipped, never dispatched.
+	StepHarness map[string]string
 	// Interrupted, when set, archives ONE infra_failure attempt on the
 	// current in_progress step before the loop re-dispatches (the
 	// recovery integration's write, performed by the single
@@ -98,8 +107,6 @@ type Config struct {
 	// overrides in workflow.md apply on top. Zero fields take the
 	// documented defaults.
 	Limits supervise.Defaults
-	// Harness names the step harness for step_started ("" = pi).
-	Harness string
 	// MaxStepFailures is the per-step failure counter bound (default 3).
 	MaxStepFailures int
 	// Now overrides the clock (tests).
@@ -571,6 +578,7 @@ func (d *Driver) prepareDispatch(stepID string) (*StepSpawn, int64, error) {
 	if spec := d.workflow.step(stepID); spec != nil {
 		sp.Model = d.modelForLocked(stepID)
 	}
+	sp.Harness = d.harnessFor(stepID)
 	sp.SpawnN = d.spawnN + 1
 	return sp, sp.SpawnN, nil
 }
@@ -727,6 +735,9 @@ type StepSpawn struct {
 	// Model is the resolved candidate ("" = the harness adapter's
 	// default; no candidate list is in effect).
 	Model string
+	// Harness is the step's effective harness (polyforge#159; never ""
+	// from the driver — pi when nothing chose otherwise).
+	Harness string
 	// Resume marks a re-dispatch of an in_progress step (answer
 	// continuation, crash recovery, recovery-lane re-derivation).
 	Resume bool
@@ -1027,8 +1038,15 @@ func capsuleIDFor(wi string) string { return "cap_" + wi }
 
 // effectiveCandidates answers the step's effective candidate list: the
 // polyforge#79 post-precedence map when the claim/recovery supplied
-// one, the bundle's own resolution otherwise.
+// one, the bundle's own resolution otherwise — filtered to the ids the
+// step's harness serves (polyforge#159). The pointer recomputation, the
+// switch and the exhaustion paths all walk this filtered list, so a
+// candidate the harness cannot run is skipped by construction.
 func (d *Driver) effectiveCandidates(stepID string) []string {
+	return harness.Filter(d.harnessFor(stepID), d.composedCandidates(stepID))
+}
+
+func (d *Driver) composedCandidates(stepID string) []string {
 	if d.cfg.StepCandidates != nil {
 		if list, ok := d.cfg.StepCandidates[stepID]; ok {
 			return list
@@ -1038,6 +1056,19 @@ func (d *Driver) effectiveCandidates(stepID string) []string {
 		return spec.ModelCandidates
 	}
 	return nil
+}
+
+// harnessFor answers the step's effective harness (never ""): the
+// claim-time compose when it keys the step, the bundle's own choice
+// otherwise, pi at the bottom.
+func (d *Driver) harnessFor(stepID string) string {
+	if h, ok := d.cfg.StepHarness[stepID]; ok && h != "" {
+		return h
+	}
+	if spec := d.workflow.step(stepID); spec != nil && spec.Harness != "" {
+		return spec.Harness
+	}
+	return harness.Pi
 }
 
 // modelForLocked resolves the step's effective model for the NEXT

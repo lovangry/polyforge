@@ -1,5 +1,6 @@
 // Package workflow is the minimal workflow-bundle frontmatter read surface
-// shared by pf: the model-candidate fields that drive model selection.
+// shared by pf: the model-candidate and harness fields that drive model
+// and harness selection.
 //
 // Design authority: docs/design/polyforge-vnext/01-workflow-skills.md.
 package workflow
@@ -20,17 +21,21 @@ import (
 // is the one structural check of a bundle. Unknown keys are ignored (a
 // retired `kind:` in an old bundle snapshot included).
 
-// Defaults carries the workflow-level fallback model candidates.
+// Defaults carries the workflow-level fallback model candidates and
+// harness (polyforge#159; "" = not declared).
 type Defaults struct {
 	ModelCandidates []string `yaml:"model_candidates"`
+	Harness         string   `yaml:"harness"`
 }
 
 // FrontmatterStep is one frontmatter step entry, reduced to the fields
 // the read surface needs: the id (the workspace yaml's per-step model
-// lists are keyed by it) and the per-step candidate override.
+// lists are keyed by it), the per-step candidate override and the
+// per-step harness (polyforge#159; "" = not declared).
 type FrontmatterStep struct {
 	ID              string   `yaml:"id"`
 	ModelCandidates []string `yaml:"model_candidates"`
+	Harness         string   `yaml:"harness"`
 }
 
 // Frontmatter is the parsed workflow.md frontmatter (structure reduced to

@@ -90,6 +90,10 @@ type Config struct {
 	// at recovery); nil = no yaml layer, the bundle's own resolution.
 	// Forwarded to the driver verbatim.
 	StepCandidates map[string][]string
+	// StepHarness is the polyforge#159 effective per-step harness map
+	// (same lifecycle as StepCandidates); nil = the bundle's own choice,
+	// else pi. Forwarded to the driver verbatim.
+	StepHarness map[string]string
 	// InterruptedCause is the recovery lane's cause string when THIS
 	// start is a re-derivation ("" on a fresh claim). Operator-shaped
 	// causes archive nothing — a deliberate stop is not a model verdict.
@@ -102,8 +106,6 @@ type Config struct {
 	Link *supervise.Link
 	// Limits are the global supervision defaults (X, Y, T).
 	Limits supervise.Defaults
-	// Harness names the step harness ("" = pi).
-	Harness string
 }
 
 // causeOperatorShutdown is the recovery lane's cause for a session
@@ -140,7 +142,6 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 		WI:      wiInfo,
 		Spawner: cfg.Spawner,
 		Link:    cfg.Link,
-		Harness: cfg.Harness,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("bridge: adapter: %w", err)
@@ -173,8 +174,8 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 		Log:            cfg.Log,
 		Link:           cfg.Link,
 		Limits:         cfg.Limits,
-		Harness:        cfg.Harness,
 		StepCandidates: cfg.StepCandidates,
+		StepHarness:    cfg.StepHarness,
 		Interrupted:    interruptedFromCause(cfg.InterruptedCause),
 	})
 	if err != nil {

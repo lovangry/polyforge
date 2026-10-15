@@ -185,6 +185,11 @@ type jobRecord struct {
 	// recovery re-derivation dispatches under; kept here (daemon-private)
 	// rather than read back from the agent-writable capsule.json.
 	StepCandidates map[string][]string `json:"step_candidates,omitempty"`
+	// StepHarness is the claim-time per-step harness snapshot
+	// (polyforge#159), daemon-private like StepCandidates. A record
+	// without it (written before #159) leaves every step to the bundle's
+	// own choice, else pi.
+	StepHarness map[string]string `json:"step_harness,omitempty"`
 }
 
 // Origin kinds.
@@ -229,6 +234,7 @@ func (j *job) record() *jobRecord {
 		EndNote:            j.endNote,
 		EndHead:            j.endHead,
 		StepCandidates:     j.stepCandidates,
+		StepHarness:        j.stepHarness,
 	}
 }
 
@@ -268,6 +274,7 @@ func jobFromRecord(rec *jobRecord) *job {
 		endNote:              rec.EndNote,
 		endHead:              rec.EndHead,
 		stepCandidates:       rec.StepCandidates,
+		stepHarness:          rec.StepHarness,
 	}
 }
 

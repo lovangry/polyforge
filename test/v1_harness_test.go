@@ -703,6 +703,8 @@ func (d *v1Daemon) start() {
 		"--data-dir", d.dataDir,
 		"--workflows-dir", d.inst.workflowsPath(),
 		"--pi-bin", d.inst.fakepiPath,
+		// never the host's real claude (a test opts in with its own --claude-bin)
+		"--claude-bin", "/nonexistent/claude-test-guard",
 		// polyforge#113: the [workspace] mapping config is the ONLY
 		// workspace source (and it doubles as the config isolation file —
 		// the daemon never reads an operator config file).

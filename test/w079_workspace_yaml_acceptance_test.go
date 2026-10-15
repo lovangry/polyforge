@@ -509,7 +509,7 @@ func TestW079InvalidYamlRefusesWithoutClaim(t *testing.T) {
 		{"unknown step id", "steps:\n  e2e:\n    w079bogusstep: { models: [a] }\n", []string{"steps.e2e.w079bogusstep"}},
 		{"retired kind key", "steps:\n  e2e:\n    gate: { models: [a] }\n", []string{"steps.e2e.gate"}},
 		{"legacy top-level models", "models:\n  e2e:\n    default: [a]\n", []string{"`models:` was replaced by `steps:`"}},
-		{"harness not accepted yet", "steps:\n  e2e:\n    fix: { models: [a], harness: pi }\n", []string{"harness"}},
+		{"unknown harness", "steps:\n  e2e:\n    fix: { models: [a], harness: codex }\n", []string{"steps.e2e.fix.harness: unknown harness"}},
 		{"empty project entry", "steps:\n  e2e:\n", nil},
 		{"null list", "steps:\n  e2e:\n    fix:\n", nil},
 		{"entry a scalar", "steps:\n  e2e:\n    default: abc\n", []string{"steps.e2e.default: must be `{ models: [...] }`"}},

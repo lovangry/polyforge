@@ -6,20 +6,22 @@
 //
 // The grammar is closed:
 //
-//	steps:                           # optional section
-//	  <project-name>:                # one entry per project of this workspace
-//	    default: { models: [...] }   # optional: every step of this project
-//	    <step-id>: { models: [...] } # optional: the steps with this id, in
-//	                                 # every bundle (fix, code, review, ...)
+//	steps:                               # optional section
+//	  <project-name>:                    # one entry per project of this workspace
+//	    default: { models: [...], harness: pi|claude }   # optional: every step of this project
+//	    <step-id>: { models: [...], harness: pi|claude } # optional: the steps with this id,
+//	                                                     # in every bundle (fix, code, review, ...)
 //
-// A step entry's only key is `models` (a list of non-empty model ids).
-// Any key not shown here — at any level — is a load error, as are
-// duplicate keys, type mismatches, an empty project entry, empty model-id
-// strings and a per-step key that is no step id of the installed
-// workflows (a typo would otherwise silently govern nothing). The retired
-// top-level `models:` section (the pre-#169 shape) refuses with a
-// migration message; `projects:` / `workflow_defaults:` are unknown keys
-// like any other.
+// A step entry's keys are `models` (a list of non-empty model ids) and
+// `harness` (polyforge#159: the step harness, a plain string of the
+// closed set pi | claude); each is optional, but an entry declares at
+// least one. Any key not shown here — at any level — is a load error, as
+// are duplicate keys, type mismatches, an empty project entry, empty
+// model-id strings, an unknown harness name and a per-step key that is
+// no step id of the installed workflows (a typo would otherwise silently
+// govern nothing). The retired top-level `models:` section (the pre-#169
+// shape) refuses with a migration message; `projects:` /
+// `workflow_defaults:` are unknown keys like any other.
 //
 // Presence semantics: an ABSENT file and an EMPTY or comments-only file
 // both answer (nil, nil) — absent-equivalent, never an error. A file
@@ -28,10 +30,18 @@
 // List presence: a declared-but-empty list is a PRESENT level that
 // wholly governs (yielding no switchable chain rather than a
 // fall-through). Absent keys fall through per the precedence chain
-// (compose.go), five levels, highest first: manual `pf submit --models`
-// (per work item, every step) > steps.<project>.<step-id>.models > bundle
-// step model_candidates > steps.<project>.default.models > bundle
-// defaults.model_candidates.
+// (compose.go). The model chain has five levels, highest first: manual
+// `pf submit --models` (per work item, every step) >
+// steps.<project>.<step-id>.models > bundle step model_candidates >
+// steps.<project>.default.models > bundle defaults.model_candidates.
+// The harness chain is resolved independently down the same levels
+// (there is no per-work-item harness): steps.<project>.<step-id>.harness
+// > bundle step harness > steps.<project>.default.harness > bundle
+// defaults.harness > the built-in pi.
+//
+// Model ↔ harness compatibility (CheckHarness, compose.go) is judged on
+// the composed result, not here: a step whose harness serves none of its
+// non-empty candidate list is refused before any claim (DAEMON-414).
 package workspace
 
 import (
@@ -44,6 +54,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/silgrid/polyforge/internal/common/harness"
 	"github.com/silgrid/polyforge/internal/common/workflow"
 	"gopkg.in/yaml.v3"
 )
@@ -59,8 +70,13 @@ const DefaultKey = "default"
 // Config is the parsed `.polyforge.yaml`.
 type Config struct {
 	// Models is project name → (DefaultKey or a step id → candidate
-	// list): steps.<project>.<key>.models, flattened for the compose.
+	// list): steps.<project>.<key>.models, flattened for the compose. A
+	// key whose entry declares no `models` is absent here.
 	Models map[string]map[string][]string
+	// Harness is project name → (DefaultKey or a step id → harness
+	// name): steps.<project>.<key>.harness (polyforge#159). A key whose
+	// entry declares no `harness` is absent here.
+	Harness map[string]map[string]string
 }
 
 // LegacyModelsReason is the refusal of a file still using the retired
@@ -168,7 +184,10 @@ func parse(raw []byte, projects []string) (*Config, string) {
 	if reason != "" {
 		return nil, reason
 	}
-	cfg := &Config{Models: make(map[string]map[string][]string, len(byProject))}
+	cfg := &Config{
+		Models:  make(map[string]map[string][]string, len(byProject)),
+		Harness: make(map[string]map[string]string, len(byProject)),
+	}
 	var unmapped []string
 	for _, pkv := range byProject {
 		project, pn := pkv.key, pkv.val
@@ -187,12 +206,18 @@ func parse(raw []byte, projects []string) (*Config, string) {
 			return nil, reason
 		}
 		cfg.Models[project] = make(map[string][]string, len(entries))
+		cfg.Harness[project] = make(map[string]string, len(entries))
 		for _, ekv := range entries {
-			list, reason := stepModels(ekv.val, where+"."+ekv.key)
+			list, hasModels, h, reason := stepEntry(ekv.val, where+"."+ekv.key)
 			if reason != "" {
 				return nil, reason
 			}
-			cfg.Models[project][ekv.key] = list
+			if hasModels {
+				cfg.Models[project][ekv.key] = list
+			}
+			if h != "" {
+				cfg.Harness[project][ekv.key] = h
+			}
 		}
 	}
 	if len(unmapped) > 0 {
@@ -201,48 +226,70 @@ func parse(raw []byte, projects []string) (*Config, string) {
 	return cfg, ""
 }
 
-// stepModels reads one `{ models: [...] }` step entry at path where:
-// models is the only key; its items are non-empty, unique model-id
-// strings (trimmed — the same rules as a `pf submit --models` list).
-func stepModels(en *yaml.Node, where string) ([]string, string) {
+// stepEntry reads one `{ models: [...], harness: ... }` step entry at
+// path where: `models` and `harness` are the only keys and at least one
+// is declared. The models items are non-empty, unique model-id strings
+// (trimmed — the same rules as a `pf submit --models` list); hasModels
+// tells a declared list (possibly empty) from an absent key. harness is
+// a plain string of the closed set ("" = not declared).
+func stepEntry(en *yaml.Node, where string) (list []string, hasModels bool, h string, reason string) {
 	if en.Kind != yaml.MappingNode {
 		hint := ""
 		if en.Kind == yaml.SequenceNode {
 			hint = " (the pre-#169 list form?)"
 		}
-		return nil, where + ": must be `{ models: [...] }`" + hint
+		return nil, false, "", where + ": must be `{ models: [...] }` and/or `{ harness: pi|claude }`" + hint
 	}
 	keys, reason := mapping(en, where)
 	if reason != "" {
-		return nil, reason
+		return nil, false, "", reason
 	}
-	var mn *yaml.Node
+	if len(keys) == 0 {
+		return nil, false, "", where + ": entry is empty — declare `models`, `harness` or both, or remove it"
+	}
+	var mn, hn *yaml.Node
 	for _, kv := range keys {
-		if kv.key != "models" {
-			return nil, fmt.Sprintf("%s.%s: not allowed (a step entry's only key is `models`)", where, kv.key)
+		switch kv.key {
+		case "models":
+			mn = kv.val
+		case "harness":
+			hn = kv.val
+		default:
+			return nil, false, "", fmt.Sprintf("%s.%s: not allowed (a step entry's keys are `models` and `harness`)", where, kv.key)
 		}
-		mn = kv.val
 	}
-	if mn == nil || mn.Kind != yaml.SequenceNode {
-		return nil, where + ".models: must be a list of model ids"
+	if hn != nil {
+		if hn.Kind != yaml.ScalarNode || hn.Tag != "!!str" {
+			return nil, false, "", where + ".harness: must be a plain harness name (pi or claude)"
+		}
+		h = strings.TrimSpace(hn.Value)
+		if !harness.Valid(h) {
+			return nil, false, "", fmt.Sprintf("%s.harness: unknown harness %q (want %s)", where, hn.Value, strings.Join(harness.Names, " or "))
+		}
 	}
-	list := make([]string, 0, len(mn.Content))
+	if mn == nil {
+		return nil, false, h, ""
+	}
+	if mn.Kind != yaml.SequenceNode {
+		return nil, false, "", where + ".models: must be a list of model ids"
+	}
+	list = make([]string, 0, len(mn.Content))
 	seen := map[string]bool{}
 	for i, item := range mn.Content {
 		if item.Kind != yaml.ScalarNode || item.Tag != "!!str" {
-			return nil, fmt.Sprintf("%s.models[%d]: must be a plain model-id string", where, i)
+			return nil, false, "", fmt.Sprintf("%s.models[%d]: must be a plain model-id string", where, i)
 		}
 		id := strings.TrimSpace(item.Value)
 		if id == "" {
-			return nil, fmt.Sprintf("%s.models[%d]: model ids must be non-empty strings", where, i)
+			return nil, false, "", fmt.Sprintf("%s.models[%d]: model ids must be non-empty strings", where, i)
 		}
 		if seen[id] {
-			return nil, fmt.Sprintf("%s.models[%d]: repeats %q", where, i, id)
+			return nil, false, "", fmt.Sprintf("%s.models[%d]: repeats %q", where, i, id)
 		}
 		seen[id] = true
 		list = append(list, id)
 	}
-	return list, ""
+	return list, true, h, ""
 }
 
 // keyVal is one mapping entry, kept in file order (refusals are then
@@ -316,12 +363,23 @@ func contains(list []string, s string) bool {
 // unknown key named, sorted — or, when the workflows dir holds no
 // readable bundle at all, that fact).
 func checkStepIDs(cfg *Config, steps map[string]bool, workflowsDir string) string {
+	seen := map[string]bool{}
 	var unknown []string
+	note := func(project, key string) {
+		name := fmt.Sprintf("steps.%s.%s", project, key)
+		if key != DefaultKey && !steps[key] && !seen[name] {
+			seen[name] = true
+			unknown = append(unknown, name)
+		}
+	}
 	for project, keys := range cfg.Models {
 		for key := range keys {
-			if key != DefaultKey && !steps[key] {
-				unknown = append(unknown, fmt.Sprintf("steps.%s.%s", project, key))
-			}
+			note(project, key)
+		}
+	}
+	for project, keys := range cfg.Harness {
+		for key := range keys {
+			note(project, key)
 		}
 	}
 	if len(unknown) == 0 {

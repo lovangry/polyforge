@@ -322,6 +322,9 @@ func (d *w113Daemon) boot(bound time.Duration) (served bool, output string, code
 		"--data-dir", d.dataDir,
 		"--workflows-dir", strippedWorkflowsDir(d.t, filepath.Join(d.root, "workflows")),
 		"--pi-bin", d.fakepi,
+		// never the host's real claude; a test opts in through extraArgs
+		// (a later --claude-bin wins)
+		"--claude-bin", "/nonexistent/claude-test-guard",
 	}
 	if d.config != "" {
 		args = append(args, "--config", d.config)

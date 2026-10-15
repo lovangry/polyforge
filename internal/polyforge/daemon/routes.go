@@ -89,10 +89,15 @@ type statusResponse struct {
 	Workspaces []string `json:"workspaces"`
 	// WorkflowsDir is the workflows dir bundles run from (absolute; pf
 	// doctor checks the workspace yaml's step-id keys against it).
-	WorkflowsDir string      `json:"workflows_dir,omitempty"`
-	ShuttingDown bool        `json:"shutting_down"`
-	Jobs         []statusJob `json:"jobs"`
-	Queue        queueStats  `json:"queue"`
+	WorkflowsDir string `json:"workflows_dir,omitempty"`
+	// Harnesses is the daemon's view of the step harness binaries
+	// (polyforge#159): found, version, credential variables set/unset —
+	// never a value. Only on request (GET /status?harnesses=1: it may run
+	// `claude --version`); pf doctor judges the claude harness by it.
+	Harnesses    map[string]harnessStatus `json:"harnesses,omitempty"`
+	ShuttingDown bool                     `json:"shutting_down"`
+	Jobs         []statusJob              `json:"jobs"`
+	Queue        queueStats               `json:"queue"`
 }
 
 type opsConfigResponse struct {
@@ -336,7 +341,14 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		// backstop. A failed probe refuses nothing here (the submit is
 		// durable-queued; the dispatcher retries the probe at Start).
 		if probe, err := d.hub.GetWorkItem(canonical); err == nil && probe != nil && probe.ProjectName != "" {
-			if _, lerr := d.rt.LoadWorkspace(probe.ProjectName); lerr != nil {
+			bundle := ""
+			if probe.BundleName != nil {
+				bundle = *probe.BundleName
+			}
+			// polyforge#159: a --models list is checked against the
+			// harness of every step of the work item's bundle here too;
+			// a WI without a bundle yet is judged at claim time instead
+			if _, lerr := d.rt.LoadWorkspace(probe.ProjectName, bundle, body.Models); lerr != nil {
 				writeErrOf(w, lerr)
 				return
 			}
@@ -678,7 +690,12 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 	// rt.List() reports). F15c rides the same loop: the per-job progress
 	// staleness for the LAST-PROGRESS column.
 	jobs, running := d.statusJobs()
+	var harnesses map[string]harnessStatus
+	if r.URL.Query().Get("harnesses") == "1" {
+		harnesses = d.harnessStatuses()
+	}
 	writeJSON(w, http.StatusOK, statusResponse{
+		Harnesses:    harnesses,
 		MachineID:    d.cfg.MachineID,
 		DisplayName:  d.cfg.DisplayName,
 		Auto:         d.modes.Auto(),

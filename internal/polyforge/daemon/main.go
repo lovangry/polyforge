@@ -45,6 +45,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	dataDir := fs.String("data-dir", "", "daemon data dir (env POLYFORGE_DATA_DIR)")
 	workflowsDir := fs.String("workflows-dir", "", "workflows/ checkout dir (default ./workflows)")
 	piBin := fs.String("pi-bin", "", "harness binary (default pi)")
+	claudeBin := fs.String("claude-bin", "", "Claude Code binary for steps whose harness is claude (config claude_bin; default claude)")
 	sessionsRoot := fs.String("harness-sessions-root", "", "harness session store root for the live-transcript sync (env POLYFORGE_HARNESS_SESSIONS_ROOT; default <data-dir>/step-agent-sessions, the step processes' own session store)")
 	operatorAgentDir := fs.String("operator-agent-dir", "", "SOURCE of the dedicated step agent directory's minimal set — model service credentials, model configuration and subagent definitions are copied from here into <data-dir>/step-agent (env POLYFORGE_OPERATOR_AGENT_DIR; default ~/.pi/agent). A configured source without a readable auth.json refuses the start")
 	gitRemoteBase := fs.String("git-remote-base", "", "aihub bare-repo base URL (default <server>/git)")
@@ -82,6 +83,9 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if *apiKey == "" {
 		*apiKey = shared.APIKey
+	}
+	if *claudeBin == "" {
+		*claudeBin = shared.ClaudeBin
 	}
 
 	// The mapping is the ONLY workspace source (polyforge#113): a config
@@ -159,6 +163,8 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		GitRemoteBase:       *gitRemoteBase,
 		WorkflowsDir:        *workflowsDir,
 		PiBin:               *piBin,
+		ClaudeBin:           *claudeBin,
+		AnthropicAuthToken:  shared.AnthropicAuthToken,
 		HarnessSessionsRoot: *sessionsRoot,
 		// An operator-named source is EXPLICIT: a missing auth.json
 		// under it refuses the start rather than running step agents

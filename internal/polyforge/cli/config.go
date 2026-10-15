@@ -48,6 +48,12 @@ type Config struct {
 	UserID       string        // caller identity for answer.answered_by
 	ChatID       string        // PF_CHAT_ID: the harness chat this process runs in (label, not a credential)
 	Mapping      *mapping.Plan // the workspace→projects plan of record (non-nil; possibly empty)
+	// ClaudeBin / AnthropicAuthToken are daemon-side Claude Code harness
+	// settings (polyforge#159): the claude binary of claude steps, and
+	// the token handed to them as ANTHROPIC_AUTH_TOKEN when the daemon's
+	// environment does not set it. The token is never printed.
+	ClaudeBin          string
+	AnthropicAuthToken string
 }
 
 // DefaultConfigPath returns the single documented config location:
@@ -134,6 +140,10 @@ func applyConfigFile(cfg *Config, kv map[string]string) {
 			cfg.DaemonSocket = v
 		case "user_id":
 			cfg.UserID = v
+		case "claude_bin":
+			cfg.ClaudeBin = v
+		case "anthropic_auth_token":
+			cfg.AnthropicAuthToken = v
 		}
 	}
 }
@@ -168,7 +178,8 @@ type workspaceSection struct {
 }
 
 // The known flat keys: root-level wherever they appear in the file.
-var coreFlatKeys = map[string]bool{"server": true, "api_key": true, "daemon_socket": true, "user_id": true}
+var coreFlatKeys = map[string]bool{"server": true, "api_key": true, "daemon_socket": true, "user_id": true,
+	"claude_bin": true, "anthropic_auth_token": true}
 
 // unknownKeyError is the refusal of a top-level key outside the known set.
 type unknownKeyError struct{ key, file string }
@@ -180,7 +191,7 @@ func (e *unknownKeyError) Error() string {
 // parseConfigTOML parses the TOML subset documented for cli.toml:
 //
 //   - `key = "value"` flat string keys: the known set (server, api_key,
-//     daemon_socket, user_id) is stored; the known keys are root-level
+//     daemon_socket, user_id, claude_bin, anthropic_auth_token) is stored; the known keys are root-level
 //     wherever they appear; any other top-level key is an error;
 //   - one section family: `[workspace."<path>"]` (quoted key mandatory)
 //     — inside, only `projects = ["a", "b"]`.

@@ -106,9 +106,15 @@ func TestLoadRefusals(t *testing.T) {
 		{"duplicate steps key", "steps:\n  e2e:\n    code: { models: [a] }\nsteps:\n  x:\n    code: { models: [b] }\n", []string{"steps"}},
 		{"legacy top-level models", "models:\n  e2e:\n    default: [a]\n", []string{"`models:` was replaced by `steps:`", "steps.<project>.<key>.models", "docs/upgrade.md"}},
 		{"legacy models beside steps", "steps:\n  e2e:\n    default: { models: [a] }\nmodels:\n  e2e:\n    code: [b]\n", []string{"`models:` was replaced by `steps:`"}},
-		{"unknown sub-key", "steps:\n  e2e:\n    fix: { models: [a], modles: [b] }\n", []string{"steps.e2e.fix.modles", "only key is `models`"}},
-		{"harness not accepted yet", "steps:\n  e2e:\n    fix: { models: [a], harness: pi }\n", []string{"steps.e2e.fix.harness", "only key is `models`"}},
-		{"entry without models", "steps:\n  e2e:\n    fix: {}\n", []string{"steps.e2e.fix.models"}},
+		{"unknown sub-key", "steps:\n  e2e:\n    fix: { models: [a], modles: [b] }\n", []string{"steps.e2e.fix.modles", "keys are `models` and `harness`"}},
+		{"unknown harness", "steps:\n  e2e:\n    fix: { models: [a], harness: codex }\n", []string{"steps.e2e.fix.harness: unknown harness \"codex\"", "pi or claude"}},
+		{"harness spelled claude-code", "steps:\n  e2e:\n    fix: { harness: claude-code }\n", []string{"steps.e2e.fix.harness: unknown harness"}},
+		{"empty harness", "steps:\n  e2e:\n    fix: { harness: \"\" }\n", []string{"steps.e2e.fix.harness: unknown harness"}},
+		{"harness a list", "steps:\n  e2e:\n    fix: { harness: [pi] }\n", []string{"steps.e2e.fix.harness: must be a plain harness name"}},
+		{"harness a number", "steps:\n  e2e:\n    fix: { harness: 42 }\n", []string{"steps.e2e.fix.harness: must be a plain harness name"}},
+		{"harness null", "steps:\n  e2e:\n    fix: { harness: ~ }\n", []string{"steps.e2e.fix.harness: must be a plain harness name"}},
+		{"harness under an unknown step id", "steps:\n  e2e:\n    build: { harness: claude }\n", []string{"steps.e2e.build"}},
+		{"entry without models", "steps:\n  e2e:\n    fix: {}\n", []string{"steps.e2e.fix: entry is empty"}},
 		{"merge key at top level", "base: &b {}\n<<: *b\nsteps:\n  e2e:\n    fix: { models: [a] }\n", []string{"top level: YAML merge keys (`<<`) are not supported", "{ models: *x }"}},
 		{"legacy models wins over a top-level merge key", "<<: {}\nmodels:\n  e2e:\n    code: [a]\n", []string{"`models:` was replaced by `steps:`"}},
 		{"merge key at project level", "steps:\n  base: &p\n    fix: { models: [a] }\n  e2e:\n    <<: *p\n", []string{"steps.e2e: YAML merge keys (`<<`) are not supported"}},
@@ -120,7 +126,7 @@ func TestLoadRefusals(t *testing.T) {
 		{"null step key", "steps:\n  e2e:\n    null: { models: [a] }\n", []string{"steps.e2e: a null key"}},
 		{"alias item in a list", "steps:\n  e2e:\n    fix: { models: [&m a, *m] }\n", []string{"steps.e2e.fix.models[1]: must be a plain model-id string"}},
 		{"tagged item in a list", "steps:\n  e2e:\n    fix: { models: [!!binary aGk=] }\n", []string{"steps.e2e.fix.models[0]"}},
-		{"bare list instead of entry", "steps:\n  e2e:\n    fix: [a]\n", []string{"steps.e2e.fix: must be `{ models: [...] }` (the pre-#169 list form?)"}},
+		{"bare list instead of entry", "steps:\n  e2e:\n    fix: [a]\n", []string{"steps.e2e.fix: must be `{ models: [...] }` and/or `{ harness: pi|claude }` (the pre-#169 list form?)"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -229,5 +235,42 @@ func TestLoadZeroProjectWorkspaceRefusesProjectKeys(t *testing.T) {
 	_, err := Load(writeYaml(t, "steps:\n  e2e:\n    fix: { models: [a] }\n"), stepsDir(t), []string{})
 	if err == nil || !strings.Contains(err.Error(), "project(s) e2e are not mapped") {
 		t.Fatalf("zero-project workspace: %v", err)
+	}
+}
+
+// TestLoadHarnessKey pins the polyforge#159 `harness` sub-key: it sits
+// next to `models` (or alone), is decoded per project and key, and an
+// entry declaring only one of the two leaves the other absent.
+func TestLoadHarnessKey(t *testing.T) {
+	cfg, err := Load(writeYaml(t, "steps:\n  e2e:\n    default: { models: [a/b] }\n    review: { models: [claude-opus-5-5], harness: claude }\n    fix: { harness: pi }\n"), stepsDir(t), nil)
+	if err != nil || cfg == nil {
+		t.Fatalf("valid yaml refused: %v", err)
+	}
+	if got := cfg.Harness["e2e"]["review"]; got != "claude" {
+		t.Fatalf("review harness %q", got)
+	}
+	if got := cfg.Harness["e2e"]["fix"]; got != "pi" {
+		t.Fatalf("fix harness %q", got)
+	}
+	if _, ok := cfg.Harness["e2e"]["default"]; ok {
+		t.Fatal("default declares no harness: must be absent")
+	}
+	if _, ok := cfg.Models["e2e"]["fix"]; ok {
+		t.Fatal("fix declares no models: must be absent (falls through)")
+	}
+	if got := cfg.Models["e2e"]["review"]; len(got) != 1 || got[0] != "claude-opus-5-5" {
+		t.Fatalf("review models %v", got)
+	}
+}
+
+// TestLoadModelsOnlyFileIsAllPi: a pre-#159 file (models only) loads
+// unchanged and declares no harness anywhere.
+func TestLoadModelsOnlyFileIsAllPi(t *testing.T) {
+	cfg, err := Load(writeYaml(t, "steps:\n  e2e:\n    default: { models: [a] }\n"), stepsDir(t), nil)
+	if err != nil || cfg == nil {
+		t.Fatalf("refused: %v", err)
+	}
+	if len(cfg.Harness["e2e"]) != 0 {
+		t.Fatalf("no harness declared, got %v", cfg.Harness)
 	}
 }

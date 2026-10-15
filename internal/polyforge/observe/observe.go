@@ -41,12 +41,13 @@ type Config struct {
 	// PushFunc overrides the capsule commit+push operation (tests).
 	PushFunc PushFunc
 	// LocateLive, when non-nil, resolves the live harness transcript of a
-	// derivation (capsuleDir + spawn moment → absolute .jsonl path; "" =
-	// not found). The monitor calls it at each dispatch's commit-boundary
+	// derivation (capsuleDir + spawn moment + the dispatch's step harness
+	// and harness-native session id → absolute .jsonl path; "" = not
+	// found). The monitor calls it at each dispatch's commit-boundary
 	// sync points (the F3 daemon-side transcript sync, onto the path the
 	// dispatch's step_started names). nil disables the sync entirely
 	// (unit tests that never exercise it).
-	LocateLive func(capsuleDir string, spawnAt time.Time) string
+	LocateLive func(capsuleDir string, spawnAt time.Time, harness, session string) string
 	// Resolve maps a non-canonical work-item id form (a "<project>#<seq>"
 	// slug) to the canonical id the monitors are keyed by; "" = unknown.
 	// The daemon binds it to its own canonicalizer so CLI-side route
