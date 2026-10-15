@@ -56,20 +56,22 @@ the user saying "init workspace".
    the agent proposes the section, the operator's config carries it.
 4. **Optionally write `.polyforge.yaml`** at the workspace root to pin
    model candidates per project, in the exact closed schema the loader
-   enforces (any other key, a duplicate key, a type mismatch, an unknown
-   kind or an empty model id refuses to load):
+   enforces (any other key, a duplicate key, a type mismatch, a per-step
+   key that is no step id of the installed workflows or an empty model id
+   refuses to load):
 
    ```yaml
    models:
      polyforge:                       # one entry per project of this workspace
        default: ["model-a", "model-b"]   # optional: steps without a list of their own
-       code: ["model-c"]                 # optional: per step kind (qa, spec,
-                                         # author, code, gate, review only)
+       fix: ["model-c"]                  # optional: per step id (the step
+                                         # with that id in every bundle)
    ```
 
-   Precedence for a step of the claimed project: its kind list, then the
-   workflow step's own `model_candidates`, then the project's `default`
-   list, then the bundle's `defaults`. A project
+   Precedence for a step of the claimed project: `pf submit --models`,
+   then the yaml list keyed by its step id, then the workflow step's own
+   `model_candidates`, then the project's `default` list, then the
+   bundle's `defaults`. A project
    not listed keeps the bundle's. A declared-but-empty list governs (no
    switchable chain). The aihub project registry, not this file, supplies
    the repo list.

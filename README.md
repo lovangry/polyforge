@@ -466,23 +466,25 @@ the mapping.
 
 Per-project model candidates. A workspace root may carry a
 `.polyforge.yaml` whose only section is `models` (strict: unknown keys at
-any level, duplicate keys, type mismatches, empty model ids and unknown
-kinds are load errors; the old `projects:` / `workflow_defaults:` shapes
-fail loudly):
+any level, duplicate keys, type mismatches, empty model ids and a
+per-step key that is no step id of the daemon's installed workflows are
+load errors; the old `projects:` / `workflow_defaults:` shapes fail
+loudly):
 
 ```yaml
 models:
   polyforge:                          # a project of this workspace
     default: ["model-a", "model-b"]   # optional: steps without a list of their own
-    code: ["model-c"]                 # optional: one step kind (qa, spec,
-                                      # author, code, gate, review)
+    fix: ["model-c"]                  # optional: one step id (fix, code,
+                                      # review, deliver, ...) — the step
+                                      # with that id in every bundle
 ```
 
 For a step of the claimed project the list is, highest first: the work
 item's manual `pf submit <id> --models a,b,c` list (every step; kept by this
 daemon only — across its restarts and `pf resume` — and a re-claim on
 another machine uses that machine's settings), else the
-step's kind list, else the workflow bundle's step-level candidates, else
+yaml list keyed by the step's id, else the workflow bundle's step-level candidates, else
 the project's `default`, else the bundle's `defaults` (a
 declared-but-empty yaml list governs: no switchable chain). A project not
 listed, or an absent or comments-only file, keeps the bundle's. The
@@ -490,7 +492,9 @@ daemon reads and validates the file BEFORE the aihub claim: an invalid
 file refuses the work item with DAEMON-414 (`pf submit` shows it; auto-pull
 skips that project and logs once) and nothing is claimed, so the work item
 stays queued for other machines. Repo lists and clone URLs always come from
-the aihub project registry.
+the aihub project registry. `pf doctor` reports the same refusal (an
+unknown per-step key included) before any claim. Upgrading from the
+retired per-kind keys: see [docs/upgrade.md](docs/upgrade.md).
 
 Supervision bounds (v2-converge 2.4) — Go duration strings (e.g. `700ms`,
 `5m`), flags only (no environment fallbacks). Omitting a flag, or passing

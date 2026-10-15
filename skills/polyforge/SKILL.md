@@ -217,8 +217,9 @@ Five standing rules, binding on every polyforge session:
    execution path.
 5. **Workspace model pinning lives in `.polyforge.yaml`.** A workspace
    root may carry a `.polyforge.yaml` whose only section is `models`:
-   per project, a `default` candidate list and/or per-step-kind lists
-   (kinds `qa`, `spec`, `author`, `code`, `gate`, `review`). The daemon
+   per project, a `default` candidate list and/or lists keyed by step id
+   (`fix`, `code`, `review`, ... — a key must be a step id of the
+   installed workflows). The daemon
    reads it fresh before every claim; an invalid file refuses the claim
    (DAEMON-414) WITHOUT claiming — the work item stays queued for other
    machines. The repo inventory and clone URLs always come from the aihub

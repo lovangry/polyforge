@@ -519,13 +519,13 @@ M1–M9 无一依赖旧多段结构——M3 的卡死判定来自 step 状态与
 ### 9.2a M4/M5 的机械可判定性与证据来源（INV-D3/INV-D4 落实） <!-- §9.2a -->
 
 **M5（谎报逃逸）的判定不依赖任何形式的人工抽查**，也**不以「调用了多少次 `RunCommand`」作为
-可疑信号**（该口径的问题：Step Skill frontmatter `kind: code|author` 的 step（`01-workflow-skills.md#§4.4`）完全
+可疑信号**（该口径的问题：产出代码或文档的 step（如 `code`、`fix`、`plan`、`e2e-author`）完全
 可能只经由文件写工具——Edit/Write 类操作——合法完成全部工作而不调用任何 `RunCommand`；把「零
 命令调用」本身当作逃逸信号会把这类合法产出误判为逃逸，产生假阳性）。判定改为直接检查**该 step
 是否产出了它承诺的 artifact**（INV-D4）：
 
-- **逃逸判定（机械，仅对 `kind ∈ {code, author}` 的 step 计算，`01-workflow-skills.md#§4.4` frontmatter 字段的
-  作用域限定；`kind ∈ {qa, spec, gate, review}` 的 step 不计算本判据）**：一个该类 step 的执行
+- **逃逸判定（机械，仅对产出型 step 计算——当前 bundle 中为 `repro`、`fix`、`code`、`deliver`、`release`、`deploy`、`plan`、`e2e-author`
+  （polyforge#169 删除 step `kind` 后按 step id 列举，即原 `kind ∈ {code, author}`）；其余 step 不计算本判据）**：一个该类 step 的执行
   结果被判定为「未产出承诺的 artifact」，当且仅当以下三者**同时**成立：
   1. 该 step 所写仓库相对**该 step 自己的起始基线**（`03-execution-capsule.md#§4.2` `steps.<id>.step_start_refs`，不是 WI 级
    认领基线（`capsule.json` 的 `repos`））的实际工作树 diff 为空；
@@ -534,9 +534,9 @@ M1–M9 无一依赖旧多段结构——M3 的卡死判定来自 step 状态与
      产出内容（含 `output.commands` 为空或缺失）。
   三者同时成立意味着该 step 声称自己已完成，但工作树、产物目录、执行权威文件三个独立通道都看不
   到任何实际产出——这与「用了多少条 shell 命令」无关：一个通过文件写工具产出真实 diff 的 step，
-  条件 1 就不成立，不计入逃逸；`qa`/`gate`/`review` 类 step 的正常产出本就可能是零文件改动（例如
-  纯问答的 grill、只打分不改代码的 review），因此本判据只对 `code`/`author` 计算，不对其余
-  `kind` 计算（避免把合法的「无产出」误判为逃逸）。
+  条件 1 就不成立，不计入逃逸；问答、判定类 step 的正常产出本就可能是零文件改动（例如
+  纯问答的 grill、只打分不改代码的 review），因此本判据只对上列产出型 step 计算，不对其余
+  step 计算（避免把合法的「无产出」误判为逃逸）。
 - 当前架构（`00`–`06`）未定义任何「声明改动文件清单」字段（没有 `declared_files` 或等价
   结构）；本判据因此只比对「实际 diff 是否为空」，不做「声明与实际是否全等」的比对——这一点
   与历史（workflow-v2 时代）曾经设想过的强校验机制不同，vNext 按当前已定义的数据模型对待，不

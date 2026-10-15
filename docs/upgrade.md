@@ -273,3 +273,128 @@ Therefore update the workflows checkout only when no `feature-full` work
 item is claimed and unfinished (queued ones are fine: they have no
 `execution.json` yet), or accept that a blocked one must be re-filed.
 `pf queue` lists them.
+
+## Step `kind` removed: `.polyforge.yaml` model lists are keyed by step id (polyforge#169)
+
+The step `kind` (`qa`/`spec`/`author`/`code`/`gate`/`review`) is gone: the
+shipped bundles no longer declare it and the driver no longer validates
+it. Its only use was grouping steps for the workspace yaml's model lists;
+those lists are now keyed by **step id** — every key of
+`models.<project>` other than `default` is a step id, and it governs the
+step with that id in every bundle that has one (`fix` covers bug-fix's
+and quick-fix's `fix`). Precedence, highest first:
+
+    # Precedence: pf submit --models > project <step-id> > workflow step
+    # model_candidates > project default > workflow defaults.
+
+Typo protection: every non-`default` key must be a step id of the
+workflows the daemon runs (its `--workflows-dir`). Any other key refuses
+the claim with DAEMON-414 before anything is claimed — the work item
+stays queued — and `pf doctor` reports it under `workspace yaml`, naming
+every unknown key (`models.<project>.<key>`). So a retired kind that is
+not also a step id (`qa`, `author`, `gate`) refuses; `code`, `spec` and
+`review` still load but now mean only the step with that id.
+
+Old bundle snapshots: a capsule claimed before the upgrade carries a
+materialized bundle whose frontmatter still says `kind: …`. The parser
+ignores the field, so same-daemon recovery of such a capsule loads it
+unchanged. The model lists such a work item uses were composed at claim
+time and snapshotted, so it keeps them.
+
+### Old kind → step ids (current bundles)
+
+| old kind | step ids it covered |
+|---|---|
+| `qa` | `grill` (feature-full), `grill-review` (feature-full), `root-cause` (bug-fix) |
+| `spec` | `spec` (feature-full), `grill` (quick-fix) |
+| `author` | `plan` (feature-full, chore), `e2e-author` (feature-full) |
+| `code` | `code` (feature-full, chore), `repro` (bug-fix), `fix` (bug-fix, quick-fix), `deliver` (feature-full, bug-fix, chore, quick-fix), `release`, `deploy` (release) |
+| `gate` | `verification` (feature-full, bug-fix, chore, quick-fix), `verify` (release) |
+| `review` | `review` (feature-full, bug-fix, chore) |
+
+`grill` is one key for both lanes (it was `qa` in feature-full and `spec`
+in quick-fix).
+
+### The three workspaces
+
+All three declare only `default` and `code`. After the upgrade their
+files still load, but `code:` governs only the `code` step (feature-full,
+chore): `fix`, `repro`, `deliver`, `release` and `deploy` would fall back
+to their own bundle list or the project `default`. To keep today's
+behaviour, list each old kind:code step id with the same list (a YAML
+anchor keeps it to one copy). Note that today the `code` list also
+overrides `release` and `deploy`'s own bundle pins
+(`[sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5]`); dropping
+those two keys lets the bundle pins govern instead.
+
+osp-ws (`/root/code/aicoding/osp-ws/.polyforge.yaml`):
+
+```yaml
+# Precedence: pf submit --models > project <step-id> > workflow step
+# model_candidates > project default > workflow defaults.
+models:
+  polyforge:
+    default: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
+    code: &osp-code [sub2api-glm/glm-5.3, sub2api-glm/glm-5.3-flash, sub2api-claude/pi-claude-opus-5]
+    fix: *osp-code
+    repro: *osp-code
+    deliver: *osp-code
+    release: *osp-code
+    deploy: *osp-code
+  pi:
+    default: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
+    code: *osp-code
+    fix: *osp-code
+    repro: *osp-code
+    deliver: *osp-code
+    release: *osp-code
+    deploy: *osp-code
+  tsshd:
+    default: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
+    code: *osp-code
+    fix: *osp-code
+    repro: *osp-code
+    deliver: *osp-code
+    release: *osp-code
+    deploy: *osp-code
+```
+
+gmi-ws (`/root/code/aicoding/gmi-ws/.polyforge.yaml`):
+
+```yaml
+# Precedence: pf submit --models > project <step-id> > workflow step
+# model_candidates > project default > workflow defaults.
+models:
+  ieops:
+    default: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
+    code: &gmi-code [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5]
+    fix: *gmi-code
+    repro: *gmi-code
+    deliver: *gmi-code
+    release: *gmi-code
+    deploy: *gmi-code
+```
+
+(gmi-ws's code list equals the release bundle's own `release`/`deploy`
+pins, so dropping those two keys changes nothing there.)
+
+yf-ws (`/root/code/aicoding/yf-ws/.polyforge.yaml`):
+
+```yaml
+# Precedence: pf submit --models > project <step-id> > workflow step
+# model_candidates > project default > workflow defaults.
+models:
+  yingfang:
+    default: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
+    code: &yf-code [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5]
+    fix: *yf-code
+    repro: *yf-code
+    deliver: *yf-code
+    release: *yf-code
+    deploy: *yf-code
+```
+
+The existing header comments of all three files state the pre-#164 order
+(`project <kind> > project default > workflow step model_candidates`);
+replace them with the precedence line above. Run `pf doctor` after the
+edit: `workspace yaml` must pass.
