@@ -195,18 +195,30 @@ type StatusResponse struct {
 
 // HarnessStatus is one harness's daemon-side status: binary, version,
 // and whether the credential variables are set ("set"/"unset" — never a
-// value).
+// value). polyforge#171 adds the claude entry's harness-root layout
+// (the three dirs) and the claude-config settings.json env block facts
+// (key → set/unset, never values) plus its pairing warnings.
 type HarnessStatus struct {
-	Bin             string `json:"bin"`
-	Found           bool   `json:"found"`
-	Path            string `json:"path,omitempty"`
-	Version         string `json:"version,omitempty"`
-	Verified        bool   `json:"verified,omitempty"`
-	VersionError    string `json:"version_error,omitempty"`
-	AuthTokenEnv    string `json:"auth_token_env,omitempty"`
-	APIKeyEnv       string `json:"api_key_env,omitempty"`
-	BaseURLEnv      string `json:"base_url_env,omitempty"`
-	BackgroundTasks string `json:"background_tasks,omitempty"`
+	Bin             string                `json:"bin"`
+	Found           bool                  `json:"found"`
+	Path            string                `json:"path,omitempty"`
+	Version         string                `json:"version,omitempty"`
+	Verified        bool                  `json:"verified,omitempty"`
+	VersionError    string                `json:"version_error,omitempty"`
+	AuthTokenEnv    string                `json:"auth_token_env,omitempty"`
+	APIKeyEnv       string                `json:"api_key_env,omitempty"`
+	BaseURLEnv      string                `json:"base_url_env,omitempty"`
+	SettingsEnv     map[string]string     `json:"settings_env,omitempty"`
+	HarnessDirs     map[string]HarnessDir `json:"harness_dirs,omitempty"`
+	SettingsWarning string                `json:"settings_warning,omitempty"`
+	BackgroundTasks string                `json:"background_tasks,omitempty"`
+}
+
+// HarnessDir is one harness dir's existence fact under the harness root
+// (polyforge#171: step_agent / step_agent_sessions / claude_config).
+type HarnessDir struct {
+	Path   string `json:"path,omitempty"`
+	Exists bool   `json:"exists"`
 }
 
 // StatusJob is one jobs[] bookkeeping entry.

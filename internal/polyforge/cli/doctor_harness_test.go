@@ -32,14 +32,42 @@ func TestClaudeHarnessCheck(t *testing.T) {
 		{"older daemon", steps, true, map[string]HarnessStatus{}, "warn", "no harness status"},
 		{"binary missing", steps, true, map[string]HarnessStatus{"claude": {Bin: "claude"}}, "fail", "does not resolve"},
 		{"unverified version", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.Version, h.Verified = "9.9.9", false; return h }()}, "warn", "9.9.9 is not in the verified set"},
-		{"no credential variable", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.AuthTokenEnv = "unset"; return h }()}, "warn", "credential authority layer is the claude-config settings.json env block"},
+		{"no credential variable", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.AuthTokenEnv = "unset"; return h }()}, "warn", "must live under the claude-config dir"},
 		{"base url set", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.BaseURLEnv = "set"; return h }()}, "warn", "ANTHROPIC_BASE_URL is set"},
+		{"settings token set", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus {
+			h := ok
+			h.AuthTokenEnv = "unset"
+			h.SettingsEnv = map[string]string{"ANTHROPIC_AUTH_TOKEN": "set", "ANTHROPIC_BASE_URL": "set", "CLAUDE_CONFIG_DIR": "unset"}
+			return h
+		}()}, "pass", "claude-config settings.json env: ANTHROPIC_AUTH_TOKEN set"},
+		{"dirs reported", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus {
+			h := ok
+			h.HarnessDirs = map[string]HarnessDir{
+				"step_agent":          {Path: "/r/step-agent", Exists: true},
+				"step_agent_sessions": {Path: "/r/step-agent-sessions", Exists: true},
+				"claude_config":       {Path: "/r/claude-config", Exists: false},
+			}
+			return h
+		}()}, "pass", "harness dirs: step agent dir present, step agent sessions present, claude config dir missing"},
+		{"oat+gateway", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus {
+			h := ok
+			h.SettingsWarning = "OAuth token (sk-ant-oat01-...) paired with a gateway BASE_URL — that combination is rejected"
+			return h
+		}()}, "warn", "sk-ant-oat01"},
+		{"config dir override", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus {
+			h := ok
+			h.SettingsWarning = "the claude-config settings.json env block sets CLAUDE_CONFIG_DIR: remove it — the adapter hard-sets the step's config dir and the settings value overrides the adapter's"
+			return h
+		}()}, "warn", "overrides the adapter's"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			st, detail := claudeHarnessCheck(c.steps, "/wf", c.up, c.hs)
 			if st != c.want || !strings.Contains(detail, c.needle) {
 				t.Fatalf("got %s %q, want %s containing %q", st, detail, c.want, c.needle)
+			}
+			if strings.Contains(detail, "sk-ant-oat01-SEN") {
+				t.Errorf("the detail carries a token value")
 			}
 		})
 	}
