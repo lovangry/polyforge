@@ -1,68 +1,79 @@
 package runtime
 
-// harness_claim_test.go: polyforge#159 on the claim path — the per-step
-// harness compose rides the job and its daemon-private state record, and
-// a model/harness mismatch refuses BEFORE the claim (DAEMON-414).
+// harness_claim_test.go: polyforge#175 on the claim path — every model
+// candidate is `<harness>:<model>`: a mixed-harness chain rides the job
+// and its daemon-private state record verbatim, an unprefixed candidate
+// or a retired `harness` key in the workspace yaml refuses BEFORE the
+// claim (DAEMON-414), a bundle with an unprefixed candidate ends the
+// claim blocked naming the file and step, and a pre-#175 state record
+// (bare ids + the #159 step_harness) still rehydrates for recovery.
 
 import (
 	"context"
 	"encoding/json"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
-func TestClaimComposeHarnessRidesTheJob(t *testing.T) {
+func TestClaimMixedHarnessChainRidesTheJob(t *testing.T) {
 	hub := newFakeHub()
 	r, ws, _ := newWorkspaceTestRuntime(t, hub, "proj")
 	r.cfg.WorkflowsDir = frontmatterBundle(t, w079Frontmatter)
-	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [prov/flash, claude-opus-5-5], harness: claude }\n")
-	if err := r.Start(context.Background(), "wi_h159comp"); err != nil {
+	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [claude:claude-opus-5-5, pi:prov/flash] }\n")
+	if err := r.Start(context.Background(), "wi_h175comp"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	j := r.jobOf("wi_h159comp")
+	j := r.jobOf("wi_h175comp")
 	if j == nil {
 		t.Fatal("the claim must run to a live agent")
 	}
 	j.mu.Lock()
-	got := j.stepHarness
+	got := j.stepCandidates
 	j.mu.Unlock()
-	if got["fix"] != "claude" || got["grill"] != "pi" || got["release"] != "pi" {
-		t.Fatalf("step harness %v, want fix=claude, others pi", got)
+	if !reflect.DeepEqual(got["fix"], []string{"claude:claude-opus-5-5", "pi:prov/flash"}) || !reflect.DeepEqual(got["grill"], []string{"pi:prov/weak-a", "pi:prov/weak-b"}) {
+		t.Fatalf("step candidates %v", got)
 	}
-	// the snapshot is persisted daemon-side and rehydrates verbatim
-	rec := j.record()
-	blob, _ := json.Marshal(rec)
+	// the snapshot (each candidate with its harness) is persisted
+	// daemon-side and rehydrates verbatim; no step_harness is written
+	blob, _ := json.Marshal(j.record())
+	if strings.Contains(string(blob), "step_harness") {
+		t.Fatalf("a current record wrote the retired step_harness: %s", blob)
+	}
 	var back jobRecord
 	if err := json.Unmarshal(blob, &back); err != nil {
 		t.Fatal(err)
 	}
-	if jobFromRecord(&back).stepHarness["fix"] != "claude" {
-		t.Fatalf("state record lost the harness snapshot: %s", blob)
+	if !reflect.DeepEqual(jobFromRecord(&back).stepCandidates["fix"], got["fix"]) {
+		t.Fatalf("state record lost the candidate snapshot: %s", blob)
 	}
-	if err := r.Stop(context.Background(), "wi_h159comp", protocol.FinishWrapped); err != nil {
+	if err := r.Stop(context.Background(), "wi_h175comp", protocol.FinishWrapped); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 }
 
-func TestHarnessMismatchRefusesBeforeClaim(t *testing.T) {
-	cases := map[string]string{
-		// fix falls through to the bundle's pi list
-		"claude step with only pi candidates": "steps:\n  proj:\n    fix: { harness: claude }\n",
-		// every pi step given only a claude id
-		"pi steps with only claude ids": "steps:\n  proj:\n    default: { models: [claude-opus-5-5] }\n    fix: { models: [claude-sonnet-5] }\n    release: { models: [claude-sonnet-5] }\n",
+func TestCandidateFormatRefusesBeforeClaim(t *testing.T) {
+	cases := map[string]struct{ yaml, want string }{
+		"unprefixed candidate": {"steps:\n  proj:\n    fix: { models: [pi:prov/flash, sub2api-glm/glm-5.3] }\n",
+			`steps.proj.fix.models[1]: "sub2api-glm/glm-5.3" needs a harness prefix (pi:… or claude:…)`},
+		"unknown prefix": {"steps:\n  proj:\n    default: { models: [codex:gpt-6] }\n", `unknown harness prefix "codex"`},
+		"empty model":    {"steps:\n  proj:\n    default: { models: [\"pi:\"] }\n", "names no model"},
+		"retired harness key": {"steps:\n  proj:\n    fix: { models: [claude:claude-opus-5-5], harness: claude }\n",
+			"steps.proj.fix.harness: the `harness` key was removed (polyforge#175)"},
 	}
-	for name, yaml := range cases {
+	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			hub := newFakeHub()
 			r, ws, sp := newWorkspaceTestRuntime(t, hub, "proj")
 			r.cfg.WorkflowsDir = frontmatterBundle(t, w079Frontmatter)
-			writeWorkspaceYaml(t, ws, yaml)
-			err := r.Start(context.Background(), "wi_h159mis")
+			writeWorkspaceYaml(t, ws, c.yaml)
+			err := r.Start(context.Background(), "wi_h175bad")
 			ae, ok := err.(*api.Error)
-			if !ok || ae.Code != api.ErrDaemonWorkspaceYaml {
-				t.Fatalf("expected DAEMON-414, got %v", err)
+			if !ok || ae.Code != api.ErrDaemonWorkspaceYaml || !strings.Contains(ae.Detail, c.want) {
+				t.Fatalf("expected DAEMON-414 naming %q, got %v", c.want, err)
 			}
 			if n := hub.claimCount(); n != 0 {
 				t.Fatalf("refused AFTER a claim (%d claim calls)", n)
@@ -71,5 +82,99 @@ func TestHarnessMismatchRefusesBeforeClaim(t *testing.T) {
 				t.Fatalf("the refusal derived %d agents", n)
 			}
 		})
+	}
+}
+
+// A bundle whose candidate carries no harness prefix is a load error
+// naming the file and the step. With the bundle known from the probe it
+// refuses BEFORE the claim (the work item stays queued) ...
+func TestBundleUnprefixedCandidateRefusesBeforeClaim(t *testing.T) {
+	hub := newFakeHub()
+	r, _, sp := newWorkspaceTestRuntime(t, hub, "proj")
+	r.cfg.WorkflowsDir = frontmatterBundle(t, strings.Replace(w079Frontmatter, "[pi:prov/flash, pi:prov/glm]", "[pi:prov/flash, prov/glm]", 1))
+	bundle := "demo-bundle"
+	hub.items = map[string]*api.WorkItem{"wi_h175pre": {ID: "wi_h175pre", ProjectName: "proj", BundleName: &bundle}}
+	err := r.Start(context.Background(), "wi_h175pre")
+	ae, ok := err.(*api.Error)
+	if !ok || ae.Code != api.ErrDaemonWorkspaceYaml || !strings.Contains(ae.Detail, `step fix: model_candidates[1]: "prov/glm" needs a harness prefix`) || !strings.Contains(ae.Detail, "stays queued") {
+		t.Fatalf("expected a pre-claim refusal naming the bundle step, got %v", err)
+	}
+	if n := hub.claimCount(); n != 0 || sp.callCount() != 0 {
+		t.Fatalf("refused AFTER a claim (%d claim calls, %d agents)", n, sp.callCount())
+	}
+}
+
+// ... and when the probe names no bundle, the claim-time read is the
+// backstop: the claim ends blocked with the error and no engine starts.
+func TestBundleUnprefixedCandidateBlocksClaim(t *testing.T) {
+	hub := newFakeHub()
+	r, _, sp := newWorkspaceTestRuntime(t, hub, "proj")
+	r.cfg.WorkflowsDir = frontmatterBundle(t, strings.Replace(w079Frontmatter, "[pi:prov/flash, pi:prov/glm]", "[pi:prov/flash, prov/glm]", 1))
+	if err := r.Start(context.Background(), "wi_h175bundle"); err == nil {
+		t.Fatal("a bundle with an unprefixed candidate was claimed and started")
+	}
+	note := hub.lastEnd().Note
+	for _, want := range []string{"demo-bundle/workflow.md", `step fix: model_candidates[1]: "prov/glm" needs a harness prefix (pi:… or claude:…)`} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("blocked note %q does not name %q", note, want)
+		}
+	}
+	if hub.lastEnd().Status != api.StatusBlocked {
+		t.Fatalf("session end %+v, want blocked", hub.lastEnd())
+	}
+	if n := sp.callCount(); n != 0 {
+		t.Fatalf("the refusal derived %d agents", n)
+	}
+}
+
+// Ruling 4: a pre-#175 state record (bare ids, optional #159
+// step_harness) rehydrates prefixed — the old step harness, else pi —
+// keeping exactly the list each step walked before the upgrade.
+func TestLegacyStateRecordRehydratesPrefixed(t *testing.T) {
+	blob := `{"work_item_id":"wi_old","state":"running",
+		"step_candidates":{"fix":["sub2api-glm/glm-5.3","claude-opus-5-5","claude-sonnet-5"],"grill":["sub2api-glm/glm-5.3","claude-opus-5-5"],"spec":[]},
+		"step_harness":{"fix":"claude","grill":"pi"}}`
+	var rec jobRecord
+	if err := json.Unmarshal([]byte(blob), &rec); err != nil {
+		t.Fatal(err)
+	}
+	got := jobFromRecord(&rec).stepCandidates
+	want := map[string][]string{
+		"fix":   {"claude:claude-opus-5-5", "claude:claude-sonnet-5"},
+		"grill": {"pi:sub2api-glm/glm-5.3"},
+		"spec":  {},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("legacy rehydrate %v, want %v", got, want)
+	}
+	// a pre-#159 record (no step_harness at all): every id on pi
+	if err := json.Unmarshal([]byte(`{"work_item_id":"wi_older","step_candidates":{"code":["a/b","c/d"]}}`), &rec); err != nil {
+		t.Fatal(err)
+	}
+	rec.LegacyStepHarness = nil
+	if got := jobFromRecord(&rec).stepCandidates["code"]; !reflect.DeepEqual(got, []string{"pi:a/b", "pi:c/d"}) {
+		t.Fatalf("pre-#159 rehydrate %v", got)
+	}
+	// and the record written back carries the prefixed ids, no step_harness
+	out, _ := json.Marshal(jobFromRecord(&rec).record())
+	if strings.Contains(string(out), "step_harness") || !strings.Contains(string(out), `"pi:a/b"`) {
+		t.Fatalf("rewritten record %s", out)
+	}
+}
+
+// The documented edge of the read-compat: a #159 claude step with no
+// candidate list (claude's default model) has nothing to prefix and
+// recovers on pi's default model.
+func TestLegacyClaudeStepWithoutListHasNoChain(t *testing.T) {
+	var rec jobRecord
+	if err := json.Unmarshal([]byte(`{"work_item_id":"wi_e","step_candidates":{"fix":[]},"step_harness":{"fix":"claude","review":"claude"}}`), &rec); err != nil {
+		t.Fatal(err)
+	}
+	got := jobFromRecord(&rec).stepCandidates
+	if l, ok := got["fix"]; !ok || len(l) != 0 {
+		t.Fatalf("fix %v", got)
+	}
+	if _, ok := got["review"]; ok {
+		t.Fatalf("review gained a list: %v", got)
 	}
 }

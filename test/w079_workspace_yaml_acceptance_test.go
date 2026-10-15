@@ -10,8 +10,8 @@ package test
 //
 //	steps:
 //	  <project>:
-//	    default: { models: [model-id, ...] }   # optional: every step of the project
-//	    <step-id>: { models: [model-id, ...] } # optional: a step id of the installed workflows
+//	    default: { models: [<harness>:<model>, ...] }   # optional: every step of the project
+//	    <step-id>: { models: [<harness>:<model>, ...] } # optional: a step id of the installed workflows
 //
 // Per step: project step-id list > bundle step list > project default >
 // bundle defaults (polyforge#164: a step's own list outranks the project
@@ -304,7 +304,7 @@ func TestW079AbsentAndEmptyYamlRunExactlyAsHead(t *testing.T) {
 	wiB := w113NewWI(t, inst, "e2e", "w079 comments-only yaml is a no-op", envelopeQuickFix())
 	capB := w079Run(t, d, inst, ws, wiB)
 
-	w079Yaml(t, ws, "steps:\n  w079other:\n    default: { models: [w079-other-model] }\n")
+	w079Yaml(t, ws, "steps:\n  w079other:\n    default: { models: [pi:w079-other-model] }\n")
 	wiC := w113NewWI(t, inst, "e2e", "w079 unlisted project keeps bundle models", envelopeQuickFix())
 	capC := w079Run(t, d, inst, ws, wiC)
 
@@ -348,10 +348,10 @@ func TestW079PerProjectModelPrecedence(t *testing.T) {
 	ws := t.TempDir()
 	w079Yaml(t, ws, `steps:
   e2e:
-    default: { models: [w079-e2e-def] }
-    fix: { models: [w079-e2e-code-a, w079-e2e-code-b] }
+    default: { models: [pi:w079-e2e-def] }
+    fix: { models: [pi:w079-e2e-code-a, pi:w079-e2e-code-b] }
   ieops:
-    default: { models: [w079-ieops-def] }
+    default: { models: [pi:w079-ieops-def] }
 `)
 	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e", "ieops", "w079third"}})
 
@@ -402,7 +402,7 @@ func TestW079PerProjectModelPrecedence(t *testing.T) {
 func TestW079ProjectStepOnlyFallsThroughToBundle(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	w079Yaml(t, ws, "steps:\n  e2e:\n    grill: { models: [w079-spec-x] }\n")
+	w079Yaml(t, ws, "steps:\n  e2e:\n    grill: { models: [pi:w079-spec-x] }\n")
 	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
 	capDir := w079Run(t, d, inst, ws, w113NewWI(t, inst, "e2e", "w079 step-only list", envelopeQuickFix()))
 	if got := w079Model(t, capDir, "grill"); got != "w079-spec-x" {
@@ -429,8 +429,8 @@ func TestW079OneDaemonTwoWorkspacesTwoYamls(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	w079Yaml(t, wsA, "steps:\n  e2e:\n    default: { models: [w079a-flow] }\n")
-	w079Yaml(t, wsB, "steps:\n  ieops:\n    fix: { models: [w079b-code] }\n")
+	w079Yaml(t, wsA, "steps:\n  e2e:\n    default: { models: [pi:w079a-flow] }\n")
+	w079Yaml(t, wsB, "steps:\n  ieops:\n    fix: { models: [pi:w079b-code] }\n")
 	d := w079Setup(t, inst, w113WS{key: wsA, projects: []string{"e2e"}}, w113WS{key: wsB, projects: []string{"ieops"}})
 
 	wiA := w113NewWI(t, inst, "e2e", "w079 two-workspace claim A", envelopeQuickFix())
@@ -465,7 +465,7 @@ func TestW079OneDaemonTwoWorkspacesTwoYamls(t *testing.T) {
 func TestW079YamlEditGovernsNextClaimNoRestart(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	w079Yaml(t, ws, "steps:\n  e2e:\n    default: { models: [w079-edit-v1] }\n")
+	w079Yaml(t, ws, "steps:\n  e2e:\n    default: { models: [pi:w079-edit-v1] }\n")
 	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
 	pid := d.cmd.Process.Pid
 
@@ -473,7 +473,7 @@ func TestW079YamlEditGovernsNextClaimNoRestart(t *testing.T) {
 	if got := w079Model(t, capA, "grill"); got != "w079-edit-v1" {
 		t.Fatalf("claim 1 grill model %q, want w079-edit-v1", got)
 	}
-	w079Yaml(t, ws, "steps:\n  e2e:\n    default: { models: [w079-edit-v2] }\n")
+	w079Yaml(t, ws, "steps:\n  e2e:\n    default: { models: [pi:w079-edit-v2] }\n")
 	capB := w079Run(t, d, inst, ws, w113NewWI(t, inst, "e2e", "w079 edit second claim", envelopeQuickFix()))
 	if got := w079Model(t, capB, "grill"); got != "w079-edit-v2" {
 		t.Fatalf("claim 2 grill model %q, want w079-edit-v2 — the edit must govern the next claim", got)
@@ -504,20 +504,22 @@ func TestW079InvalidYamlRefusesWithoutClaim(t *testing.T) {
 	}{
 		{"torn yaml", "steps:\n  e2e:\n    default: [\n", nil},
 		{"old shape projects", "projects:\n  e2e:\n    repos: []\n", []string{"projects"}},
-		{"old shape workflow_defaults", "workflow_defaults:\n  model_candidates: [a]\n", []string{"workflow_defaults"}},
-		{"unknown top-level key", "model:\n  e2e:\n    default: { models: [a] }\n", []string{"model"}},
-		{"unknown step id", "steps:\n  e2e:\n    w079bogusstep: { models: [a] }\n", []string{"steps.e2e.w079bogusstep"}},
-		{"retired kind key", "steps:\n  e2e:\n    gate: { models: [a] }\n", []string{"steps.e2e.gate"}},
+		{"old shape workflow_defaults", "workflow_defaults:\n  model_candidates: [pi:a]\n", []string{"workflow_defaults"}},
+		{"unknown top-level key", "model:\n  e2e:\n    default: { models: [pi:a] }\n", []string{"model"}},
+		{"unknown step id", "steps:\n  e2e:\n    w079bogusstep: { models: [pi:a] }\n", []string{"steps.e2e.w079bogusstep"}},
+		{"retired kind key", "steps:\n  e2e:\n    gate: { models: [pi:a] }\n", []string{"steps.e2e.gate"}},
 		{"legacy top-level models", "models:\n  e2e:\n    default: [a]\n", []string{"`models:` was replaced by `steps:`"}},
-		{"unknown harness", "steps:\n  e2e:\n    fix: { models: [a], harness: codex }\n", []string{"steps.e2e.fix.harness: unknown harness"}},
+		{"retired harness key", "steps:\n  e2e:\n    fix: { models: [pi:a], harness: claude }\n", []string{"steps.e2e.fix.harness: the `harness` key was removed (polyforge#175)"}},
+		{"unprefixed candidate", "steps:\n  e2e:\n    fix: { models: [pi:a, sub2api-glm/glm-5.3] }\n", []string{`steps.e2e.fix.models[1]: "sub2api-glm/glm-5.3" needs a harness prefix (pi:… or claude:…)`}},
+		{"unknown harness prefix", "steps:\n  e2e:\n    fix: { models: [codex:a] }\n", []string{`steps.e2e.fix.models[0]: "codex:a" has an unknown harness prefix "codex"`}},
 		{"empty project entry", "steps:\n  e2e:\n", nil},
 		{"null list", "steps:\n  e2e:\n    fix:\n", nil},
 		{"entry a scalar", "steps:\n  e2e:\n    default: abc\n", []string{"steps.e2e.default: must be `{ models: [...] }`"}},
 		{"empty model id", "steps:\n  e2e:\n    default: { models: [\"\"] }\n", nil},
 		{"legacy models as a scalar", "models: 42\n", []string{"`models:` was replaced by `steps:`"}},
-		{"project not mapped to this workspace", "steps:\n  w079ghost:\n    default: { models: [a] }\n", []string{"w079ghost", "not mapped to this workspace"}},
-		{"duplicate project key", "steps:\n  e2e:\n    default: { models: [a] }\n  w079dup:\n    default: { models: [a] }\n  w079dup:\n    default: { models: [b] }\n", []string{"w079dup"}},
-		{"duplicate list key", "steps:\n  e2e:\n    default: { models: [a] }\n    default: { models: [b] }\n", []string{"default"}},
+		{"project not mapped to this workspace", "steps:\n  w079ghost:\n    default: { models: [pi:a] }\n", []string{"w079ghost", "not mapped to this workspace"}},
+		{"duplicate project key", "steps:\n  e2e:\n    default: { models: [pi:a] }\n  w079dup:\n    default: { models: [pi:a] }\n  w079dup:\n    default: { models: [pi:b] }\n", []string{"w079dup"}},
+		{"duplicate list key", "steps:\n  e2e:\n    default: { models: [pi:a] }\n    default: { models: [pi:b] }\n", []string{"default"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -535,7 +537,7 @@ func TestW079InvalidYamlRefusesWithoutClaim(t *testing.T) {
 func TestW079FixYamlAndResubmitIsClean(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	w079Yaml(t, ws, "steps:\n  e2e:\n    default: { models: [w079-ok] }\n   BAD KEY\n")
+	w079Yaml(t, ws, "steps:\n  e2e:\n    default: { models: [pi:w079-ok] }\n   BAD KEY\n")
 	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
 
 	wi := w113NewWI(t, inst, "e2e", "w079 fix-and-resubmit cycle", envelopeQuickFix())
@@ -545,7 +547,7 @@ func TestW079FixYamlAndResubmitIsClean(t *testing.T) {
 		t.Fatalf("the refused submit left capsule husks: %v", ents)
 	}
 
-	w079Yaml(t, ws, "steps:\n  e2e:\n    default: { models: [w079-reclaimed] }\n")
+	w079Yaml(t, ws, "steps:\n  e2e:\n    default: { models: [pi:w079-reclaimed] }\n")
 	capDir := w079Run(t, d, inst, ws, wi)
 	if got := w113TopLevel(t, filepath.Join(ws, "capsules")); len(got) != 1 || got[0] != wiPathName(t, inst, wi) {
 		t.Fatalf("capsules dir holds %v, want exactly [%s]", got, wi)
@@ -596,8 +598,8 @@ func TestW079RotationAdvancesAndCapsOnEffectiveList(t *testing.T) {
 		yamlEntry string
 		want      string
 	}{
-		{"two failures pin the third entry", "fix: { models: [w079r-a, w079r-b, w079r-c] }", "w079r-c"},
-		{"two failures on a two-entry list cap at the end", "fix: { models: [w079r-a, w079r-b] }", "w079r-b"},
+		{"two failures pin the third entry", "fix: { models: [pi:w079r-a, pi:w079r-b, pi:w079r-c] }", "w079r-c"},
+		{"two failures on a two-entry list cap at the end", "fix: { models: [pi:w079r-a, pi:w079r-b] }", "w079r-b"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -644,7 +646,7 @@ func TestW079RotationAdvancesAndCapsOnEffectiveList(t *testing.T) {
 func TestW079GateFailRewindResetsEffectiveHead(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [w079g-a, w079g-b] }\n")
+	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [pi:w079g-a, pi:w079g-b] }\n")
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
 		inst.url, inst.adminKey, "",
 		[]w113WS{{key: ws, projects: []string{"e2e"}}})
@@ -730,7 +732,7 @@ func TestW079RotationUntouchedWithoutYaml(t *testing.T) {
 func TestW079RestartKeepsClaimTimeSnapshot(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [w079-m1, w079-m2] }\n")
+	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [pi:w079-m1, pi:w079-m2] }\n")
 	sock := filepath.Join(shortTmp("/tmp", "w079sock"), "d.sock")
 	dataDir := t.TempDir()
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
@@ -753,7 +755,7 @@ func TestW079RestartKeepsClaimTimeSnapshot(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	d.crash()
-	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [w079-n1, w079-n2] }\n")
+	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [pi:w079-n1, pi:w079-n2] }\n")
 	d2 := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptSock(sock), w113DOptDataDir(dataDir))
 	d2.start()
 	defer d2.stop()
@@ -1055,7 +1057,7 @@ func TestW079PlacementFollowsCliTomlOnly(t *testing.T) {
 	if err := os.MkdirAll(wsX, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	w079Yaml(t, wsX, "steps:\n  e2e:\n    default: { models: [w079-drift-model] }\n")
+	w079Yaml(t, wsX, "steps:\n  e2e:\n    default: { models: [pi:w079-drift-model] }\n")
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
 		inst.url, inst.adminKey, "",
 		[]w113WS{

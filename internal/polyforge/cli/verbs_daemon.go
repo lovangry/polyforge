@@ -20,10 +20,12 @@ var cmdSubmit = &Command{
 	Name:    "submit",
 	Group:   GroupExec,
 	Summary: "Submit a WI for execution on this machine (claim)",
-	Usage:   "pf submit <id> [--priority low|normal|high|urgent] [--models a,b,c]",
+	Usage:   "pf submit <id> [--priority low|normal|high|urgent] [--models <harness>:<model>,...]",
 	Setup: func(fs *flag.FlagSet) {
 		fs.String("priority", "normal", "queue priority (low|normal|high|urgent)")
-		fs.String("models", "", "manual model candidates for EVERY step of this WI, comma-separated, in order "+
+		fs.String("models", "", "manual model candidates for EVERY step of this WI, comma-separated, in order; "+
+			"each is <harness>:<model> with harness pi or claude, e.g. claude:claude-opus-5-5,pi:sub2api-glm/glm-5.3 "+
+			"(the prefix is mandatory; a candidate on another harness than the previous one starts a fresh session) "+
 			"(precedence: --models > workspace yaml steps.<project>.<step-id>.models > bundle step model_candidates > "+
 			"yaml steps.<project>.default.models > bundle defaults.model_candidates)")
 	},

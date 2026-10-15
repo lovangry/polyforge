@@ -21,7 +21,7 @@ import (
 func TestS12ManualModelsBeatYamlAndAdvanceOnModelFailure(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	w079Yaml(t, ws, "steps:\n  e2e:\n    default: { models: [s12-yaml-def] }\n    fix: { models: [s12-yaml-code] }\n")
+	w079Yaml(t, ws, "steps:\n  e2e:\n    default: { models: [pi:s12-yaml-def] }\n    fix: { models: [pi:s12-yaml-code] }\n")
 	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
 
 	wi := w113NewWI(t, inst, "e2e", "s12 manual models",
@@ -31,7 +31,7 @@ func TestS12ManualModelsBeatYamlAndAdvanceOnModelFailure(t *testing.T) {
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 		})
-	d.pfWant(inst, -1, "submit", wi, "--models", "s12-m1, s12-m2,s12-m3")
+	d.pfWant(inst, -1, "submit", wi, "--models", "pi:s12-m1, pi:s12-m2,pi:s12-m3")
 	capDir := w079Capsule(t, inst, ws, wi)
 	w113WaitCapsule(t, capDir, 90*time.Second)
 	w113WaitCompleted(t, capDir, 300*time.Second)
@@ -65,11 +65,17 @@ func TestS12ManualModelsBadInputRefused(t *testing.T) {
 	ws := t.TempDir()
 	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
 	wi := w113NewWI(t, inst, "e2e", "s12 bad models", envelopeQuickFix())
-	for _, bad := range []string{"a,,b", "a,a", ","} {
+	for _, bad := range []string{"pi:a,,pi:b", "pi:a,pi:a", ",", "codex:a", "claude:"} {
 		out := d.pfWant(inst, 1, "submit", wi, "--models", bad)
 		if !strings.Contains(out, "--models") {
 			t.Fatalf("--models %q: refusal output %q does not name the flag", bad, out)
 		}
+	}
+	// polyforge#175: an unprefixed candidate is refused up front, naming
+	// it and the two prefixes
+	out := d.pfWant(inst, 1, "submit", wi, "--models", "pi:a/b,sub2api-glm/glm-5.3")
+	if !strings.Contains(out, `submit: --models: "sub2api-glm/glm-5.3" needs a harness prefix (pi:… or claude:…)`) {
+		t.Fatalf("unprefixed --models refusal: %q", out)
 	}
 	if st := inst.wiStatus(t, wi); st != "queued" {
 		t.Fatalf("a refused submit moved the WI to %q", st)
@@ -81,7 +87,7 @@ func TestS12ManualModelsBadInputRefused(t *testing.T) {
 func TestS12ManualModelsSurviveDaemonRestart(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [s12-y1, s12-y2] }\n")
+	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [pi:s12-y1, pi:s12-y2] }\n")
 	sock := filepath.Join(shortTmp("/tmp", "s12sock"), "d.sock")
 	dataDir := t.TempDir()
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
@@ -96,14 +102,14 @@ func TestS12ManualModelsSurviveDaemonRestart(t *testing.T) {
 		})
 	d := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptSock(sock), w113DOptDataDir(dataDir))
 	d.start()
-	d.pfWant(inst, -1, "submit", wi, "--models", "s12-m1,s12-m2")
+	d.pfWant(inst, -1, "submit", wi, "--models", "pi:s12-m1,pi:s12-m2")
 	capDir := w079Capsule(t, inst, ws, wi)
 	w113WaitCapsule(t, capDir, 90*time.Second)
 	w113StepStatus(t, capDir, "fix", "in_progress", 90*time.Second)
 	time.Sleep(2 * time.Second)
 
 	d.crash()
-	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [s12-n1] }\n")
+	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [pi:s12-n1] }\n")
 	d2 := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptSock(sock), w113DOptDataDir(dataDir))
 	d2.start()
 	defer d2.stop()
@@ -134,7 +140,7 @@ func TestS12ManualModelsSurviveReclaim(t *testing.T) {
 
 	d := newV1Daemon(t, inst)
 	d.start()
-	d.pf(t, "submit", wi, "--models", "s12-r1,s12-r2")
+	d.pf(t, "submit", wi, "--models", "pi:s12-r1,pi:s12-r2")
 	waitStepStatus(t, d, wi, "verification", "in_progress", 90*time.Second)
 	capA := d.capsuleDir(wi)
 	waitUntil(t, 60*time.Second, "the hub chain never carried capsule.json and the fix step done", func() bool {

@@ -5,16 +5,16 @@ rewind:
   max_total: 4
   max_per_step: 2
 defaults:
-  model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
+  model_candidates: [pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5, pi:sub2api-openai/gpt-6-astra]
 steps:
   - { id: repro, context_policy: fresh, handoff: true }
   # root-cause is a gate: it must run FRESH (the judge never inherits the
   # judged conversation — driver rule, separation of powers) and takes the
   # repro record (artifacts/repro.md) by path convention: it reads the
   # artifact, not the chat.
-  - { id: root-cause, context_policy: fresh, handoff: true, gate: true, model_candidates: [sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra, sub2api-glm/glm-5.3], on_fail: { target: repro } }
+  - { id: root-cause, context_policy: fresh, handoff: true, gate: true, model_candidates: [pi:sub2api-claude/pi-claude-opus-5, pi:sub2api-openai/gpt-6-astra, pi:sub2api-glm/glm-5.3], on_fail: { target: repro } }
   - { id: fix, context_policy: inherit, handoff: true }
-  - { id: verification, context_policy: fresh, handoff: false, gate: true, on_fail: { target: fix }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: verification, context_policy: fresh, handoff: false, gate: true, on_fail: { target: fix }, model_candidates: [pi:sub2api-glm/glm-5.3-flash, pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5] }
   - { id: review, context_policy: fresh, handoff: false, gate: true, on_fail: { target: fix } }
   - { id: deliver, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, on_fail: { target: fix } }
 ---

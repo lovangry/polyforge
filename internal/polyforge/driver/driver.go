@@ -73,16 +73,10 @@ type Config struct {
 	// re-derived at recovery). When non-nil it SUBSTITUTES the parsed
 	// step-level lists for every step it keys — a present-empty entry
 	// governs and means no switchable chain. A step absent from the map
-	// (or a nil map) keeps the bundle's own resolution.
+	// (or a nil map) keeps the bundle's own resolution. Every candidate
+	// is `<harness>:<model>` (polyforge#175): the prefix is the harness
+	// that candidate's dispatch runs on (New refuses any other shape).
 	StepCandidates map[string][]string
-	// StepHarness is the polyforge#159 effective per-step harness map
-	// (claim-time compose, snapshotted daemon-side like StepCandidates).
-	// A step it keys runs on that harness; a step absent from it (or a
-	// nil map) keeps the bundle's own choice, else pi. The candidate
-	// list a step walks is its effective list FILTERED to the ids its
-	// harness serves (harness.Serves): an incompatible candidate is
-	// skipped, never dispatched.
-	StepHarness map[string]string
 	// Interrupted, when set, archives ONE infra_failure attempt on the
 	// current in_progress step before the loop re-dispatches (the
 	// recovery integration's write, performed by the single
@@ -224,6 +218,21 @@ func New(cfg Config) (*Driver, error) {
 	}
 	if wf.MaxPerStep <= 0 {
 		wf.MaxPerStep = defaultMaxRewindPerStep
+	}
+
+	// polyforge#175: every candidate a step can walk must name its
+	// harness; refuse up front rather than mid-chain.
+	for _, spec := range wf.Steps {
+		list := spec.ModelCandidates
+		where, src := "model_candidates", "the bundle's own list"
+		if l, ok := cfg.StepCandidates[spec.ID]; ok {
+			list, where, src = l, "models", "the claim-time list: yaml, bundle or pf submit --models"
+		}
+		for i, c := range list {
+			if _, err := harness.ParseCandidate(c); err != nil {
+				return nil, fmt.Errorf("driver: step %s: %s[%d] (%s): %w", spec.ID, where, i, src, err)
+			}
+		}
 	}
 
 	exec, existed, err := loadExecution(execPath, cfg.WI, wf)
@@ -575,10 +584,16 @@ func (d *Driver) prepareDispatch(stepID string) (*StepSpawn, int64, error) {
 	if st != nil && len(st.Attempts) > 0 && st.Attempts[len(st.Attempts)-1].FailureCause == FailEndedWithoutResult {
 		sp.PriorEndedWithoutResult = true
 	}
+	// the candidate names the harness its dispatch runs on (polyforge#175);
+	// no list in effect runs pi's own default model. A candidate on
+	// another harness than the previous dispatch's starts a fresh
+	// session with the old transcript as reference (spawn adapter).
+	sp.Harness = harness.Pi
 	if spec := d.workflow.step(stepID); spec != nil {
-		sp.Model = d.modelForLocked(stepID)
+		if c, err := harness.ParseCandidate(d.modelForLocked(stepID)); err == nil {
+			sp.Harness, sp.Model = c.Harness, c.Model
+		}
 	}
-	sp.Harness = d.harnessFor(stepID)
 	sp.SpawnN = d.spawnN + 1
 	return sp, sp.SpawnN, nil
 }
@@ -1036,17 +1051,12 @@ func skeletonExecution(wi WIInfo, wf *Workflow) *capsule.Execution {
 
 func capsuleIDFor(wi string) string { return "cap_" + wi }
 
-// effectiveCandidates answers the step's effective candidate list: the
-// polyforge#79 post-precedence map when the claim/recovery supplied
-// one, the bundle's own resolution otherwise — filtered to the ids the
-// step's harness serves (polyforge#159). The pointer recomputation, the
-// switch and the exhaustion paths all walk this filtered list, so a
-// candidate the harness cannot run is skipped by construction.
+// effectiveCandidates answers the step's effective candidate list (each
+// `<harness>:<model>`, validated by New): the polyforge#79
+// post-precedence map when the claim/recovery supplied one, the
+// bundle's own resolution otherwise. The pointer recomputation, the
+// switch and the exhaustion paths all walk this list — across harnesses.
 func (d *Driver) effectiveCandidates(stepID string) []string {
-	return harness.Filter(d.harnessFor(stepID), d.composedCandidates(stepID))
-}
-
-func (d *Driver) composedCandidates(stepID string) []string {
 	if d.cfg.StepCandidates != nil {
 		if list, ok := d.cfg.StepCandidates[stepID]; ok {
 			return list
@@ -1058,22 +1068,9 @@ func (d *Driver) composedCandidates(stepID string) []string {
 	return nil
 }
 
-// harnessFor answers the step's effective harness (never ""): the
-// claim-time compose when it keys the step, the bundle's own choice
-// otherwise, pi at the bottom.
-func (d *Driver) harnessFor(stepID string) string {
-	if h, ok := d.cfg.StepHarness[stepID]; ok && h != "" {
-		return h
-	}
-	if spec := d.workflow.step(stepID); spec != nil && spec.Harness != "" {
-		return spec.Harness
-	}
-	return harness.Pi
-}
-
-// modelForLocked resolves the step's effective model for the NEXT
-// dispatch (the candidate at the recomputed pointer; "" when no
-// candidate list is in effect). The recomputation runs over the
+// modelForLocked resolves the step's effective candidate for the NEXT
+// dispatch (the `<harness>:<model>` at the recomputed pointer; "" when
+// no candidate list is in effect). The recomputation runs over the
 // EFFECTIVE list (polyforge#79): the post-precedence list the claim
 // carried — or the recovery re-derived — never the raw bundle parse
 // alone. Model-class infra failures alone advance (bounded, capped at list end), a gate-FAIL

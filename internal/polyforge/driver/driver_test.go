@@ -645,14 +645,14 @@ func TestLoadWorkflowFromBundle(t *testing.T) {
 	dir := t.TempDir()
 	fm := `---
 defaults:
-  model_candidates: [prov/a, prov/b]
+  model_candidates: [pi:prov/a, pi:prov/b]
 rewind:
   max_total: 3
 steps:
   - id: spec
   - id: code
     context_policy: inherit
-    model_candidates: [prov/c]
+    model_candidates: [pi:prov/c]
   - id: check
     gate: true
     context_policy: fresh
@@ -678,10 +678,10 @@ steps:
 	if wf.Steps[0].ContextPolicy != ContextInherit {
 		t.Fatalf("spec step: %+v", wf.Steps[0])
 	}
-	if wf.Steps[1].ContextPolicy != "inherit" || len(wf.Steps[1].ModelCandidates) != 1 || wf.Steps[1].ModelCandidates[0] != "prov/c" {
+	if wf.Steps[1].ContextPolicy != "inherit" || len(wf.Steps[1].ModelCandidates) != 1 || wf.Steps[1].ModelCandidates[0] != "pi:prov/c" {
 		t.Fatalf("code step (step-level candidates replace defaults): %+v", wf.Steps[1])
 	}
-	if wf.Steps[0].ModelCandidates[0] != "prov/a" {
+	if wf.Steps[0].ModelCandidates[0] != "pi:prov/a" {
 		t.Fatalf("defaults chain applies: %+v", wf.Steps[0].ModelCandidates)
 	}
 	of := wf.Steps[2].OnFail

@@ -8,6 +8,7 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -226,7 +227,7 @@ func TestInvalidWorkspaceYamlRefusedBeforeClaim(t *testing.T) {
 	if claims != 0 || liveCount(td) != 0 || td.q.LenPending() != 0 {
 		t.Fatalf("invalid yaml must claim and enqueue nothing: claims=%d live=%d pending=%d", claims, liveCount(td), td.q.LenPending())
 	}
-	if err := os.WriteFile(yamlPath, []byte("steps:\n  proj:\n    fix: { models: [\"x\"] }\n"), 0o600); err != nil {
+	if err := os.WriteFile(yamlPath, []byte("steps:\n  proj:\n    fix: { models: [\"pi:x\"] }\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	td.waitLive(t, "wi_a1")
@@ -369,4 +370,50 @@ func TestEnqueueIfAtomicWithAutoOffPurge(t *testing.T) {
 	if err != nil || ok || q.IsPending("wi_a") {
 		t.Fatalf("EnqueueIf with auto off = %v, %v (pending=%v); want refused", ok, err, q.IsPending("wi_a"))
 	}
+}
+
+// polyforge#175: an installed bundle whose candidates are not
+// `<harness>:<model>` refuses the manual submit synchronously (DAEMON-414
+// naming file and step) and is skipped by auto-pull — never enqueued,
+// never claimed, no submit_rejected churn every wave; fixing the bundle
+// lets the next wave pull it.
+func TestBundleCandidateFormatRefusedBeforeEnqueue(t *testing.T) {
+	wf := t.TempDir()
+	bundleMD := filepath.Join(wf, "demo-bundle", "workflow.md")
+	if err := os.MkdirAll(filepath.Dir(bundleMD), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bundleMD, []byte("---\nsteps:\n  - { id: fix, model_candidates: [sub2api-glm/glm-5.3] }\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	td := newTestDaemon(t, func(c *Config) { c.WorkflowsDir = wf })
+	td.hub.mu.Lock()
+	td.hub.bundles = map[string]string{"wi_manual": "demo-bundle"}
+	td.hub.mu.Unlock()
+	mkBare(t, td.cfg.GitRemoteBase, "wi_manual")
+	_, cerr := td.client.ClaimWithModels("wi_manual", "normal", nil)
+	var ae *api.Error
+	if !errors.As(cerr, &ae) || ae.Code != api.ErrDaemonWorkspaceYaml || !strings.Contains(ae.Detail, `step fix: model_candidates[0]: "sub2api-glm/glm-5.3" needs a harness prefix`) {
+		t.Fatalf("submit on a bad bundle = %v, want DAEMON-414 naming the step", cerr)
+	}
+	seedReady(td, t, "wi_a1")
+	if err := td.modes.SetAuto(true); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond) // ~30 drain ticks
+	td.hub.mu.Lock()
+	claims := len(td.hub.claims)
+	td.hub.mu.Unlock()
+	if claims != 0 || liveCount(td) != 0 || td.q.LenPending() != 0 {
+		t.Fatalf("a bad bundle must claim and enqueue nothing: claims=%d live=%d pending=%d", claims, liveCount(td), td.q.LenPending())
+	}
+	for _, e := range td.obs.Events().SinceAfter("wi_a1", 0) {
+		if e.Kind == observe.EvSubmitRejected {
+			t.Fatalf("auto-pull enqueued and rejected a work item on a bad bundle: %+v", e)
+		}
+	}
+	if err := os.WriteFile(bundleMD, []byte("---\nsteps:\n  - { id: fix, model_candidates: [pi:sub2api-glm/glm-5.3] }\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	td.waitLive(t, "wi_a1")
 }

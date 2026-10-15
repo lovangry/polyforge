@@ -75,8 +75,8 @@ func TestTwoWorkspacesTwoYamlsOneDaemon(t *testing.T) {
 	r, _, wsA, wsB := twoWorkspaceRuntime(t)
 
 	// wsA: a project default. wsB: a per-step pin.
-	writeWorkspaceYaml(t, wsA, "steps:\n  proj-a:\n    default: { models: [w079a-flow, w079a-flow2] }\n")
-	writeWorkspaceYaml(t, wsB, "steps:\n  proj-b:\n    fix: { models: [w079b-code] }\n")
+	writeWorkspaceYaml(t, wsA, "steps:\n  proj-a:\n    default: { models: [pi:w079a-flow, pi:w079a-flow2] }\n")
+	writeWorkspaceYaml(t, wsB, "steps:\n  proj-b:\n    fix: { models: [pi:w079b-code] }\n")
 
 	if err := r.Start(context.Background(), "wi_w079intA"); err != nil {
 		t.Fatalf("Start A: %v", err)
@@ -102,7 +102,7 @@ func TestTwoWorkspacesTwoYamlsOneDaemon(t *testing.T) {
 
 	// Per-claim freshness: an edit between claims governs the NEXT claim
 	// (the audit field is gone; neither capsule carries the deleted key).
-	writeWorkspaceYaml(t, wsA, "steps:\n  proj-a:\n    default: { models: [w079-edit-v2] }\n")
+	writeWorkspaceYaml(t, wsA, "steps:\n  proj-a:\n    default: { models: [pi:w079-edit-v2] }\n")
 	if err := r.Start(context.Background(), "wi_w079intA2"); err != nil {
 		t.Fatalf("Start A2: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestSiblingProjectUnaffectedAndSharedYamlRefusesBoth(t *testing.T) {
 	r.cfg.GitRemoteBase = hub.capsuleRepoBase
 	r.cfg.WorkflowsDir = wfDir
 
-	writeWorkspaceYaml(t, ws, "steps:\n  p1:\n    default: { models: [w79/p1] }\n")
+	writeWorkspaceYaml(t, ws, "steps:\n  p1:\n    default: { models: [pi:w79/p1] }\n")
 	if err := r.Start(context.Background(), "wi_w079s1"); err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestSiblingProjectUnaffectedAndSharedYamlRefusesBoth(t *testing.T) {
 	}
 	j2 := r.jobOf("wi_w079s2")
 	j2.mu.Lock()
-	if got := j2.stepCandidates["fix"]; len(got) == 0 || got[0] != "prov/flash" {
+	if got := j2.stepCandidates["fix"]; len(got) == 0 || got[0] != "pi:prov/flash" {
 		t.Fatalf("p2 fix %v, want the bundle step-level list", got)
 	}
 	j2.mu.Unlock()

@@ -3,50 +3,46 @@ package harness
 import (
 	"os"
 	"path/filepath"
-	"reflect"
+	"strings"
 	"testing"
 )
 
-func TestServes(t *testing.T) {
-	cases := []struct {
-		h, id string
-		want  bool
-	}{
-		{"pi", "sub2api-glm/glm-5.3", true},
-		{"", "sub2api-glm/glm-5.3", true},
-		{"pi", "anthropic/claude-opus-5", true}, // provider-qualified: pi's
-		{"pi", "claude-opus-5-5", false},
-		{"pi", "s12-m1", true}, // neither shape: pi (pre-#159 meaning)
-		{"claude", "claude-opus-5-5", true},
-		{"claude", "claude-sonnet-5", true},
-		{"claude", "anthropic/claude-opus-5", false},
-		{"claude", "sub2api-glm/glm-5.3", false},
-		{"claude", "opus", false}, // aliases are not accepted
-		{"claude", "sonnet", false},
-		{"claude", "", false},
-		{"pi", "", false},
-		{"codex", "gpt-6", false},
+func TestParseCandidate(t *testing.T) {
+	ok := []struct{ in, h, m string }{
+		{"pi:sub2api-glm/glm-5.3", "pi", "sub2api-glm/glm-5.3"},
+		{"claude:claude-opus-5-5", "claude", "claude-opus-5-5"},
+		{"pi:anthropic/claude-opus-5", "pi", "anthropic/claude-opus-5"}, // the prefix, not the id shape, decides
+		{"claude:sub2api-glm/glm-5.3", "claude", "sub2api-glm/glm-5.3"},
+		{"pi:ollama/llama3:8b", "pi", "ollama/llama3:8b"}, // split on the FIRST ':'
+		{"  pi : x/y  ", "pi", "x/y"},
 	}
-	for _, c := range cases {
-		if got := Serves(c.h, c.id); got != c.want {
-			t.Errorf("Serves(%q, %q) = %v, want %v", c.h, c.id, got, c.want)
+	for _, c := range ok {
+		got, err := ParseCandidate(c.in)
+		if err != nil || got.Harness != c.h || got.Model != c.m {
+			t.Errorf("ParseCandidate(%q) = %+v, %v; want %s / %s", c.in, got, err, c.h, c.m)
 		}
 	}
-}
-
-func TestFilter(t *testing.T) {
-	mixed := []string{"sub2api-glm/glm-5.3", "claude-opus-5-5", "x/y", "claude-sonnet-5"}
-	if got := Filter("claude", mixed); !reflect.DeepEqual(got, []string{"claude-opus-5-5", "claude-sonnet-5"}) {
-		t.Fatalf("claude filter = %v", got)
+	if s, _ := Normalize("  pi : x/y "); s != "pi:x/y" {
+		t.Errorf("Normalize = %q", s)
 	}
-	if got := Filter("pi", mixed); !reflect.DeepEqual(got, []string{"sub2api-glm/glm-5.3", "x/y"}) {
-		t.Fatalf("pi filter = %v", got)
+	bad := []struct{ in, want string }{
+		{"sub2api-glm/glm-5.3", `"sub2api-glm/glm-5.3" needs a harness prefix (pi:… or claude:…)`},
+		{"claude-opus-5-5", "needs a harness prefix"},
+		{"codex:gpt-6", `unknown harness prefix "codex"`},
+		{"PI:x", `unknown harness prefix "PI"`}, // the prefix is case-sensitive
+		{"Claude:claude-opus-5-5", `unknown harness prefix "Claude"`},
+		{"ollama/llama3:8b", `unknown harness prefix "ollama/llama3"`},
+		{"claude-code:claude-opus-5-5", "unknown harness prefix"},
+		{":m", "unknown harness prefix"},
+		{"pi:", "names no model"},
+		{"claude:  ", "names no model"},
+		{"", "needs a harness prefix"},
 	}
-	if got := Filter("claude", nil); got != nil {
-		t.Fatalf("nil list must stay nil, got %v", got)
-	}
-	if got := Filter("claude", []string{"a/b"}); got == nil || len(got) != 0 {
-		t.Fatalf("no served id: want empty non-nil, got %#v", got)
+	for _, c := range bad {
+		_, err := ParseCandidate(c.in)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("ParseCandidate(%q) err = %v, want %q", c.in, err, c.want)
+		}
 	}
 	if !Valid("pi") || !Valid("claude") || Valid("") || Valid("claude-code") {
 		t.Fatal("Valid closed set")

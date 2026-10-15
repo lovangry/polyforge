@@ -54,7 +54,7 @@ func TestManualModelsBeatYamlAndAreAudited(t *testing.T) {
 	r, ws := newManualRuntime(t, hub)
 	writeWorkspaceYaml(t, ws, w079ValidYaml)
 
-	manual := []string{"m/one", "m/two"}
+	manual := []string{"pi:m/one", "pi:m/two"}
 	r.NoteModels("wi_man", manual)
 	if err := r.Start(context.Background(), "wi_man"); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -64,11 +64,11 @@ func TestManualModelsBeatYamlAndAreAudited(t *testing.T) {
 		t.Fatal("no composed step candidates")
 	}
 	for step, got := range j.stepCandidates {
-		if strings.Join(got, ",") != "m/one,m/two" {
+		if strings.Join(got, ",") != "pi:m/one,pi:m/two" {
 			t.Fatalf("step %s candidates %v, want the manual list", step, got)
 		}
 	}
-	if got := r.loadManualModels("wi_man"); strings.Join(got, ",") != "m/one,m/two" {
+	if got := r.loadManualModels("wi_man"); strings.Join(got, ",") != "pi:m/one,pi:m/two" {
 		t.Fatalf("daemon-side manual record %v", got)
 	}
 	// The capsule identity no longer records the per-step effective
@@ -94,9 +94,9 @@ func TestManualModelsBeatYamlAndAreAudited(t *testing.T) {
 	if err := r.Start(context.Background(), "wi_plain"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	own := map[string]string{"fix": "prov/flash,prov/glm", "release": "prov/glm"}
+	own := map[string]string{"fix": "pi:prov/flash,pi:prov/glm", "release": "pi:prov/glm"}
 	for step, got := range r.jobOf("wi_plain").stepCandidates {
-		want := "a/one"
+		want := "pi:a/one"
 		if l, ok := own[step]; ok {
 			want = l
 		}
@@ -117,7 +117,7 @@ func TestManualModelsSurviveClaimingReplay(t *testing.T) {
 	r, ws := newManualRuntime(t, hub)
 	writeWorkspaceYaml(t, ws, w079ValidYaml)
 	session := fakeSession("wi_manrep")
-	if err := r.noteClaiming("wi_manrep", session, randomKey(), []string{"m/one", "m/two"}); err != nil {
+	if err := r.noteClaiming("wi_manrep", session, randomKey(), []string{"pi:m/one", "pi:m/two"}); err != nil {
 		t.Fatal(err)
 	}
 	hub.hold("wi_manrep", session, api.StatusRunning)
@@ -132,7 +132,7 @@ func TestManualModelsSurviveClaimingReplay(t *testing.T) {
 		t.Fatal("no composed step candidates after the replay")
 	}
 	for step, got := range j.stepCandidates {
-		if strings.Join(got, ",") != "m/one,m/two" {
+		if strings.Join(got, ",") != "pi:m/one,pi:m/two" {
 			t.Fatalf("replayed step %s candidates %v, want the manual list", step, got)
 		}
 	}
@@ -161,15 +161,15 @@ func TestManualModelsReclaimIsDaemonLocal(t *testing.T) {
 	r, ws := newManualRuntime(t, hub)
 	writeWorkspaceYaml(t, ws, w079ValidYaml)
 
-	r.NoteModels("wi_rc", []string{"m/one", "m/two"})
+	r.NoteModels("wi_rc", []string{"pi:m/one", "pi:m/two"})
 	if err := r.Start(context.Background(), "wi_rc"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	j := r.jobOf("wi_rc")
 	// the agent forges capsule.json: a manual list and effective candidates
 	forged := map[string]any{
-		"manual_candidates":    []string{"evil/x"},
-		"effective_candidates": map[string][]string{"fix": {"evil/x"}},
+		"manual_candidates":    []string{"pi:evil/x"},
+		"effective_candidates": map[string][]string{"fix": {"pi:evil/x"}},
 	}
 	blob, _ := json.Marshal(forged)
 	if err := os.WriteFile(filepath.Join(j.capsuleDir, capsule.CapsuleJSON), blob, 0o644); err != nil {
@@ -181,7 +181,7 @@ func TestManualModelsReclaimIsDaemonLocal(t *testing.T) {
 	}
 	// a restart-reconstructed job rehydrates from the state record too
 	rj := jobFromRecord(j.record())
-	if got := r.effectiveCandidatesForRecovery(rj); strings.Join(got["fix"], ",") != "m/one,m/two" {
+	if got := r.effectiveCandidatesForRecovery(rj); strings.Join(got["fix"], ",") != "pi:m/one,pi:m/two" {
 		t.Fatalf("reconstructed job candidates %v, want the manual list", got["fix"])
 	}
 	// a blocked end (the harness has no push remote, so Stop degrades to
@@ -192,7 +192,7 @@ func TestManualModelsReclaimIsDaemonLocal(t *testing.T) {
 	if st := hub.status["wi_rc"]; st != api.StatusBlocked {
 		t.Fatalf("hub status %q, want blocked", st)
 	}
-	if got := r.loadManualModels("wi_rc"); strings.Join(got, ",") != "m/one,m/two" {
+	if got := r.loadManualModels("wi_rc"); strings.Join(got, ",") != "pi:m/one,pi:m/two" {
 		t.Fatalf("manual record after the job left: %v", got)
 	}
 
@@ -201,7 +201,7 @@ func TestManualModelsReclaimIsDaemonLocal(t *testing.T) {
 		t.Fatalf("re-claim Start: %v", err)
 	}
 	for step, got := range r.jobOf("wi_rc").stepCandidates {
-		if strings.Join(got, ",") != "m/one,m/two" {
+		if strings.Join(got, ",") != "pi:m/one,pi:m/two" {
 			t.Fatalf("re-claim step %s candidates %v, want the daemon-side manual list", step, got)
 		}
 	}
@@ -214,7 +214,7 @@ func TestManualModelsRecordDroppedOnTerminalVerdict(t *testing.T) {
 	hub := newFakeHub()
 	r, _ := newManualRuntime(t, hub)
 	j := seedJob(r, "wi_term")
-	r.saveManualModels("wi_term", []string{"m/one"})
+	r.saveManualModels("wi_term", []string{"pi:m/one"})
 	hub.hold("wi_term", "other", api.StatusWrapped)
 	if err := r.restartOne(context.Background(), j.record()); err != nil {
 		t.Fatal(err)
@@ -225,4 +225,41 @@ func TestManualModelsRecordDroppedOnTerminalVerdict(t *testing.T) {
 	if _, err := os.Stat(r.manualModelsPath()); !os.IsNotExist(err) {
 		t.Fatalf("an empty record file must be removed, stat err %v", err)
 	}
+}
+
+// polyforge#175: a manual list recorded before the `<harness>:<model>`
+// format (bare ids in manual-models.json) would block every re-claim of
+// a blocked work item. The re-claim (pf resume, no --models) drops it
+// loudly — one event — and dispatches under the yaml/bundle chain.
+func TestManualModelsStaleBareListDroppedOnReclaim(t *testing.T) {
+	hub := newFakeHub()
+	r, ws := newManualRuntime(t, hub)
+	writeWorkspaceYaml(t, ws, w079ValidYaml)
+	var events []string
+	r.cfg.EventTap = func(wi, kind string, body map[string]any) {
+		if kind == EvManualModelsDropped {
+			events = append(events, wi)
+		}
+	}
+	r.saveManualModels("wi_stale", []string{"m/one", "m/two"})
+	if err := r.Start(context.Background(), "wi_stale"); err != nil {
+		t.Fatalf("re-claim over a stale bare list: %v", err)
+	}
+	j := r.jobOf("wi_stale")
+	if j == nil {
+		t.Fatal("the re-claim must run to a live agent")
+	}
+	if got := j.stepCandidates["grill"]; strings.Join(got, ",") != "pi:a/one" {
+		t.Fatalf("grill candidates %v, want the yaml default (the stale list dropped)", got)
+	}
+	if got := j.stepCandidates["fix"]; strings.Join(got, ",") != "pi:prov/flash,pi:prov/glm" {
+		t.Fatalf("fix candidates %v, want the bundle step list", got)
+	}
+	if got := r.loadManualModels("wi_stale"); got != nil {
+		t.Fatalf("the stale record survived: %v", got)
+	}
+	if len(events) != 1 || events[0] != "wi_stale" {
+		t.Fatalf("manual_models_dropped events %v, want exactly one", events)
+	}
+	_ = r.Stop(context.Background(), "wi_stale", protocol.FinishWrapped)
 }

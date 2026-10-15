@@ -17,7 +17,7 @@ submit as usual.
 ## Command
 
 ```
-pf submit <id> [--priority low|normal|high|urgent] [--models a,b,c]
+pf submit <id> [--priority low|normal|high|urgent] [--models <harness>:<model>,...]
 ```
 
 `--priority` defaults to `normal`. `--models` is a manual model-candidate
@@ -25,7 +25,14 @@ list for this work item: it is the candidate chain of every step (advancing
 on model-class failures like any list), kept by this daemon only (across its
 restarts and `pf resume`); a re-claim on another machine uses that machine's
 settings. Non-empty, comma-separated, no empty
-or duplicate ids, else a local bad-input refusal. Candidate precedence,
+or duplicate candidates, else a local bad-input refusal. Every candidate is
+`<harness>:<model>` with harness `pi` or `claude`, split on the first `:`
+(e.g. `--models claude:claude-opus-5-5,pi:sub2api-glm/glm-5.3`); a candidate
+without a prefix, with an unknown prefix or an empty model is refused up
+front, naming it (`"sub2api-glm/glm-5.3" needs a harness prefix (pi:… or
+claude:…)`). A chain may mix harnesses: a switch onto a candidate of another
+harness starts a fresh session with the previous transcript as read-only
+reference. Candidate precedence,
 highest first: `--models` > yaml `steps.<project>.<step-id>.models` > bundle step
 `model_candidates` > yaml `steps.<project>.default.models` > bundle
 `defaults.model_candidates`. Before the daemon is

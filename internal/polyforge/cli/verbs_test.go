@@ -985,7 +985,7 @@ func TestVerbSubmitModels(t *testing.T) {
 	d.answer("POST", "/jobs/wi_abc/claim", `{"accepted":true,"work_item_id":"wi_abc"}`)
 	env := map[string]string{"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock}
 
-	for _, bad := range []string{"a,,b", "a,a", " ", ",", "a, a"} {
+	for _, bad := range []string{"pi:a,,pi:b", "pi:a,pi:a", " ", ",", "pi:a, pi:a", "p/a", "pi:a,p/b", "codex:a", "claude:"} {
 		before := len(aihubRec.all())
 		code, _, stderr := runPf(t, env, "submit", "wi_abc", "--models", bad)
 		if code == 0 || !strings.Contains(stderr, "--models") {
@@ -996,11 +996,16 @@ func TestVerbSubmitModels(t *testing.T) {
 		}
 	}
 
-	if code, _, stderr := runPf(t, env, "submit", "wi_abc", "--models", " p/a , p/b"); code != 0 {
+	// polyforge#175: the prefix is mandatory — the refusal names the
+	// candidate and the two prefixes, before any request
+	if _, _, stderr := runPf(t, env, "submit", "wi_abc", "--models", "pi:x/y,sub2api-glm/glm-5.3"); !strings.Contains(stderr, `submit: --models: "sub2api-glm/glm-5.3" needs a harness prefix (pi:… or claude:…)`) {
+		t.Fatalf("unprefixed --models refusal: %q", stderr)
+	}
+	if code, _, stderr := runPf(t, env, "submit", "wi_abc", "--models", " pi:p/a , claude:claude-opus-5-5"); code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
 	got := d.rec.all()
-	if len(got) != 1 || !strings.Contains(got[0].Body, `"models":["p/a","p/b"]`) {
+	if len(got) != 1 || !strings.Contains(got[0].Body, `"models":["pi:p/a","claude:claude-opus-5-5"]`) {
 		t.Fatalf("claim body = %+v, want the trimmed models list", got)
 	}
 	// without the flag the body carries no models key

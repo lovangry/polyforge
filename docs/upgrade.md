@@ -374,6 +374,9 @@ in quick-fix).
 
 ### The three workspaces
 
+(These lists are the #169 rewrite; since polyforge#175 every candidate
+also needs its `pi:` / `claude:` prefix — see that section's rewrite.)
+
 All three declare only `default` and `code` today, in the old `models:`
 shape. Besides the shape change, the old `code:` (a kind) covered every
 kind:code step; as a step id it governs only the `code` step
@@ -461,6 +464,15 @@ Run `pf doctor` after the edit: `workspace yaml` must pass.
 
 ## Per-step harness: pi or Claude Code (polyforge#159)
 
+> **Superseded in part by polyforge#175** — see "Model candidates name
+> their harness: `<harness>:<model>`" below. The `harness` key (yaml and
+> bundle), the separate harness chain, the id-shape compatibility rule
+> and the "model/harness mismatch" refusal described in this section
+> are **removed**: every candidate now carries its harness as a
+> mandatory `pi:` / `claude:` prefix, and a step's chain may cross
+> harnesses. What a claude step runs, its credentials and `claude_bin`
+> below still hold.
+
 A step can now run on **Claude Code** instead of pi. The choice is a
 second per-step property next to `models`, in the same `steps:` entries:
 
@@ -489,7 +501,7 @@ steps:
   the daemon (state.json); a yaml edit governs the next claim, never an
   in-flight work item.
 
-### Which models a harness can run (compatibility)
+### Which models a harness can run (compatibility) — removed by polyforge#175
 
 Read off the model id, no registry:
 
@@ -661,3 +673,197 @@ harness-root layout, polyforge#171):
 - the pairing clause above whenever the shape says rejected, and a
   remove-it clause whenever the settings env block carries
   `CLAUDE_CONFIG_DIR` (it would override the adapter's value).
+
+## Model candidates name their harness: `<harness>:<model>` (polyforge#175)
+
+polyforge#159 made the harness a per-step setting (a `harness` key in the
+workspace yaml and the bundles) and guessed each candidate's harness from
+the shape of its id (`claude-…` → claude, anything else → pi). That
+could not express one step trying Claude Code first and pi second, and
+the same model can run on both harnesses (Opus through pi + sub2api, or
+through Claude Code's own API), so the guess was unreliable. The harness
+is now part of every candidate.
+
+### The format
+
+Every model candidate is `<harness>:<model>`:
+
+- `harness` is `pi` or `claude` (closed set);
+- the prefix is case-sensitive: `PI:` / `Claude:` are unknown prefixes;
+- the string is split on the **first** `:` — the model keeps any `/` and
+  any further `:` (`pi:ollama/llama3:8b` is pi running `ollama/llama3:8b`);
+- the model part is exactly what that harness's `--model` gets
+  (`claude:claude-opus-5-5` runs `claude … --model claude-opus-5-5`,
+  `pi:sub2api-glm/glm-5.3` runs `pi … --model sub2api-glm/glm-5.3`).
+
+The prefix is **mandatory** and is the whole truth: there is no inference
+from the id any more (`pi:claude-opus-5-5` is a pi candidate), no
+`harness` key and no "this harness serves none of the list" check. One
+format everywhere:
+
+| where | key |
+|---|---|
+| `.polyforge.yaml` | `steps.<project>.<default\|step-id>.models` |
+| bundle frontmatter | step `model_candidates`, `defaults.model_candidates` |
+| CLI | `pf submit <id> --models claude:claude-opus-5-5,pi:sub2api-glm/glm-5.3` |
+
+The precedence of the model chain is unchanged: `pf submit --models` >
+`steps.<project>.<step-id>.models` > bundle step `model_candidates` >
+`steps.<project>.default.models` > bundle `defaults.model_candidates`.
+A step with no list (or a declared-empty one) runs pi's own default model.
+
+A chain may **mix harnesses**: the fallback walks the candidates in order
+(D7 unchanged: switch on auth / billing / unknown model, same-model retry
+on rate limit / 5xx), and each dispatch runs on its candidate's harness.
+A switch always starts a fresh session; when the next candidate is on
+another harness the previous dispatch's transcript (the other harness's
+JSONL) rides the new prompt as read-only reference — the #159 mechanism.
+Same-step continuations (an answered question, the first retry after a
+crash) still resume the same session when the harness is unchanged.
+
+### Refusals (no backward compatibility)
+
+| what | where it refuses | message (example) |
+|---|---|---|
+| a candidate without a prefix, with an unknown prefix, or with an empty model | `.polyforge.yaml`: every claim of that workspace's projects, DAEMON-414 before anything is claimed (the work item stays queued); `pf doctor` `workspace yaml` fails the same | `steps.polyforge.code.models[1]: "sub2api-glm/glm-5.3" needs a harness prefix (pi:… or claude:…)` |
+| the `harness` key in a yaml step entry | same as above | ``steps.polyforge.fix.harness: the `harness` key was removed (polyforge#175) — move it into each model candidate's prefix, e.g. [claude:claude-opus-5-5, pi:sub2api-glm/glm-5.3] (see docs/upgrade.md)`` |
+| an unprefixed `model_candidates` entry, or a `harness` key under a bundle step or `defaults` | the bundle fails to load: a claim of a work item on it is refused before it is made (DAEMON-414, the work item stays queued; `pf submit` gets the refusal directly and auto-pull skips such work items, logging the refusal once; should the bundle only be known after the claim, the claim ends `blocked` with the same text); `pf doctor` `workspace yaml` names file and step. The bundle's step ids still count as legal yaml keys | `workflow bundle bug-fix refused: …/bug-fix/workflow.md: step root-cause: model_candidates[0]: "sub2api-claude/pi-claude-opus-5" needs a harness prefix (pi:… or claude:…)` |
+| `pf submit --models` with an unprefixed candidate | the CLI, before any request (the daemon route refuses the same with DAEMON-400) | `submit: --models: "sub2api-glm/glm-5.3" needs a harness prefix (pi:… or claude:…)` |
+
+So, **as with #169, edit all three workspace files together with the
+deploy**: until a file is rewritten, no work item of that workspace's
+projects is claimed on that machine. The five shipped bundles are
+already rewritten (every candidate `pi:` — they ran on pi before).
+
+In-flight work items are unaffected: their candidate lists were
+snapshotted at claim time in the daemon's `state.json`; a record written
+before this version (bare ids plus the #159 `step_harness`) is read with
+each bare id on that step's old harness (pi when none), keeping exactly
+the candidates the step walked before, so recovery continues. A
+`pf submit --models` list given before the upgrade to a work item that
+is later re-claimed on the same machine (the daemon keeps it in
+`manual-models.json`, e.g. `pf resume` of a blocked work item) still has
+bare ids: the re-claim drops it — one stderr line and a
+`manual_models_dropped` event name the list — and the step chains fall
+back to the yaml/bundle levels. To pin a manual chain again, submit the
+work item with a prefixed `--models` once it is queued. One edge
+case changes harness: an in-flight step whose #159 harness was `claude`
+but which had **no** candidate list (Claude Code's own default model)
+recovers on pi's default model — the new format cannot express "claude
+with its default model"; give such a step a `claude:` candidate.
+
+### Before / after
+
+```yaml
+# before (#159)
+steps:
+  polyforge:
+    default: { models: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+    review:  { models: [claude-opus-5-5, claude-sonnet-5], harness: claude }
+
+# after (#175)
+steps:
+  polyforge:
+    default: { models: [pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5] }
+    review:  { models: [claude:claude-opus-5-5, claude:claude-sonnet-5] }
+    # new: one step, two harnesses — Claude Code's API first, pi + glm as fallback
+    fix:     { models: [claude:claude-opus-5-5, pi:sub2api-glm/glm-5.3] }
+```
+
+```
+# before                                        # after
+pf submit wi_x --models a/b,claude-opus-5-5     pf submit wi_x --models pi:a/b,claude:claude-opus-5-5
+```
+
+A bundle step: `model_candidates: [sub2api-glm/glm-5.3]` becomes
+`model_candidates: [pi:sub2api-glm/glm-5.3]`; a `harness: claude` on the
+step is deleted and its candidates get `claude:`.
+
+`pf doctor`: `harness claude` runs only when some resolved candidate is
+`claude:…`, and lists each such step's whole chain (each candidate's
+harness is its prefix) with the level it came from; `workspace yaml`
+also loads the daemon's installed bundles. The #171 claude-config
+authority-layer checks are unchanged.
+
+### Rewriting the three workspaces (examples — edit the files yourself)
+
+The rule: a bare id ran on its step's harness — `harness: claude` when
+the entry (or the bundle step) said so, otherwise pi — and #159 silently
+**skipped** ids the step's harness could not run (`claude-…` ids on a pi
+step, everything else on a claude step). Prefix each id accordingly. An
+id that was being skipped can now either be dropped (exactly today's
+behaviour) or kept with its real harness (it will then actually run, in
+its place in the chain — a behaviour change that adds Claude spend; the
+examples below keep today's behaviour and show that alternative as a
+comment). Keep each file's header comment but drop any `harness`
+wording.
+
+osp-ws (`/root/code/aicoding/osp-ws/.polyforge.yaml`):
+
+```yaml
+steps:
+  polyforge:
+    default:
+      models: [pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5, pi:sub2api-openai/gpt-6-astra]
+    smoke:
+      models: [claude:claude-opus-5-5]   # the smoke bundle's step ran on claude
+    fix:
+      models: [claude:claude-opus-5-5]   # was: harness: claude + [claude-opus-5-5]
+    code:
+      models: [pi:sub2api-glm/glm-5.3-flash, pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5]
+  pi:
+    default:
+      models: [pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5, pi:sub2api-openai/gpt-6-astra]
+    smoke:
+      models: [claude:claude-opus-5-5]
+    code:
+      models: [pi:sub2api-glm/glm-5.3-flash, pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5]
+  tsshd:
+    default:
+      models: [pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5, pi:sub2api-openai/gpt-6-astra]
+    smoke:
+      models: [claude:claude-opus-5-5]
+    code:
+      models: [pi:sub2api-glm/glm-5.3-flash, pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5]
+```
+
+(`smoke` is the step id of a smoke bundle that is not among the five
+shipped ones: if that bundle ran the step on pi rather than claude, the
+bare `claude-opus-5-5` was being skipped there — write the list that
+bundle step should really walk. The bundle itself must also be
+rewritten: no `harness` key, prefixed `model_candidates`.)
+
+gmi-ws (`/root/code/aicoding/gmi-ws/.polyforge.yaml`):
+
+```yaml
+steps:
+  ieops:
+    default:
+      # today's behaviour: #159 skipped claude-opus-5-5 on these (pi) steps.
+      # Alternative — keep it as a real Claude Code fallback (adds Claude spend):
+      #   models: [pi:sub2api-glm/glm-5.3, claude:claude-opus-5-5, pi:sub2api-openai/gpt-6-astra]
+      models: [pi:sub2api-glm/glm-5.3, pi:sub2api-openai/gpt-6-astra]
+    smoke:
+      models: [claude:claude-opus-5-5]
+    code:
+      # today's behaviour: claude-sonnet-5-5 was skipped likewise.
+      # Alternative (adds Claude spend):
+      #   models: [pi:sub2api-glm/glm-5.3, claude:claude-sonnet-5-5]
+      models: [pi:sub2api-glm/glm-5.3]
+```
+
+yf-ws (`/root/code/aicoding/yf-ws/.polyforge.yaml`):
+
+```yaml
+steps:
+  yingfang:
+    default:
+      models: [pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5, pi:sub2api-openai/gpt-6-astra]
+    smoke:
+      models: [claude:claude-opus-5-5]
+    code:
+      models: [pi:sub2api-glm/glm-5.3-flash, pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5]
+```
+
+Run `pf doctor` after the edit: `workspace yaml` must pass, and
+`harness claude` must pass wherever a `claude:` candidate remains.
