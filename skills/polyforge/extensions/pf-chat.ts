@@ -12,7 +12,10 @@
 // lines, each of which wakes the agent (sendMessage + triggerTurn). Progress
 // never enters the model context: every 2s the widget is refreshed from
 // `pf watch --chat <id> --statusline` (reads the watcher's progress file).
-// Without pf or a daemon this does nothing.
+// Without pf or a daemon this does nothing — except that a failed
+// `pf chat init` is retried every RESTART_MS until the session ends, so a
+// daemon that comes up after the pi session (e.g. after a reboot) is picked
+// up without reopening the session.
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { isToolCallEventType, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -30,13 +33,19 @@ export default function (pi: ExtensionAPI) {
   let watcher: ChildProcess | undefined;
   let poller: ReturnType<typeof setInterval> | undefined;
   let restart: ReturnType<typeof setTimeout> | undefined;
+  let initRetry: ReturnType<typeof setTimeout> | undefined;
+  // Bumped on every stop; an in-flight or scheduled `chat init` from an
+  // older session generation drops its result instead of starting anything.
+  let generation = 0;
   let stopped = true;
 
   function stopWatching(ctx?: { ui: { setWidget(key: string, content: string[] | undefined): void } }) {
     stopped = true;
+    generation++;
     if (poller) clearInterval(poller);
     if (restart) clearTimeout(restart);
-    poller = restart = undefined;
+    if (initRetry) clearTimeout(initRetry);
+    poller = restart = initRetry = undefined;
     const child = watcher;
     watcher = undefined;
     if (child && !child.killed) child.kill("SIGTERM");
@@ -69,27 +78,43 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     stopWatching(ctx);
     chatId = "";
-    try {
-      const sessionId = ctx.sessionManager.getSessionId();
-      const res = await pi.exec("pf", ["chat", "init", "--harness", "pi", "--harness-session", sessionId]);
-      const id = res.stdout.trim();
-      if (res.code === 0 && /^chat_[A-Za-z0-9_]+$/.test(id)) chatId = id;
-    } catch {
-      // pf missing or daemon down: run without a chat id
-    }
-    if (!chatId) return;
-    stopped = false;
-    startWatcher();
-    const id = chatId;
-    poller = setInterval(async () => {
+    const gen = generation;
+
+    // tryInit asks the daemon for this session's chat id. On failure (pf
+    // missing, daemon down) it schedules itself again after RESTART_MS —
+    // like the watcher's restart loop — until it succeeds or the session
+    // ends. Retrying is safe: the daemon maps (harness, harness-session) to
+    // the same chat id idempotently.
+    const tryInit = async () => {
+      initRetry = undefined;
+      let id = "";
       try {
-        const res = await pi.exec("pf", ["watch", "--chat", id, "--statusline"]);
-        const lines = res.code === 0 ? res.stdout.split("\n").filter((l) => l.trim() !== "") : [];
-        ctx.ui.setWidget(WIDGET_KEY, lines.length > 0 ? lines : undefined);
+        const sessionId = ctx.sessionManager.getSessionId();
+        const res = await pi.exec("pf", ["chat", "init", "--harness", "pi", "--harness-session", sessionId]);
+        const out = res.stdout.trim();
+        if (res.code === 0 && /^chat_[A-Za-z0-9_]+$/.test(out)) id = out;
       } catch {
-        ctx.ui.setWidget(WIDGET_KEY, undefined);
+        // pf missing or daemon down: retry below
       }
-    }, POLL_MS);
+      if (gen !== generation) return; // session ended or restarted meanwhile
+      if (!id) {
+        initRetry = setTimeout(tryInit, RESTART_MS);
+        return;
+      }
+      chatId = id;
+      stopped = false;
+      startWatcher();
+      poller = setInterval(async () => {
+        try {
+          const res = await pi.exec("pf", ["watch", "--chat", id, "--statusline"]);
+          const lines = res.code === 0 ? res.stdout.split("\n").filter((l) => l.trim() !== "") : [];
+          ctx.ui.setWidget(WIDGET_KEY, lines.length > 0 ? lines : undefined);
+        } catch {
+          ctx.ui.setWidget(WIDGET_KEY, undefined);
+        }
+      }, POLL_MS);
+    };
+    await tryInit();
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
