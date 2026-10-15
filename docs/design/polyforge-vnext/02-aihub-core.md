@@ -191,7 +191,7 @@ CREATE TABLE wi_dependencies (
 
 - **同 project 硬边界**：边两端必须属于同一 project；跨 project 依赖边一律拒绝（`CORE-400`）。无调用方可见性的 project 中的 WI 本身不可见（§4.10），不会成为边端。
 - **防环**：`blocks` 边写入前，在既有 `blocks` 边集合上做有向可达性检测，会构成有向环（含自环）→ `CORE-409`（`reason=DEPENDENCY_CYCLE`）；`supersedes` 边同样检测（supersedes 链不得成环）；`related` 无方向语义，不参与环检测。
-- **blocker 必须是执行票（polyforge#161）**：`blocks` 边的 blocking 方必须已绑 bundle（`bundle_name` 非空）；登记票与 epic 父票（父票恒为登记票，§4.4）永远不会 `wrapped`，以其为 blocker 一律拒绝（`CORE-400`，`reason=BLOCKER_NOT_EXECUTABLE`，「先绑 bundle」）。这也覆盖「子票等其 epic 父票」的情形；不另设父子专用规则。
+- **blocker 必须是执行票（polyforge#161）**：`blocks` 边的 blocking 方必须已绑 bundle（`bundle_name` 非空）；登记票与 epic 父票（父票恒为登记票，§4.4）永远不会 `wrapped`，以其为 blocker 一律拒绝（`CORE-400`，`reason=BLOCKER_NOT_EXECUTABLE`，「先绑 bundle」）。这也覆盖「子票等其 epic 父票」的情形；不另设父子专用规则。对称地，仍是任一 `blocks` 边 blocker 的 WI 不得解绑 bundle（`PATCH bundle_name=null` → `CORE-400`，`reason=BLOCKER_STILL_BLOCKS`，列出被阻塞票，先删边）；改绑另一 bundle 仍允许。
 - **幂等**：重复添加已存在的边是 no-op，答复当前依赖视图。
 - **不做存在性探测**：建边/删边/建票 `after` 中指向调用方不可读 project 的 WI，与不存在的 WI 答同一 `CORE-404`（`work item <ref>`）。
 - 删除边即物理删除行；依赖关系变更不新增 `wi_events` 事件类型（`§5.1a` 枚举不变）。

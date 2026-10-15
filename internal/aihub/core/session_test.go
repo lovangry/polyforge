@@ -958,3 +958,36 @@ func TestDependencyOnlyWrappedBlockerReleases(t *testing.T) {
 		t.Fatalf("running WI carries waiting_for %+v", w)
 	}
 }
+
+// polyforge#161: a work item that still blocks another cannot unbind its
+// bundle (it could never wrap); rebinding stays allowed, and unbinding
+// works once the edge is gone.
+func TestUnbindRefusedWhileBlocking(t *testing.T) {
+	env := newEnv(t)
+	a := mustCreateExecWI(t, env, "blocker", nil, "")
+	b := mustCreateExecWI(t, env, "dependent", nil, "")
+	if err := env.WIs.AddDependency(a, b, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	bSlug := func() string {
+		wi, err := env.WIs.Get(b, GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return wi.Slug
+	}()
+	_, err := env.WIs.Patch(a, map[string]json.RawMessage{"bundle_name": json.RawMessage(`null`)})
+	if !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "BLOCKER_STILL_BLOCKS" ||
+		!strings.Contains(err.Error(), bSlug) || !strings.Contains(err.Error(), "remove the edges first") {
+		t.Fatalf("unbind of a blocker: %v", err)
+	}
+	if _, err := env.WIs.Patch(a, map[string]json.RawMessage{"bundle_name": json.RawMessage(`"other-bundle"`)}); err != nil {
+		t.Fatalf("rebind of a blocker refused: %v", err)
+	}
+	if err := env.WIs.RemoveDependency(a, b, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.WIs.Patch(a, map[string]json.RawMessage{"bundle_name": json.RawMessage(`null`)}); err != nil {
+		t.Fatalf("unbind after edge removal: %v", err)
+	}
+}

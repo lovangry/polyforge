@@ -596,6 +596,39 @@ func diagnoseR2Window(q queryRower, wiID string) error {
 	return nil
 }
 
+// refuseUnbindWhileBlockingTx refuses unbinding the bundle of a work item
+// that is still the blocker of a `blocks` edge (polyforge#161): without a
+// bundle it can never wrap, so its dependents would wait forever.
+// Rebinding to another bundle stays allowed.
+func refuseUnbindWhileBlockingTx(tx *sql.Tx, wiID string) error {
+	rows, err := tx.Query(`SELECT p.name, w.seq FROM wi_dependencies d
+		JOIN work_items w ON w.id = d.blocked_wi_id
+		JOIN projects p ON p.id = w.project_id
+		WHERE d.blocking_wi_id=?1 AND d.kind='blocks' ORDER BY w.seq`, wiID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var dependents []string
+	for rows.Next() {
+		var project string
+		var seq int64
+		if err := rows.Scan(&project, &seq); err != nil {
+			return err
+		}
+		dependents = append(dependents, project+"#"+strconv.FormatInt(seq, 10))
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(dependents) > 0 {
+		return Fail(api.ErrCoreBadInput, "BLOCKER_STILL_BLOCKS",
+			"cannot unbind the bundle: this work item still blocks %s — remove the edges first (`pf file dep rm`)",
+			strings.Join(dependents, ", "))
+	}
+	return nil
+}
+
 // Patch updates the mutable field set. fields maps field name → raw JSON.
 func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*api.WorkItem, error) {
 	// Bundle fields (w140): parsed up front (pure — no DB access); the R2
@@ -717,6 +750,9 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 			if err := refuseBundleWithChildrenTx(tx, id); err != nil {
 				return nil, err
 			}
+		} else if err := refuseUnbindWhileBlockingTx(tx, id); err != nil {
+			// polyforge#161: an unbound blocker could never wrap.
+			return nil, err
 		}
 		name := bundleRef(bp.Name)
 		sets = append(sets, "bundle_name=?")
