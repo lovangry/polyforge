@@ -364,7 +364,6 @@ func New(cfg Config) (*Daemon, error) {
 				SpawnN:           in.SpawnN,
 				Spawner:          in.Spawner,
 				StepCandidates:   in.StepCandidates,
-				StepHarness:      in.StepHarness,
 				InterruptedCause: in.InterruptedCause,
 				// polyforge#171: the resume decision for claude dispatches
 				// locates the native session under the claude-config dir
@@ -965,7 +964,7 @@ func (d *Daemon) fetchAutoWave() {
 	var items []api.WorkItem
 	denied := false
 	for _, project := range d.cfg.Mapping.Projects() {
-		if _, lerr := d.rt.LoadWorkspace(project, "", nil); lerr != nil {
+		if _, lerr := d.rt.LoadWorkspace(project); lerr != nil {
 			if d.yamlRefused == nil {
 				d.yamlRefused = map[string]string{}
 			}

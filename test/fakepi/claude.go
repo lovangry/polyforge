@@ -192,6 +192,7 @@ func runClaude() {
 		"settings_cfg_dir_set":        settingsCfgDirSet,
 		"prompt_bytes":                len(prompt),
 		"prompt_has_handoff":          strings.Contains(string(prompt), "# Handoff from step"),
+		"prompt_has_reference":        strings.Contains(string(prompt), "Previous attempt (read-only reference)"),
 		"wi":                          wi,
 	})
 	if ok && entry.SpawnN > 0 {

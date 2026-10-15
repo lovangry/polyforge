@@ -200,7 +200,7 @@ func (r *Runtime) resumeClaiming(ctx context.Context) {
 		// The claim is already open server-side, so this is the one place
 		// the yaml is read after a claim: an invalid file here
 		// compensates with the D5 blocked end like any post-claim refusal.
-		wcfg, werr := r.LoadWorkspace(resp.WorkItem.ProjectName, resp.Claim.BundleName, rec.Models)
+		wcfg, werr := r.LoadWorkspace(resp.WorkItem.ProjectName)
 		if werr != nil {
 			var ae *api.Error
 			note := werr.Error()

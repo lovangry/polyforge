@@ -1,10 +1,10 @@
 package driver
 
-// harness_test.go: polyforge#159 in the driver — the per-step harness
-// (claim-time map > bundle choice > pi), the candidate list FILTERED to
-// the ids the step's harness serves (switch and exhaustion walk the
-// filtered list, so incompatible candidates are skipped), and the spawn
-// adapter's harness-aware resume/fresh choice.
+// harness_test.go: the step harness in the driver — polyforge#175:
+// each candidate is `<harness>:<model>` and its prefix is the harness of
+// the dispatch that runs it (one chain may cross harnesses; the switch
+// walks it in order), New refuses an unprefixed candidate, and the spawn
+// adapter's harness-aware resume/fresh choice (#159).
 
 import (
 	"context"
@@ -17,53 +17,58 @@ import (
 	"github.com/silgrid/polyforge/internal/common/harness"
 )
 
-func harnessDriver(t *testing.T, stepHarness map[string]string, bundleHarness string, list []string, attempts []capsule.Attempt) *Driver {
+func harnessDriver(t *testing.T, list []string, attempts []capsule.Attempt) *Driver {
 	t.Helper()
-	dir := t.TempDir()
-	execPath := filepath.Join(dir, capsule.ExecutionJSON)
-	seedExecution(t, execPath, "review", capsule.StepInProgress, attempts)
-	d, err := New(Config{
-		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
-		ExecPath: execPath,
-		Workflow: &Workflow{Steps: []StepSpec{
-			{ID: "review", ContextPolicy: "fresh", Harness: bundleHarness, ModelCandidates: []string{"bundle/x"}},
-		}, MaxTotal: 4, MaxPerStep: 2},
-		Spawner:        &fakeSpawner{},
-		Log:            &eventLog{},
-		StepCandidates: map[string][]string{"review": list},
-		StepHarness:    stepHarness,
-	})
+	d, err := harnessDriverErr(t, list, attempts)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return d
 }
 
-func TestHarnessFiltersCandidates(t *testing.T) {
-	mixed := []string{"g/glm", "claude-opus-5-5", "g/flash", "claude-sonnet-5"}
+func harnessDriverErr(t *testing.T, list []string, attempts []capsule.Attempt) (*Driver, error) {
+	t.Helper()
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, capsule.ExecutionJSON)
+	seedExecution(t, execPath, "review", capsule.StepInProgress, attempts)
+	cands := map[string][]string{}
+	if list != nil {
+		cands["review"] = list
+	}
+	return New(Config{
+		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
+		ExecPath: execPath,
+		Workflow: &Workflow{Steps: []StepSpec{
+			{ID: "review", ContextPolicy: "fresh", ModelCandidates: []string{"pi:bundle/x"}},
+		}, MaxTotal: 4, MaxPerStep: 2},
+		Spawner:        &fakeSpawner{},
+		Log:            &eventLog{},
+		StepCandidates: cands,
+	})
+}
+
+func TestCandidatePrefixPicksHarness(t *testing.T) {
+	mixed := []string{"claude:claude-opus-5-5", "pi:sub2api-glm/glm-5.3", "claude:claude-sonnet-5"}
 	model := infraAttempt(1, FailExitModel)
 	cases := []struct {
-		name        string
-		stepHarness map[string]string
-		bundle      string
-		attempts    []capsule.Attempt
-		wantH       string
-		wantModel   string
+		name      string
+		list      []string
+		attempts  []capsule.Attempt
+		wantH     string
+		wantModel string
 	}{
-		{"claude step takes the first claude id", map[string]string{"review": "claude"}, "", nil, "claude", "claude-opus-5-5"},
-		{"claude step switches to the next claude id (pi ids skipped)", map[string]string{"review": "claude"}, "", []capsule.Attempt{model}, "claude", "claude-sonnet-5"},
-		{"claude step caps at its last claude id", map[string]string{"review": "claude"}, "", []capsule.Attempt{model, infraAttempt(2, FailExitModel)}, "claude", "claude-sonnet-5"},
-		{"pi step takes the first pi id", map[string]string{"review": "pi"}, "", nil, "pi", "g/glm"},
-		{"pi step switches to the next pi id (claude ids skipped)", map[string]string{"review": "pi"}, "", []capsule.Attempt{model}, "pi", "g/flash"},
-		{"no map: the bundle's own harness", nil, "claude", nil, "claude", "claude-opus-5-5"},
-		{"nothing chosen: pi", nil, "", nil, "pi", "g/glm"},
-		// a pre-#159 state record rehydrates no step_harness map at all:
-		// every step resolves to pi and never dispatches a claude id
-		{"pre-#159 record (empty map): pi", map[string]string{}, "", nil, "pi", "g/glm"},
+		{"head runs on its own harness", mixed, nil, "claude", "claude-opus-5-5"},
+		{"a model-class failure moves to the next candidate, across harnesses", mixed, []capsule.Attempt{model}, "pi", "sub2api-glm/glm-5.3"},
+		{"and back", mixed, []capsule.Attempt{model, infraAttempt(2, FailExitModel)}, "claude", "claude-sonnet-5"},
+		{"the pointer caps at the last candidate", mixed, []capsule.Attempt{model, infraAttempt(2, FailExitModel), infraAttempt(3, FailExitModel)}, "claude", "claude-sonnet-5"},
+		{"the prefix, not the id shape, decides", []string{"pi:claude-opus-5-5"}, nil, "pi", "claude-opus-5-5"},
+		{"the model keeps every further ':'", []string{"pi:ollama/llama3:8b"}, nil, "pi", "ollama/llama3:8b"},
+		{"a present-empty list: pi's own default model", []string{}, nil, "pi", ""},
+		{"no claim-time entry: the bundle's own list", nil, nil, "pi", "bundle/x"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			d := harnessDriver(t, c.stepHarness, c.bundle, mixed, c.attempts)
+			d := harnessDriver(t, c.list, c.attempts)
 			sp, _, err := d.prepareDispatch("review")
 			if err != nil {
 				t.Fatal(err)
@@ -75,23 +80,48 @@ func TestHarnessFiltersCandidates(t *testing.T) {
 	}
 }
 
-// The switch decision walks the filtered list: on a claude step with one
-// claude candidate a model-class failure is an exhaustion, never a
-// switch onto a pi id.
-func TestHarnessSwitchSkipsIncompatible(t *testing.T) {
-	d := harnessDriver(t, map[string]string{"review": "claude"}, "", []string{"claude-opus-5-5", "g/glm"}, nil)
+// The switch decision walks the whole chain: a claude candidate's
+// model-class failure switches onto the next candidate even when it is
+// a pi one, and the switch starts a fresh session (the spawn adapter
+// then carries the old transcript as reference).
+func TestSwitchCrossesHarnesses(t *testing.T) {
+	d := harnessDriver(t, []string{"claude:claude-opus-5-5", "pi:g/glm"}, nil)
 	d.mu.Lock()
 	dec := d.decideFailureLocked("review", d.exec.Steps["review"], &StepFailure{Cause: FailExitModel})
 	d.mu.Unlock()
-	if dec.Switch || !dec.Exhausted {
-		t.Fatalf("decision %+v, want exhausted (the only claude candidate is in use)", dec)
+	if !dec.Switch || !dec.Fresh || dec.From != "claude:claude-opus-5-5" || dec.To != "pi:g/glm" {
+		t.Fatalf("decision %+v, want a fresh switch claude:… → pi:…", dec)
 	}
-	d = harnessDriver(t, map[string]string{"review": "claude"}, "", []string{"claude-opus-5-5", "g/glm", "claude-sonnet-5"}, nil)
+	d = harnessDriver(t, []string{"claude:claude-opus-5-5"}, nil)
 	d.mu.Lock()
 	dec = d.decideFailureLocked("review", d.exec.Steps["review"], &StepFailure{Cause: FailExitModel})
 	d.mu.Unlock()
-	if !dec.Switch || dec.From != "claude-opus-5-5" || dec.To != "claude-sonnet-5" {
-		t.Fatalf("decision %+v, want a switch opus → sonnet", dec)
+	if dec.Switch || !dec.Exhausted {
+		t.Fatalf("decision %+v, want exhausted", dec)
+	}
+}
+
+// New refuses a candidate without a valid `<harness>:` prefix — in the
+// claim-time map or in the bundle's own list a step would walk.
+func TestNewRefusesUnprefixedCandidates(t *testing.T) {
+	for in, want := range map[string]string{
+		"g/glm":       `step review: models[1] (the claim-time list: yaml, bundle or pf submit --models): "g/glm" needs a harness prefix (pi:… or claude:…)`,
+		"codex:gpt-6": `unknown harness prefix "codex"`,
+		"claude:":     "names no model",
+	} {
+		if _, err := harnessDriverErr(t, []string{"pi:ok/x", in}, nil); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%q: err %v, want %q", in, err, want)
+		}
+	}
+	dir := t.TempDir()
+	_, err := New(Config{
+		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
+		ExecPath: filepath.Join(dir, capsule.ExecutionJSON),
+		Workflow: &Workflow{Steps: []StepSpec{{ID: "fix", ContextPolicy: "fresh", ModelCandidates: []string{"bundle/x"}}}},
+		Spawner:  &fakeSpawner{},
+	})
+	if err == nil || !strings.Contains(err.Error(), `step fix: model_candidates[0] (the bundle's own list): "bundle/x" needs a harness prefix`) {
+		t.Fatalf("bundle list: %v", err)
 	}
 }
 
@@ -196,7 +226,10 @@ func entries0Transcript(t *testing.T, capDir string) string {
 	return entries[0].Transcript
 }
 
-func TestWorkflowHarnessParse(t *testing.T) {
+// The driver's own bundle parse no longer knows a `harness` key (it is
+// refused by the claim-side frontmatter read, polyforge#175); an old
+// capsule snapshot that still carries one loads, its key ignored.
+func TestWorkflowParseIgnoresRetiredHarnessKey(t *testing.T) {
 	wf, err := parseWorkflow([]byte("defaults:\n  harness: claude\nsteps:\n  - { id: a }\n  - { id: b, harness: pi }\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -204,16 +237,35 @@ func TestWorkflowHarnessParse(t *testing.T) {
 	if err := validateWorkflow(wf); err != nil {
 		t.Fatal(err)
 	}
-	if wf.Steps[0].Harness != "claude" || wf.Steps[1].Harness != "pi" {
-		t.Fatalf("harness %q %q", wf.Steps[0].Harness, wf.Steps[1].Harness)
-	}
-	// a bundle without the field (every pre-#159 snapshot) declares none
-	wf, _ = parseWorkflow([]byte("steps:\n  - { id: a }\n"))
-	if wf.Steps[0].Harness != "" || validateWorkflow(wf) != nil {
-		t.Fatalf("old bundle %+v", wf.Steps[0])
-	}
-	wf, _ = parseWorkflow([]byte("steps:\n  - { id: a, harness: claude-code }\n"))
-	if err := validateWorkflow(wf); err == nil {
-		t.Fatal("unknown harness accepted at load")
+}
+
+// polyforge#175 ruling 3: a candidate switch onto another harness is a
+// FRESH dispatch (the switch decision) on the new harness; the previous
+// dispatch's capsule transcript — the other harness's JSONL — rides the
+// prompt as read-only reference, both ways.
+func TestAdapterCrossHarnessSwitchCarriesReference(t *testing.T) {
+	for _, c := range []struct{ from, to string }{{"claude", "pi"}, {"pi", "claude"}} {
+		t.Run(c.from+"→"+c.to, func(t *testing.T) {
+			ad, sp, capDir := spawnEnv(t)
+			ad.ClaudeConfigDir = t.TempDir()
+			if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "grill", WIID: "wi_sp", SpawnN: 1, Harness: c.from, Model: "m-" + c.from}); err != nil {
+				t.Fatal(err)
+			}
+			p, _ := sp.last()
+			if err := ad.appendSpawnJournal(p, "grill", "ab12cd34", 1, "2026-10-15T00:00:00Z"); err != nil {
+				t.Fatal(err)
+			}
+			writeCapsuleFile(t, capDir, strings.TrimPrefix(p.TranscriptPath, capDir+"/"), "{\"type\":\"user\"}\n")
+			if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "grill", WIID: "wi_sp", SpawnN: 2, Harness: c.to, Model: "m-" + c.to, Fresh: true}); err != nil {
+				t.Fatal(err)
+			}
+			p2, _ := sp.last()
+			if p2.Resume || p2.Harness != c.to || p2.Model != "m-"+c.to || p2.TranscriptPath == p.TranscriptPath {
+				t.Fatalf("switch dispatch %+v", p2)
+			}
+			if !strings.Contains(p2.InitialPrompt, "Previous attempt (read-only reference)") || !strings.Contains(p2.InitialPrompt, p.TranscriptPath) {
+				t.Fatalf("the cross-harness switch carries no reference to %s", p.TranscriptPath)
+			}
+		})
 	}
 }

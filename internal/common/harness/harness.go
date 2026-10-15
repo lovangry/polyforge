@@ -1,36 +1,30 @@
 // Package harness names the step harnesses a workflow step can run on
-// (polyforge#159) and the one model ↔ harness compatibility rule. There
-// is no model registry: compatibility is read off the model id's shape.
+// (polyforge#159) and the one model-candidate format (polyforge#175).
 //
-//   - claude (Claude Code, `claude -p --bare`) serves the official
-//     Anthropic model ids: a `claude-` prefix and no `/`
-//     (claude-opus-5-5). Aliases (opus, sonnet) are not accepted — they
-//     name "the latest" and are not reproducible.
-//   - pi serves every other id: the provider-qualified `provider/model`
-//     form its --model takes (sub2api-glm/glm-5.3, anthropic/claude-…),
-//     and — so every pre-#159 configuration keeps its meaning — any
-//     other id that is not a claude id.
-//
-// The two sets are disjoint, so one candidate list may mix both: a pi
-// step uses its pi ids, a claude step its claude ids.
+// A model candidate is `<harness>:<model>`: the harness of the closed set
+// (pi | claude) and the model id that harness's --model takes, split on
+// the FIRST `:` (a model id may contain `/` and further `:`). The prefix
+// is mandatory and is the whole truth of where a candidate runs — there
+// is no inference from the model id's shape and no per-step harness
+// setting. One candidate chain may therefore mix harnesses
+// (`[claude:claude-opus-5-5, pi:sub2api-glm/glm-5.3]`).
 package harness
 
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
-// The closed harness set. An absent harness ("") is Pi everywhere.
+// The closed harness set. An absent harness ("") is Pi where a record
+// predates the harness field (spawn-journal lines before #159).
 const (
 	Pi     = "pi"
 	Claude = "claude"
 )
-
-// Names is the closed set in display order.
-var Names = []string{Pi, Claude}
 
 // Valid reports whether name is a harness of the closed set.
 func Valid(name string) bool { return name == Pi || name == Claude }
@@ -43,40 +37,48 @@ func Of(name string) string {
 	return name
 }
 
-// IsClaudeModel reports whether id has the official Claude model-id
-// shape: `claude-` prefix, no `/`.
-func IsClaudeModel(id string) bool {
-	return strings.HasPrefix(id, "claude-") && !strings.Contains(id, "/")
+// Candidate is one parsed model candidate: the harness it runs on and
+// the model id handed to that harness.
+type Candidate struct {
+	Harness string
+	Model   string
 }
 
-// Serves reports whether harness h ("" = pi) can run model id.
-func Serves(h, id string) bool {
-	if id == "" {
-		return false
+// String answers the canonical `<harness>:<model>` form.
+func (c Candidate) String() string { return c.Harness + ":" + c.Model }
+
+// PrefixHint is the shape every refusal of an unprefixed candidate names.
+const PrefixHint = "pi:… or claude:…"
+
+// ParseCandidate parses one `<harness>:<model>` candidate (surrounding
+// whitespace of the whole string and of each half is ignored). A
+// candidate without a `:`, with a harness outside the closed set, or
+// with an empty model is refused; the error text quotes the candidate
+// and is meant to be prefixed with its location by the caller.
+func ParseCandidate(s string) (Candidate, error) {
+	raw := strings.TrimSpace(s)
+	h, m, ok := strings.Cut(raw, ":")
+	if !ok {
+		return Candidate{}, fmt.Errorf("%q needs a harness prefix (%s)", raw, PrefixHint)
 	}
-	switch Of(h) {
-	case Claude:
-		return IsClaudeModel(id)
-	case Pi:
-		return !IsClaudeModel(id)
+	h, m = strings.TrimSpace(h), strings.TrimSpace(m)
+	if !Valid(h) {
+		return Candidate{}, fmt.Errorf("%q has an unknown harness prefix %q (want %s)", raw, h, PrefixHint)
 	}
-	return false
+	if m == "" {
+		return Candidate{}, fmt.Errorf("%q names no model after the harness prefix (want %s)", raw, PrefixHint)
+	}
+	return Candidate{Harness: h, Model: m}, nil
 }
 
-// Filter answers the ids of list harness h can run, order kept. A nil
-// list stays nil (no list in effect); a non-empty list none of whose
-// ids h serves answers an empty, non-nil list.
-func Filter(h string, list []string) []string {
-	if list == nil {
-		return nil
+// Normalize answers the canonical form of one candidate, or the
+// ParseCandidate refusal.
+func Normalize(s string) (string, error) {
+	c, err := ParseCandidate(s)
+	if err != nil {
+		return "", err
 	}
-	out := make([]string, 0, len(list))
-	for _, id := range list {
-		if Serves(h, id) {
-			out = append(out, id)
-		}
-	}
-	return out
+	return c.String(), nil
 }
 
 // ---------------------------------------------------------------------------

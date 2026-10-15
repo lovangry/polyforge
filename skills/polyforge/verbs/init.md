@@ -55,41 +55,45 @@ the user saying "init workspace".
    `projects` list. Nothing rewrites cli.toml behind the operator's back —
    the agent proposes the section, the operator's config carries it.
 4. **Optionally write `.polyforge.yaml`** at the workspace root to pin
-   model candidates and the step harness per project, in the exact closed
-   schema the loader enforces (any other key, a duplicate key, a type
-   mismatch, a per-step key that is no step id of the installed
-   workflows, a project key this workspace's cli.toml section does not
-   list, a step-entry key other than `models` / `harness`, a harness other
-   than `pi` / `claude`, a top-level `models:` section (the pre-#169
-   shape) or an empty model id refuses to load; YAML merge keys (`<<`)
-   are refused — share a list with anchors, `models: &x [...]` /
+   model candidates per project, in the exact closed schema the loader
+   enforces (any other key, a duplicate key, a type mismatch, a per-step
+   key that is no step id of the installed workflows, a project key this
+   workspace's cli.toml section does not list, a step-entry key other
+   than `models` — the retired `harness` key included — a top-level
+   `models:` section (the pre-#169 shape), or a candidate that is not
+   `<harness>:<model>` refuses to load; YAML merge keys (`<<`) are
+   refused — share a list with anchors, `models: &x [...]` /
    `{ models: *x }`):
 
    ```yaml
-   # Models: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
-   # Harness: steps.<project>.<step-id>.harness > bundle step harness > steps.<project>.default.harness > bundle defaults.harness > pi
+   # Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
+   # Every candidate is <harness>:<model>, harness pi or claude (polyforge#175)
    steps:
      polyforge:                               # one entry per project of this workspace
-       default: { models: ["prov/model-a", "prov/model-b"] }  # optional: steps without a list of their own
-       fix: { models: ["prov/model-c"] }      # optional: per step id (the step
+       default: { models: ["pi:prov/model-a", "pi:prov/model-b"] }  # optional: steps without a list of their own
+       fix: { models: ["pi:prov/model-c"] }   # optional: per step id (the step
                                               # with that id in every bundle)
-       review: { models: ["claude-opus-5-5"], harness: claude }  # optional: run this step on Claude Code
+       review: { models: ["claude:claude-opus-5-5", "pi:prov/model-a"] }  # Claude Code first, pi as fallback
    ```
+
+   Each candidate is `<harness>:<model>`: `pi:` or `claude:`, split on
+   the first `:` (the model keeps any `/` or further `:`); no prefix, an
+   unknown prefix or an empty model refuses. The prefix alone decides
+   where the candidate runs — a chain may mix harnesses, and a switch
+   onto a candidate of another harness starts a fresh session with the
+   previous transcript as read-only reference. A step with no list (or
+   an empty one) runs pi's own default model.
 
    Precedence for a step of the claimed project: `pf submit --models`,
    then the yaml list keyed by its step id, then the workflow step's own
    `model_candidates`, then the project's `default` list, then the
-   bundle's `defaults`. The harness resolves the same way on its own
-   (no `--models`-like level; pi when nothing names one). A project
-   not listed keeps the bundle's. A declared-but-empty list governs (no
-   switchable chain). Compatibility is read off the id: `claude` runs only
-   `claude-…` ids (no `/`), `pi` every other id; a mixed list is fine (each
-   step uses the ids its harness runs), but a step whose harness runs
-   none of its non-empty list refuses the claim — so a claude step needs
-   claude ids of its own. Claude Code must be installed and logged in by
-   a human on the daemon's machine (`claude_bin` / `anthropic_auth_token`
-   in cli.toml are optional; see docs/upgrade.md, polyforge#159). The
-   aihub project registry, not this file, supplies the repo list.
+   bundle's `defaults`. A project not listed keeps the bundle's. A
+   declared-but-empty list governs (no switchable chain). Claude Code
+   must be installed and logged in by a human on the daemon's machine
+   (`claude_bin` in cli.toml is optional; the credential lives in the
+   harness root's `claude-config/settings.json`; see docs/upgrade.md,
+   polyforge#159, #171, #175). The aihub project registry, not this file,
+   supplies the repo list.
 
 An edit to `.polyforge.yaml` takes effect on the NEXT claim — no daemon
 restart is involved; the daemon reads the yaml fresh before every claim.

@@ -203,9 +203,6 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// bridge classifies it and filters operator-shaped stops (a
 	// deliberate stop is not a model verdict).
 	stepCandidates := r.effectiveCandidatesForRecovery(j)
-	j.mu.Lock()
-	stepHarness := j.stepHarness // the claim-time snapshot, like the candidates
-	j.mu.Unlock()
 	interruptedCause := cause
 	for {
 		// Driver WI: restart the Go Driver via the bound engine starter
@@ -238,7 +235,6 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 			// dispatches under, and the archive signal for the dispatch
 			// the recovery cause interrupted.
 			StepCandidates:   stepCandidates,
-			StepHarness:      stepHarness,
 			InterruptedCause: interruptedCause,
 		})
 		if err == nil {

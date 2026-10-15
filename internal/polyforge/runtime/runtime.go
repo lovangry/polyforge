@@ -71,7 +71,8 @@ type Config struct {
 	WorkflowsDir  string // daemon checkout's workflows/ (materialization source)
 	// Harness is the adapter whose agent definitions the capsule
 	// materializes (pi: the subagent extension's agents/). It is NOT the
-	// step harness — that is per step (polyforge#159, StepHarness).
+	// step harness — that is per model candidate (polyforge#175: the
+	// `<harness>:` prefix of each candidate).
 	Harness string
 	PiBin   string // harness binary (default "pi")
 	// ClaudeBin is the Claude Code binary (default "claude"; cli.toml
@@ -214,10 +215,8 @@ type AgentStartInput struct {
 	// StepCandidates is the polyforge#79 effective per-step candidate
 	// map this derivation dispatches under (nil = no yaml layer — the
 	// bundle's own resolution). The bridge forwards it to the driver.
+	// Every candidate is `<harness>:<model>` (polyforge#175).
 	StepCandidates map[string][]string
-	// StepHarness is the polyforge#159 effective per-step harness map of
-	// the same claim-time compose (nil = bundle choice, else pi).
-	StepHarness map[string]string
 	// InterruptedCause is the recovery lane's cause string when THIS
 	// derivation is a recovery re-derivation ("" on a fresh claim): the
 	// driver archives the interrupted dispatch's infra attempt from it.
@@ -279,10 +278,6 @@ type job struct {
 	// present-empty entry governs and means no switchable chain). In-
 	// memory only; the durable snapshot is the capsule.json audit.
 	stepCandidates map[string][]string
-	// stepHarness is the polyforge#159 claim-time harness compose (step
-	// id → harness), snapshotted with the candidates; the durable copy
-	// is the daemon-private state.json record.
-	stepHarness map[string]string
 	// manualModels is the work item's `pf submit --models` list (top
 	// precedence level; kept daemon-side in manual-models.json).
 	manualModels []string
@@ -647,13 +642,20 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 	if probe == nil || probe.ProjectName == "" {
 		return fmt.Errorf("runtime: %s: work-item probe answered no project (not claiming)", wi)
 	}
-	probeBundle := ""
-	if probe.BundleName != nil {
-		probeBundle = *probe.BundleName
-	}
-	wcfg, werr := r.LoadWorkspace(probe.ProjectName, probeBundle, manual)
+	wcfg, werr := r.LoadWorkspace(probe.ProjectName)
 	if werr != nil {
 		return werr
+	}
+	// polyforge#175: a bundle whose candidates are not `<harness>:<model>`
+	// is a local defect too — refuse before the claim so the work item
+	// stays queued (startClaimed re-checks as the backstop).
+	if probe.BundleName != nil {
+		if _, ferr := r.readBundleFrontmatter(*probe.BundleName); ferr != nil {
+			return &api.Error{
+				Code:   api.ErrDaemonWorkspaceYaml,
+				Detail: fmt.Sprintf("the workflow bundle of %s refused the claim before it was made (the work item stays queued): %v", wi, ferr),
+			}
+		}
 	}
 	sessionID, err := mintSessionID()
 	if err != nil {
@@ -801,9 +803,14 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	// claim (Start / the journal replay); compose the per-step candidates
 	// for the claimed project from that snapshot.
 	j.workspaceYaml = wcfg
-	fm := r.readBundleFrontmatter(j.bundleName)
+	// polyforge#175: a bundle whose candidates are not `<harness>:<model>`
+	// (or that still declares a `harness` key) is a load error naming the
+	// file and the step; the claim ends blocked with it.
+	fm, ferr := r.readBundleFrontmatter(j.bundleName)
+	if ferr != nil {
+		return r.abandonClaim(j, wi, ferr, ferr.Error())
+	}
 	j.stepCandidates = workspace.ComposeCandidates(fm, wcfg, j.project, j.manualModels)
-	j.stepHarness = workspace.ComposeHarness(fm, wcfg, j.project)
 
 	if err := r.prepareCapsule(j); err != nil {
 		return r.abandonClaim(j, wi, err, "prepare capsule: "+err.Error())
@@ -862,7 +869,6 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 			// every dispatch of this derivation resolves its model from
 			// the post-precedence effective list.
 			StepCandidates: j.stepCandidates,
-			StepHarness:    j.stepHarness,
 		})
 		if err2 != nil {
 			return r.abandonClaim(j, wi, err2, "driver start: "+err2.Error())
@@ -921,30 +927,17 @@ func unmappedProjectError(project string) *api.Error {
 // project's workspace through the inverse mapping (DAEMON-412 when
 // unmapped) and strictly validate <root>/.polyforge.yaml through the
 // shared loader, its per-step keys against the step ids of the installed
-// workflows (DAEMON-414 when invalid, an unknown key included). The
-// polyforge#159 model/harness check runs on the same read: a step whose
-// harness serves none of its non-empty candidate list refuses with the
-// same DAEMON-414 — over every installed bundle, or, when a manual
-// `--models` list is given with a known bundle, over that list and the
-// work item's bundle (a manual list without a bundle is not judged here). The parsed config is nil when the
+// workflows and every candidate's `<harness>:` prefix (polyforge#175)
+// — DAEMON-414 when invalid. The parsed config is nil when the
 // workspace carries no yaml (absent-equivalent: bundle defaults).
 // Nothing is claimed or created by it; the daemon's submit face and
 // auto-pull call it too, so a refusal reaches the operator before enqueue.
-func (r *Runtime) LoadWorkspace(project, bundle string, manual []string) (*workspace.Config, error) {
+func (r *Runtime) LoadWorkspace(project string) (*workspace.Config, error) {
 	ws, err := r.cfg.Mapping.WorkspaceFor(project)
 	if err != nil {
 		return nil, unmappedProjectError(project)
 	}
 	wcfg, err := workspace.Load(ws, r.cfg.WorkflowsDir, r.cfg.Mapping.ProjectsOf(ws))
-	if err == nil && r.cfg.WorkflowsDir != "" {
-		// a manual list is judged against the work item's bundle only; with
-		// no bundle known yet (a submit before the bundle is bound) it is
-		// left to the claim's own pre-claim read, whose probe carries it
-		if len(manual) == 0 || bundle == "" {
-			bundle, manual = "", nil
-		}
-		err = workspace.CheckHarness(ws, wcfg, r.cfg.WorkflowsDir, []string{project}, bundle, manual)
-	}
 	if err != nil {
 		return nil, &api.Error{
 			Code:   api.ErrDaemonWorkspaceYaml,
@@ -955,20 +948,18 @@ func (r *Runtime) LoadWorkspace(project, bundle string, manual []string) (*works
 }
 
 // readBundleFrontmatter reads the pinned bundle's workflow.md
-// frontmatter from the daemon checkout. A torn frontmatter is aihub's
-// bundle-validation business at WI creation; the claim treats it as
-// absent and lets the driver's own parse surface the defect at
-// dispatch.
-func (r *Runtime) readBundleFrontmatter(bundleName string) *workflow.Frontmatter {
+// frontmatter from the daemon checkout. A torn frontmatter, or one whose
+// candidate format is refused (polyforge#175), answers the load error
+// naming the file and the step; a missing one answers (nil, nil).
+func (r *Runtime) readBundleFrontmatter(bundleName string) (*workflow.Frontmatter, error) {
 	if bundleName == "" || r.cfg.WorkflowsDir == "" {
-		return nil
+		return nil, nil
 	}
 	fm, err := workflow.ReadFrontmatter(filepath.Join(r.cfg.WorkflowsDir, bundleName, "workflow.md"))
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: bundle frontmatter unreadable (treating as absent): %v\n", bundleName, err)
-		return nil
+		return nil, fmt.Errorf("workflow bundle %s refused: %w", bundleName, err)
 	}
-	return fm
+	return fm, nil
 }
 
 // abandonClaim is the D5 compensation carried into the session model:

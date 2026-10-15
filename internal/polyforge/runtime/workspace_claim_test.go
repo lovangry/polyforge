@@ -63,7 +63,7 @@ func writeWorkspaceYaml(t *testing.T, ws, content string) string {
 	return p
 }
 
-const w079ValidYaml = "steps:\n  proj:\n    default: { models: [a/one] }\n"
+const w079ValidYaml = "steps:\n  proj:\n    default: { models: [pi:a/one] }\n"
 
 // An invalid .polyforge.yaml refuses with the typed DAEMON-414 BEFORE the
 // aihub claim: no SessionClaim call, no session end, no capsule, no
@@ -124,18 +124,18 @@ func TestWorkspaceYamlRefusalFamilies(t *testing.T) {
 		yaml string
 	}{
 		{"torn", "steps:\n  proj:\n    fix: [\n"},
-		{"unknown top-level key", "model: x\nsteps:\n  proj:\n    default: { models: [a] }\n"},
+		{"unknown top-level key", "model: x\nsteps:\n  proj:\n    default: { models: [pi:a] }\n"},
 		{"retired projects section", "projects:\n  proj:\n    repos: { models: [] }\n"},
-		{"retired workflow_defaults section", "workflow_defaults:\n  model_candidates: [a]\n"},
-		{"key that is no installed step id", "steps:\n  proj:\n    build: { models: [a] }\n"},
-		{"retired kind key", "steps:\n  proj:\n    gate: { models: [a] }\n"},
+		{"retired workflow_defaults section", "workflow_defaults:\n  model_candidates: [pi:a]\n"},
+		{"key that is no installed step id", "steps:\n  proj:\n    build: { models: [pi:a] }\n"},
+		{"retired kind key", "steps:\n  proj:\n    gate: { models: [pi:a] }\n"},
 		{"legacy top-level models (pre-#169 shape)", "models:\n  proj:\n    default: [a]\n"},
-		{"unknown harness", "steps:\n  proj:\n    default: { models: [a], harness: codex }\n"},
-		{"project not mapped to this workspace", "steps:\n  proj:\n    default: { models: [a] }\n  ghost:\n    default: { models: [b] }\n"},
+		{"unknown harness", "steps:\n  proj:\n    default: { models: [pi:a], harness: codex }\n"},
+		{"project not mapped to this workspace", "steps:\n  proj:\n    default: { models: [pi:a] }\n  ghost:\n    default: { models: [pi:b] }\n"},
 		{"empty project entry", "steps:\n  proj:\n"},
 		{"empty model id", "steps:\n  proj:\n    default: { models: [\"\"] }\n"},
 		{"scalar instead of list", "steps:\n  proj:\n    default: a\n"},
-		{"duplicate key", "steps:\n  proj:\n    default: { models: [a] }\n    default: { models: [b] }\n"},
+		{"duplicate key", "steps:\n  proj:\n    default: { models: [pi:a] }\n    default: { models: [pi:b] }\n"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -241,7 +241,7 @@ func TestWorkspaceYamlReadOnFreshClaimAndReclaim(t *testing.T) {
 	}
 	hub.forceEnd("wi_w079lane")
 	claims := hub.claimCount()
-	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    bogus: { models: [a] }\n")
+	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    bogus: { models: [pi:a] }\n")
 	terr := r.Start(context.Background(), "wi_w079lane")
 	if ae, ok := terr.(*api.Error); !ok || ae.Code != api.ErrDaemonWorkspaceYaml {
 		t.Fatalf("expected DAEMON-414 on the re-claim, got %v", terr)

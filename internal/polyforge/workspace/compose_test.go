@@ -6,6 +6,7 @@ package workspace
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/workflow"
@@ -149,14 +150,48 @@ func TestComposeManualBeatsEveryOtherLevel(t *testing.T) {
 }
 
 func TestNormalizeModels(t *testing.T) {
-	if got, err := NormalizeModels([]string{" a/x ", "b"}); err != nil || !reflect.DeepEqual(got, []string{"a/x", "b"}) {
+	if got, err := NormalizeModels([]string{" pi:a/x ", "claude: claude-opus-5-5"}); err != nil || !reflect.DeepEqual(got, []string{"pi:a/x", "claude:claude-opus-5-5"}) {
 		t.Fatalf("got %v, %v", got, err)
 	}
-	for name, in := range map[string][]string{
-		"empty list": nil, "empty id": {"a", ""}, "blank id": {"a", "  "}, "duplicate": {"a", "b", " a"},
+	for name, c := range map[string]struct {
+		in   []string
+		want string
+	}{
+		"empty list":     {nil, "models list is empty"},
+		"empty id":       {[]string{"pi:a", ""}, "empty candidate"},
+		"blank id":       {[]string{"pi:a", "  "}, "empty candidate"},
+		"duplicate":      {[]string{"pi:a", "pi:b", " pi: a"}, `repeats "pi:a"`},
+		"no prefix":      {[]string{"sub2api-glm/glm-5.3"}, `"sub2api-glm/glm-5.3" needs a harness prefix (pi:… or claude:…)`},
+		"unknown prefix": {[]string{"codex:gpt-6"}, `unknown harness prefix "codex"`},
+		"empty model":    {[]string{"claude:"}, "names no model"},
 	} {
-		if _, err := NormalizeModels(in); err == nil {
-			t.Fatalf("%s: want an error", name)
+		if _, err := NormalizeModels(c.in); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Fatalf("%s: err %v, want %q", name, err, c.want)
 		}
+	}
+}
+
+// ResolveSteps names each step's level; the harness of each candidate is
+// its prefix (polyforge#175), a list-less step runs on pi.
+func TestResolveStepsHarnessPerCandidate(t *testing.T) {
+	fm := bundleWith([]string{"pi:g/glm"}, []workflow.FrontmatterStep{{ID: "fix"}, {ID: "review"}, {ID: "spec", ModelCandidates: []string{}}})
+	cfg := models("p", map[string][]string{"review": {"claude:claude-opus-5-5", "pi:g/glm"}})
+	rs := ResolveSteps("bug-fix", fm, cfg, "p", nil)
+	if len(rs) != 3 {
+		t.Fatalf("resolutions %v", rs)
+	}
+	fix, rev, spec := rs[0], rs[1], rs[2]
+	if fix.ModelsFrom != "bundle bug-fix defaults.model_candidates" || !reflect.DeepEqual(fix.Harnesses(), []string{"pi"}) || fix.Uses("claude") {
+		t.Fatalf("fix %+v", fix)
+	}
+	if rev.ModelsFrom != "steps.p.review.models" || !reflect.DeepEqual(rev.Harnesses(), []string{"claude", "pi"}) || !rev.Uses("claude") {
+		t.Fatalf("review %+v", rev)
+	}
+	if !reflect.DeepEqual(spec.Harnesses(), []string{"pi"}) {
+		t.Fatalf("an empty list runs on pi's default model: %+v", spec)
+	}
+	rs = ResolveSteps("bug-fix", fm, cfg, "p", []string{"claude:claude-sonnet-5"})
+	if rs[0].ModelsFrom != "pf submit --models" || !rs[0].Uses("claude") || rs[0].Uses("pi") {
+		t.Fatalf("manual %+v", rs[0])
 	}
 }

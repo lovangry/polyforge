@@ -87,12 +87,12 @@ func TestEffectiveListSubstitutesBundleLists(t *testing.T) {
 		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
 		ExecPath: execPath,
 		Workflow: &Workflow{Steps: []StepSpec{
-			{ID: "fix", ContextPolicy: "fresh", ModelCandidates: []string{"bundle-x", "bundle-y"}},
+			{ID: "fix", ContextPolicy: "fresh", ModelCandidates: []string{"pi:bundle-x", "pi:bundle-y"}},
 		}, MaxTotal: 4, MaxPerStep: 2},
 		Spawner: sp,
 		Log:     &eventLog{},
 		StepCandidates: map[string][]string{
-			"fix": {"eff-a", "eff-b", "eff-c"},
+			"fix": {"pi:eff-a", "pi:eff-b", "pi:eff-c"},
 		},
 	})
 	if err != nil {
@@ -117,25 +117,25 @@ func TestRotationAdvancesAndCapsOnEffectiveList(t *testing.T) {
 	}{
 		{
 			"two provider failures pin the third entry",
-			[]string{"eff-a", "eff-b", "eff-c"},
+			[]string{"pi:eff-a", "pi:eff-b", "pi:eff-c"},
 			[]capsule.Attempt{infraAttempt(1, FailExitModel), infraAttempt(2, FailExitModel)},
 			"eff-c",
 		},
 		{
 			"two failures on a two-entry list cap at the end",
-			[]string{"eff-a", "eff-b"},
+			[]string{"pi:eff-a", "pi:eff-b"},
 			[]capsule.Attempt{infraAttempt(1, FailExitModel), infraAttempt(2, FailExitModel)},
 			"eff-b",
 		},
 		{
 			"host-class failures never advance",
-			[]string{"eff-a", "eff-b"},
+			[]string{"pi:eff-a", "pi:eff-b"},
 			[]capsule.Attempt{infraAttempt(1, FailExitHost), infraAttempt(2, FailExitHost)},
 			"eff-a",
 		},
 		{
 			"a gate-fail rewind resets to the head",
-			[]string{"eff-a", "eff-b"},
+			[]string{"pi:eff-a", "pi:eff-b"},
 			[]capsule.Attempt{infraAttempt(1, FailExitModel), {Cause: CauseGateFailRewind, AttemptSeq: 2}},
 			"eff-a",
 		},
@@ -182,7 +182,7 @@ func TestPresentEmptyEffectiveEntryGoverns(t *testing.T) {
 		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
 		ExecPath: execPath,
 		Workflow: &Workflow{Steps: []StepSpec{
-			{ID: "fix", ContextPolicy: "fresh", ModelCandidates: []string{"bundle-x"}},
+			{ID: "fix", ContextPolicy: "fresh", ModelCandidates: []string{"pi:bundle-x"}},
 		}, MaxTotal: 4, MaxPerStep: 2},
 		Spawner:        sp,
 		Log:            &eventLog{},
@@ -216,7 +216,7 @@ func TestInterruptedDispatchArchivesOnce(t *testing.T) {
 		Spawner:  sp,
 		Log:      &eventLog{},
 		StepCandidates: map[string][]string{
-			"fix": {"eff-a", "eff-b"},
+			"fix": {"pi:eff-a", "pi:eff-b"},
 		},
 		Interrupted: &InterruptedDispatch{Detail: "daemon_restart"},
 	})

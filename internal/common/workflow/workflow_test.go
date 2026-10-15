@@ -15,11 +15,11 @@ import (
 const fmFixture = `---
 name: demo
 defaults:
-  model_candidates: [prov-a/model-a1, prov-a/model-a2, prov-b/model-b1]
+  model_candidates: [pi:prov-a/model-a1, pi:prov-a/model-a2, claude:prov-b/model-b1]
 steps:
   - id: draft
   - id: gate
-    model_candidates: [prov-b/model-b2]
+    model_candidates: [" claude:prov-b/model-b2 "]
 ---
 
 # body narrative
@@ -56,7 +56,7 @@ func TestReadFrontmatterParsesCandidates(t *testing.T) {
 	if fm == nil {
 		t.Fatal("a present frontmatter must parse")
 	}
-	want := []string{"prov-a/model-a1", "prov-a/model-a2", "prov-b/model-b1"}
+	want := []string{"pi:prov-a/model-a1", "pi:prov-a/model-a2", "claude:prov-b/model-b1"}
 	if fm.Defaults == nil || len(fm.Defaults.ModelCandidates) != len(want) {
 		t.Fatalf("defaults candidates = %+v, want %v", fm.Defaults, want)
 	}
@@ -65,15 +65,15 @@ func TestReadFrontmatterParsesCandidates(t *testing.T) {
 			t.Fatalf("defaults candidates = %v, want %v", fm.Defaults.ModelCandidates, want)
 		}
 	}
-	// the per-step override is carried verbatim
+	// the per-step override is carried in canonical form
 	var gate *FrontmatterStep
 	for i := range fm.Steps {
 		if fm.Steps[i].ID == "gate" {
 			gate = &fm.Steps[i]
 		}
 	}
-	if gate == nil || len(gate.ModelCandidates) != 1 || gate.ModelCandidates[0] != "prov-b/model-b2" {
-		t.Fatalf("per-step override = %+v, want [prov-b/model-b2]", gate)
+	if gate == nil || len(gate.ModelCandidates) != 1 || gate.ModelCandidates[0] != "claude:prov-b/model-b2" {
+		t.Fatalf("per-step override = %+v, want [claude:prov-b/model-b2]", gate)
 	}
 }
 
@@ -147,6 +147,34 @@ func TestShippedBundlesCarryNoKind(t *testing.T) {
 		front, _, _ := SplitFrontmatter(raw)
 		if strings.Contains(string(front), "kind:") {
 			t.Errorf("%s: frontmatter still declares the retired step kind", p)
+		}
+	}
+}
+
+// polyforge#175: an unprefixed candidate, an unknown prefix, an empty
+// model and a retired `harness` key each refuse the bundle, naming the
+// file and the step.
+func TestReadFrontmatterRefusesCandidateFormat(t *testing.T) {
+	cases := []struct{ front, want string }{
+		{"defaults:\n  model_candidates: [pi:a/b, prov-a/model-a1]\nsteps:\n  - id: x\n",
+			`defaults.model_candidates[1]: "prov-a/model-a1" needs a harness prefix (pi:… or claude:…)`},
+		{"steps:\n  - id: review\n    model_candidates: [codex:gpt-6]\n",
+			`step review: model_candidates[0]: "codex:gpt-6" has an unknown harness prefix "codex"`},
+		{"steps:\n  - id: review\n    model_candidates: [\"claude:\"]\n",
+			`step review: model_candidates[0]: "claude:" names no model`},
+		{"steps:\n  - id: review\n    harness: claude\n",
+			"step review: harness: the `harness` key was removed (polyforge#175) — move it into each model candidate's prefix"},
+		{"defaults:\n  harness: pi\nsteps:\n  - id: x\n",
+			"defaults.harness: the `harness` key was removed"},
+	}
+	for _, c := range cases {
+		p := filepath.Join(t.TempDir(), "workflow.md")
+		if err := os.WriteFile(p, []byte("---\n"+c.front+"---\nbody\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		fm, err := ReadFrontmatter(p)
+		if err == nil || fm != nil || !strings.Contains(err.Error(), p+": ") || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("front %q: fm %v err %v, want %q", c.front, fm, err, c.want)
 		}
 	}
 }

@@ -160,6 +160,10 @@ func main() {
 		drv.journal("prompt", map[string]any{
 			"spawn_n":                   drv.spawnN,
 			"ended_without_result_hint": strings.Contains(cmd.Message, "ended without you writing the result envelope"),
+			// polyforge#175: a fresh dispatch after a candidate switch
+			// (possibly from another harness) carries the previous
+			// transcript as read-only reference
+			"prompt_has_reference": strings.Contains(cmd.Message, "Previous attempt (read-only reference)"),
 		})
 		// the initial instruction: a plain assistant turn — unless this
 		// dispatch's action is the zero-signal harness (Silent: not even

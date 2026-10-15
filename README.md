@@ -477,14 +477,21 @@ shapes fail loudly):
 # Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
 steps:
   polyforge:                                # a project of this workspace
-    default: { models: ["model-a", "model-b"] }  # optional: steps without a list of their own
-    fix: { models: ["model-c"] }            # optional: one step id (fix, code,
+    default: { models: ["pi:prov/model-a", "pi:prov/model-b"] }  # optional: steps without a list of their own
+    fix: { models: ["claude:claude-opus-5-5", "pi:prov/model-c"] }  # optional: one step id (fix, code,
                                             # review, deliver, ...) — the step
                                             # with that id in every bundle
 ```
 
+Every candidate — here, in a bundle's `model_candidates` and in
+`pf submit --models` — is `<harness>:<model>` with harness `pi` or
+`claude` (polyforge#175; split on the first `:`, the prefix mandatory). A
+chain may mix harnesses; a switch onto a candidate of another harness
+starts a fresh session with the previous transcript as read-only
+reference.
+
 For a step of the claimed project the list is, highest first: the work
-item's manual `pf submit <id> --models a,b,c` list (every step; kept by this
+item's manual `pf submit <id> --models pi:a,claude:b` list (every step; kept by this
 daemon only — across its restarts and `pf resume` — and a re-claim on
 another machine uses that machine's settings), else the
 yaml list keyed by the step's id, else the workflow bundle's step-level candidates, else

@@ -143,16 +143,16 @@ func TestSubmitModelsPersistedAndValidated(t *testing.T) {
 	})
 	mkBare(t, hubBase, wi)
 	hub.status[wi] = api.StatusQueued
-	for _, bad := range []string{`[]`, `["a",""]`, `["a","a"]`, `["a"," a "]`} {
+	for _, bad := range []string{`[]`, `["pi:a",""]`, `["pi:a","pi:a"]`, `["pi:a"," pi:a "]`, `["p/a"]`, `["codex:a"]`, `["claude:"]`} {
 		if code := postSubmit(t, td1.sock, "/jobs/"+wi+"/claim", `{"models":`+bad+`}`); code != 400 {
 			t.Fatalf("models %s: status %d, want 400", bad, code)
 		}
 	}
-	if code := postSubmit(t, td1.sock, "/jobs/"+wi+"/claim", `{"models":[" p/a ","p/b"]}`); code != 200 {
+	if code := postSubmit(t, td1.sock, "/jobs/"+wi+"/claim", `{"models":[" pi:p/a ","claude:p/b"]}`); code != 200 {
 		t.Fatalf("submit status %d", code)
 	}
 	ents := readQueueFile(t, data)
-	if len(ents) != 1 || strings.Join(ents[0].Models, ",") != "p/a,p/b" {
+	if len(ents) != 1 || strings.Join(ents[0].Models, ",") != "pi:p/a,claude:p/b" {
 		t.Fatalf("persisted queue = %+v, want the trimmed models list", ents)
 	}
 	shutdownAndWait(t, td1)
@@ -167,7 +167,7 @@ func TestSubmitModelsPersistedAndValidated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), `"p/a"`) || !strings.Contains(string(raw), `"p/b"`) {
+	if !strings.Contains(string(raw), `"pi:p/a"`) || !strings.Contains(string(raw), `"claude:p/b"`) {
 		t.Fatalf("replayed claim lost the manual list (daemon-side record): %s", raw)
 	}
 	ji, _ := td2.rt.Info(wi)

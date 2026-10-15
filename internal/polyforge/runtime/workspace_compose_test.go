@@ -36,11 +36,11 @@ func frontmatterBundle(t *testing.T, frontmatter string) (workflowsDir string) {
 const w079Frontmatter = `---
 name: demo-bundle
 defaults:
-  model_candidates: [prov/weak-a, prov/weak-b]
+  model_candidates: [pi:prov/weak-a, pi:prov/weak-b]
 steps:
   - { id: grill }
-  - { id: fix, model_candidates: [prov/flash, prov/glm] }
-  - { id: release, model_candidates: [prov/glm] }
+  - { id: fix, model_candidates: [pi:prov/flash, pi:prov/glm] }
+  - { id: release, model_candidates: [pi:prov/glm] }
 ---
 
 # demo
@@ -74,7 +74,7 @@ func TestClaimComposeRidesTheJob(t *testing.T) {
 	r.cfg.GitRemoteBase = hub.capsuleRepoBase
 	r.cfg.WorkflowsDir = wfDir
 
-	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [w79/code-a, w79/code-b] }\n")
+	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [pi:w79/code-a, pi:w79/code-b] }\n")
 	if err := r.Start(context.Background(), "wi_w079comp"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -85,13 +85,13 @@ func TestClaimComposeRidesTheJob(t *testing.T) {
 	j.mu.Lock()
 	got := j.stepCandidates
 	j.mu.Unlock()
-	if got["fix"] == nil || got["fix"][0] != "w79/code-a" || got["fix"][1] != "w79/code-b" {
+	if got["fix"] == nil || got["fix"][0] != "pi:w79/code-a" || got["fix"][1] != "pi:w79/code-b" {
 		t.Fatalf("fix effective list %v, want [w79/code-a w79/code-b] (the per-step pin replaces the bundle step-level list)", got["fix"])
 	}
-	if got["release"] == nil || got["release"][0] != "prov/glm" {
+	if got["release"] == nil || got["release"][0] != "pi:prov/glm" {
 		t.Fatalf("release effective list %v, want its own [prov/glm] (a step-id key governs that step only)", got["release"])
 	}
-	if got["grill"] == nil || got["grill"][0] != "prov/weak-a" {
+	if got["grill"] == nil || got["grill"][0] != "pi:prov/weak-a" {
 		t.Fatalf("grill effective list %v, want the bundle weak default (grill unlisted)", got["grill"])
 	}
 	if err := r.Stop(context.Background(), "wi_w079comp", protocol.FinishWrapped); err != nil {
@@ -134,10 +134,10 @@ func TestClaimComposeWithoutYamlIsBundleOnly(t *testing.T) {
 	j.mu.Lock()
 	got := j.stepCandidates
 	j.mu.Unlock()
-	if got["fix"] == nil || got["fix"][0] != "prov/flash" {
+	if got["fix"] == nil || got["fix"][0] != "pi:prov/flash" {
 		t.Fatalf("fix effective list %v, want the bundle step-level head prov/flash", got["fix"])
 	}
-	if got["grill"] == nil || got["grill"][0] != "prov/weak-a" {
+	if got["grill"] == nil || got["grill"][0] != "pi:prov/weak-a" {
 		t.Fatalf("grill effective list %v, want the bundle weak default", got["grill"])
 	}
 	if err := r.Stop(context.Background(), "wi_w079comp2", protocol.FinishWrapped); err != nil {

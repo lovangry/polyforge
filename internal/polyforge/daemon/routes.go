@@ -341,14 +341,7 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		// backstop. A failed probe refuses nothing here (the submit is
 		// durable-queued; the dispatcher retries the probe at Start).
 		if probe, err := d.hub.GetWorkItem(canonical); err == nil && probe != nil && probe.ProjectName != "" {
-			bundle := ""
-			if probe.BundleName != nil {
-				bundle = *probe.BundleName
-			}
-			// polyforge#159: a --models list is checked against the
-			// harness of every step of the work item's bundle here too;
-			// a WI without a bundle yet is judged at claim time instead
-			if _, lerr := d.rt.LoadWorkspace(probe.ProjectName, bundle, body.Models); lerr != nil {
+			if _, lerr := d.rt.LoadWorkspace(probe.ProjectName); lerr != nil {
 				writeErrOf(w, lerr)
 				return
 			}

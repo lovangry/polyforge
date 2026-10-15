@@ -34,7 +34,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/harness"
@@ -95,73 +94,48 @@ func composeStepFrom(fm *workflow.Frontmatter, pm map[string][]string, s workflo
 	return nil, ""
 }
 
-// ---------------------------------------------------------------------------
-// Harness (polyforge#159): the second per-step property, resolved
-// INDEPENDENTLY down the same levels (non-merge, first present level
-// wins), with the built-in pi at the bottom and no per-work-item level:
-//
-//	yaml steps.<project>.<step-id>.harness > bundle step harness >
-//	yaml steps.<project>.default.harness > bundle defaults.harness > pi
+// StepResolution is one step's resolved candidate list with the level
+// it came from (the doctor's resolution table). Each candidate carries
+// its harness as its `<harness>:` prefix (polyforge#175).
+type StepResolution struct {
+	Project    string   `json:"project"`
+	Bundle     string   `json:"bundle"`
+	Step       string   `json:"step"`
+	Models     []string `json:"models,omitempty"`
+	ModelsFrom string   `json:"models_from,omitempty"`
+}
 
-// ComposeHarness answers the per-step effective harness of one claim of
-// project, keyed by step id — an entry for every step of the bundle (nil
-// when fm declares no steps). Like the candidates it is computed once
-// per claim and snapshotted daemon-side; an edit governs the next claim.
-func ComposeHarness(fm *workflow.Frontmatter, cfg *Config, project string) map[string]string {
-	if fm == nil || len(fm.Steps) == 0 {
-		return nil
+// Harnesses answers the distinct harnesses of the resolved candidates,
+// in candidate order. A step with no (or an empty) list runs on pi's
+// default model, so it answers [pi].
+func (r StepResolution) Harnesses() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range r.Models {
+		h := harness.Pi
+		if c, err := harness.ParseCandidate(m); err == nil {
+			h = c.Harness
+		}
+		if !seen[h] {
+			seen[h] = true
+			out = append(out, h)
+		}
 	}
-	var ph map[string]string
-	if cfg != nil {
-		ph = cfg.Harness[project]
-	}
-	out := make(map[string]string, len(fm.Steps))
-	for _, s := range fm.Steps {
-		h, _ := composeHarnessFrom(fm, ph, s, project, "")
-		out[s.ID] = h
+	if len(out) == 0 {
+		out = []string{harness.Pi}
 	}
 	return out
 }
 
-// composeHarnessFrom resolves one step's harness and names its level.
-func composeHarnessFrom(fm *workflow.Frontmatter, ph map[string]string, s workflow.FrontmatterStep, project, bundle string) (string, string) {
-	if h, ok := ph[s.ID]; ok {
-		return h, fmt.Sprintf("steps.%s.%s.harness", project, s.ID)
+// Uses reports whether any resolved candidate runs on harness h (a step
+// with no list runs on pi).
+func (r StepResolution) Uses(h string) bool {
+	for _, x := range r.Harnesses() {
+		if x == h {
+			return true
+		}
 	}
-	if s.Harness != "" {
-		return s.Harness, fmt.Sprintf("bundle %s step %s harness", bundle, s.ID)
-	}
-	if h, ok := ph[DefaultKey]; ok {
-		return h, fmt.Sprintf("steps.%s.%s.harness", project, DefaultKey)
-	}
-	if fm.Defaults != nil && fm.Defaults.Harness != "" {
-		return fm.Defaults.Harness, fmt.Sprintf("bundle %s defaults.harness", bundle)
-	}
-	return harness.Pi, "built-in default"
-}
-
-// StepResolution is one step's resolved pair (the doctor's resolution
-// table and the compatibility check share it): the effective harness and
-// candidate list, each with the level it came from, and the candidates
-// that harness can actually run.
-type StepResolution struct {
-	Project     string   `json:"project"`
-	Bundle      string   `json:"bundle"`
-	Step        string   `json:"step"`
-	Harness     string   `json:"harness"`
-	HarnessFrom string   `json:"harness_from"`
-	Models      []string `json:"models,omitempty"`
-	ModelsFrom  string   `json:"models_from,omitempty"`
-	// Served is Models filtered to the ids Harness serves (the list the
-	// driver walks); nil when no list is in effect.
-	Served []string `json:"served,omitempty"`
-}
-
-// Mismatch reports a step whose harness serves none of a non-empty
-// candidate list (an empty or absent list is never a mismatch: the
-// harness's own default model runs).
-func (r StepResolution) Mismatch() bool {
-	return len(r.Models) > 0 && len(r.Served) == 0
+	return false
 }
 
 // ResolveSteps answers the resolution of every step of one bundle for
@@ -171,20 +145,17 @@ func ResolveSteps(bundle string, fm *workflow.Frontmatter, cfg *Config, project 
 		return nil
 	}
 	var pm map[string][]string
-	var ph map[string]string
 	if cfg != nil {
-		pm, ph = cfg.Models[project], cfg.Harness[project]
+		pm = cfg.Models[project]
 	}
 	out := make([]StepResolution, 0, len(fm.Steps))
 	for _, s := range fm.Steps {
 		r := StepResolution{Project: project, Bundle: bundle, Step: s.ID}
-		r.Harness, r.HarnessFrom = composeHarnessFrom(fm, ph, s, project, bundle)
 		if len(manual) > 0 {
 			r.Models, r.ModelsFrom = append([]string(nil), manual...), "pf submit --models"
 		} else {
 			r.Models, r.ModelsFrom = composeStepFrom(fm, pm, s, project, bundle)
 		}
-		r.Served = harness.Filter(r.Harness, r.Models)
 		out = append(out, r)
 	}
 	return out
@@ -192,18 +163,22 @@ func ResolveSteps(bundle string, fm *workflow.Frontmatter, cfg *Config, project 
 
 // Bundles answers the installed bundles under workflowsDir (name →
 // frontmatter, nil frontmatter skipped) — or only the named one when
-// bundle is non-empty. A torn frontmatter is the bundle's own defect
-// (its claim surfaces it) and is skipped here.
-func Bundles(workflowsDir, bundle string) (map[string]*workflow.Frontmatter, error) {
+// bundle is non-empty. A torn or refused frontmatter (an unprefixed
+// candidate, a retired `harness` key — polyforge#175) is the bundle's
+// own defect: it is skipped from the map and its error is answered in
+// bad (name → load error) for the doctor to report; its claim surfaces
+// it too.
+func Bundles(workflowsDir, bundle string) (map[string]*workflow.Frontmatter, map[string]error, error) {
 	out := map[string]*workflow.Frontmatter{}
+	bad := map[string]error{}
 	if workflowsDir == "" {
-		return out, nil
+		return out, bad, nil
 	}
 	names := []string{bundle}
 	if bundle == "" {
 		ents, err := os.ReadDir(workflowsDir)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		names = names[:0]
 		for _, e := range ents {
@@ -214,59 +189,21 @@ func Bundles(workflowsDir, bundle string) (map[string]*workflow.Frontmatter, err
 	}
 	for _, n := range names {
 		fm, err := workflow.ReadFrontmatter(filepath.Join(workflowsDir, n, "workflow.md"))
-		if err != nil || fm == nil {
+		if err != nil {
+			bad[n] = err
 			continue
 		}
-		out[n] = fm
-	}
-	return out, nil
-}
-
-// CheckHarness is the polyforge#159 load-time compatibility check — the
-// ONE function the pre-claim read (runtime.LoadWorkspace) and pf doctor
-// share. For every project × installed bundle (only bundle when named) ×
-// step it resolves the effective harness and candidate list and refuses
-// (a typed *Error naming the workspace yaml path) when the harness is
-// outside the closed set or serves none of a non-empty list. Every
-// problem is named, sorted; nil when all steps are runnable. cfg may be
-// nil (bundle levels only). manual is the work item's --models list.
-func CheckHarness(workspaceRoot string, cfg *Config, workflowsDir string, projects []string, bundle string, manual []string) error {
-	bundles, err := Bundles(workflowsDir, bundle)
-	if err != nil {
-		return &Error{Path: PathFor(workspaceRoot), Reason: fmt.Sprintf("the installed workflows are unreadable, so the model/harness pairs cannot be checked: %v", err)}
-	}
-	var problems []string
-	for _, project := range projects {
-		for name, fm := range bundles {
-			for _, r := range ResolveSteps(name, fm, cfg, project, manual) {
-				where := project + "/" + name + "/" + r.Step
-				switch {
-				case !harness.Valid(r.Harness):
-					problems = append(problems, fmt.Sprintf("%s: unknown harness %q (%s; want %s)", where, r.Harness, r.HarnessFrom, strings.Join(harness.Names, " or ")))
-				case r.Mismatch():
-					problems = append(problems, fmt.Sprintf("%s: harness %s (%s) cannot serve any of [%s] (%s) — %s", where, r.Harness, r.HarnessFrom, strings.Join(r.Models, ", "), r.ModelsFrom, compatRule(r.Harness)))
-				}
-			}
+		if fm != nil {
+			out[n] = fm
 		}
 	}
-	if len(problems) == 0 {
-		return nil
-	}
-	sort.Strings(problems)
-	return &Error{Path: PathFor(workspaceRoot), Reason: "model/harness mismatch: " + strings.Join(problems, "; ")}
-}
-
-// compatRule states the id-shape rule a mismatched harness needs.
-func compatRule(h string) string {
-	if h == harness.Claude {
-		return "claude runs only official `claude-…` model ids (no `/`); declare steps.<project>.<step>.models with such ids"
-	}
-	return "pi runs `provider/model` ids, never a bare `claude-…` id (that is Claude Code's)"
+	return out, bad, nil
 }
 
 // NormalizeModels validates a manual `--models` list: non-empty, every
-// id trimmed and non-empty, no duplicates. It returns the trimmed list.
-// There is no model registry to check ids against.
+// entry a `<harness>:<model>` candidate (harness.ParseCandidate — the
+// prefix is mandatory, polyforge#175), no duplicates. It returns the
+// canonical list. There is no model registry to check ids against.
 func NormalizeModels(in []string) ([]string, error) {
 	if len(in) == 0 {
 		return nil, fmt.Errorf("models list is empty")
@@ -274,15 +211,18 @@ func NormalizeModels(in []string) ([]string, error) {
 	out := make([]string, 0, len(in))
 	seen := map[string]bool{}
 	for _, m := range in {
-		m = strings.TrimSpace(m)
-		if m == "" {
-			return nil, fmt.Errorf("models list has an empty model id")
+		if strings.TrimSpace(m) == "" {
+			return nil, fmt.Errorf("models list has an empty candidate")
 		}
-		if seen[m] {
-			return nil, fmt.Errorf("models list repeats %q", m)
+		c, err := harness.Normalize(m)
+		if err != nil {
+			return nil, err
 		}
-		seen[m] = true
-		out = append(out, m)
+		if seen[c] {
+			return nil, fmt.Errorf("models list repeats %q", c)
+		}
+		seen[c] = true
+		out = append(out, c)
 	}
 	return out, nil
 }

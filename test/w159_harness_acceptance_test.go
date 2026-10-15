@@ -127,11 +127,15 @@ func w159SpawnJournal(t *testing.T, capDir string) []map[string]any {
 	return out
 }
 
-const w159Yaml = "steps:\n  e2e:\n    fix: { models: [w159/pi-a, claude-opus-5-5, claude-sonnet-5], harness: claude }\n"
+// polyforge#175: the harness is each candidate's prefix (no `harness`
+// key); the fix step's chain is claude-only here, the cross-harness
+// chains live in w175_mixed_chain_acceptance_test.go.
+const w159Yaml = "steps:\n  e2e:\n    fix: { models: [claude:claude-opus-5-5, claude:claude-sonnet-5] }\n"
 
 // ① One work item, two harnesses: grill and verification on pi, fix on
 // Claude Code. The result contract, the handoff injection, the clean
-// claude argv/env, the mixed-list filtering and the transcript copy.
+// claude argv/env (only the bare model rides --model, never the prefix)
+// and the transcript copy.
 func TestW159MixedHarnessWorkItem(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
@@ -141,7 +145,7 @@ func TestW159MixedHarnessWorkItem(t *testing.T) {
 	capDir := w079Run(t, d, inst, ws, wi)
 
 	if got := w079Model(t, capDir, "fix"); got != "claude-opus-5-5" {
-		t.Fatalf("fix model %q, want the first claude id of the mixed list", got)
+		t.Fatalf("fix model %q, want the head of the claude chain", got)
 	}
 	if got := w079Model(t, capDir, "grill"); strings.HasPrefix(got, "claude-") {
 		t.Fatalf("grill (pi) model %q", got)
@@ -159,7 +163,7 @@ func TestW159MixedHarnessWorkItem(t *testing.T) {
 			t.Fatalf("claude argv %q misses %q", argv, want)
 		}
 	}
-	for _, banned := range []string{w159Token, "--setting-sources", "--fallback-model", "w159/pi-a"} {
+	for _, banned := range []string{w159Token, "--setting-sources", "--fallback-model", "claude:claude-opus-5-5"} {
 		if strings.Contains(argv, banned) {
 			t.Fatalf("claude argv carries %q: %s", banned, argv)
 		}
@@ -293,8 +297,8 @@ func w159NoToken(t *testing.T, root string) {
 }
 
 // ② D7 on claude output: a 429 retries the SAME model, a 401 switches to
-// the next claude candidate (pi ids skipped), a 5xx retries the same
-// model; ③ ended_without_result after an ok result with no envelope.
+// the next candidate, a 5xx retries the same model; ③
+// ended_without_result after an ok result with no envelope.
 func TestW159ClaudeD7(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
@@ -332,8 +336,8 @@ func TestW159ClaudeD7(t *testing.T) {
 	}
 }
 
-// Candidates exhausted on claude: an unknown model on every claude
-// candidate blocks the work item (never a pi id dispatched to claude).
+// Candidates exhausted on claude: an unknown model on every candidate of
+// a claude-only chain blocks the work item.
 func TestW159ClaudeCandidatesExhaustedBlocks(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
@@ -424,22 +428,29 @@ func TestW159ClaudeNeedsInputResumes(t *testing.T) {
 	}
 }
 
-// ⑥ A configuration whose claude step has no claude candidate refuses
-// the claim (DAEMON-414, the WI stays queued) and doctor fails it; a
-// valid one passes doctor's claude check without ever showing the token,
-// and a missing claude binary fails it.
-func TestW159MismatchRefusedAndDoctor(t *testing.T) {
+// ⑥ polyforge#175: the retired `harness` key refuses the claim
+// (DAEMON-414, the WI stays queued) and doctor fails it; a prefixed
+// chain passes doctor's claude check (the check runs because a resolved
+// candidate is claude:…) without ever showing the token, and a missing
+// claude binary fails it.
+func TestW159RetiredHarnessKeyRefusedAndDoctor(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { harness: claude }\n")
+	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [claude-opus-5-5], harness: claude }\n")
 	d, cfg, _ := w159HarnessRoot(t, inst, ws, "")
 	wi := w113NewWI(t, inst, "e2e", "w159 mismatch", envelopeQuickFix())
 	out, code := w113Pf(t, inst, w113Env{socket: d.sock}, "submit", wi)
-	w079Refused(t, d, inst, ws, wi, out, code, "model/harness mismatch", "e2e/quick-fix/fix: harness claude (steps.e2e.fix.harness)")
+	w079Refused(t, d, inst, ws, wi, out, code, "steps.e2e.fix.harness: the `harness` key was removed (polyforge#175)")
 
 	doc := w079PfWant(t, inst, 1, w079Env{config: cfg}, "--json", "doctor")
-	if !strings.Contains(doc, "model/harness mismatch") {
-		t.Fatalf("doctor does not report the mismatch: %s", doc)
+	if !strings.Contains(doc, "the `harness` key was removed") {
+		t.Fatalf("doctor does not report the retired key: %s", doc)
+	}
+	// the key gone, the unprefixed id refuses on its own
+	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [claude-opus-5-5] }\n")
+	doc = w079PfWant(t, inst, 1, w079Env{config: cfg}, "--json", "doctor")
+	if !strings.Contains(doc, `steps.e2e.fix.models[0]: \"claude-opus-5-5\" needs a harness prefix (pi:… or claude:…)`) {
+		t.Fatalf("doctor does not report the unprefixed candidate: %s", doc)
 	}
 
 	// fixed: doctor's claude check passes on the fake (verified version,
@@ -453,7 +464,7 @@ func TestW159MismatchRefusedAndDoctor(t *testing.T) {
 			claudeCheck = &parsed.Checks[i]
 		}
 	}
-	if claudeCheck == nil || claudeCheck.Status != "pass" || !strings.Contains(claudeCheck.Detail, "e2e/quick-fix/fix: claude") || !strings.Contains(claudeCheck.Detail, "2.1.296") {
+	if claudeCheck == nil || claudeCheck.Status != "pass" || !strings.Contains(claudeCheck.Detail, "e2e/quick-fix/fix: [claude:claude-opus-5-5, claude:claude-sonnet-5] (steps.e2e.fix.models)") || !strings.Contains(claudeCheck.Detail, "2.1.296") {
 		t.Fatalf("harness claude check %+v", claudeCheck)
 	}
 	if strings.Contains(doc, w159Token) {

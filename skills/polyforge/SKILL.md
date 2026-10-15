@@ -216,18 +216,21 @@ Five standing rules, binding on every polyforge session:
 4. **Hand over an outcome, not a path.** When handing work to an
    executor, specify the outcome plus its acceptance criteria — never an
    execution path.
-5. **Per-step models and harness live in `.polyforge.yaml`.** A
+5. **Per-step models live in `.polyforge.yaml`; each candidate names its harness.** A
    workspace root may carry a `.polyforge.yaml` whose only section is
    `steps`: per project, a `default` entry and/or entries keyed by step id
    (`fix`, `code`, `review`, ... — a key must be a step id of the
-   installed workflows), each `{ models: [...], harness: pi|claude }`
-   (`models` and `harness` are the only keys; either may be omitted, not
-   both). `harness` picks the
-   step's harness — pi (the default when nothing says otherwise) or
-   Claude Code (`claude`, run as `claude -p --bare`, logged in by a human
-   beforehand). A claude step runs only `claude-…` model ids, a pi step
-   every other id; a step whose harness runs none of its candidates
-   refuses the claim. The daemon
+   installed workflows), each `{ models: [...] }` (`models` is the only
+   key). Every candidate is `<harness>:<model>` — `pi:` or `claude:`
+   (Claude Code, run as `claude -p --bare`, logged in by a human
+   beforehand), split on the first `:` — e.g.
+   `[claude:claude-opus-5-5, pi:sub2api-glm/glm-5.3]`. The prefix is
+   mandatory and is the whole truth (no inference from the id, no
+   `harness` key — a leftover one refuses); the same format holds for
+   the bundles' `model_candidates` and `pf submit --models`. A chain may
+   mix harnesses: when the next candidate runs on another harness the
+   step starts a fresh session with the previous transcript as read-only
+   reference. The daemon
    reads it fresh before every claim; an invalid file refuses the claim
    (DAEMON-414) WITHOUT claiming — the work item stays queued for other
    machines. The repo inventory and clone URLs always come from the aihub

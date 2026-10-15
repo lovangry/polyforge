@@ -12,9 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
-	"github.com/silgrid/polyforge/internal/common/harness"
 	"github.com/silgrid/polyforge/internal/common/workflow"
 	"gopkg.in/yaml.v3"
 )
@@ -49,14 +47,12 @@ type StepSpec struct {
 	ID   string
 	Gate bool
 	// ContextPolicy is ContextInherit (the default) or ContextFresh.
-	ContextPolicy   string
+	ContextPolicy string
+	// ModelCandidates is the bundle's own list (`<harness>:<model>`
+	// each, polyforge#175; judged by New, not at parse — an old capsule's
+	// bundle snapshot recovers under its claim-time snapshot instead).
 	ModelCandidates []string
-	// Harness is the bundle's own harness choice for the step (its
-	// step-level `harness`, else `defaults.harness`; "" = none declared).
-	// The effective harness is the claim-time compose (driver
-	// Config.StepHarness); this is only its bundle levels.
-	Harness string
-	OnFail  *OnFail
+	OnFail          *OnFail
 	// Handoff marks a step that must produce a handoff artifact for the
 	// next inherit step (validated on its completed results).
 	Handoff bool
@@ -152,7 +148,6 @@ func parseWorkflow(front []byte) (*Workflow, error) {
 			HumanAnswerIfAsked:      s.RequiresHumanAnswer.ifAsked,
 			RequiresCommandEvidence: s.RequiresCommandEvidence,
 			ModelCandidates:         s.ModelCandidates,
-			Harness:                 s.Harness,
 		}
 		if s.Budget != nil {
 			step.WallMinutes = s.Budget.WallMinutes
@@ -165,9 +160,6 @@ func parseWorkflow(front []byte) (*Workflow, error) {
 		}
 		if step.ModelCandidates == nil && doc.Defaults != nil {
 			step.ModelCandidates = doc.Defaults.ModelCandidates
-		}
-		if step.Harness == "" && doc.Defaults != nil {
-			step.Harness = doc.Defaults.Harness
 		}
 		wf.Steps = append(wf.Steps, step)
 	}
@@ -195,9 +187,6 @@ func validateWorkflow(wf *Workflow) error {
 			return fmt.Errorf("driver: duplicate step id %q", s.ID)
 		}
 		seen[s.ID] = true
-		if s.Harness != "" && !harness.Valid(s.Harness) {
-			return fmt.Errorf("driver: step %q has unknown harness %q (want %s)", s.ID, s.Harness, strings.Join(harness.Names, " or "))
-		}
 		switch s.ContextPolicy {
 		case ContextInherit, ContextFresh:
 		default:
@@ -232,7 +221,6 @@ type extDoc struct {
 
 type extDefaults struct {
 	ModelCandidates []string `yaml:"model_candidates"`
-	Harness         string   `yaml:"harness"`
 }
 
 type extRewind struct {
@@ -248,7 +236,6 @@ type extStep struct {
 	RequiresCommandEvidence bool       `yaml:"requires_command_evidence"`
 	ContextPolicy           string     `yaml:"context_policy"`
 	ModelCandidates         []string   `yaml:"model_candidates"`
-	Harness                 string     `yaml:"harness"`
 	OnFail                  *extOnFail `yaml:"on_fail"`
 	Budget                  *extBudget `yaml:"budget"`
 }

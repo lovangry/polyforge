@@ -80,7 +80,7 @@ func TestRecoveryRelaunchCarriesClaimSnapshot(t *testing.T) {
 	rec := &recordingStarter{base: scriptedEngineStarter(sp)}
 	r.cfg.AgentStarter = rec.start
 
-	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [w79/code-a, w79/code-b] }\n")
+	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [pi:w79/code-a, pi:w79/code-b] }\n")
 	if err := r.Start(context.Background(), "wi_w079rec"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestRecoveryRelaunchCarriesClaimSnapshot(t *testing.T) {
 	j.mu.Lock()
 	claimSnap := j.stepCandidates
 	j.mu.Unlock()
-	if claimSnap["fix"] == nil || claimSnap["fix"][0] != "w79/code-a" {
+	if claimSnap["fix"] == nil || claimSnap["fix"][0] != "pi:w79/code-a" {
 		t.Fatalf("claim snapshot for fix %v, want [w79/code-a ...]", claimSnap["fix"])
 	}
 	// Drain the claim's own RTStarted before the recovery's message.
@@ -100,7 +100,7 @@ func TestRecoveryRelaunchCarriesClaimSnapshot(t *testing.T) {
 	}
 
 	// The mid-flight edit: the yaml on disk now pins a DIFFERENT list.
-	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [w79/edited-a] }\n")
+	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [pi:w79/edited-a] }\n")
 
 	// The death → recovery: the relaunch must carry the claim snapshot,
 	// NOT a re-derivation of the edited yaml.
@@ -111,8 +111,8 @@ func TestRecoveryRelaunchCarriesClaimSnapshot(t *testing.T) {
 	}
 	relaunch := rec.last()
 	if len(relaunch.StepCandidates["fix"]) != 2 ||
-		relaunch.StepCandidates["fix"][0] != "w79/code-a" ||
-		relaunch.StepCandidates["fix"][1] != "w79/code-b" {
+		relaunch.StepCandidates["fix"][0] != "pi:w79/code-a" ||
+		relaunch.StepCandidates["fix"][1] != "pi:w79/code-b" {
 		t.Fatalf("relaunch StepCandidates for fix %v, want the claim snapshot [w79/code-a w79/code-b] — an edited yaml governs only the NEXT claim (the disk yaml now pins [w79/edited-a])", relaunch.StepCandidates["fix"])
 	}
 	if relaunch.InterruptedCause != protocol.RecoverDeath {
@@ -151,11 +151,11 @@ func TestRecoveryReconstructedJobRehydratesRecordNotYamlOrCapsule(t *testing.T) 
 	}
 	live := seedJob(r, "wi_w079rec2")
 	live.stepCandidates = map[string][]string{
-		"fix":   {"w79/aud-a", "w79/aud-b"},
-		"grill": {"prov/weak-a"},
+		"fix":   {"pi:w79/aud-a", "pi:w79/aud-b"},
+		"grill": {"pi:prov/weak-a"},
 	}
 	j := jobFromRecord(live.record()) // the restart shape
-	blob, err := json.Marshal(map[string]any{"effective_candidates": map[string][]string{"fix": {"evil/x"}}})
+	blob, err := json.Marshal(map[string]any{"effective_candidates": map[string][]string{"fix": {"pi:evil/x"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,12 +163,12 @@ func TestRecoveryReconstructedJobRehydratesRecordNotYamlOrCapsule(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, y := range []string{
-		"steps:\n  proj:\n    fix: { models: [w79/edited] }\n",
+		"steps:\n  proj:\n    fix: { models: [pi:w79/edited] }\n",
 		"steps:\n  proj:\n    fix: [\n", // invalid: recovery must not care
 	} {
 		writeWorkspaceYaml(t, ws, y)
 		got := r.effectiveCandidatesForRecovery(j)
-		if len(got["fix"]) != 2 || got["fix"][0] != "w79/aud-a" || got["fix"][1] != "w79/aud-b" {
+		if len(got["fix"]) != 2 || got["fix"][0] != "pi:w79/aud-a" || got["fix"][1] != "pi:w79/aud-b" {
 			t.Fatalf("rehydrated fix list %v, want the record's [w79/aud-a w79/aud-b] regardless of the disk yaml %q and the capsule.json forgery", got["fix"], y)
 		}
 	}

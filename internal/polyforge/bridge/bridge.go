@@ -89,11 +89,8 @@ type Config struct {
 	// map the runtime computed at claim time (or rehydrated/re-derived
 	// at recovery); nil = no yaml layer, the bundle's own resolution.
 	// Forwarded to the driver verbatim.
+	// Each candidate is `<harness>:<model>` (polyforge#175).
 	StepCandidates map[string][]string
-	// StepHarness is the polyforge#159 effective per-step harness map
-	// (same lifecycle as StepCandidates); nil = the bundle's own choice,
-	// else pi. Forwarded to the driver verbatim.
-	StepHarness map[string]string
 	// InterruptedCause is the recovery lane's cause string when THIS
 	// start is a re-derivation ("" on a fresh claim). Operator-shaped
 	// causes archive nothing — a deliberate stop is not a model verdict.
@@ -182,7 +179,6 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 		Link:           cfg.Link,
 		Limits:         cfg.Limits,
 		StepCandidates: cfg.StepCandidates,
-		StepHarness:    cfg.StepHarness,
 		Interrupted:    interruptedFromCause(cfg.InterruptedCause),
 	})
 	if err != nil {

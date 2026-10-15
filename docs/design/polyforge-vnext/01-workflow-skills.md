@@ -100,7 +100,7 @@ frontmatter 顶层字段：
 | `budget` | Budget | 可选（workflow 级） | 结构见 §6.6；缺省 = 无 workflow 级上界 |
 | `rewind.max_total` | int | 可选 | 缺省 4；整个 workflow 累计 rewind 上界 |
 | `rewind.max_per_step` | int | 可选 | 缺省 2；同一 step 被回退重入的上界 |
-| `defaults.model_candidates` | []string | 可选 | 步骤未声明时使用的有序候选 |
+| `defaults.model_candidates` | []string | 可选 | 步骤未声明时使用的有序候选；每项 `<harness>:<model>`（harness ∈ pi/claude，按第一个 `:` 切分，前缀必填，polyforge#175） |
 | `steps` | []Step | 必填 | 非空，元素 `id` 唯一（V2）；**数组顺序即唯一执行序**（V3） |
 
 Step 元素字段：
@@ -114,7 +114,7 @@ Step 元素字段：
 | `context_policy` | string | 可选，缺省 `inherit` | `inherit`\|`fresh`：见 §4.4a。`inherit` 的 step 续上上游交接（派发输入带 handoff 文件正文），`fresh` 从零开始；`gate: true` 的 step 必须是 `fresh`（闸只凭自己的输入判，不继承有倾向性的上下文；V11） |
 | `handoff` | bool | 可选，缺省 false | true 表示本 step 必须写交接文件 `artifacts/handoff-<step-id>.md`：见 §4.4a |
 | `budget` | Budget | 可选 | step 级，覆盖/叠加 workflow 级，结构同 §6.6 |
-| `model_candidates` | []string | 可选 | 覆盖 `defaults`（整体替换，非合并）；有序，切换语义见 §6.3 |
+| `model_candidates` | []string | 可选 | 覆盖 `defaults`（整体替换，非合并）；有序，切换语义见 §6.3；每项 `<harness>:<model>`（polyforge#175，可跨 harness，换到另一 harness 的候选时新开会话并带旧记录作只读参考） |
 
 frontmatter 不声明 step 间输入 wiring、执行目录（`cwd`）或任何排序/位置键：上游产物落 Capsule `artifacts/` 与 `execution.json` 的 `steps.<id>.output`（`03-execution-capsule.md#§4.2`），下游 step 的 agent 指令按产物路径约定读取（§4.2）；step 执行的 `cwd` 由 WI Agent 按 `03-execution-capsule.md#§5.1` 的 `RunCommand.cwd` 取值域（`repos/<name>` 或 `artifacts`）选择。结构 schema 只承载结构、调度与预算，不重复表达执行细节。
 

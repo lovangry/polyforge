@@ -26,7 +26,7 @@ rewind:
   max_total: 3
   max_per_step: 2
 defaults:
-  model_candidates: [prov/a, prov/b]
+  model_candidates: [pi:prov/a, pi:prov/b]
 steps:
   - id: grill
     context_policy: fresh

@@ -85,9 +85,17 @@ func newSupEnv(t *testing.T, mod func(*Config), steps ...StepSpec) *supEnv {
 	return &supEnv{d: d, sp: sp, link: link, log: log, execPath: execPath}
 }
 
+// chain declares a step's bundle candidate list; a bare test id runs on
+// pi (the test reads as the dispatched model ids — every candidate is
+// `<harness>:<model>`, polyforge#175).
 func chain(id string, models ...string) StepSpec {
 	s := spec(id)
-	s.ModelCandidates = models
+	for _, m := range models {
+		if !strings.HasPrefix(m, "pi:") && !strings.HasPrefix(m, "claude:") {
+			m = "pi:" + m
+		}
+		s.ModelCandidates = append(s.ModelCandidates, m)
+	}
 	return s
 }
 
@@ -207,7 +215,7 @@ func TestDeathCauseTableModelClassSwitchesCandidate(t *testing.T) {
 	if st.Attempts[0].FailureCause != FailExitModel {
 		t.Fatalf("attempt %+v must carry the cause", st.Attempts[0])
 	}
-	if sw := env.log.byKind("candidate_switched"); len(sw) != 1 || sw[0].body["from"] != "a" || sw[0].body["to"] != "b" {
+	if sw := env.log.byKind("candidate_switched"); len(sw) != 1 || sw[0].body["from"] != "pi:a" || sw[0].body["to"] != "pi:b" {
 		t.Fatalf("candidate_switched events: %+v", sw)
 	}
 	// the switch starts a NEW conversation

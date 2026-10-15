@@ -13,8 +13,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/harness"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
@@ -183,13 +185,14 @@ type jobRecord struct {
 	EndHead string `json:"end_head,omitempty"`
 	// StepCandidates is the claim-time per-step candidate snapshot a
 	// recovery re-derivation dispatches under; kept here (daemon-private)
-	// rather than read back from the agent-writable capsule.json.
+	// rather than read back from the agent-writable capsule.json. Each
+	// candidate is `<harness>:<model>` (polyforge#175).
 	StepCandidates map[string][]string `json:"step_candidates,omitempty"`
-	// StepHarness is the claim-time per-step harness snapshot
-	// (polyforge#159), daemon-private like StepCandidates. A record
-	// without it (written before #159) leaves every step to the bundle's
-	// own choice, else pi.
-	StepHarness map[string]string `json:"step_harness,omitempty"`
+	// LegacyStepHarness is READ-ONLY compat (polyforge#175): a record
+	// written before #175 carries bare candidate ids plus this optional
+	// per-step harness (#159). jobFromRecord rewrites such a record's
+	// bare ids to `<step_harness or pi>:<id>`; it is never written.
+	LegacyStepHarness map[string]string `json:"step_harness,omitempty"`
 }
 
 // Origin kinds.
@@ -234,7 +237,6 @@ func (j *job) record() *jobRecord {
 		EndNote:            j.endNote,
 		EndHead:            j.endHead,
 		StepCandidates:     j.stepCandidates,
-		StepHarness:        j.stepHarness,
 	}
 }
 
@@ -273,9 +275,44 @@ func jobFromRecord(rec *jobRecord) *job {
 		origin:               rec.Origin,
 		endNote:              rec.EndNote,
 		endHead:              rec.EndHead,
-		stepCandidates:       rec.StepCandidates,
-		stepHarness:          rec.StepHarness,
+		stepCandidates:       legacyCandidates(rec.StepCandidates, rec.LegacyStepHarness),
 	}
+}
+
+// legacyCandidates is the polyforge#175 read-compat of a pre-#175
+// claim-time snapshot, so an in-flight work item recovers across the
+// upgrade: a candidate that is not `<harness>:<model>` is a bare id of
+// that era and runs on the record's old per-step harness (#159
+// step_harness), else pi. The step keeps exactly the list it walked
+// before the upgrade — #159 skipped the ids its harness did not serve
+// (claude: `claude-…` without `/`; pi: every other id) — so the
+// recorded model-class failures still index the same candidates. A
+// current record passes through unchanged.
+func legacyCandidates(cands map[string][]string, stepHarness map[string]string) map[string][]string {
+	if cands == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(cands))
+	for step, list := range cands {
+		if list == nil {
+			out[step] = nil
+			continue
+		}
+		h := harness.Of(stepHarness[step])
+		conv := make([]string, 0, len(list))
+		for _, id := range list {
+			if c, err := harness.ParseCandidate(id); err == nil {
+				conv = append(conv, c.String())
+				continue
+			}
+			claudeID := strings.HasPrefix(id, "claude-") && !strings.Contains(id, "/")
+			if claudeID == (h == harness.Claude) {
+				conv = append(conv, h+":"+id)
+			}
+		}
+		out[step] = conv
+	}
+	return out
 }
 
 // loadState reads state.json; a missing file is an empty state (first
