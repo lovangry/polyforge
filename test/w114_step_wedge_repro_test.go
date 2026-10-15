@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -151,6 +152,10 @@ func TestW114StepWedgeDetectedWithoutOperator(t *testing.T) {
 		}
 	}
 	// The dispatches ran under the chain's first two candidates, in order.
+	// The failure record names candidates (`<harness>:<model>`,
+	// polyforge#175); the harness journals the bare model its --model got.
+	_, fromModel, _ := strings.Cut(f.From, ":")
+	_, toModel, _ := strings.Cut(f.To, ":")
 	var models []string
 	for _, rec := range fakeJournal(t, d.capsuleDir(wi)) {
 		if rec["type"] == "spawn" {
@@ -159,8 +164,8 @@ func TestW114StepWedgeDetectedWithoutOperator(t *testing.T) {
 			}
 		}
 	}
-	if len(models) < 2 || models[0] != f.From || models[1] != f.To {
-		t.Fatalf("dispatch models %v, want [%s %s ...]", models, f.From, f.To)
+	if !strings.HasPrefix(f.From, "pi:") || !strings.HasPrefix(f.To, "pi:") || len(models) < 2 || models[0] != fromModel || models[1] != toModel {
+		t.Fatalf("dispatch models %v, want [%s %s ...] (from %s → %s)", models, fromModel, toModel, f.From, f.To)
 	}
 	// ONE verdict, ONE failure record for the wedged dispatch.
 	kinds := d.eventKinds(t, wi)

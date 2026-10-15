@@ -362,7 +362,7 @@ func TestV2ModelPinFailureAdvancesCandidate(t *testing.T) {
 	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
 	fails := stepFailures(t, d, wi)
 	if len(fails) != 1 || fails[0].Step != "verification" || fails[0].Cause != "exit_model_class" || fails[0].Disposition != "switch_model" ||
-		fails[0].From != "sub2api-glm/glm-5.3-flash" || fails[0].To != "sub2api-glm/glm-5.3" || fails[0].Count != 0 {
+		fails[0].From != "pi:sub2api-glm/glm-5.3-flash" || fails[0].To != "pi:sub2api-glm/glm-5.3" || fails[0].Count != 0 {
 		t.Fatalf("failure records %+v, want exit_model_class/switch_model flash -> glm-5.3 on verification", fails)
 	}
 	if vs := verdicts(t, d, wi); len(vs) != 0 {
