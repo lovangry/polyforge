@@ -60,7 +60,9 @@ the user saying "init workspace".
    key that is no step id of the installed workflows, a project key this
    workspace's cli.toml section does not list, a step-entry key
    other than `models`, a top-level `models:` section (the pre-#169 shape)
-   or an empty model id refuses to load):
+   or an empty model id refuses to load; YAML merge keys (`<<`) are
+   refused — share a list with anchors, `models: &x [...]` /
+   `{ models: *x }`):
 
    ```yaml
    # Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults

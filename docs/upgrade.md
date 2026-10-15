@@ -317,7 +317,11 @@ not also a step id (`qa`, `author`, `gate`) refuses; `code`, `spec` and
 `review` load but mean only the step with that id. Likewise every
 project key under `steps:` must be a project cli.toml maps to that
 workspace, and a `models` list's ids are trimmed and must be non-empty,
-unique strings (the `pf submit --models` rules).
+unique strings (the `pf submit --models` rules) written as plain
+strings — numbers, YAML tags and aliased items (`[&m a, *m]`) are
+refused. YAML merge keys (`<<`) are refused at every level; share lists
+with anchors instead (`models: &x [...]` / `{ models: *x }`, as in the
+blocks below). The file must hold exactly one YAML document.
 
 Step-id keys are checked against the workflows dir at every claim, not
 once: before deploying a workflows release that removes or renames a
