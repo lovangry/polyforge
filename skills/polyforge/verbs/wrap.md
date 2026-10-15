@@ -49,7 +49,7 @@ wrap answers the graceful `already_terminal` shape, not an error.
 | `DAEMON-409` | A close is already in progress for this job — another pause/wrap, or a mid-recovery state | Wait for the in-flight close to settle, then check `pf watch <id> --once`; the work item is being closed exactly once either way. |
 | `CORE-*` passthrough (e.g. `CORE-403`, `CORE-409`) | The server-side end-generation was refused | The typed Core verdict arrives verbatim — typically the generation is no longer yours to end; act per its detail. |
 | `DAEMON-500` | The close failed on the daemon side | The job is left mid-seal, recorded as such; the next daemon start finishes the close. Check the daemon log before retrying. |
-| `dial unix …` | Daemon not running | Nothing is executing here — start the daemon or check `--socket`. |
+| `dial unix …` | Daemon not running | Nothing is executing here — run `pf daemon ensure`, then retry once (or check `--socket`). |
 
 A `--fail` close is permanent for this work item: the CLI refuses any later
 submit of it up front (`terminal (failed)`), and only a brand-new work item

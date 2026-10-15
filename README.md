@@ -22,18 +22,29 @@ It installs the `pf` binary (SHA-verified from the release server), writes
 `~/.config/polyforge/cli.toml` (never rewritten), and keeps its own checkout
 of the release tag in `~/.local/share/polyforge/release/<tag>` (stable
 symlink `release/current`, previous version kept). From that checkout it
-installs the `skills/polyforge` routing skill for each harness it finds,
-independently: Claude Code (`~/.claude` or `claude` on PATH) gets the skill
-replaced wholesale in `~/.claude/skills/polyforge` plus a SessionStart hook
-registered once in `~/.claude/settings.json`; pi (on PATH) gets its polyforge
-package entry pinned to the same tag as the binary. It then reports
+wires the `skills/polyforge` routing skill into each harness it finds,
+independently, by REFERENCE (nothing copied, nothing cloned twice):
+Claude Code (`~/.claude` or `claude` on PATH) gets `~/.claude/skills/polyforge`
+as a symlink to `release/current/skills/polyforge` plus a SessionStart hook
+registered once in `~/.claude/settings.json`; pi (on PATH, or its agent dir
+present) gets one local package entry naming `release/current` in its
+settings (replacing an older `git:...silgrid/polyforge.git@<tag>` entry).
+It then reports
 whether each harness will display polyforge progress (the `pf doctor
 --harness` check: Claude Code's statusLine running `pf watch --statusline`,
 pi's pf-chat extension) and prints a copyable snippet when not — it never
-edits your statusLine. Then it starts the
-daemon with `-workflows-dir release/current/workflows` (once a `[workspace]`
-mapping exists; a daemon already running with a different workflows dir is
-reported, never auto-restarted) and verifies connectivity. The admin
+edits your statusLine — plus the install-layout and v1-leftover checks.
+Then it starts the daemon through `pf daemon ensure` (once a `[workspace]`
+mapping exists): a restart loop in tmux session `polyforge-daemon` runs it
+with `-workflows-dir release/current/workflows` and revives it within ~5s
+after a crash; after a container/machine restart (tmux does not survive
+one) the next pi or Claude Code session runs the same ensure. An upgrade
+shuts the daemon down gracefully (the loop ends with that clean exit —
+`pf ops shutdown` always stops for good, only failures are restarted),
+swaps the binary, then ensures again; meanwhile it holds the ensure lock,
+so a harness session starting mid-upgrade starts nothing. A daemon already running with a different workflows
+dir, or without its loop, is reported, never auto-restarted. Finally it
+verifies connectivity. The admin
 registers the machine identity first. Re-running the same command upgrades
 and is idempotent. Daily use from a session is natural language via the
 `polyforge` routing skill; from a terminal it's

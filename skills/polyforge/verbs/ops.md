@@ -16,8 +16,8 @@ the daemon lives.
 - EN: daemon status / what's this machine running / how many jobs / turn
   auto-pull on / turn auto-pull off / let the machine pick up ready work
   itself / raise the concurrency / shut the daemon down gracefully /
-  pre-upgrade check
-- 中文: 升级前自检 / 启停 / 守护进程状态 / 本机在跑什么 / 开启自动领取 /
+  pre-upgrade check / start the daemon / the daemon is down
+- 中文: 升级前自检 / 启停 / 拉起 daemon / daemon 挂了 / 守护进程状态 / 本机在跑什么 / 开启自动领取 /
   关闭自动领取 / 优雅停机 / 调大并发
 - EN (recovery): take over a stuck work item / its daemon is dead / the
   machine holding it is gone / force-end the session
@@ -31,7 +31,20 @@ pf ops auto [on|off]                                 # bare: show; on: pull the 
 pf ops max [N]                                       # bare: show; N >= 1: max concurrent jobs
 pf ops shutdown                                      # graceful shutdown
 pf ops end-session <wi> --reason <text>              # force-end a stuck holder's session (aihub-direct)
+pf daemon ensure                                     # START: the daemon under its tmux restart loop (no-op when it answers)
 ```
+
+Starting the daemon is `pf daemon ensure` (polyforge#174) — never a bare
+`pf daemon` in the background. It is idempotent and file-locked: when a
+daemon answers it does nothing; otherwise it starts the restart loop in
+tmux session `polyforge-daemon` (a failed exit — crash, panic, kill — is
+restarted within ~5s; a clean exit ends the loop) and waits for the socket. The harness adapters already run it when a session
+starts or resumes, so the agent runs it only as the fallback: an
+execution-plane verb answered `dial unix …` → `pf daemon ensure`, then
+retry that verb ONCE. A non-zero exit carries the reason (no `[workspace]`
+mapping, missing release workflows, the daemon log tail) — relay it and
+run `pf doctor`. `pf ops shutdown` stops the daemon for good: its clean
+exit ends the restart loop as well; `pf daemon ensure` starts it again.
 
 `pf ops auto off` is more than the switch: the queue's not-yet-started
 `origin=auto` entries are REMOVED at the same time (from memory and from
@@ -95,7 +108,7 @@ end), `CORE-410` (terminal).
 |---|---|---|
 | `DAEMON-410` (`SHUTTING_DOWN`) | Any external submit while a graceful shutdown is in flight | Wait for the shutdown to complete and the daemon to restart. |
 | `DAEMON-400` | Malformed ops-config request (`max < 1`, empty body) — the CLI's own argument validation usually catches this first with a usage error | Fix the invocation; read the detail. |
-| `dial unix …` | The daemon is not running on this machine | Nothing to operate on — start it first (`pf daemon`); check `--socket` / `PF_DAEMON_SOCKET` if you expect it elsewhere. |
+| `dial unix …` | The daemon is not running on this machine | Run `pf daemon ensure` (starts it under its tmux restart loop; a no-op when one answers), then retry the verb once; if ensure fails, relay its message and run `pf doctor`. Check `--socket` / `PF_DAEMON_SOCKET` if you expect it elsewhere. |
 
 Auto vs shutdown: with auto on the machine also claims and runs
 ready-queue work by itself (an internal loop; idle-polls when the queue is

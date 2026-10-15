@@ -52,10 +52,16 @@ import (
 //     daemon socket (GET /status over the UDS), auth (a signed aihub
 //     read getting past the key boundary — the same read face the
 //     projects check uses, no admin-only surface);
-//   - the harness progress-display family (doctor_display.go): Claude
-//     Code's statusLine and pi's pf-chat extension — pass/warn/skip
-//     only, never fail, so they never move the exit code. `--harness`
-//     runs this family alone (tools/install.sh prints it).
+//   - daemon supervision (polyforge#174, doctor_layout.go): a live
+//     daemon under the tmux restart loop (or an active systemd unit)
+//     passes, an unsupervised one warns with the fix; a dead daemon is
+//     the socket check's fail, which names `pf daemon ensure`;
+//   - the harness family (doctor_display.go, doctor_layout.go): Claude
+//     Code's statusLine and pi's pf-chat extension, the install layout
+//     tools/install.sh sets up (pi's local release package, Claude's
+//     skill symlink) and v1 polyforge leftovers — pass/warn/skip only,
+//     never fail, so they never move the exit code. `--harness` runs
+//     this family alone (tools/install.sh prints it).
 //
 // Exit codes: 0 every check passes, 1 any check fails, 2 usage errors
 // (the repo convention — unknown flags parse-fail before any check).
@@ -159,7 +165,7 @@ func runDoctorChecks(ctx *Context) doctorReport {
 	cfg, err := LoadConfig(ctx.ConfigPath)
 	if err != nil {
 		add(docChConfig, "fail", err.Error()+" — see the install docs for the migration steps")
-		for _, name := range []string{docChMapping, docChDirs, docChYaml, docChClaude, docChProjects, docChServer, docChSocket, docChAuth} {
+		for _, name := range []string{docChMapping, docChDirs, docChYaml, docChClaude, docChProjects, docChServer, docChSocket, docChSupervision, docChAuth} {
 			add(name, "skip", "config-dependent check not run: the config could not be loaded")
 		}
 		checks = append(checks, harnessDisplayChecks()...)
@@ -206,6 +212,8 @@ func runDoctorChecks(ctx *Context) doctorReport {
 	// Daemon socket: independent of aihub.
 	sockOK, sockDetail, status := probeDaemonSocket(cfg.DaemonSocket)
 	add(docChSocket, passOrFail(sockOK), sockDetail)
+	// polyforge#174: a live daemon should run under the restart loop.
+	checks = append(checks, supervisionCheck(sockOK))
 
 	if cfg.Mapping.Empty() {
 		add(docChYaml, "skip", "not run: the mapping is absent")
@@ -309,7 +317,7 @@ func probeDaemonSocket(sock string) (bool, string, StatusResponse) {
 	var st StatusResponse
 	raw, err := c.Status()
 	if err != nil {
-		return false, fmt.Sprintf("daemon socket %s does not answer GET /status: %v — is the daemon running?", sock, err), st
+		return false, fmt.Sprintf("daemon socket %s does not answer GET /status: %v — the daemon is not running: start it with `pf daemon ensure` (it starts the supervised restart loop)", sock, err), st
 	}
 	_ = json.Unmarshal(raw, &st)
 	return true, fmt.Sprintf("daemon socket %s answers (daemon %s)", sock, st.MachineID), st

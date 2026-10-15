@@ -110,7 +110,7 @@ refused before anything else happens.
 | `CORE-409 NOT_BLOCKED` | The resume door on a work item that is no longer blocked | The state moved — check `pf queue`/`pf watch <id> --once`; a paused WI unpauses with this same verb. |
 | `CORE-409 NOT_CLAIMABLE` (from the resume door) | The blocked WI still carries a session (a half-settled close) | Nobody may resume it until the holder settles — check the holder daemon, or an admin/maintainer ends the session with `pf ops end-session`. |
 | `CORE-404` (from the resume door, on claim) | Another machine claimed the work item between the door and the claim | It resumed elsewhere — watch it there. |
-| `dial unix …` | Daemon not running | The blocked-door resume re-establishes execution, so a daemon must be involved — start the daemon or check `--socket`. The paused-door resume still cleared `clean_pause` at the hub; once the holder daemon starts, its restart reconciliation attaches the paused session (to continue without it, `pf ops end-session` + `pf submit`). |
+| `dial unix …` | Daemon not running | The blocked-door resume re-establishes execution, so a daemon must be involved — run `pf daemon ensure`, then retry once (or check `--socket`). The paused-door resume still cleared `clean_pause` at the hub; once the holder daemon starts, its restart reconciliation attaches the paused session (to continue without it, `pf ops end-session` + `pf submit`). |
 
 Do not route "continue / go on" of a **running** work item here — that is
 `watch`. A blocked work item has exactly two owner moves: continue it here,

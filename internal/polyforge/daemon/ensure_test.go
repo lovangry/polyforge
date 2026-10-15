@@ -1,0 +1,136 @@
+package daemon
+
+// ensure_test.go (polyforge#174): unit pins of `pf daemon ensure` — the
+// machine id it launches with, the loop script (valid sh, the canonical
+// argv quoted, the daemon immune to the loop's hangup, harness markers
+// dropped) and the refusals. The end-to-end behavior (real tmux on a
+// private server, real daemon, concurrency, restart) lives in
+// test/w174_daemon_ensure_test.go.
+
+import (
+	"bytes"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestEnsureMachineID(t *testing.T) {
+	dir := t.TempDir()
+	got := ensureMachineID(dir)
+	if !strings.HasPrefix(got, "m-") || hostSanitizeRe.MatchString(got[2:]) {
+		t.Fatalf("default id %q is not m-<sanitized short hostname>", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, daemonIDFile), []byte("m-recorded\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := ensureMachineID(dir); got != "m-recorded" {
+		t.Fatalf("the recorded daemon-id must win, got %q", got)
+	}
+}
+
+func TestEnsureLoopScript(t *testing.T) {
+	p := &ensurePlan{
+		pfBin: "/opt/pf bin/pf", configPath: "/c/it's cli.toml", dataDir: "/d/data",
+		socket: "/d/data/daemon.sock", workflowsDir: "/d/data/release/current/workflows",
+		machineID: "m-x", home: "/home/u", timeout: time.Second,
+	}
+	script := p.loopScript()
+	if out, err := exec.Command("sh", "-n", "-c", script).CombinedOutput(); err != nil {
+		t.Fatalf("loop script is not valid sh: %v %s\n%s", err, out, script)
+	}
+	for _, want := range []string{
+		"nohup '/opt/pf bin/pf' 'daemon' '--config' '/c/it'\\''s cli.toml' '-machine-id' 'm-x' '-data-dir' '/d/data' '-socket' '/d/data/daemon.sock' '-workflows-dir' '/d/data/release/current/workflows' < /dev/null >> '/d/data/daemon.log' 2>&1",
+		"while :; do", "rc=$?", "if [ \"$rc\" -eq 0 ]", "break", "sleep 5", "POLYFORGE_SUPERVISOR='tmux:polyforge-daemon'",
+		"unset TMUX TMUX_PANE PF_CHAT_ID PF_WI_ID",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("loop script lacks %q:\n%s", want, script)
+		}
+	}
+	for _, banned := range []string{"-auto", "-max-concurrent-jobs", "--harness-root"} {
+		if strings.Contains(script, banned) {
+			t.Fatalf("loop script forces %q:\n%s", banned, script)
+		}
+	}
+}
+
+// TestEnsureLoopRestartsFailuresAndEndsOnCleanExit runs the real loop
+// script (no tmux) around a fake daemon that fails once, then exits 0:
+// the failure is restarted after the pause, the clean exit ends the loop;
+// every inherited CLAUDE* and the step/chat markers are gone from the
+// daemon's environment.
+func TestEnsureLoopRestartsFailuresAndEndsOnCleanExit(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "pf")
+	body := "#!/bin/sh\nn=$(cat " + dir + "/n 2>/dev/null || echo 0); n=$((n+1)); echo $n > " + dir + "/n\nenv > " + dir + "/env.$n\n[ $n -ge 2 ] && exit 0\nexit 3\n"
+	if err := os.WriteFile(fake, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := &ensurePlan{pfBin: fake, configPath: "/c", dataDir: dir, socket: dir + "/s", workflowsDir: dir, machineID: "m-x", home: dir}
+	cmd := exec.Command("sh", "-c", p.loopScript())
+	cmd.Env = append(os.Environ(), "CLAUDECODE=1", "CLAUDE_CODE_SSE_PORT=1", "CLAUDE_ANYTHING=x", "PF_WI_ID=wi_1", "PF_CHAT_ID=chat_1", "TMUX=/x,1,0")
+	start := time.Now()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("loop: %v %s", err, out)
+	}
+	if took := time.Since(start); took < 4*time.Second || took > 15*time.Second {
+		t.Fatalf("loop took %s: want one ~5s restart pause, then the end on the clean exit", took)
+	}
+	if n, _ := os.ReadFile(filepath.Join(dir, "n")); strings.TrimSpace(string(n)) != "2" {
+		t.Fatalf("daemon runs = %q, want 2 (failure restarted, clean exit final)", n)
+	}
+	env, _ := os.ReadFile(filepath.Join(dir, "env.1"))
+	for _, banned := range []string{"CLAUDE", "PF_WI_ID=", "PF_CHAT_ID=", "TMUX="} {
+		if strings.Contains(string(env), banned) {
+			t.Fatalf("the daemon inherited %q:\n%s", banned, env)
+		}
+	}
+	if !strings.Contains(string(env), "POLYFORGE_SUPERVISOR=tmux:polyforge-daemon") {
+		t.Fatal("the supervision marker is missing")
+	}
+	log, _ := os.ReadFile(filepath.Join(dir, "daemon.log"))
+	if !strings.Contains(string(log), "failed (exit 3); restarting") || !strings.Contains(string(log), "exited cleanly; the loop ends") {
+		t.Fatalf("loop log:\n%s", log)
+	}
+}
+
+func TestEnsureRefusedInStepAgent(t *testing.T) {
+	t.Setenv("PF_WI_ID", "wi_step")
+	var out, errb bytes.Buffer
+	if code := Main([]string{"ensure"}, nil, &out, &errb); code != 1 || !strings.Contains(errb.String(), "step agent") {
+		t.Fatalf("ensure in a step agent: exit %d stderr %q, want 1 refusing", code, errb.String())
+	}
+}
+
+func TestEnsureUsageAndRefusals(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := Main([]string{"ensure", "--bogus"}, nil, &out, &errb); code != 2 {
+		t.Fatalf("unknown flag: exit %d, want 2", code)
+	}
+	if code := Main([]string{"ensure", "extra"}, nil, &out, &errb); code != 2 {
+		t.Fatalf("stray argument: exit %d, want 2", code)
+	}
+	// no mapping: refused before any tmux / process work
+	cfg := filepath.Join(t.TempDir(), "cli.toml")
+	sock := filepath.Join(t.TempDir(), "d.sock")
+	if err := os.WriteFile(cfg, []byte("server = \"http://127.0.0.1:1\"\ndaemon_socket = \""+sock+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir()) // no tmux reachable at all
+	errb.Reset()
+	if code := Main([]string{"ensure", "--config", cfg, "--timeout", "1s"}, nil, &out, &errb); code != 1 || !strings.Contains(errb.String(), "[workspace") {
+		t.Fatalf("no mapping: exit %d stderr %q, want 1 naming the mapping", code, errb.String())
+	}
+	// a mapping but no workflows dir: refused, nothing started
+	ws := t.TempDir()
+	if err := os.WriteFile(cfg, []byte("server = \"http://127.0.0.1:1\"\ndaemon_socket = \""+sock+"\"\n[workspace.\""+ws+"\"]\nprojects = [\"e2e\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	errb.Reset()
+	if code := Main([]string{"ensure", "--config", cfg, "--timeout", "1s", "--workflows-dir", filepath.Join(ws, "absent")}, nil, &out, &errb); code != 1 || !strings.Contains(errb.String(), "workflows dir") {
+		t.Fatalf("missing workflows: exit %d stderr %q", code, errb.String())
+	}
+}

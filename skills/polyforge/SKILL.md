@@ -33,10 +33,16 @@ intent is ambiguous, **ask rather than guess**.
 
 ## Install surface
 
-This skill is the **only** thing a user harness installs. Pi: one `skills`
-path line in settings, pointing directly at `skills/polyforge/` inside the
-local checkout — zero copying, no bundling. Claude Code: `tools/install.sh`
-replaces `~/.claude/skills/polyforge` from its release checkout. There is no executor skill: the
+This skill is the **only** thing a user harness installs, and both
+harnesses REFERENCE the release checkout `tools/install.sh` keeps at
+`~/.local/share/polyforge/release/current` — zero copying, no second clone
+(polyforge#174). Pi: one local package entry naming that directory in pi's
+settings `packages` (the repo's `package.json` declares this skill AND the
+`pf-chat` extension — a bare `skills` path line would lose the extension).
+Claude Code: `~/.claude/skills/polyforge` is a symlink to
+`release/current/skills/polyforge`. A release switch is the `release/current`
+swap; the next harness session loads it. `pf doctor` warns when a harness
+deviates from this layout or still carries v1 polyforge artifacts. There is no executor skill: the
 **Go driver** owns workflow execution — the daemon binds it
 unconditionally, version-locked to the daemon release, and no harness
 installs or runs a workflow. A user harness never executes a workflow:
@@ -76,7 +82,7 @@ EXTENDED_GLOB and starts a comment after whitespace.
 | wrap it up / we're done / mark it failed / 收尾 / 完事了 / 判完成 / 判失败 | `verbs/wrap.md` | daemon |
 | ship it / deliver / push the branch / open the PR / merge it / 推上去 / 交付 | `verbs/ship.md` (deliver-step note: no verb; point at the workflow's `deliver` step and `pf watch`) | — |
 | cut a release / publish a version / deploy it / 发版 / 发布新版本 / 部署上线 | `verbs/file.md` (create, `--bundle release`) | AIHub |
-| daemon status / what's this machine running / what's happening / global state / 看看什么情况 / 全局状态 / auto-pull on/off / max concurrent jobs / shutdown / 升级前自检 / 启停 / 自动领取开关 / 调并发 / 优雅停机 | `verbs/ops.md` | daemon |
+| daemon status / what's this machine running / what's happening / global state / 看看什么情况 / 全局状态 / auto-pull on/off / max concurrent jobs / shutdown / start the daemon / the daemon is down / 升级前自检 / 启停 / 拉起 daemon / 自动领取开关 / 调并发 / 优雅停机 | `verbs/ops.md` (start = `pf daemon ensure`) | daemon |
 | is this machine healthy / diagnose / check the mapping / why won't the daemon start / 连不上 / 诊断 / 体检 / 检查映射 | `verbs/doctor.md` | CLI (config + aihub + daemon reads) |
 | init / install / upgrade / machine setup / 装机 / 升级 | `verbs/init.md` (machine pointer) | CLI |
 | init this workspace / initialize the workspace / write the workspace yaml / 初始化工作区 / 生成工作区配置 | `verbs/init.md` (workspace init) | CLI |
@@ -283,8 +289,12 @@ pf [global flags] <verb> [verb flags] [positional args]
   (non-fast-forward, gitlink, blob size, sequence-trailer violations),
   `DAEMON-*` the local daemon face, `CAP-*` capsule lifecycle.
 - A daemon-face failure to dial (`dial unix ...`) means the daemon is not
-  running on this machine — start it (`pf daemon`) or check `--socket`; it is
-  not a typed verdict about any work item.
+  running on this machine; it is not a typed verdict about any work item.
+  Run `pf daemon ensure` (it starts the daemon under its tmux restart loop,
+  or does nothing when one already answers), then retry the verb ONCE; if
+  ensure fails, relay its message and suggest `pf doctor` (or check
+  `--socket`). This is the fallback: normally the harness adapter already
+  ran ensure when the session started (see below).
 
 ## Chat identity (PF_CHAT_ID)
 
@@ -307,13 +317,22 @@ it: a harness adapter sets it.
   ]}]}}
   ```
 
-  It appends `export PF_CHAT_ID=<id>` to `$CLAUDE_ENV_FILE` and prints one
-  JSON object: `systemMessage` shows `polyforge chat id: <id>` to the human,
-  `additionalContext` gives the model the same id. It is silent when pf or
-  the daemon is unavailable.
+  It first runs `pf daemon ensure` (bounded: 15s, killed at 20s) so a
+  daemon that is down — e.g. after a container or machine restart — comes
+  back; then it appends `export PF_CHAT_ID=<id>` to `$CLAUDE_ENV_FILE` and
+  prints one JSON object: `systemMessage` shows `polyforge chat id: <id>` to
+  the human, `additionalContext` gives the model the same id. It is silent
+  when pf or the daemon is unavailable, and never blocks the session.
+  SessionStart fires on startup, resume, clear and compact.
 - **pi**: the `extensions/pf-chat.ts` extension is listed in this package's
-  `pi.extensions` manifest; it runs `pf chat init` on session start and
+  `pi.extensions` manifest; it runs `pf chat init` on session start (pi-web
+  replays session start when it resumes its sessions) — when that fails it
+  runs `pf daemon ensure` once in the background and retries — and
   prefixes every bash tool call with `PF_CHAT_ID=<id>`.
+- **Step agents never run either adapter**: pi steps run against the
+  daemon's own agent dir (no user packages, no pf-chat), claude steps run
+  with `--bare` (no hooks); both carry `PF_WI_ID`, on which the adapters
+  exit as a second fence. Only a human's session starts the daemon.
 
 ## Routing boundaries this skill never crosses
 

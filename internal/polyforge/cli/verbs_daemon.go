@@ -398,7 +398,7 @@ var cmdOps = &Command{
 	Usage: "pf ops status\n" +
 		"pf ops auto [on|off]    # off = only explicit pf submit; on = the daemon also pulls the ready queue itself (bare = show)\n" +
 		"pf ops max [N]          # max concurrent jobs on this machine, N >= 1 (bare = show)\n" +
-		"pf ops shutdown         # graceful shutdown (quiesce)\n" +
+		"pf ops shutdown         # graceful shutdown (quiesce); the restart loop ends with it — start again with `pf daemon ensure`\n" +
 		"pf ops end-session <wi> --reason <text>  # admin/maintainer: force-end a stuck holder's session (WI -> queued; then `pf submit <wi>` anywhere)",
 	Setup: func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
@@ -520,10 +520,32 @@ func onOff(b bool) string {
 // flag set — keep it in sync manually. The retired selection flags and
 // env mirrors are NOT listed anywhere on this face (polyforge#113): the
 // config's [workspace] mapping is the only workspace source.
-const daemonUsage = `pf daemon [--flag value] ...
+const daemonUsage = `pf daemon ensure [--config PATH] [--workflows-dir DIR] [--timeout D]
+pf daemon [--flag value] ...
 
-Starts the local polyforge daemon (a UDS server hosting the runtime and
-observe projections). The real entry is assembled: cmd/pf/main.go
+pf daemon ensure (polyforge#174) is how the daemon is started on a work
+machine — by tools/install.sh, and by the harness adapters (pi's pf-chat
+extension, the Claude Code SessionStart hook) when a human's session
+starts or resumes. Idempotent: a daemon answering on the config's
+daemon_socket means nothing to do (exit 0). Otherwise it starts the
+restart loop in tmux session polyforge-daemon (pf daemon <canonical
+argv>; a failed exit — crash, panic, kill — is restarted after 5s, a
+clean exit — pf ops shutdown, SIGTERM — ends the loop; the log is
+<data-dir>/daemon.log) and waits up to
+--timeout (default 30s) for the socket: exit 0 when it answers, 1 when
+not. Concurrent calls are serialized by <data-dir>/ensure.lock: one
+loop, one daemon (tools/install.sh holds the same lock during an
+upgrade). Refused inside a step agent (PF_WI_ID set). Without tmux it starts one unsupervised daemon and
+warns. The canonical argv: --config, -machine-id (the recorded
+<data-dir>/daemon-id, else m-<short hostname>), -data-dir
+($POLYFORGE_DATA_DIR or ~/.local/share/polyforge), -socket (the
+config's daemon_socket), -workflows-dir (<data-dir>/release/current/
+workflows unless --workflows-dir). A config without a [workspace]
+mapping is refused (the daemon would refuse to start). pf ops shutdown
+stops the daemon for good: the loop ends with the clean exit.
+
+pf daemon [--flag value] ... runs the local polyforge daemon in the
+foreground (a UDS server hosting the runtime and observe projections). The real entry is assembled: cmd/pf/main.go
 intercepts ` + "`pf daemon`" + ` argv before CLI dispatch and calls
 internal/polyforge/daemon.Main. This CLI registration exists only to
 serve ` + "`pf help daemon`" + ` presentation.
@@ -626,7 +648,7 @@ The full ` + "`pf daemon --help`" + ` flag surface is documented in the README.`
 var cmdDaemon = &Command{
 	Name:    "daemon",
 	Group:   GroupProcess,
-	Summary: "Run the local pf daemon (assembled: main.go intercepts `pf daemon` before CLI dispatch; this verb serves `pf help daemon` only)",
+	Summary: "Run the local pf daemon; `pf daemon ensure` starts it under supervision unless it answers (main.go intercepts `pf daemon` before CLI dispatch; this verb serves `pf help daemon` only)",
 	Usage:   daemonUsage,
 	Setup:   func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {

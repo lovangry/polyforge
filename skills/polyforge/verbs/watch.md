@@ -55,7 +55,7 @@ in only when no slug is known. Quote a slug when you pass it back
 | (no code) `watch: no chat id` | None of `--chat`, `--harness-session` or `PF_CHAT_ID` is set | The session has no chat id — see the Chat identity section of `SKILL.md`. |
 | (no code) `watch: --chat and --harness-session are both explicit chat-id sources` | Both flags were passed | Pass exactly one of them. |
 | `DAEMON-400` | Bad cursor or chat id | Fix the invocation. |
-| `dial unix …` | Daemon not running | Nothing is executing here — start the daemon or check `--socket`. The resident watcher prints `daemon unreachable; progress paused` and keeps retrying. |
+| `dial unix …` | Daemon not running | Nothing is executing here — run `pf daemon ensure`, then retry once (or check `--socket`). The resident watcher prints `daemon unreachable; progress paused` and keeps retrying. |
 
 Progress is never a second authority: the step fields are a live direct read of
 the capsule's execution record; the events are news, not state.

@@ -157,16 +157,22 @@ func TestPiDisplayCheck(t *testing.T) {
 		detail   string
 	}{
 		{"no pi", "", "skip", "not set up"},
-		{"settings.json absent", "-", "warn", "pi install git:git@github.com:silgrid/polyforge.git"},
+		{"settings.json absent", "-", "warn", "re-run tools/install.sh"},
 		{"malformed settings.json", "[1,", "warn", "cannot tell"},
-		{"package not installed", `{"packages":["git:git@github.com:other/repo.git"]}`, "warn", "pi install"},
+		{"package not installed", `{"packages":["git:git@github.com:other/repo.git"]}`, "warn", "release/current"},
 		{"package installed", `{"packages":["git:git@github.com:other/repo.git","git:git@github.com:silgrid/polyforge.git@v2.2.1"]}`, "pass", "silgrid/polyforge"},
 		{"package installed (object entry)", `{"packages":[{"source":"https://github.com/silgrid/polyforge"}]}`, "pass", "silgrid/polyforge"},
 		{"extension listed", `{"extensions":[{"x":1},"/src/polyforge/skills/polyforge/extensions/pf-chat.ts"]}`, "pass", "pf-chat.ts"},
+		// polyforge#174: the local release checkout install.sh references
+		{"local release package", `{"packages":["~/.local/share/polyforge/release/current"]}`, "pass", "release/current"},
+		{"local release package missing", `{"packages":["/nonexistent/release/current"]}`, "warn", "re-run tools/install.sh"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c := piDisplayCheck(filepath.Join(displayHome(t, "", tc.settings), ".pi", "agent"))
+			home := displayHome(t, "", tc.settings)
+			t.Setenv("POLYFORGE_DATA_DIR", "")
+			layoutRelease(t, home)
+			c := piDisplayCheck(filepath.Join(home, ".pi", "agent"), home)
 			if c.Status != tc.status || !strings.Contains(c.Detail, tc.detail) {
 				t.Fatalf("got %s %q, want %s carrying %q", c.Status, c.Detail, tc.status, tc.detail)
 			}
@@ -181,7 +187,7 @@ func TestDoctorDisplayGapKeepsExitCode(t *testing.T) {
 	home := displayHome(t, "{not json", `{"packages":[]}`)
 	env := map[string]string{"HOME": home, "PI_CODING_AGENT_DIR": ""}
 	code, stdout, doc := doctorStatus(t, env, "--json", "doctor", "--harness")
-	if code != 0 || !doc.OK || len(doc.Checks) != 2 {
+	if code != 0 || !doc.OK || len(doc.Checks) != 5 {
 		t.Fatalf("--harness: exit %d ok %v checks %+v (output %s)", code, doc.OK, doc.Checks, stdout)
 	}
 	for _, name := range []string{docChClaudeDisplay, docChPiDisplay} {

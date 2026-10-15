@@ -867,3 +867,58 @@ steps:
 
 Run `pf doctor` after the edit: `workspace yaml` must pass, and
 `harness claude` must pass wherever a `claude:` candidate remains.
+
+## Work machines: harnesses reference the release; the daemon is supervised (polyforge#174)
+
+Re-running `tools/install.sh` on a machine installed before this change
+migrates it in place; a second run changes nothing.
+
+### What the re-run changes
+
+- **pi**: the `git:git@github.com:silgrid/polyforge.git@<ver>` entry in
+  pi's settings `packages` (a second, full clone of the repo under
+  `~/.pi/agent/git/`) is replaced, in place, by one local entry naming
+  `~/.local/share/polyforge/release/current` — the checkout install.sh
+  already keeps. pi loads a local package where it lies (no copy); the
+  release's `package.json` declares the skill AND the `pf-chat`
+  extension. Other packages are untouched; the previous settings file is
+  kept as `settings.json.bak-polyforge-<timestamp>`. `pi` itself is no
+  longer invoked. Restart the pi sessions (pi-web) to load it. The old
+  clone is no longer referenced; remove it once pi runs fine:
+  `rm -rf ~/.pi/agent/git/github.com/silgrid/polyforge`.
+- **Claude Code**: the copied `~/.claude/skills/polyforge` directory is
+  removed and replaced by a symlink to
+  `release/current/skills/polyforge`. The SessionStart hook keeps its
+  registered path (`~/.claude/skills/polyforge/hooks/claude-session-start.sh`,
+  now resolved through the link). Claude Code 2.1.296 accepts symlinked
+  skill dirs; confirm once in an interactive session that `polyforge` is
+  listed among the skills.
+- **daemon**: the upgrade holds `~/.local/share/polyforge/ensure.lock`
+  (a harness session starting meanwhile starts nothing), shuts the daemon
+  down gracefully (the old `nohup` one included; a loop's daemon takes its
+  loop with it on that clean exit) and waits until daemon and loop are
+  gone, swaps the binary, then runs `pf daemon ensure`: from now on the
+  daemon runs inside the restart loop (a failed exit is restarted within
+  ~5s; log
+  `~/.local/share/polyforge/daemon.log`, appended, rotated at 10 MiB). When
+  the binary is already current, a live daemon is left alone and an
+  unsupervised one is reported with the fix:
+  `pf ops shutdown && while pf ops status >/dev/null 2>&1 || ! flock -n ~/.local/share/polyforge/daemon.lock true; do sleep 2; done; pf daemon ensure`.
+- **after a container / machine restart** tmux is gone too: the next
+  Claude Code session start (SessionStart: startup/resume/clear/compact) or
+  pi session start (pi-web replays it when it resumes its sessions) runs
+  `pf daemon ensure` and brings the daemon back. Until then auto-pull does
+  not run — the accepted cost of not touching the container's startup.
+- **`pf ops shutdown` still stops** the daemon for good: the loop restarts
+  only a failed exit (crash, panic, kill); a clean exit (`pf ops shutdown`,
+  SIGTERM) ends the loop too. Start it again with `pf daemon ensure`.
+
+### v1 leftovers
+
+`pf doctor` (and the installer's harness rows) now warn about v1
+polyforge artifacts still installed — the v1 aihub bridge as a pi package
+(`GMISWE/ieops-aihub`) or at `~/.pi/agent/extensions/polyforge/`, v1
+Claude skills (`using-polyforge`, `pf-*`) and v1 Claude plugins — and
+print one command line that first backs them up into
+`~/polyforge-v1-backup-<timestamp>/`, then removes them. Nothing is
+removed automatically. Restart the harness sessions afterwards.

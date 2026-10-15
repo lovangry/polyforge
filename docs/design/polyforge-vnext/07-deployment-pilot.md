@@ -16,8 +16,8 @@
   Daemon 统一作为 Interactive / Batch / Drain 三种 WI Job 执行模式的唯一执行者（`00-architecture.md#§3.4`），
   Linux/macOS 均为宿主机原生执行、v1 可信内部仓库边界下不引入 per-step 隔离（INV-12，`00-architecture.md#§3.7`）；部署单元清单与目录布局
   （§3/§4）。
-- 部署 CLI 面：`pf-deploy install/backup/upgrade/rollback` 的语义与 `DEPLOY-*`/`PILOT-*` 错误码
-  （§5）。
+- 部署面：AIHub 服务主机的 `.polyforge/deploy.sh`、工作机的 `tools/install.sh` 与 `pf daemon ensure`
+  的语义与 `DEPLOY-*`/`PILOT-*` 错误码（§5）。
 - 安装 / 升级 / 回滚的编号步骤序列，以及升级窗口内的并发与崩溃恢复（§6/§7）。
 - **回归清单**：对照 `aihub#699 / #709 / #714 / #744 / #747 / #749 / #754 / #770 / #773 / #775 /
   #777 / #778 / #780` 共 13 条，逐条给出缺陷摘要、vNext 交叉引用与机械反例断言（§10.2）。
@@ -109,7 +109,7 @@ Daemon-to-Daemon 协议或互推通道，一切跨机信息经 AIHub HTTP 中转
 （`00-architecture.md#§3.3` 正式取代声明），与现行 aihub 系统（gen-1，含其 MCP 服务器与外部
 tracker sync 等 v1 不含的能力）是两个互不共享代码与数据的独立系统。Pilot 通过（§9.3 全部门槛
 未触发且 §11 达标判据满足）之前，二者**并存运行**：旧 aihub 系统继续作为生产权威，vNext AIHub
-只服务 Pilot 范围（§9.1）；二者不共 `<data_dir>`、不共 systemd 单元名（§3 的 `polyforge-aihub`）、
+只服务 Pilot 范围（§9.1）；二者不共 `<data_dir>`、不共容器/服务名（§3 的 docker compose 服务 `aihub`）、
 不共监听端口，之间**不迁移执行状态**（`00-architecture.md#§1.2`：workflow-v2 执行状态不迁移），
 也不存在任何执行状态迁移或同步通道；**Memory 存量是唯一迁移项**（`06-memory-search.md#§10`：
 现有 aihub memory 一次性导出为 Markdown 权威文件——非执行状态，也不构成两系统间的同步通道）。切换在 Pilot 达标后一次性发生（§11）：新工作一律开在 vNext AIHub，旧系统进入冻结/退役
@@ -129,7 +129,7 @@ tracker sync 等 v1 不含的能力）是两个互不共享代码与数据的独
 
 WI Agent（`00-architecture.md#§3.6`）**不是**独立安装的部署单元：它是 Daemon 在创建 Job 时按需派生的每 WI
 一个的宿主机原生子进程，运行的是与 Daemon 同一份分发物中的驱动代码，不单独打包、不单独安装、不
-单独作为独立的进程管理单元（systemd 单元或 launchd job）存在。部署单元清单（§3）只列出需要独立安装/升级/回滚的物件；WI Agent 的
+单独作为独立的进程管理单元（tmux 监督环、systemd 单元或 launchd job）存在。部署单元清单（§3）只列出需要独立安装/升级/回滚的物件；WI Agent 的
 生命周期完全由其所属 Daemon 管理（`04-local-runtime.md#§6.1`/§7.1），升级 Daemon 二进制即升级了 WI Agent 会
 使用的驱动代码版本。
 
@@ -141,8 +141,11 @@ WI Agent（`00-architecture.md#§3.6`）**不是**独立安装的部署单元：
 **用户机器部署物 = 工作机二进制 + 路由 skill 引用（安装面裁定的部署侧落地）**：一台用户工作机的全部
 vNext 部署物是工作机二进制（单文件：CLI 动词 + `daemon` 子命令；其发行物内含 `skills/pf-execute/`，见下段）加路由 skill 的一个
 引用（数据面动词经 CLI 直连 AIHub，分流表
-`00-architecture.md#§5.1`）——**Pi 侧**是 settings 中 skills 配置的一行路径，直接指向本机 aihub checkout 内的
-`skills/polyforge/`（零复制，不搬文件）；**Claude Code 侧**经 plugin marketplace 安装路由 skill
+`00-architecture.md#§5.1`）——两个 harness 都**引用** `tools/install.sh` 维护的同一份发行检出
+`~/.local/share/polyforge/release/current`（零复制，不二次克隆，polyforge#174）：**Pi 侧**是 settings
+`packages` 中一条指向该目录的本地路径包（仓根 `package.json` 声明路由 skill 与 `pf-chat` 扩展——只写
+一行 `skills` 路径会丢掉扩展）；**Claude Code 侧** `~/.claude/skills/polyforge` 是指向
+`release/current/skills/polyforge` 的软链，外加一次注册的 SessionStart 钩子
 （`00-architecture.md#§3.1` 安装面裁定、`01-workflow-skills.md#§2.1`）。用户 harness **永不执行 workflow**：
 Interactive 模式下用户只提交意图、观察进度、回答 needs_input，workflow 的解析与执行全部发生在
 Daemon 派生的 WI Agent 一侧（`00-architecture.md#§3.4a`）。
@@ -163,9 +166,9 @@ agents 废弃）——部署面不部署、不迁移其中任何被删除或废�
 
 | 单元 | 产物 | 部署位置 | 独立升级/回滚 |
 |---|---|---|---|
-| `aihub` | AIHub 服务二进制（**新仓部署物**，`00-architecture.md#§3.3` 取代声明；与旧 aihub 系统并存到 Pilot 通过，切换见 §2.1/§11） | 单主机，systemd 单元 `polyforge-aihub` | 是（§6.3/§6.4） |
-| 工作机二进制 | 单文件：`pf` CLI 动词 + `daemon` 子命令（部署单元合并裁定，`00-architecture.md#§3.3`；数据面动词直连 AIHub 与管理操作，分流表 `00-architecture.md#§5.1`） | 每台工作机 + CI 机器：**Linux** 注册为 systemd 单元 `polyforge-daemon`（ExecStart 指向 `<binary> daemon`，随开机自启、由 systemd 监督重启）；**macOS** 以 launchd agent/daemon（`plist` 设 `KeepAlive`，监督重启）同理，或由操作者显式管理的前台常驻 `<binary> daemon`——v1 不规定 macOS 侧具体使用哪一种，只要求该机进程满足 `00-architecture.md#§3.1`/`04` 的长驻语义（崩溃后可被重新拉起，`04-local-runtime.md#§7`） | 是，逐台滚动（§6.3⑤，优雅停机后替换单文件再拉起），两类平台各自按自身进程管理机制重启，升级步骤本身不因平台而分叉 |
-| 路由 Skill | Skill 包 | 各用户 Harness | 随仓 tag 版本（mono-repo 单一 semver，`00-architecture.md#§3.3`）：pi 经 settings 路径引用仓内 `skills/polyforge`（git pull 即更新，零复制）、cc 经 marketplace 随 tag 打包；滚动更新存在时差，不构成独立版本线 |
+| `aihub` | AIHub 服务二进制（**新仓部署物**，`00-architecture.md#§3.3` 取代声明；与旧 aihub 系统并存到 Pilot 通过，切换见 §2.1/§11） | 单主机，docker compose 服务 `aihub`（`deploy/docker-compose.yml`，`restart: unless-stopped`：崩溃与主机重启均由 docker 拉起；镜像只由 `.polyforge/deploy.sh` 拉取/加载，compose 从不构建） | 是（§6.3/§6.4，经 `.polyforge/deploy.sh`：在线备份后秒级切换窗口，失败自动回滚） |
+| 工作机二进制 | 单文件：`pf` CLI 动词 + `daemon` 子命令（部署单元合并裁定，`00-architecture.md#§3.3`；数据面动词直连 AIHub 与管理操作，分流表 `00-architecture.md#§5.1`） | 每台工作机：`/usr/local/bin/pf`，由 `tools/install.sh` 安装。`daemon` 子命令**只经 `pf daemon ensure` 拉起**（幂等 + 文件锁）：它在 tmux 会话 `polyforge-daemon` 中运行监督环（`pf daemon <规范 argv>`，非零退出 5s 后重启，干净退出即结束环）——**崩溃**约 5s 内被环重新拉起，`pf ops shutdown` 则连环一起停下；tmux 不跨容器/机器重启存活，**重启**后由下一个开始或恢复的 harness 会话（pi `pf-chat` 扩展、Claude Code SessionStart 钩子）执行 `pf daemon ensure` 拉起（§6.5）。有 systemd 的机器同样走 tmux 环（与容器一致，最小可行）；操作者若改用自管的 systemd 单元 `polyforge-daemon.service`，`pf doctor` 亦认作已监督。满足 `04-local-runtime.md#§7` 的「崩溃后可被重新拉起」 | 是，逐台滚动（§6.3⑤：持 ensure 锁→优雅停机（环随干净退出结束）→替换单文件与 `release/current`→释放锁→`pf daemon ensure`） |
+| 路由 Skill | Skill 包（含 pi `pf-chat` 扩展与 Claude Code SessionStart 钩子两个适配层） | 各用户 Harness，引用工作机的 `release/current` 检出（§2.3） | 随仓 tag 版本（mono-repo 单一 semver，`00-architecture.md#§3.3`）：`tools/install.sh` 切换 `release/current` 即更新，下一个 harness 会话生效；pi 为本地路径包、cc 为软链，均零复制；不构成独立版本线 |
 | bundle | `workflows/<bundle-name>/`：`workflow.md`（frontmatter + 正文）+ `agents/*.md`（`01-workflow-skills.md#§2.1`/§3） | 随 aihub 仓本机 checkout 交付：AIHub 服务主机（创建 WI 时服务端读取，`02-aihub-core.md#§4.5`）与每台工作机（WI Agent 第 0 步物化来源，`03-execution-capsule.md#§4.5`） | 否——无注册接口、无 registry/Core catalog（`01-workflow-skills.md#§2.1`）；随 checkout 的 git 版本演进，不构成独立部署/升级/回滚单元 |
 
 WI Agent（§2.3）不在本表——它没有独立的部署位置或版本号，其代码版本恒等于派生它的 Daemon
@@ -203,10 +206,12 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
 
 | 操作 | 语义 | 可能错误码 |
 |---|---|---|
-| `pf-deploy install` | 建目录、初始化 SQLite（migrate 到 v1 schema）、注册 systemd 单元（§6.1） | `DEPLOY-507` |
-| `pf-deploy backup` | 一致性备份：SQLite backup API 热备 + `<data_dir>/{memory,capsules}` 目录快照，二者在同一个「无在飞写入」时间点原子关联产出（§6.2） | `DEPLOY-507` |
+| `.polyforge/deploy.sh <ver> --confirm <ver>` | AIHub 服务主机：把已发布版本推上 docker 服务——在线备份（rsync + SQLite backup API 快照 + 追平 + 异机副本，服务不停）→ 秒级切换窗口（停旧容器→该版本 upgrade SQL→起新容器）→ 校验；切换后任一步失败自动回滚（§6.3/§6.4） | 退出码 10（已回滚）/ 11（回滚失败） |
+| `pf backup` | M4 管理面：服务端 DB-only 快照（`backupBarrier` 写屏障下 `VACUUM INTO`，§6.2）；不含 `memory/` 与 git 仓——全量备份走 `deploy.sh` | `DEPLOY-507` |
+| `tools/install.sh <api-key>` | 工作机装机/升级：二进制、配置、`release/<tag>` 检出与 harness 引用、`pf daemon ensure`（§6.1/§6.3⑤） | — |
+| `pf daemon ensure` | 工作机 daemon 唯一拉起入口：socket 可达即退出 0；否则在 tmux 监督环中拉起并等待 socket（§6.5） | 退出码 1（未能拉起，附原因与日志尾） |
 | `pf upgrade`（部署管道，非发版：下载已发布制品→校验 sha256→§6.3 升级序列） | §6.3 升级序列 | `DEPLOY-409 LOCK_HELD`（旧进程未停）/ `DEPLOY-507` |
-| `pf-deploy rollback <point>` | §6.4 回滚序列 | `DEPLOY-404 BACKUP_NOT_FOUND`（备份点不存在）/ `DEPLOY-409 DAEMON_STILL_LIVE`（仍有 Daemon 存活未确认） |
+| 回滚（`deploy.sh` 自动回滚；数据恢复按其打印的命令人工执行） | §6.4 回滚序列 | `DEPLOY-404 BACKUP_NOT_FOUND`（备份点不存在）/ `DEPLOY-409 DAEMON_STILL_LIVE`（仍有 Daemon 存活未确认） |
 | `DELETE /api/v1/work-items/{id}/capsule-data?confirm=` | Capsule 远端数据删除入口；签名与错误码权威在 `05-sync-revision-recovery.md#§5.1`/§5.2（状态门/确认门定义在 `05-sync-revision-recovery.md#§2.10`），本表仅标注其经部署 CLI 也可触发（不重定义、不借用 `DEPLOY-*` 前缀） | `SYNC-409`（WI 非终态，`05-sync-revision-recovery.md#§5.2`）/ `SYNC-400`（`confirm` 参数不符，`05-sync-revision-recovery.md#§5.2`） |
 
 **错误码表（前缀 `DEPLOY`）**：
@@ -229,12 +234,14 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
 ### 6.1 安装 <!-- §6.1 -->
 
 1. 在主机创建 `<data_dir>`（权限 `0750`，属主为服务运行用户）。
-2. 部署 `aihub` 二进制；启用并启动 systemd 单元 `polyforge-aihub`：启动序列内部依次完成
+2. 部署 `aihub`：以 docker compose 服务 `aihub` 运行已发布镜像（`deploy/docker-compose.yml`，
+   `restart: unless-stopped`，镜像由 `.polyforge/deploy.sh` 拉取/加载）：启动序列内部依次完成
    `service.lock` 获取 → schema 安装（`CREATE TABLE IF NOT EXISTS`；无迁移）→ 后台 memory 对账（启动期 `RebuildIndex`）。
-3. 在每台工作机部署单一工作机二进制（`pf`，含 `daemon` 子命令），并按该机器操作系统配置其进程监督方式，使 `daemon` 子命令在监督下长驻运行（§3）：**Linux** 工作机
-   注册并启用 systemd 单元 `polyforge-daemon`（ExecStart 指向 `<binary> daemon`）；**macOS** 工作机安装
-   launchd agent/daemon（`plist` 设 `KeepAlive`，随登录/开机拉起）或由操作者以前台常驻 `<binary> daemon` 方式运行并自行负责重启——两者均需
-   满足 `daemon` 子命令崩溃后能被重新拉起这一长驻语义（`04-local-runtime.md#§7`），v1 不进一步规定 macOS 侧的具体
+3. 在每台工作机运行 `tools/install.sh <api-key>`：安装单一工作机二进制（`pf`，含 `daemon` 子命令），
+   并经 `pf daemon ensure` 在监督下拉起 `daemon`（§3、§6.5）：tmux 会话 `polyforge-daemon` 中的监督环在
+   崩溃后约 5s 内重新拉起；机器/容器重启后由下一个 harness 会话开始时的 `pf daemon ensure` 拉起——
+   满足 `daemon` 子命令崩溃后能被重新拉起这一长驻语义（`04-local-runtime.md#§7`）。有 systemd 的机器同样
+   使用 tmux 环；操作者自管的 systemd 单元 `polyforge-daemon.service` 被 `pf doctor` 认作已监督，v1 不进一步规定其
    选择。随后执行注册流程，把机器身份写入 Core 的 `machines` 表（`02-aihub-core.md#§5.1`、`02-aihub-core.md#§4.10`），并把
    该机器的初始 Job 执行模式（Interactive/Batch/Drain，`00-architecture.md#§3.4`）写入
    `$POLYFORGE_HOME/daemon/state.json` 的 `mode` 字段（`04-local-runtime.md#§4.1`/§6.7）。对运行
@@ -249,9 +256,11 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
    本机 checkout 读取并固化三 scalar（`02-aihub-core.md#§4.5`），执行侧由 WI Agent 第 0 步从工作机本机
    checkout 物化（不做 digest 校验——校验链已删，polyforge#149 B9；`03-execution-capsule.md#§4.5`）。
 5. 把路由 skill 安排到参与 Pilot 的用户 harness——用户机器的部署物到此为止只有工作机二进制与路由
-   skill 引用（§2.3）：Pi 侧在 settings 的 skills 配置中加一行路径，指向本机 aihub checkout 内的
-   `skills/polyforge/`（零复制）；Claude Code 侧经 plugin marketplace 安装
-   （`00-architecture.md#§3.1`）。任何 harness 不安装 `pf-execute` 或任何 bundle/step skill（§2.3）。路由
+   skill 引用（§2.3），由第 3 步的 `tools/install.sh` 一并完成：Pi 侧在 settings `packages` 写一条指向
+   `release/current` 的本地路径包（替换旧的 `git:...@<ver>` 条目）；Claude Code 侧把
+   `~/.claude/skills/polyforge` 设为指向 `release/current/skills/polyforge` 的软链并注册 SessionStart 钩子
+   （`00-architecture.md#§3.1`）。`pf doctor` 对偏离该布局或残留 v1 polyforge 物件的 harness 报 warn 并给出
+   先备份再清理的命令。任何 harness 不安装 `pf-execute` 或任何 bundle/step skill（§2.3）。路由
    skill 是 Interactive 模式的唯一入口（`00-architecture.md#§3.4a`）。
 6. 安装完成的判据：`pf doctor` 对 AIHub 业务端点（如 `GET /api/v1/work-items`）的连通性自检通过，且响应头报告的 `schema_version` 为当前 v1 版本（无独立 whoami 端点，`02-aihub-core.md#§5.1`）；
    至少一台工作机的 Daemon 心跳已出现在 `machines` 表中，且其 `mode` 已成功写入 Daemon state。装机自检另含一次
@@ -261,7 +270,11 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
    Pilot；探针属安装面判据，不是运行时依赖——Pilot 期间候选不可达仍按 `01-workflow-skills.md#§6.3` 的基础设施
    失败原地 resume 语义处理，装机探针不为其兜底，也不因探针曾通过而改变该语义。
 
-### 6.2 一致性备份（`pf-deploy backup`，升级/回滚均以此为前置步骤） <!-- §6.2 -->
+### 6.2 一致性备份（`pf backup` 与 `.polyforge/deploy.sh` 在线备份，升级/回滚均以此为前置步骤） <!-- §6.2 -->
+
+现行实现：升级前的全量备份是 `.polyforge/deploy.sh` 第 3–5 步（服务不停：rsync `memory/` 与 `git/`
+→ SQLite backup API 快照 `aihub.db` → rsync 追平 → 快照完整性与计数校验 → 异机副本）；`pf backup`
+（M4，admin）只写服务端 DB-only 快照。下文的写屏障是 aihub 进程内 `backupBarrier` 的语义。
 
 一致性备份要求 SQLite 快照与 `capsules/`/`memory/` 目录快照对应**同一个「无在飞写入」时间点**，
 否则两者之间可能夹进一次已提交的 Revision 发布而不同点。实现方式是 aihub 进程内一个专用的写
@@ -270,7 +283,7 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
 
 1. aihub 进程内维护一个进程级读写锁 `backupBarrier`：每个 Core 写事务（`02` 的写 API、`05-sync-revision-recovery.md#§5.1`
    的 block/manifest 发布，二者同属一个 aihub 进程）在事务开始前持有该锁的读态，事务结束后释放。
-2. `pf-deploy backup` 调用仅接受本机（`localhost`）来源的内部管理端点（AIHub 单端口 A5
+2. 备份调用（`pf backup` 的管理端点）仅接受本机（`localhost`）来源的内部管理端点（AIHub 单端口 A5
    上的管理路径，`00-architecture.md#§3.1`；以来源限制而非第二监听端口实现本机专属），请求该锁的写态：
    写态请求会阻塞直到
    全部已发起的读态持有者完成并释放，同时暂停新的读态请求进入（即「排空在飞写入」）。
@@ -295,8 +308,8 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
 
 **与权威需求「维护窗口备份」的关系（修复 B21）**：上述亚秒级持锁窗口是**实现级**的写阻塞
 时长（写事务被暂停多久），不等于权威需求的「维护窗口」——后者是**运维级**的准入条件：本文
-裁定 `pf-deploy backup` **MUST** 只在声明的维护窗口内执行（缺省每日 02:00–05:00 本地时间，可配置）；
-窗口外调用 `pf-deploy backup` 需显式 `--force-outside-window` 旗并在输出中告警（不拒绝，但留下
+裁定备份 **MUST** 只在声明的维护窗口内执行（缺省每日 02:00–05:00 本地时间，可配置）；
+窗口外调用备份需显式 `--force-outside-window` 旗并在输出中告警（不拒绝，但留下
 审计痕迹）。升级（§6.3）/回滚（§6.4）的**准入条件**之一是“当前处于维护窗口内，或操作者已显式
 确认接受窗口外风险”，不在窗口内且未确认则拒绝为 `DEPLOY-412 OUTSIDE_MAINTENANCE_WINDOW`。这一准入
 条件獨立于上述亚秒级持锁实现细节，两者不相互替代。
@@ -304,17 +317,18 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
 ### 6.3 升级 <!-- §6.3 -->
 
 1. 执行一次 §6.2 一致性备份（必做，不可跳过）。
-2. 停止 `polyforge-aihub` systemd 单元；确认 `service.lock` 已释放（INV-D1）——若检测到锁未释放
+2. 经 `.polyforge/deploy.sh` 的切换窗口停止旧 `aihub` 容器（优雅排空）；确认 `service.lock` 已释放（INV-D1）——若检测到锁未释放
    （例如停止超时），中止升级并返回 `DEPLOY-409 LOCK_HELD`。
 3. 替换 `aihub` 二进制；以迁移模式启动一次，执行 schema 迁移（`02-aihub-core.md#§11`，`schema_version` 单调
    递增，迁移事务原子）。
-4. 正常启动 `polyforge-aihub`；执行起服自检（业务端点响应头返回新版本号且自注册成功，无独立 whoami 端点）。
+4. 以新镜像启动 `aihub` 容器（`compose up -d --no-deps aihub`）；执行起服自检（业务端点响应头返回新版本号且自注册成功，无独立 whoami 端点）。
 5. 逐台滚动升级工作机的单一工作机二进制；Core API 协议向后兼容一个版本窗，允许旧版本 Daemon
    与新版本 AIHub 短暂共存直到该台完成升级。升级某台工作机前，先让其完成一次优雅停机
    （`00-architecture.md#§3.5`、`04-local-runtime.md#§6.5`）：该动作代替所有仍在进行的 WI Agent 各触发一次全扫描发布，保证
-   替换二进制前没有正在飞行的执行现场。随后替换该机的单一工作机二进制，按该机器的进程监督方式重新拉起 `daemon` 子命令：**Linux**
-   工作机 `systemctl restart polyforge-daemon`；**macOS** 工作机重新加载对应的 launchd job
-   （`launchctl kickstart`/`bootstrap`）或由操作者重启前台 `<binary> daemon`——两种情形下 Daemon 重启后**不**按
+   替换二进制前没有正在飞行的执行现场。工作机侧由 `tools/install.sh` 按固定顺序执行：**持有 `<data-dir>/ensure.lock`**（期间 harness 会话的
+   ensure 只等待、不拉起任何东西）→ **优雅停 daemon**（`pf ops shutdown`；干净退出同时结束监督环；等待
+   daemon 与环都真正消失，残留的空环直接关掉，避免旧二进制被环重新拉起或与新 daemon 抢 socket）→ 替换单一工作机二进制与 `release/current` → **`pf daemon ensure`**
+   拉起新环与新 daemon（拉起前释放锁）。新 Daemon 启动后**不**按
    `04-local-runtime.md#§7.1` 的崩溃恢复规则处理：升级前的优雅停机已按 `04-local-runtime.md#§6.2` A 路径结束该 WI 当时的
    generation（并从 `jobs[]` 中移除对应记录），因此重启后的 Daemon 看不到一个仍在“未结束”的
    旧 Job 可供“识别并续跑”；待升级完成后，该 WI 需经 Interactive/Batch/Drain 三种模式之一的
@@ -335,11 +349,11 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
    （`02-aihub-core.md#§5.1`），该 token 的 HMAC 校验依赖 `service_secret`，若 `service_secret` 本身未变，旧
    token 在回滚后的旧 generation 上会被重新判定为合法——即「旧凭证复活」。本步骤把这类风险收敛
    到显式确认。
-2. 停止 `polyforge-aihub`（旧进程停稳，配合步骤 1 对无 Daemon 存活的确认）；用指定 `<point>` 的
+2. 停止 `aihub` 容器（旧进程停稳，配合步骤 1 对无 Daemon 存活的确认）；用指定 `<point>` 的
    备份数据恢复 `<data_dir>`（同一个 §6.2 产出的 SQLite 快照 + 目录快照对，保证两者一致）。本步
    与下一步的顺序是裁定后的固定序列：**先恢复备份、再起 AIHub**——不存在任何「在停服期间调
    HTTP 作废凭证」的步骤。
-3. 用回滚前的旧版本二进制启动 `polyforge-aihub`；其**启动自检自动触发** `rotate-secret` 且
+3. 用回滚前的旧版本镜像启动 `aihub` 容器（`deploy.sh` 自动回滚即此步）；其**启动自检自动触发** `rotate-secret` 且
    **`mode="rollback"`**（`02-aihub-core.md#§6.6` 已有启动触发语义——行 M5 的触发方本就包含
    「启动自检自动触发」，本序列不另设停服期 HTTP 调用；**MUST NOT** 使用缺省的 `mode="grace"`；
    `grace_seconds` 强制视为 0，非零值被 `CORE-400` 拒绝）：新 epoch 之前的全部未 `retired_at` 旧 epoch
@@ -377,6 +391,39 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
    此验收流程 MUST 在非生产测试环境对每个备份点定期演习一次（与 §6.2 的日常备份频率独立，不要求
    每日演习），确保备份产物真能被恢复且恢复后数据自洽，而不是只验证备份文件能被拷贝。
 
+### 6.5 容器部署（无 systemd）：daemon 的拉起分工 <!-- §6.5 -->
+
+工作机常是容器（PID 1 为 sshd，无 systemd / cron / supervisord），容器重启后 tmux 不保留。daemon 的拉起
+因此不碰容器启动流程（ENTRYPOINT / 宿主机），改为「使用时自愈」，唯一入口是 `pf daemon ensure`
+（polyforge#174）：
+
+1. **ensure 语义**：daemon socket 可达 ⇒ 什么都不做、退出 0；否则在 tmux 会话 `polyforge-daemon` 中
+   启动监督环 `while :; do nohup pf daemon <规范 argv>; rc=$?; [ "$rc" -eq 0 ] && break; sleep 5; done`（规范 argv：`--config`、`-machine-id`
+   取 `<data-dir>/daemon-id` 否则 `m-<短主机名>`、`-data-dir`、`-socket` 取配置 `daemon_socket`、
+   `-workflows-dir <data-dir>/release/current/workflows`；harness 根目录取缺省 `<data-dir>`（#171）；auto 与
+   并发上限沿用 daemon 自身持久设置；工作目录 `$HOME`，日志追加到 `<data-dir>/daemon.log`，超 10 MiB 轮转），
+   等待 socket 可达后返回。`<data-dir>/ensure.lock` 文件锁防并发：pi-web 同时恢复多个会话时只拉起一个环、
+   一个 daemon；拿不到锁的调用等待持锁者完成后按 socket 结果返回。无 `[workspace]` 映射或缺 workflows
+   时拒绝拉起并说明原因。tmux 不可用时退回单次无监督启动并明确告警。
+2. **崩溃**：非零退出（崩溃、panic、被杀）由监督环约 5s 内拉起新进程；干净退出（`pf ops shutdown`、
+   SIGTERM——优雅停机序列）结束监督环，即 `pf ops shutdown` 仍是「真正停下」，再起用 `pf daemon ensure`。
+3. **容器 / 机器重启**：下一个开始或恢复的 harness 会话执行 `pf daemon ensure`——pi 的 `pf-chat` 扩展在
+   `session_start` 的 `pf chat init` 失败时后台调用一次（pi-web 恢复会话会重放 `session_start`），随后沿用
+   每 5s 的重试环；Claude Code 的 SessionStart 钩子（startup / resume / clear / compact 触发）先 ensure
+   （15s 上限、20s 强杀）再 `pf chat init`，失败静默、不阻塞会话。
+4. **边界**：只有人用的交互会话会调用 ensure。pi step 用 daemon 专属的 `PI_CODING_AGENT_DIR`（不加载用户
+   包与 `pf-chat`），claude step 以 `--bare` 运行（不跑钩子），二者环境均带 `PF_WI_ID`，适配层见之即退出。
+5. **代价（接受）**：重启后到第一个 harness 会话开始前 daemon 不在，自动领取不工作。
+6. **升级停机顺序**：`tools/install.sh` 持 ensure 锁 → 优雅停 daemon（环随干净退出结束；残留空环用
+   `tmux kill-session -t =polyforge-daemon` 关掉，环内 daemon 以 `nohup` 运行、不受挂断影响）→ 替换二进制与
+   `release/current` → 释放锁 → `pf daemon ensure`（§6.3 第 5 步）。
+7. **自检**：`pf doctor` 的 `daemon socket` 在 daemon 不在线时 fail 并给出 `pf daemon ensure`；`daemon
+   supervision` 在 daemon 在线但无 tmux 环（亦无 systemd 单元 `polyforge-daemon.service`）时 warn，给出修复
+   命令。路由 skill 的兜底：执行面动词报 daemon 不可达时先 `pf daemon ensure` 再重试一次。
+
+AIHub 服务主机不在此列：它是 docker compose 服务（`restart: unless-stopped`），崩溃与主机重启均由
+docker 拉起，升级只在 `.polyforge/deploy.sh` 的秒级切换窗口中断服务。
+
 ## 7. 并发与崩溃恢复（升级窗口） <!-- §7 -->
 
 - **升级窗内 Core 不可用**：WI Agent 一侧的 Revision 发布请求失败后按 `05-sync-revision-recovery.md#§6` 的六步流程原地
@@ -388,7 +435,7 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
   （对应 §10.3 的机械复核，与回归 R 类断言使用同一套「模型审计 + 故障注入」方法）。
 - **升级迁移崩溃**：`aihub migrate`（§6.3 步骤 3）在事务中途被杀——schema 迁移事务原子
   （`02-aihub-core.md#§11`），中断即回滚到迁移前状态；此时判据是数据库仍处于迁移前 schema，不存在"半迁移"
-  schema 落地的情况。若迁移前状态本身已不可用，唯一恢复路径是 `pf-deploy rollback` 到最近一次
+  schema 落地的情况。若迁移前状态本身已不可用，唯一恢复路径是按 `deploy.sh` 打印的回滚命令恢复到最近一次
   §6.2 备份点。
 - **误起第二个 aihub 进程**：`02-aihub-core.md#§2.2` 的 `service.lock`（第二层，先于本文的写屏障存在）使后起
   进程立即以启动期锁拒绝退出，不进入任何写路径。
@@ -587,7 +634,7 @@ Agent 独占写入的 `runtime-state/execution.json`（INV-6）才具备 INV-D3 
   `05` SYNC-INV-1）——构造一个只产生文件系统变化但不触发任何 `00-architecture.md#§4.3` 事件的窗口，断言该窗口
   内 HEAD 不推进，直到下一次真实触发事件到来才推进。
 - **可注入故障清单**：
-  1. `aihub migrate` 中途 `kill -9`：预期数据库回滚到迁移前 schema，可用 `pf-deploy rollback`
+  1. `aihub migrate` 中途 `kill -9`：预期数据库回滚到迁移前 schema，可按 `deploy.sh` 打印的回滚命令
      恢复到最近备份点。
   2. 升级窗口内工作机 Daemon 断连 1 小时：预期 WI Agent 侧退避重试（`05-sync-revision-recovery.md#§6`），AIHub 恢复后
      由下一次 `00-architecture.md#§4.3` 触发事件驱动一次全扫描收敛，无数据丢失。

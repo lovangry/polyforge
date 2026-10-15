@@ -682,6 +682,7 @@ type w113InstallCtx struct {
 	stubBin string // gh/pi stubs (put FIRST on PATH)
 	home    string // scratch HOME (config, package checkout, daemon data)
 	rel     string // the fake release dir the stub gh serves
+	tmuxDir string // private tmux server (polyforge#174: install.sh starts the daemon loop in tmux)
 }
 
 // w113InstallPrep builds the hermetic installer fixture: a stub bin dir
@@ -699,9 +700,15 @@ func w113InstallPrep(t *testing.T) *w113InstallCtx {
 		t.Fatal(err)
 	}
 	ic := &w113InstallCtx{
-		rel:  relDir,
-		home: t.TempDir(),
+		rel:     relDir,
+		home:    t.TempDir(),
+		tmuxDir: t.TempDir(),
 	}
+	t.Cleanup(func() {
+		kill := exec.Command("tmux", "kill-server")
+		kill.Env = []string{"PATH=" + os.Getenv("PATH"), "TMUX_TMPDIR=" + ic.tmuxDir}
+		_ = kill.Run()
+	})
 	pfBin := filepath.Join(ic.rel, "pf-linux-amd64")
 	if err := w113CopyFile(filepath.Join(bins, "pf"), pfBin); err != nil {
 		t.Fatal(err)
@@ -806,6 +813,8 @@ func w113RunInstall(t *testing.T, ic *w113InstallCtx) (string, int) {
 		"PATH=" + ic.stubBin + ":" + os.Getenv("PATH"),
 		"HOME=" + ic.home,
 		"W113_REL=" + ic.rel,
+		// never the operator's tmux server (TMUX is not passed either)
+		"TMUX_TMPDIR=" + ic.tmuxDir,
 	}
 	var out strings.Builder
 	cmd.Stdout, cmd.Stderr = &out, &out
@@ -1778,8 +1787,17 @@ func TestW113DoctorHealthyMachine(t *testing.T) {
 		t.Fatalf("pf doctor --json (healthy): ok is false (checks %+v, output %q)", doc.Checks, jout)
 	}
 	for _, c := range doc.Checks {
-		if c.Name == "claude progress display" || c.Name == "pi progress display" {
-			continue // presentation-only (polyforge#142): no harness in the scratch HOME
+		switch c.Name {
+		case "claude progress display", "pi progress display",
+			"claude install layout", "pi install layout", "v1 harness leftovers":
+			continue // the harness family (polyforge#142, #174): no harness in the scratch HOME
+		case "daemon supervision":
+			// polyforge#174: this test runs its daemon directly, not under
+			// the tmux restart loop — a warn, never a fail
+			if c.Status == "fail" {
+				t.Fatalf("daemon supervision failed: %s", c.Detail)
+			}
+			continue
 		}
 		if c.Status != "pass" {
 			t.Fatalf("pf doctor --json (healthy): check %q is %q, want pass (output %q)", c.Name, c.Status, jout)

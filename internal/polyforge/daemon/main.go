@@ -34,6 +34,12 @@ import (
 
 // Main executes `pf daemon <flags>` and returns the process exit code.
 func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	// `pf daemon ensure` (polyforge#174): start the daemon under
+	// supervision unless it already answers — never runs the daemon
+	// in this process.
+	if len(argv) > 0 && argv[0] == "ensure" {
+		return Ensure(argv[1:], stdout, stderr)
+	}
 	fs := flag.NewFlagSet("pf daemon", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", "", "shared config file: its [workspace] mapping is the capsule-placement source (default ~/.config/polyforge/cli.toml)")

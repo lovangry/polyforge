@@ -8,6 +8,9 @@
 // TestMain so HOME and the XDG/POLYFORGE_* roots point at a throwaway
 // directory for the whole package run.
 //
+// tmux is hermetic as well: TMUX_TMPDIR names a scratch dir and TMUX is
+// unset, so a test that reaches tmux starts its own private server.
+//
 // Git configuration is hermetic too: GIT_CONFIG_GLOBAL names a scratch
 // global config carrying only a test identity, and GIT_CONFIG_NOSYSTEM
 // drops the system file, so no test reads (or, through
@@ -100,6 +103,13 @@ func run(m *testing.M, atExit []func() error) (int, error) {
 	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
 		return 0, err
 	}
+	// A private tmux server (polyforge#174): `pf daemon ensure` and the
+	// doctor talk to the default tmux server, which is keyed by
+	// TMUX_TMPDIR once TMUX is unset — never the operator's live one.
+	tmuxDir := filepath.Join(home, "tmux")
+	if err := os.MkdirAll(tmuxDir, 0o700); err != nil {
+		return 0, err
+	}
 	for k, v := range map[string]string{
 		"HOME":               home,
 		"XDG_CONFIG_HOME":    filepath.Join(home, ".config"),
@@ -108,11 +118,12 @@ func run(m *testing.M, atExit []func() error) (int, error) {
 		"XDG_CACHE_HOME":     filepath.Join(home, ".cache"),
 		"XDG_RUNTIME_DIR":    runtimeDir,
 		"POLYFORGE_DATA_DIR": filepath.Join(home, ".local", "share", "polyforge"),
+		"TMUX_TMPDIR":        tmuxDir,
 	} {
 		os.Setenv(k, v)
 	}
 	// Ambient daemon/connection settings must not leak in either.
-	for _, k := range []string{"PF_DAEMON_SOCKET", "POLYFORGE_MACHINE_ID"} {
+	for _, k := range []string{"PF_DAEMON_SOCKET", "POLYFORGE_MACHINE_ID", "TMUX", "TMUX_PANE", "PI_CODING_AGENT_DIR"} {
 		os.Unsetenv(k)
 	}
 	code := m.Run()
