@@ -7,10 +7,10 @@ rewind:
 defaults:
   model_candidates: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra]
 steps:
-  - { id: grill, context_policy: fresh, handoff: true, kind: spec, requires_human_answer: if_asked }
-  - { id: fix, context_policy: inherit, handoff: true, kind: code }
-  - { id: verification, context_policy: fresh, handoff: false, kind: gate, gate: true, on_fail: { target: fix }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-  - { id: deliver, context_policy: fresh, handoff: false, kind: code, gate: true, requires_command_evidence: true, on_fail: { target: fix } }
+  - { id: grill, context_policy: fresh, handoff: true, requires_human_answer: if_asked }
+  - { id: fix, context_policy: inherit, handoff: true }
+  - { id: verification, context_policy: fresh, handoff: false, gate: true, on_fail: { target: fix }, model_candidates: [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
+  - { id: deliver, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, on_fail: { target: fix } }
 ---
 
 # quick-fix — light remediation flow
@@ -44,12 +44,12 @@ outcome for a clear, small ask, so `grill` may complete without asking — an un
 claim runs on — but that completion is recorded (`human_gate_unasked` event) and the
 owner is notified.
 
-## Why `grill` is `kind: spec` (not `kind: qa`)
+## Why `grill` also writes the spec
 
-In `feature-full`, the pre-spec clarification step is `kind: qa` and a separate `spec` step
-follows it. This bundle deliberately has no separate spec authoring step: the `grill` step does not
+In `feature-full`, the pre-spec clarification step `grill` is followed by a separate `spec`
+step. This bundle deliberately has no separate spec authoring step: the `grill` step does not
 stop at gathering answers, it commits them to a micro-spec (`artifacts/fix-memo.md`) that `fix`
-implements directly. That is spec work, so it is declared `kind: spec`.
+implements directly.
 
 ## Artifact flow between steps
 

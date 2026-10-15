@@ -74,9 +74,9 @@ func twoWorkspaceRuntime(t *testing.T) (*Runtime, *fakeHub, string, string) {
 func TestTwoWorkspacesTwoYamlsOneDaemon(t *testing.T) {
 	r, _, wsA, wsB := twoWorkspaceRuntime(t)
 
-	// wsA: a project default. wsB: a per-kind pin.
+	// wsA: a project default. wsB: a per-step pin.
 	writeWorkspaceYaml(t, wsA, "models:\n  proj-a:\n    default: [w079a-flow, w079a-flow2]\n")
-	writeWorkspaceYaml(t, wsB, "models:\n  proj-b:\n    code: [w079b-code]\n")
+	writeWorkspaceYaml(t, wsB, "models:\n  proj-b:\n    fix: [w079b-code]\n")
 
 	if err := r.Start(context.Background(), "wi_w079intA"); err != nil {
 		t.Fatalf("Start A: %v", err)
@@ -178,7 +178,7 @@ func TestSiblingProjectUnaffectedAndSharedYamlRefusesBoth(t *testing.T) {
 	// The shared yaml is torn: BOTH projects refuse with DAEMON-414 and
 	// neither reaches the aihub claim.
 	claims := hub.claimCount()
-	writeWorkspaceYaml(t, ws, "models:\n  p1:\n    code: [\n")
+	writeWorkspaceYaml(t, ws, "models:\n  p1:\n    fix: [\n")
 	for _, wi := range []string{"wi_w079s3", "wi_w079s4"} {
 		err := r.Start(context.Background(), wi)
 		ae, ok := err.(*api.Error)

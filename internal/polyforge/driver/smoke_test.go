@@ -109,10 +109,10 @@ func TestSmokeEndToEnd(t *testing.T) {
 name: smoke-bundle
 description: Phase-1 smoke test bundle
 steps:
-  - { id: grill, kind: spec, context_policy: fresh, handoff: true, interactive: true }
-  - { id: fix, kind: code, context_policy: inherit, handoff: true }
-  - { id: verification, kind: gate, gate: true, context_policy: fresh }
-  - { id: finalize, kind: code, gate: true, context_policy: inherit }
+  - { id: grill, context_policy: fresh, handoff: true, interactive: true }
+  - { id: fix, context_policy: inherit, handoff: true }
+  - { id: verification, gate: true, context_policy: fresh }
+  - { id: finalize, gate: true, context_policy: inherit }
 ---`
 	if err := os.WriteFile(filepath.Join(capsuleDir, "workflows/smoke-bundle/workflow.md"), []byte(wfYAML), 0o644); err != nil {
 		t.Fatal(err)

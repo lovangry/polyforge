@@ -226,7 +226,7 @@ func TestInvalidWorkspaceYamlRefusedBeforeClaim(t *testing.T) {
 	if claims != 0 || liveCount(td) != 0 || td.q.LenPending() != 0 {
 		t.Fatalf("invalid yaml must claim and enqueue nothing: claims=%d live=%d pending=%d", claims, liveCount(td), td.q.LenPending())
 	}
-	if err := os.WriteFile(yamlPath, []byte("models:\n  proj:\n    code: [\"x\"]\n"), 0o600); err != nil {
+	if err := os.WriteFile(yamlPath, []byte("models:\n  proj:\n    fix: [\"x\"]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	td.waitLive(t, "wi_a1")

@@ -80,7 +80,7 @@ func TestRecoveryRelaunchCarriesClaimSnapshot(t *testing.T) {
 	rec := &recordingStarter{base: scriptedEngineStarter(sp)}
 	r.cfg.AgentStarter = rec.start
 
-	writeWorkspaceYaml(t, ws, "models:\n  proj:\n    code: [w79/code-a, w79/code-b]\n")
+	writeWorkspaceYaml(t, ws, "models:\n  proj:\n    fix: [w79/code-a, w79/code-b]\n")
 	if err := r.Start(context.Background(), "wi_w079rec"); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestRecoveryRelaunchCarriesClaimSnapshot(t *testing.T) {
 	}
 
 	// The mid-flight edit: the yaml on disk now pins a DIFFERENT list.
-	writeWorkspaceYaml(t, ws, "models:\n  proj:\n    code: [w79/edited-a]\n")
+	writeWorkspaceYaml(t, ws, "models:\n  proj:\n    fix: [w79/edited-a]\n")
 
 	// The death → recovery: the relaunch must carry the claim snapshot,
 	// NOT a re-derivation of the edited yaml.
@@ -163,8 +163,8 @@ func TestRecoveryReconstructedJobRehydratesRecordNotYamlOrCapsule(t *testing.T) 
 		t.Fatal(err)
 	}
 	for _, y := range []string{
-		"models:\n  proj:\n    code: [w79/edited]\n",
-		"models:\n  proj:\n    code: [\n", // invalid: recovery must not care
+		"models:\n  proj:\n    fix: [w79/edited]\n",
+		"models:\n  proj:\n    fix: [\n", // invalid: recovery must not care
 	} {
 		writeWorkspaceYaml(t, ws, y)
 		got := r.effectiveCandidatesForRecovery(j)

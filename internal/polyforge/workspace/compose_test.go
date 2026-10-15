@@ -1,6 +1,6 @@
 package workspace
 
-// compose_test.go: the precedence chain (project kind > bundle step >
+// compose_test.go: the precedence chain (project step id > bundle step >
 // project default > bundle default), table-driven. Fixture model ids are
 // placeholders.
 
@@ -25,21 +25,21 @@ func models(project string, entry map[string][]string) *Config {
 
 var testBundle = func() *workflow.Frontmatter {
 	return bundleWith([]string{"prov/weak-a"}, []workflow.FrontmatterStep{
-		{ID: "grill", Kind: "spec"},
-		{ID: "fix", Kind: "code", ModelCandidates: []string{"prov/flash"}},
-		{ID: "release", Kind: "code"},
-		{ID: "verification", Kind: "gate"},
+		{ID: "grill"},
+		{ID: "fix", ModelCandidates: []string{"prov/flash"}},
+		{ID: "release"},
+		{ID: "verification"},
 	})
 }
 
-// A project kind list wholly replaces every step of that kind (a bundle
-// step-level list included); other kinds keep bundle resolution.
-func TestComposeProjectKindReplacesEveryKindStep(t *testing.T) {
-	got := ComposeCandidates(testBundle(), models("p", map[string][]string{"code": {"y/c1", "y/c2"}}), "p", nil)
+// A project step-id list wholly replaces that step's resolution (a
+// bundle step-level list included); other steps keep bundle resolution.
+func TestComposeProjectStepListReplacesThatStep(t *testing.T) {
+	got := ComposeCandidates(testBundle(), models("p", map[string][]string{"fix": {"y/c1", "y/c2"}, "release": {"y/r"}}), "p", nil)
 	want := map[string][]string{
 		"grill":        {"prov/weak-a"},
 		"fix":          {"y/c1", "y/c2"},
-		"release":      {"y/c1", "y/c2"},
+		"release":      {"y/r"},
 		"verification": {"prov/weak-a"},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -47,12 +47,12 @@ func TestComposeProjectKindReplacesEveryKindStep(t *testing.T) {
 	}
 }
 
-// The project default governs every step lacking both a kind list and a
-// step-level list, beating the bundle's defaults; a bundle step's own
-// list beats the project default (polyforge#164 H10); a kind list beats
-// both.
-func TestComposeProjectDefaultAndKindPrecedence(t *testing.T) {
-	got := ComposeCandidates(testBundle(), models("p", map[string][]string{"default": {"y/d"}, "gate": {"y/g"}}), "p", nil)
+// The project default governs every step lacking both a step-id list
+// and a step-level list, beating the bundle's defaults; a bundle step's
+// own list beats the project default (polyforge#164 H10); a step-id list
+// beats both.
+func TestComposeProjectDefaultAndStepPrecedence(t *testing.T) {
+	got := ComposeCandidates(testBundle(), models("p", map[string][]string{"default": {"y/d"}, "verification": {"y/g"}}), "p", nil)
 	want := map[string][]string{
 		"grill":        {"y/d"},
 		"fix":          {"prov/flash"},
@@ -66,7 +66,7 @@ func TestComposeProjectDefaultAndKindPrecedence(t *testing.T) {
 
 // A declared-empty list is present and governs: no fall-through.
 func TestComposePresentEmptyGoverns(t *testing.T) {
-	got := ComposeCandidates(testBundle(), models("p", map[string][]string{"default": {"y/d"}, "code": {}}), "p", nil)
+	got := ComposeCandidates(testBundle(), models("p", map[string][]string{"default": {"y/d"}, "fix": {}}), "p", nil)
 	if l, ok := got["fix"]; !ok || l == nil || len(l) != 0 {
 		t.Fatalf("fix = %#v, want present-empty", got["fix"])
 	}
@@ -108,7 +108,7 @@ func TestComposeUnlistedNilAndBundleOnly(t *testing.T) {
 	if got := ComposeCandidates(nil, cfg, "p", nil); got != nil {
 		t.Fatalf("nil bundle = %v, want nil", got)
 	}
-	if got := ComposeCandidates(bundleWith(nil, []workflow.FrontmatterStep{{ID: "a", Kind: "code"}}), nil, "p", nil); got != nil {
+	if got := ComposeCandidates(bundleWith(nil, []workflow.FrontmatterStep{{ID: "a"}}), nil, "p", nil); got != nil {
 		t.Fatalf("no list anywhere = %v, want nil", got)
 	}
 }
@@ -116,8 +116,8 @@ func TestComposeUnlistedNilAndBundleOnly(t *testing.T) {
 // Two projects in one yaml compose independently.
 func TestComposeOtherProjectUnaffected(t *testing.T) {
 	cfg := &Config{Models: map[string]map[string][]string{
-		"a": {"code": {"y/a"}},
-		"b": {"code": {"y/b"}},
+		"a": {"fix": {"y/a"}},
+		"b": {"fix": {"y/b"}},
 	}}
 	if got := ComposeCandidates(testBundle(), cfg, "a", nil); !reflect.DeepEqual(got["fix"], []string{"y/a"}) {
 		t.Fatalf("a fix = %v", got["fix"])
@@ -129,12 +129,12 @@ func TestComposeOtherProjectUnaffected(t *testing.T) {
 
 func TestComposeManualBeatsEveryOtherLevel(t *testing.T) {
 	manual := []string{"man/a", "man/b"}
-	cfg := models("p", map[string][]string{"default": {"y/d"}, "code": {"y/c"}})
+	cfg := models("p", map[string][]string{"default": {"y/d"}, "fix": {"y/c"}})
 	for _, c := range []*Config{cfg, nil} {
 		got := ComposeCandidates(testBundle(), c, "p", manual)
 		for _, step := range []string{"grill", "fix", "release"} {
 			if !reflect.DeepEqual(got[step], manual) {
-				t.Fatalf("step %s = %v, want the manual list over yaml kind/default and bundle", step, got[step])
+				t.Fatalf("step %s = %v, want the manual list over yaml step/default and bundle", step, got[step])
 			}
 		}
 	}

@@ -181,7 +181,10 @@ type StatusResponse struct {
 	// path the daemon routes capsules into, in mapping declaration
 	// order — a multi-workspace daemon never presents one workspace as
 	// if it were the only one.
-	Workspaces   []string    `json:"workspaces"`
+	Workspaces []string `json:"workspaces"`
+	// WorkflowsDir is the absolute workflows dir the daemon runs bundles
+	// from (pf doctor judges the workspace yaml's step-id keys by it).
+	WorkflowsDir string      `json:"workflows_dir,omitempty"`
 	ShuttingDown bool        `json:"shutting_down"`
 	Jobs         []StatusJob `json:"jobs"`
 	Queue        QueueStats  `json:"queue"`

@@ -11,9 +11,9 @@ package test
 //	models:
 //	  <project>:
 //	    default: [model-id, ...]   # optional: every step of the project
-//	    <kind>: [model-id, ...]    # optional: qa|spec|author|code|gate|review
+//	    <step-id>: [model-id, ...] # optional: a step id of the installed workflows
 //
-// Per step: project kind list > bundle step list > project default >
+// Per step: project step-id list > bundle step list > project default >
 // bundle defaults (polyforge#164: a step's own list outranks the project
 // default). The daemon reads and validates the file BEFORE the
 // aihub claim: an invalid file refuses with DAEMON-414 (surfaced to
@@ -333,9 +333,9 @@ func TestW079AbsentAndEmptyYamlRunExactlyAsHead(t *testing.T) {
 }
 
 // TestW079PerProjectModelPrecedence pins the chain inside ONE workspace
-// serving three projects: project kind list > bundle step list > project
-// default > bundle defaults. e2e declares default + code (kind:code steps
-// get the code list, verification keeps its own step list, the rest get
+// serving three projects: project step-id list > bundle step list > project
+// default > bundle defaults. e2e declares default + fix (the fix step
+// gets the fix list, verification keeps its own step list, the rest get
 // the default), ieops declares only a default (it governs every step
 // without a list of its own, never a step's own list — polyforge#164),
 // and a third project the yaml does not list stays bundle-only — no
@@ -348,7 +348,7 @@ func TestW079PerProjectModelPrecedence(t *testing.T) {
 	w079Yaml(t, ws, `models:
   e2e:
     default: [w079-e2e-def]
-    code: [w079-e2e-code-a, w079-e2e-code-b]
+    fix: [w079-e2e-code-a, w079-e2e-code-b]
   ieops:
     default: [w079-ieops-def]
 `)
@@ -366,7 +366,7 @@ func TestW079PerProjectModelPrecedence(t *testing.T) {
 		"fix": "w079-e2e-code-a",
 	} {
 		if got := w079Model(t, capE, step); got != want {
-			t.Fatalf("e2e %s model %q, want %q (project kind > bundle step > project default)", step, got, want)
+			t.Fatalf("e2e %s model %q, want %q (project step id > bundle step > project default)", step, got, want)
 		}
 	}
 	for _, step := range []string{"grill", "fix"} {
@@ -395,17 +395,17 @@ func TestW079PerProjectModelPrecedence(t *testing.T) {
 	}
 }
 
-// TestW079ProjectKindOnlyFallsThroughToBundle pins the scoping of a
-// kind-only entry: a `spec` list hits the grill step (kind spec) while
-// kind:code steps keep the bundle's own resolution.
-func TestW079ProjectKindOnlyFallsThroughToBundle(t *testing.T) {
+// TestW079ProjectStepOnlyFallsThroughToBundle pins the scoping of a
+// step-id-only entry: a `grill` list hits the grill step only, while the
+// other steps keep the bundle's own resolution.
+func TestW079ProjectStepOnlyFallsThroughToBundle(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	w079Yaml(t, ws, "models:\n  e2e:\n    spec: [w079-spec-x]\n")
+	w079Yaml(t, ws, "models:\n  e2e:\n    grill: [w079-spec-x]\n")
 	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
-	capDir := w079Run(t, d, inst, ws, w113NewWI(t, inst, "e2e", "w079 kind-only list", envelopeQuickFix()))
+	capDir := w079Run(t, d, inst, ws, w113NewWI(t, inst, "e2e", "w079 step-only list", envelopeQuickFix()))
 	if got := w079Model(t, capDir, "grill"); got != "w079-spec-x" {
-		t.Fatalf("grill (kind spec) model %q, want w079-spec-x", got)
+		t.Fatalf("grill model %q, want w079-spec-x", got)
 	}
 	if got := w079Model(t, capDir, "fix"); got != w079DefaultsHead {
 		t.Fatalf("fix model %q, want the bundle defaults head %q", got, w079DefaultsHead)
@@ -429,7 +429,7 @@ func TestW079OneDaemonTwoWorkspacesTwoYamls(t *testing.T) {
 		}
 	}
 	w079Yaml(t, wsA, "models:\n  e2e:\n    default: [w079a-flow]\n")
-	w079Yaml(t, wsB, "models:\n  ieops:\n    code: [w079b-code]\n")
+	w079Yaml(t, wsB, "models:\n  ieops:\n    fix: [w079b-code]\n")
 	d := w079Setup(t, inst, w113WS{key: wsA, projects: []string{"e2e"}}, w113WS{key: wsB, projects: []string{"ieops"}})
 
 	wiA := w113NewWI(t, inst, "e2e", "w079 two-workspace claim A", envelopeQuickFix())
@@ -505,9 +505,10 @@ func TestW079InvalidYamlRefusesWithoutClaim(t *testing.T) {
 		{"old shape projects", "projects:\n  e2e:\n    repos: []\n", []string{"projects"}},
 		{"old shape workflow_defaults", "workflow_defaults:\n  model_candidates: [a]\n", []string{"workflow_defaults"}},
 		{"unknown top-level key", "model:\n  e2e:\n    default: [a]\n", []string{"model"}},
-		{"unknown kind", "models:\n  e2e:\n    w079boguskind: [a]\n", []string{"w079boguskind"}},
+		{"unknown step id", "models:\n  e2e:\n    w079bogusstep: [a]\n", []string{"models.e2e.w079bogusstep"}},
+		{"retired kind key", "models:\n  e2e:\n    gate: [a]\n", []string{"models.e2e.gate"}},
 		{"empty project entry", "models:\n  e2e:\n", nil},
-		{"null list", "models:\n  e2e:\n    code:\n", nil},
+		{"null list", "models:\n  e2e:\n    fix:\n", nil},
 		{"list not a list", "models:\n  e2e:\n    default: abc\n", nil},
 		{"empty model id", "models:\n  e2e:\n    default: [\"\"]\n", nil},
 		{"type mismatch on models", "models: 42\n", nil},
@@ -581,24 +582,24 @@ const w079ProviderErr = `upstream provider error: model "fake/w079-missing" not 
 
 // TestW079RotationAdvancesAndCapsOnEffectiveList pins the rotation
 // composition on the post-precedence list: two provider-class infra
-// failures advance the pointer along the yaml per-project kind list (two
+// failures advance the pointer along the yaml per-project step-id list (two
 // crashes are inside the recovery budget; a third would trip the storm
 // guard), and the pin is capped at the list end — never beyond, never
 // wrapping. RED pre-implementation (the effective list is the bundle's).
 func TestW079RotationAdvancesAndCapsOnEffectiveList(t *testing.T) {
 	cases := []struct {
-		name     string
-		stepKind string
-		want     string
+		name      string
+		yamlEntry string
+		want      string
 	}{
-		{"two failures pin the third entry", "code: [w079r-a, w079r-b, w079r-c]", "w079r-c"},
-		{"two failures on a two-entry list cap at the end", "code: [w079r-a, w079r-b]", "w079r-b"},
+		{"two failures pin the third entry", "fix: [w079r-a, w079r-b, w079r-c]", "w079r-c"},
+		{"two failures on a two-entry list cap at the end", "fix: [w079r-a, w079r-b]", "w079r-b"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			inst := newV1Install(t)
 			ws := t.TempDir()
-			w079Yaml(t, ws, "models:\n  e2e:\n    "+c.stepKind+"\n")
+			w079Yaml(t, ws, "models:\n  e2e:\n    "+c.yamlEntry+"\n")
 			cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
 				inst.url, inst.adminKey, "",
 				[]w113WS{{key: ws, projects: []string{"e2e"}}})
@@ -639,7 +640,7 @@ func TestW079RotationAdvancesAndCapsOnEffectiveList(t *testing.T) {
 func TestW079GateFailRewindResetsEffectiveHead(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	w079Yaml(t, ws, "models:\n  e2e:\n    code: [w079g-a, w079g-b]\n")
+	w079Yaml(t, ws, "models:\n  e2e:\n    fix: [w079g-a, w079g-b]\n")
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
 		inst.url, inst.adminKey, "",
 		[]w113WS{{key: ws, projects: []string{"e2e"}}})
@@ -725,7 +726,7 @@ func TestW079RotationUntouchedWithoutYaml(t *testing.T) {
 func TestW079RestartKeepsClaimTimeSnapshot(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
-	w079Yaml(t, ws, "models:\n  e2e:\n    code: [w079-m1, w079-m2]\n")
+	w079Yaml(t, ws, "models:\n  e2e:\n    fix: [w079-m1, w079-m2]\n")
 	sock := filepath.Join(shortTmp("/tmp", "w079sock"), "d.sock")
 	dataDir := t.TempDir()
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
@@ -748,7 +749,7 @@ func TestW079RestartKeepsClaimTimeSnapshot(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	d.crash()
-	w079Yaml(t, ws, "models:\n  e2e:\n    code: [w079-n1, w079-n2]\n")
+	w079Yaml(t, ws, "models:\n  e2e:\n    fix: [w079-n1, w079-n2]\n")
 	d2 := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptSock(sock), w113DOptDataDir(dataDir))
 	d2.start()
 	defer d2.stop()

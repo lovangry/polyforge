@@ -24,7 +24,7 @@ var cmdSubmit = &Command{
 	Setup: func(fs *flag.FlagSet) {
 		fs.String("priority", "normal", "queue priority (low|normal|high|urgent)")
 		fs.String("models", "", "manual model candidates for EVERY step of this WI, comma-separated, in order "+
-			"(precedence: --models > workspace yaml models.<project>.<kind> > bundle step model_candidates > "+
+			"(precedence: --models > workspace yaml models.<project>.<step-id> > bundle step model_candidates > "+
 			"yaml models.<project>.default > bundle defaults.model_candidates)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {

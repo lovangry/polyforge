@@ -7,6 +7,21 @@ import (
 	"testing"
 )
 
+// stepsDir writes an installed-workflows dir whose bundles declare the
+// step ids code, fix, review and spec, and answers it.
+func stepsDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fm := "---\nsteps:\n  - { id: code }\n  - { id: fix }\n  - { id: review }\n  - { id: spec }\n---\n"
+	if err := os.WriteFile(filepath.Join(dir, "b", "workflow.md"), []byte(fm), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 func writeYaml(t *testing.T, content string) string {
 	t.Helper()
 	ws := t.TempDir()
@@ -19,7 +34,7 @@ func writeYaml(t *testing.T, content string) string {
 // TestLoadAbsentAndEmptyAreNil pins the absent-equivalence rule: a
 // missing file and an empty/comments-only file both answer (nil, nil).
 func TestLoadAbsentAndEmptyAreNil(t *testing.T) {
-	cfg, err := Load(t.TempDir())
+	cfg, err := Load(t.TempDir(), stepsDir(t))
 	if err != nil || cfg != nil {
 		t.Fatalf("absent yaml: %+v, %v; want nil, nil", cfg, err)
 	}
@@ -30,7 +45,7 @@ func TestLoadAbsentAndEmptyAreNil(t *testing.T) {
 		"empty document": "---\n",
 		"null models":    "models:\n",
 	} {
-		cfg, err := Load(writeYaml(t, content))
+		cfg, err := Load(writeYaml(t, content), stepsDir(t))
 		if err != nil || cfg != nil {
 			t.Fatalf("%s: %+v, %v; want nil, nil (absent-equivalent)", name, cfg, err)
 		}
@@ -39,7 +54,7 @@ func TestLoadAbsentAndEmptyAreNil(t *testing.T) {
 
 // TestLoadValidGrammars pins the valid shapes and the decoded content.
 func TestLoadValidGrammars(t *testing.T) {
-	cfg, err := Load(writeYaml(t, "models:\n  e2e:\n    default: [a, b]\n    code: [c]\n    review: []\n  other:\n    spec: [d]\n"))
+	cfg, err := Load(writeYaml(t, "models:\n  e2e:\n    default: [a, b]\n    code: [c]\n    review: []\n  other:\n    spec: [d]\n"), stepsDir(t))
 	if err != nil || cfg == nil {
 		t.Fatalf("valid yaml refused: %v", err)
 	}
@@ -69,10 +84,11 @@ func TestLoadRefusals(t *testing.T) {
 		{"old shape: step_kinds", "workflow_defaults:\n  step_kinds:\n    code: [a]\n", []string{"workflow_defaults"}},
 		{"retired release section", "release:\n  cadence: weekly\n", []string{"release"}},
 		{"unknown top-level key beside models", "models:\n  e2e:\n    code: [a]\nmodel: x\n", []string{"model"}},
-		{"unknown kind", "models:\n  e2e:\n    build: [a]\n", []string{"e2e", "build"}},
+		{"unknown step id", "models:\n  e2e:\n    build: [a]\n", []string{"models.e2e.build"}},
+		{"every unknown step id named", "models:\n  e2e:\n    zz: [a]\n    fix: [a]\n  b:\n    gate: [a]\n", []string{"models.b.gate, models.e2e.zz"}},
 		{"misspelled default", "models:\n  e2e:\n    defaults: [a]\n", []string{"defaults"}},
 		{"empty model id in default", "models:\n  e2e:\n    default: [\"\"]\n", []string{"e2e", "default"}},
-		{"blank model id in kind", "models:\n  e2e:\n    code: [a, \"  \"]\n", []string{"e2e", "code"}},
+		{"blank model id in step list", "models:\n  e2e:\n    code: [a, \"  \"]\n", []string{"e2e", "code"}},
 		{"null project entry", "models:\n  e2e:\n", []string{"e2e"}},
 		{"null list", "models:\n  e2e:\n    code:\n", []string{"e2e", "code"}},
 		{"models not a map", "models: 42\n", nil},
@@ -80,13 +96,13 @@ func TestLoadRefusals(t *testing.T) {
 		{"list not a list", "models:\n  e2e:\n    code: a\n", nil},
 		{"list of non-strings", "models:\n  e2e:\n    code: [[a]]\n", nil},
 		{"duplicate project key", "models:\n  e2e:\n    code: [a]\n  e2e:\n    code: [b]\n", []string{"e2e"}},
-		{"duplicate kind key", "models:\n  e2e:\n    code: [a]\n    code: [b]\n", []string{"code"}},
+		{"duplicate step key", "models:\n  e2e:\n    code: [a]\n    code: [b]\n", []string{"code"}},
 		{"duplicate models key", "models:\n  e2e:\n    code: [a]\nmodels:\n  x:\n    code: [b]\n", []string{"models"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ws := writeYaml(t, c.yaml)
-			cfg, err := Load(ws)
+			cfg, err := Load(ws, stepsDir(t))
 			if err == nil {
 				t.Fatalf("invalid yaml accepted: %+v", cfg)
 			}
@@ -116,7 +132,24 @@ func TestUnreadableYamlIsTyped(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(ws, FileName), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(ws); err == nil {
+	if _, err := Load(ws, stepsDir(t)); err == nil {
 		t.Fatal("a directory at the yaml path must refuse")
+	}
+}
+
+// TestLoadStepKeysNeedTheInstalledSet: no workflows dir skips only the
+// step-id check, an unreadable one refuses; yaml anchors let one list
+// serve several step ids.
+func TestLoadStepKeysNeedTheInstalledSet(t *testing.T) {
+	ws := writeYaml(t, "models:\n  e2e:\n    code: &c [a, b]\n    fix: *c\n    bogus: *c\n")
+	if _, err := Load(ws, stepsDir(t)); err == nil || !strings.Contains(err.Error(), "models.e2e.bogus") {
+		t.Fatalf("an unknown step id must refuse, got %v", err)
+	}
+	cfg, err := Load(ws, "")
+	if err != nil || len(cfg.Models["e2e"]["fix"]) != 2 {
+		t.Fatalf("no workflows dir: %+v, %v; want the anchored lists loaded", cfg, err)
+	}
+	if _, err := Load(ws, filepath.Join(t.TempDir(), "missing")); err == nil || !strings.Contains(err.Error(), "unreadable") {
+		t.Fatalf("an unreadable workflows dir must refuse, got %v", err)
 	}
 }

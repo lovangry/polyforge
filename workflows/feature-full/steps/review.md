@@ -136,8 +136,7 @@ these present:
 
 ## Position in the flow
 
-This step is declared `kind: review` in the workflow frontmatter, which the schema grants
-positional freedom — in every delivery bundle that has a review it sits between `verification` and
+In every delivery bundle that has a review this step sits between `verification` and
 `deliver`: the mechanical gate runs first, so a mechanical failure never costs a review,
 and the judgment reads its results.
 

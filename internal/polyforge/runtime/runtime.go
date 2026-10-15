@@ -897,8 +897,9 @@ func unmappedProjectError(project string) *api.Error {
 // an edit governs the next claim with no daemon restart): resolve the
 // project's workspace through the inverse mapping (DAEMON-412 when
 // unmapped) and strictly validate <root>/.polyforge.yaml through the
-// shared loader (DAEMON-414 when invalid). The parsed config is nil when
-// the workspace carries no yaml (absent-equivalent: bundle defaults).
+// shared loader, its per-step keys against the step ids of the installed
+// workflows (DAEMON-414 when invalid, an unknown key included). The
+// parsed config is nil when the workspace carries no yaml (absent-equivalent: bundle defaults).
 // Nothing is claimed or created by it; the daemon's submit face and
 // auto-pull call it too, so a refusal reaches the operator before enqueue.
 func (r *Runtime) LoadWorkspace(project string) (*workspace.Config, error) {
@@ -906,7 +907,7 @@ func (r *Runtime) LoadWorkspace(project string) (*workspace.Config, error) {
 	if err != nil {
 		return nil, unmappedProjectError(project)
 	}
-	wcfg, err := workspace.Load(ws)
+	wcfg, err := workspace.Load(ws, r.cfg.WorkflowsDir)
 	if err != nil {
 		return nil, &api.Error{
 			Code:   api.ErrDaemonWorkspaceYaml,

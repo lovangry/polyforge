@@ -40,6 +40,10 @@ func TestSubmitAndStatus(t *testing.T) {
 	if len(st.Workspaces) != 1 || st.Workspaces[0] != td.cfg.Mapping.Workspaces()[0] {
 		t.Fatalf("status workspaces = %v, want the mapped set %v", st.Workspaces, td.cfg.Mapping.Workspaces())
 	}
+	// #169: the workflows dir pf doctor judges yaml keys by.
+	if st.WorkflowsDir != td.cfg.WorkflowsDir {
+		t.Fatalf("status workflows_dir = %q, want %q", st.WorkflowsDir, td.cfg.WorkflowsDir)
+	}
 	if len(st.Jobs) != 1 {
 		t.Fatalf("jobs = %+v, want 1", st.Jobs)
 	}

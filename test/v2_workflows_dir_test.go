@@ -58,7 +58,7 @@ func addGrillHumanGate(t testing.TB, dir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := strings.Replace(string(raw), "{ id: grill, context_policy: fresh, handoff: true, kind: spec", "{ id: grill, context_policy: fresh, handoff: true, kind: spec, requires_human_answer: true", 1)
+	out := strings.Replace(string(raw), "{ id: grill, context_policy: fresh, handoff: true", "{ id: grill, context_policy: fresh, handoff: true, requires_human_answer: true", 1)
 	if out == string(raw) {
 		t.Fatal("quick-fix grill line not found for the human-gate copy")
 	}

@@ -130,6 +130,9 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *workflowsDir == "" {
 		*workflowsDir = "workflows"
 	}
+	if abs, err := filepath.Abs(*workflowsDir); err == nil {
+		*workflowsDir = abs // GET /status reports it; pf doctor reads by it
+	}
 	if *sessionsRoot == "" {
 		*sessionsRoot = os.Getenv("POLYFORGE_HARNESS_SESSIONS_ROOT")
 	}
