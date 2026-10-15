@@ -29,8 +29,8 @@ writes the client config, keeps a checkout of the release at
 `~/.claude/skills/polyforge` as a symlink into it — no copy, no second
 clone), and — on execution machines — starts the local daemon through
 `pf daemon ensure` (a restart loop in tmux session `polyforge-daemon`;
-an upgrade stops that loop, shuts the daemon down gracefully, swaps the
-binary and ensures again). After a container or machine restart the next
+an upgrade shuts the daemon down gracefully — the loop ends with that
+clean exit — swaps the binary and ensures again). After a container or machine restart the next
 pi or Claude Code session runs the same ensure; nothing else needs to be
 started by hand. Prerequisites (a personal API key,
 `gh` authenticated) and flags live in the README install section and

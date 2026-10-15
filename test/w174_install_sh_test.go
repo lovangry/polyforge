@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -34,12 +35,13 @@ import (
 // w174Install is one hermetic installer machine on top of w174Env.
 type w174Install struct {
 	*w174Env
-	shim    string // gh, tmux, pi shims (first on PATH)
-	rel     string // the fake release assets the gh stub serves
-	src     string // the release tree `gh repo clone` copies
-	bin     string // PF_BIN
-	journal string
-	tagFile string
+	shim     string // gh, tmux, pi shims (first on PATH)
+	rel      string // the fake release assets the gh stub serves
+	src      string // the release tree `gh repo clone` copies
+	bin      string // PF_BIN
+	journal  string
+	tagFile  string
+	extraEnv []string
 }
 
 func w174NewInstall(t *testing.T) *w174Install {
@@ -100,7 +102,22 @@ exit 0
 // call and exec'ing the real build.
 func (in *w174Install) release(t *testing.T, tag string) {
 	t.Helper()
-	wrapper := fmt.Sprintf("#!/bin/sh\necho \"pf $*\" >> \"$W174_JOURNAL\"\n[ \"$1\" = --version ] && { echo %s; exit 0; }\nexec %s \"$@\"\n", tag, in.pf)
+	// With W174_ENSURE_DURING_DRAIN=1, `ops shutdown` also plays a harness
+	// session starting mid-upgrade: once the old daemon's socket is gone
+	// it runs `pf daemon ensure` and journals its exit code.
+	wrapper := fmt.Sprintf(`#!/bin/sh
+echo "pf $*" >> "$W174_JOURNAL"
+[ "$1" = --version ] && { echo %[1]s; exit 0; }
+if [ "$1 $2" = "ops shutdown" ] && [ "${W174_ENSURE_DURING_DRAIN:-}" = 1 ]; then
+  %[2]s "$@"; rc=$?
+  n=0
+  while curl -s -m 1 --unix-socket "$W174_SOCK" http://x/status >/dev/null 2>&1 && [ $n -lt 100 ]; do sleep 0.2; n=$((n+1)); done
+  out=$(%[2]s daemon ensure --config "$W174_CFG" --timeout 3s 2>&1); erc=$?
+  echo "drain-ensure rc=$erc $out" | tr '\n' ' ' >> "$W174_JOURNAL"; echo >> "$W174_JOURNAL"
+  exit $rc
+fi
+exec %[2]s "$@"
+`, tag, in.pf)
 	if err := os.WriteFile(filepath.Join(in.rel, "pf-linux-amd64"), []byte(wrapper), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +137,8 @@ func (in *w174Install) run(t *testing.T) (string, int) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", filepath.Join(v1Root(t), "tools", "install.sh"), "w174key", "127.0.0.1")
 	cmd.Env = append(in.env(), "PF_BIN="+in.bin, "W174_REL="+in.rel, "W174_SRC="+in.src,
-		"W174_JOURNAL="+in.journal, "W174_TAG_FILE="+in.tagFile)
+		"W174_JOURNAL="+in.journal, "W174_TAG_FILE="+in.tagFile, "W174_SOCK="+in.sock, "W174_CFG="+in.cfg)
+	cmd.Env = append(cmd.Env, in.extraEnv...)
 	out, err := cmd.CombinedOutput()
 	code := 0
 	if err != nil {
@@ -155,6 +173,17 @@ func journalIndex(lines []string, prefix string) int {
 	return -1
 }
 
+// loops counts the restart-loop sessions (exact name) on the private server.
+func (in *w174Install) loops() int {
+	n := 0
+	for _, s := range in.sessions() {
+		if s == "polyforge-daemon" {
+			n++
+		}
+	}
+	return n
+}
+
 func w174ReadFile(t *testing.T, p string) string {
 	t.Helper()
 	raw, err := os.ReadFile(p)
@@ -173,7 +202,15 @@ func TestW174InstallMigratesOldLayoutThenIsIdempotent(t *testing.T) {
 	in := w174NewInstall(t)
 	in.release(t, "v0.0.1-w174")
 	piSettings := filepath.Join(in.home, ".pi", "agent", "settings.json")
-	oldPi := `{"defaultModel":"x","packages":["npm:other-pkg","git:git@github.com:silgrid/polyforge.git@v2.7.0",{"source":"git:github.com/someone/else"}]}`
+	// another polyforge checkout also listed (a dev clone): install warns
+	devClone := filepath.Join(t.TempDir(), "dev-polyforge")
+	if err := os.MkdirAll(filepath.Join(devClone, "skills", "polyforge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(devClone, "skills", "polyforge", "SKILL.md"), []byte("# dev\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldPi := `{"defaultModel":"x","packages":["npm:other-pkg",{"source":"git:git@github.com:silgrid/polyforge.git@v2.7.0","prompts":[]},{"source":"git:github.com/someone/else"},"` + devClone + `"]}`
 	if err := os.WriteFile(piSettings, []byte(oldPi), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -199,12 +236,15 @@ func TestW174InstallMigratesOldLayoutThenIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := json.Marshal(pi.Packages)
-	want, _ := json.Marshal([]any{"npm:other-pkg", relCur, map[string]any{"source": "git:github.com/someone/else"}})
+	want, _ := json.Marshal([]any{"npm:other-pkg", map[string]any{"source": relCur, "prompts": []any{}}, map[string]any{"source": "git:github.com/someone/else"}, devClone})
 	if string(got) != string(want) || pi.DefaultModel != "x" {
 		t.Fatalf("pi settings after migration: packages %s (want %s), defaultModel %q", got, want, pi.DefaultModel)
 	}
 	if baks, _ := filepath.Glob(piSettings + ".bak-polyforge-*"); len(baks) != 1 {
 		t.Fatalf("pi settings backups = %v, want one", baks)
+	}
+	if !strings.Contains(out, "WARN: pi also loads another polyforge checkout ("+devClone+")") {
+		t.Fatalf("no warning about the second polyforge checkout:\n%s", out)
 	}
 	// Claude: the copied dir replaced by a symlink, the hook registered on the stable path
 	if target, err := os.Readlink(oldSkill); err != nil || target != filepath.Join(relCur, "skills", "polyforge") {
@@ -273,31 +313,45 @@ func TestW174InstallMigratesOldLayoutThenIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestW174InstallUpgradeStopsLoopFirst: an upgrade stops the restart loop
-// before the graceful daemon shutdown, swaps, and the new daemon comes
-// from `pf daemon ensure` (one loop, one daemon, a new process).
-func TestW174InstallUpgradeStopsLoopFirst(t *testing.T) {
+// TestW174InstallUpgradeOrderAndLock: an upgrade shuts the daemon down
+// gracefully (its loop ends with the clean exit), swaps, and the new
+// daemon comes from `pf daemon ensure`; a harness session's ensure during
+// the drain starts nothing (install.sh holds the ensure lock); unrelated
+// tmux sessions — including a similarly named one — survive.
+func TestW174InstallUpgradeOrderAndLock(t *testing.T) {
 	in := w174NewInstall(t)
 	in.release(t, "v0.0.1-w174")
 	if out, code := in.run(t); code != 0 {
 		t.Fatalf("install v0.0.1: exit %d\n%s", code, out)
 	}
 	oldPid := in.oneDaemon(t, 10*time.Second)
+	for _, name := range []string{"piweb", "polyforge-daemon2"} {
+		if out, err := in.tmux("new-session", "-d", "-s", name, "sleep 600"); err != nil {
+			t.Fatalf("tmux new-session %s: %v %s", name, err, out)
+		}
+	}
 
 	in.release(t, "v0.0.2-w174")
 	in.resetJournal(t)
+	in.extraEnv = []string{"W174_ENSURE_DURING_DRAIN=1"}
 	out, code := in.run(t)
 	if code != 0 {
 		t.Fatalf("upgrade to v0.0.2: exit %d\n%s", code, out)
 	}
 	lines := in.journalLines()
-	kill := journalIndex(lines, "tmux kill-session")
 	shut := journalIndex(lines, "pf ops shutdown")
-	ensure := journalIndex(lines, "pf daemon ensure")
-	if kill < 0 || shut < 0 || ensure < 0 || !(kill < shut && shut < ensure) {
-		t.Fatalf("upgrade order must be: stop loop (%d) < graceful shutdown (%d) < ensure (%d); journal:\n%s", kill, shut, ensure, strings.Join(lines, "\n"))
+	drain := journalIndex(lines, "drain-ensure ")
+	ensure := journalIndex(lines, "pf daemon ensure --config")
+	if shut < 0 || drain < 0 || ensure < 0 || !(shut < drain && drain < ensure) {
+		t.Fatalf("upgrade order must be: graceful shutdown (%d) < [mid-drain ensure (%d)] < install's ensure (%d); journal:\n%s", shut, drain, ensure, strings.Join(lines, "\n"))
 	}
-	if got := strings.TrimSpace(w174ReadFile(t, in.bin)); !strings.Contains(got, "v0.0.2-w174") {
+	if !strings.HasPrefix(lines[drain], "drain-ensure rc=1 ") || !strings.Contains(lines[drain], "another `pf daemon ensure`") {
+		t.Fatalf("an ensure during the drain must wait on install's lock and start nothing: %q", lines[drain])
+	}
+	if i := journalIndex(lines, "tmux kill-session"); i >= 0 {
+		t.Fatalf("the loop should have ended with the clean shutdown, yet install killed a session: %q", lines[i])
+	}
+	if got := w174ReadFile(t, in.bin); !strings.Contains(got, "v0.0.2-w174") {
 		t.Fatal("the binary was not swapped")
 	}
 	if cur, _ := os.Readlink(filepath.Join(in.data, "release", "current")); cur != "v0.0.2-w174" {
@@ -307,7 +361,64 @@ func TestW174InstallUpgradeStopsLoopFirst(t *testing.T) {
 	if newPid == oldPid {
 		t.Fatal("the old daemon survived the upgrade")
 	}
-	if s := in.sessions(); len(s) != 1 || s[0] != "polyforge-daemon" {
-		t.Fatalf("tmux sessions after the upgrade = %v", s)
+	if in.loops() != 1 {
+		t.Fatalf("restart loops after the upgrade = %d (sessions %v), want 1", in.loops(), in.sessions())
+	}
+	// unrelated sessions survive install AND a later ensure
+	if code, o, e := in.ensure(t); code != 0 {
+		t.Fatalf("ensure after the upgrade: %d %s %s", code, o, e)
+	}
+	got := strings.Join(in.sessions(), " ")
+	for _, name := range []string{"piweb", "polyforge-daemon2"} {
+		if !strings.Contains(" "+got+" ", " "+name+" ") {
+			t.Fatalf("unrelated tmux session %s did not survive (sessions %q)", name, got)
+		}
+	}
+}
+
+// TestW174InstallUpgradeFromUnsupervisedNohupDaemon: today's machines run
+// a bare `nohup pf daemon` and no loop; the upgrade stops it gracefully
+// and ends with exactly one loop and one (new) daemon.
+func TestW174InstallUpgradeFromUnsupervisedNohupDaemon(t *testing.T) {
+	in := w174NewInstall(t)
+	in.release(t, "v0.0.1-w174")
+	if out, code := in.run(t); code != 0 {
+		t.Fatalf("install v0.0.1: exit %d\n%s", code, out)
+	}
+	// back to today's state: stop the loop's daemon, start a bare nohup one
+	stop := exec.Command(in.pf, "--config", in.cfg, "ops", "shutdown")
+	stop.Env = in.env()
+	if out, err := stop.CombinedOutput(); err != nil {
+		t.Fatalf("ops shutdown: %v %s", err, out)
+	}
+	waitUntil(t, 30*time.Second, "the loop's daemon did not end", func() bool { return len(in.daemons()) == 0 && in.loops() == 0 })
+	id := strings.TrimSpace(w174ReadFile(t, filepath.Join(in.data, "daemon-id")))
+	nohup := exec.Command("sh", "-c", "nohup \"$0\" daemon --config \"$1\" -machine-id \"$2\" -data-dir \"$3\" -socket \"$4\" -workflows-dir \"$3/release/current/workflows\" >/dev/null 2>&1 &",
+		in.pf, in.cfg, id, in.data, in.sock)
+	nohup.Env = in.env()
+	if out, err := nohup.CombinedOutput(); err != nil {
+		t.Fatalf("nohup daemon: %v %s", err, out)
+	}
+	oldPid := in.oneDaemon(t, 10*time.Second)
+	if in.loops() != 0 {
+		t.Fatal("fixture: a loop exists")
+	}
+
+	in.release(t, "v0.0.2-w174")
+	in.resetJournal(t)
+	out, code := in.run(t)
+	if code != 0 {
+		t.Fatalf("upgrade: exit %d\n%s", code, out)
+	}
+	newPid := in.oneDaemon(t, 10*time.Second)
+	if newPid == oldPid {
+		t.Fatal("the nohup daemon survived the upgrade")
+	}
+	if in.loops() != 1 {
+		t.Fatalf("restart loops = %d (sessions %v), want 1", in.loops(), in.sessions())
+	}
+	environ, _ := os.ReadFile(filepath.Join("/proc", strconv.Itoa(newPid), "environ"))
+	if !strings.Contains(string(environ), "POLYFORGE_SUPERVISOR=tmux:polyforge-daemon") {
+		t.Fatal("the new daemon is not the loop's")
 	}
 }

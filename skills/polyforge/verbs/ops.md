@@ -37,16 +37,14 @@ pf daemon ensure                                     # START: the daemon under i
 Starting the daemon is `pf daemon ensure` (polyforge#174) — never a bare
 `pf daemon` in the background. It is idempotent and file-locked: when a
 daemon answers it does nothing; otherwise it starts the restart loop in
-tmux session `polyforge-daemon` (a crash is restarted within ~5s) and
-waits for the socket. The harness adapters already run it when a session
+tmux session `polyforge-daemon` (a failed exit — crash, panic, kill — is
+restarted within ~5s; a clean exit ends the loop) and waits for the socket. The harness adapters already run it when a session
 starts or resumes, so the agent runs it only as the fallback: an
 execution-plane verb answered `dial unix …` → `pf daemon ensure`, then
 retry that verb ONCE. A non-zero exit carries the reason (no `[workspace]`
 mapping, missing release workflows, the daemon log tail) — relay it and
-run `pf doctor`. To stop the daemon for good (e.g. before a manual
-upgrade), stop the loop first, then the daemon:
-`tmux kill-session -t polyforge-daemon; pf ops shutdown` — otherwise the
-loop starts it again after 5s.
+run `pf doctor`. `pf ops shutdown` stops the daemon for good: its clean
+exit ends the restart loop as well; `pf daemon ensure` starts it again.
 
 `pf ops auto off` is more than the switch: the queue's not-yet-started
 `origin=auto` entries are REMOVED at the same time (from memory and from

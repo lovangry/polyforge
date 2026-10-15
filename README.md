@@ -39,8 +39,10 @@ mapping exists): a restart loop in tmux session `polyforge-daemon` runs it
 with `-workflows-dir release/current/workflows` and revives it within ~5s
 after a crash; after a container/machine restart (tmux does not survive
 one) the next pi or Claude Code session runs the same ensure. An upgrade
-stops that loop first, shuts the daemon down gracefully, swaps the binary,
-then ensures again. A daemon already running with a different workflows
+shuts the daemon down gracefully (the loop ends with that clean exit —
+`pf ops shutdown` always stops for good, only failures are restarted),
+swaps the binary, then ensures again; meanwhile it holds the ensure lock,
+so a harness session starting mid-upgrade starts nothing. A daemon already running with a different workflows
 dir, or without its loop, is reported, never auto-restarted. Finally it
 verifies connectivity. The admin
 registers the machine identity first. Re-running the same command upgrades

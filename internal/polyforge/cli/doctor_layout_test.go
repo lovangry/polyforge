@@ -85,8 +85,8 @@ func TestDoctorDaemonSupervision(t *testing.T) {
 		env["PATH"] = fakeTmuxPath(t, 1) // no polyforge-daemon session
 		code, _, doc := doctorStatus(t, env, "--json", "doctor")
 		st, detail := doctorFind(t, doc, docChSupervision)
-		if st != "warn" || !strings.Contains(detail, ensureFixCommand) || !strings.Contains(detail, "polyforge-daemon") {
-			t.Fatalf("unsupervised = %s %q, want warn with %q", st, detail, ensureFixCommand)
+		if st != "warn" || !strings.Contains(detail, "daemon.lock' true; do sleep 2; done; pf daemon ensure") || !strings.Contains(detail, "polyforge-daemon") {
+			t.Fatalf("unsupervised = %s %q, want warn with the lock-waiting fix", st, detail)
 		}
 		if code != 0 || !doc.OK {
 			t.Fatalf("a supervision warn must not move the exit code: exit %d ok %v", code, doc.OK)

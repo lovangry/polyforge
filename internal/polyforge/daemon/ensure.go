@@ -10,16 +10,20 @@ package daemon
 //   - Idempotent: a daemon answering GET /status on the configured socket
 //     means nothing to do (exit 0).
 //   - Otherwise a tmux session (supervisor.SessionName) runs the restart
-//     loop `while true; do pf daemon <canonical argv>; sleep 5; done`, so
-//     a crash is restarted within ~5s; ensure waits until the socket
-//     answers. The daemon inside the loop ignores SIGHUP (nohup), so
-//     killing the tmux session — install.sh's first upgrade step — stops
-//     the restarts without killing the daemon; it is then shut down
-//     gracefully.
+//     loop: `pf daemon <canonical argv>`; a non-zero exit (crash, panic,
+//     kill) restarts it after 5s, a clean exit (0: `pf ops shutdown`,
+//     SIGTERM/SIGINT — the graceful sequence) ENDS the loop and the
+//     session, so `pf ops shutdown` stops the daemon for good. ensure
+//     waits until the socket answers. The daemon ignores SIGHUP (nohup):
+//     killing the tmux session (a fallback for a stuck loop) never kills
+//     the daemon itself.
 //   - An flock on <data-dir>/ensure.lock serializes concurrent calls (a
 //     pi-web restart resumes many sessions at once): the holder starts at
 //     most one loop; a caller that does not get the lock waits for the
 //     holder to finish and answers by the socket, starting nothing.
+//     tools/install.sh holds the same lock across an upgrade (stop →
+//     swap), so an adapter's ensure in that window starts nothing.
+//   - A step agent (PF_WI_ID set) is refused outright.
 //   - Without tmux it falls back to one unsupervised detached start and
 //     says so loudly.
 //
@@ -58,7 +62,7 @@ const (
 	logRotateBytes = 10 << 20
 )
 
-// restartDelay is the pause between two loop iterations.
+// restartDelay is the pause before a failed daemon is restarted.
 const restartDelay = 5
 
 // ensurePlan is everything one ensure run decided before acting.
@@ -104,6 +108,10 @@ func Ensure(argv []string, stdout, stderr io.Writer) int {
 	if fs.NArg() > 0 {
 		fmt.Fprintf(stderr, "pf daemon ensure: unexpected arguments %v\n", fs.Args())
 		return 2
+	}
+	if os.Getenv("PF_WI_ID") != "" {
+		fmt.Fprintln(stderr, "pf daemon ensure: refused inside a step agent (PF_WI_ID is set): only a human's session starts the daemon")
+		return 1
 	}
 	plan, err := planEnsure(*cfgPath, *workflowsDir, *timeout)
 	if err != nil {
@@ -281,10 +289,14 @@ func (p *ensurePlan) start(stdout, stderr io.Writer) error {
 	return nil
 }
 
-// loopScript is the sh program the tmux session runs. PATH and HOME are
-// pinned to the caller's (a pre-existing tmux server carries its own
-// environment); the markers of a harness session are dropped so the
-// daemon — and the step agents it spawns — never inherit them.
+// loopScript is the sh program the tmux session runs. Its environment is
+// the TMUX SERVER's (its global environment, captured when the server
+// started, plus the client's update-environment variables), not the
+// ensure caller's: PATH and HOME are therefore pinned to the caller's,
+// and the markers of a harness session (TMUX*, every CLAUDE*, PF_CHAT_ID,
+// PF_WI_ID) are dropped so the daemon — and the step agents it spawns —
+// never inherit them. Everything else (e.g. ANTHROPIC_*) is whatever the
+// tmux server carries.
 func (p *ensurePlan) loopScript() string {
 	argv := []string{"nohup", shQuote(p.pfBin)}
 	for _, a := range p.daemonArgv() {
@@ -293,13 +305,16 @@ func (p *ensurePlan) loopScript() string {
 	log := shQuote(p.logPath())
 	var b strings.Builder
 	fmt.Fprintf(&b, "export PATH=%s HOME=%s %s=%s\n", shQuote(os.Getenv("PATH")), shQuote(p.home), supervisor.MarkerEnv, shQuote("tmux:"+supervisor.SessionName))
-	b.WriteString("unset TMUX TMUX_PANE CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_ENV_FILE CLAUDE_PROJECT_DIR PF_CHAT_ID PF_WI_ID\n")
+	b.WriteString("unset TMUX TMUX_PANE PF_CHAT_ID PF_WI_ID\n")
+	b.WriteString("for v in $(env | sed -n 's/^\\(CLAUDE[A-Za-z0-9_]*\\)=.*/\\1/p'); do unset \"$v\"; done\n")
 	fmt.Fprintf(&b, "cd %s 2>/dev/null || cd /\n", shQuote(p.home))
-	b.WriteString("while true; do\n")
+	b.WriteString("while :; do\n")
 	fmt.Fprintf(&b, "  if [ \"$(wc -c < %s 2>/dev/null || echo 0)\" -gt %d ]; then mv -f %s %s.1; fi\n", log, logRotateBytes, log, log)
 	fmt.Fprintf(&b, "  echo \"pf daemon ensure loop: starting the daemon at $(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)\" >> %s\n", log)
 	fmt.Fprintf(&b, "  %s < /dev/null >> %s 2>&1\n", strings.Join(argv, " "), log)
-	fmt.Fprintf(&b, "  echo \"pf daemon ensure loop: the daemon exited ($?); restarting in %ds\" >> %s\n", restartDelay, log)
+	b.WriteString("  rc=$?\n")
+	fmt.Fprintf(&b, "  if [ \"$rc\" -eq 0 ]; then echo \"pf daemon ensure loop: the daemon exited cleanly; the loop ends\" >> %s; break; fi\n", log)
+	fmt.Fprintf(&b, "  echo \"pf daemon ensure loop: the daemon failed (exit $rc); restarting in %ds\" >> %s\n", restartDelay, log)
 	fmt.Fprintf(&b, "  sleep %d\n", restartDelay)
 	b.WriteString("done\n")
 	return b.String()

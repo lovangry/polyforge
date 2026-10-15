@@ -327,13 +327,20 @@ func shellQuote(s string) string {
 }
 
 // ensureFixCommand restarts an unsupervised live daemon under the loop:
-// a graceful stop (running jobs are checkpointed), wait for the socket to
-// go quiet, then ensure.
-const ensureFixCommand = "pf ops shutdown && while pf ops status >/dev/null 2>&1; do sleep 2; done; pf daemon ensure"
+// a graceful stop (running jobs are checkpointed), wait until the socket
+// is quiet AND the daemon released its data-dir lock (the process is
+// really gone — the same test tools/install.sh's daemon_running uses),
+// then ensure.
+func ensureFixCommand(home string) string {
+	lock := shellQuote(filepath.Join(polyforgeDataDir(home), "daemon.lock"))
+	return "pf ops shutdown && while pf ops status >/dev/null 2>&1 || ! flock -n " + lock + " true; do sleep 2; done; pf daemon ensure"
+}
 
 // supervisionCheck judges whether a live daemon is supervised.
 func supervisionCheck(daemonUp bool) doctorCheck {
 	c := doctorCheck{Name: docChSupervision}
+	home, _ := os.UserHomeDir()
+	fix := ensureFixCommand(home)
 	if !daemonUp {
 		c.Status, c.Detail = "skip", "not run: the daemon does not answer — start it: pf daemon ensure"
 		return c
@@ -345,9 +352,9 @@ func supervisionCheck(daemonUp bool) doctorCheck {
 	case supervisor.SystemdActive():
 		c.Status, c.Detail = "pass", "systemd unit "+supervisor.SystemdUnit+" is active"
 	case errors.Is(err, supervisor.ErrNoTmux):
-		c.Status, c.Detail = "warn", "the daemon runs without supervision and tmux is not installed: a crash is not restarted — install tmux, then: "+ensureFixCommand
+		c.Status, c.Detail = "warn", "the daemon runs without supervision and tmux is not installed: a crash is not restarted — install tmux, then: "+fix
 	default:
-		c.Status, c.Detail = "warn", "the daemon runs without supervision (no tmux session "+supervisor.SessionName+", no active "+supervisor.SystemdUnit+"): a crash is not restarted — restart it under the loop (graceful; running jobs are checkpointed first): "+ensureFixCommand
+		c.Status, c.Detail = "warn", "the daemon runs without supervision (no tmux session "+supervisor.SessionName+", no active "+supervisor.SystemdUnit+"): a crash is not restarted — restart it under the loop (graceful; running jobs are checkpointed first): "+fix
 	}
 	return c
 }

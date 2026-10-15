@@ -167,7 +167,7 @@ agents 废弃）——部署面不部署、不迁移其中任何被删除或废�
 | 单元 | 产物 | 部署位置 | 独立升级/回滚 |
 |---|---|---|---|
 | `aihub` | AIHub 服务二进制（**新仓部署物**，`00-architecture.md#§3.3` 取代声明；与旧 aihub 系统并存到 Pilot 通过，切换见 §2.1/§11） | 单主机，docker compose 服务 `aihub`（`deploy/docker-compose.yml`，`restart: unless-stopped`：崩溃与主机重启均由 docker 拉起；镜像只由 `.polyforge/deploy.sh` 拉取/加载，compose 从不构建） | 是（§6.3/§6.4，经 `.polyforge/deploy.sh`：在线备份后秒级切换窗口，失败自动回滚） |
-| 工作机二进制 | 单文件：`pf` CLI 动词 + `daemon` 子命令（部署单元合并裁定，`00-architecture.md#§3.3`；数据面动词直连 AIHub 与管理操作，分流表 `00-architecture.md#§5.1`） | 每台工作机：`/usr/local/bin/pf`，由 `tools/install.sh` 安装。`daemon` 子命令**只经 `pf daemon ensure` 拉起**（幂等 + 文件锁）：它在 tmux 会话 `polyforge-daemon` 中运行监督环 `while true; do pf daemon <规范 argv>; sleep 5; done`——**崩溃**约 5s 内被环重新拉起；tmux 不跨容器/机器重启存活，**重启**后由下一个开始或恢复的 harness 会话（pi `pf-chat` 扩展、Claude Code SessionStart 钩子）执行 `pf daemon ensure` 拉起（§6.5）。有 systemd 的机器同样走 tmux 环（与容器一致，最小可行）；操作者若改用自管的 systemd 单元 `polyforge-daemon.service`，`pf doctor` 亦认作已监督。满足 `04-local-runtime.md#§7` 的「崩溃后可被重新拉起」 | 是，逐台滚动（§6.3⑤：先停监督环→优雅停机→替换单文件与 `release/current`→`pf daemon ensure`） |
+| 工作机二进制 | 单文件：`pf` CLI 动词 + `daemon` 子命令（部署单元合并裁定，`00-architecture.md#§3.3`；数据面动词直连 AIHub 与管理操作，分流表 `00-architecture.md#§5.1`） | 每台工作机：`/usr/local/bin/pf`，由 `tools/install.sh` 安装。`daemon` 子命令**只经 `pf daemon ensure` 拉起**（幂等 + 文件锁）：它在 tmux 会话 `polyforge-daemon` 中运行监督环（`pf daemon <规范 argv>`，非零退出 5s 后重启，干净退出即结束环）——**崩溃**约 5s 内被环重新拉起，`pf ops shutdown` 则连环一起停下；tmux 不跨容器/机器重启存活，**重启**后由下一个开始或恢复的 harness 会话（pi `pf-chat` 扩展、Claude Code SessionStart 钩子）执行 `pf daemon ensure` 拉起（§6.5）。有 systemd 的机器同样走 tmux 环（与容器一致，最小可行）；操作者若改用自管的 systemd 单元 `polyforge-daemon.service`，`pf doctor` 亦认作已监督。满足 `04-local-runtime.md#§7` 的「崩溃后可被重新拉起」 | 是，逐台滚动（§6.3⑤：持 ensure 锁→优雅停机（环随干净退出结束）→替换单文件与 `release/current`→释放锁→`pf daemon ensure`） |
 | 路由 Skill | Skill 包（含 pi `pf-chat` 扩展与 Claude Code SessionStart 钩子两个适配层） | 各用户 Harness，引用工作机的 `release/current` 检出（§2.3） | 随仓 tag 版本（mono-repo 单一 semver，`00-architecture.md#§3.3`）：`tools/install.sh` 切换 `release/current` 即更新，下一个 harness 会话生效；pi 为本地路径包、cc 为软链，均零复制；不构成独立版本线 |
 | bundle | `workflows/<bundle-name>/`：`workflow.md`（frontmatter + 正文）+ `agents/*.md`（`01-workflow-skills.md#§2.1`/§3） | 随 aihub 仓本机 checkout 交付：AIHub 服务主机（创建 WI 时服务端读取，`02-aihub-core.md#§4.5`）与每台工作机（WI Agent 第 0 步物化来源，`03-execution-capsule.md#§4.5`） | 否——无注册接口、无 registry/Core catalog（`01-workflow-skills.md#§2.1`）；随 checkout 的 git 版本演进，不构成独立部署/升级/回滚单元 |
 
@@ -325,10 +325,10 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
 5. 逐台滚动升级工作机的单一工作机二进制；Core API 协议向后兼容一个版本窗，允许旧版本 Daemon
    与新版本 AIHub 短暂共存直到该台完成升级。升级某台工作机前，先让其完成一次优雅停机
    （`00-architecture.md#§3.5`、`04-local-runtime.md#§6.5`）：该动作代替所有仍在进行的 WI Agent 各触发一次全扫描发布，保证
-   替换二进制前没有正在飞行的执行现场。工作机侧由 `tools/install.sh` 按固定顺序执行：**先停监督环**（关掉 tmux 会话 `polyforge-daemon`，环内
-   daemon 忽略挂断信号继续运行，避免旧 daemon 被环立刻拉起或与新 daemon 抢 socket）→ **优雅停 daemon**
-   （`pf ops shutdown`，等待其真正退出）→ 替换单一工作机二进制与 `release/current` → **`pf daemon ensure`**
-   拉起新环与新 daemon。新 Daemon 启动后**不**按
+   替换二进制前没有正在飞行的执行现场。工作机侧由 `tools/install.sh` 按固定顺序执行：**持有 `<data-dir>/ensure.lock`**（期间 harness 会话的
+   ensure 只等待、不拉起任何东西）→ **优雅停 daemon**（`pf ops shutdown`；干净退出同时结束监督环；等待
+   daemon 与环都真正消失，残留的空环直接关掉，避免旧二进制被环重新拉起或与新 daemon 抢 socket）→ 替换单一工作机二进制与 `release/current` → **`pf daemon ensure`**
+   拉起新环与新 daemon（拉起前释放锁）。新 Daemon 启动后**不**按
    `04-local-runtime.md#§7.1` 的崩溃恢复规则处理：升级前的优雅停机已按 `04-local-runtime.md#§6.2` A 路径结束该 WI 当时的
    generation（并从 `jobs[]` 中移除对应记录），因此重启后的 Daemon 看不到一个仍在“未结束”的
    旧 Job 可供“识别并续跑”；待升级完成后，该 WI 需经 Interactive/Batch/Drain 三种模式之一的
@@ -398,14 +398,15 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
 （polyforge#174）：
 
 1. **ensure 语义**：daemon socket 可达 ⇒ 什么都不做、退出 0；否则在 tmux 会话 `polyforge-daemon` 中
-   启动监督环 `while true; do pf daemon <规范 argv>; sleep 5; done`（规范 argv：`--config`、`-machine-id`
+   启动监督环 `while :; do nohup pf daemon <规范 argv>; rc=$?; [ "$rc" -eq 0 ] && break; sleep 5; done`（规范 argv：`--config`、`-machine-id`
    取 `<data-dir>/daemon-id` 否则 `m-<短主机名>`、`-data-dir`、`-socket` 取配置 `daemon_socket`、
    `-workflows-dir <data-dir>/release/current/workflows`；harness 根目录取缺省 `<data-dir>`（#171）；auto 与
    并发上限沿用 daemon 自身持久设置；工作目录 `$HOME`，日志追加到 `<data-dir>/daemon.log`，超 10 MiB 轮转），
    等待 socket 可达后返回。`<data-dir>/ensure.lock` 文件锁防并发：pi-web 同时恢复多个会话时只拉起一个环、
    一个 daemon；拿不到锁的调用等待持锁者完成后按 socket 结果返回。无 `[workspace]` 映射或缺 workflows
    时拒绝拉起并说明原因。tmux 不可用时退回单次无监督启动并明确告警。
-2. **崩溃**：监督环约 5s 内拉起新进程。
+2. **崩溃**：非零退出（崩溃、panic、被杀）由监督环约 5s 内拉起新进程；干净退出（`pf ops shutdown`、
+   SIGTERM——优雅停机序列）结束监督环，即 `pf ops shutdown` 仍是「真正停下」，再起用 `pf daemon ensure`。
 3. **容器 / 机器重启**：下一个开始或恢复的 harness 会话执行 `pf daemon ensure`——pi 的 `pf-chat` 扩展在
    `session_start` 的 `pf chat init` 失败时后台调用一次（pi-web 恢复会话会重放 `session_start`），随后沿用
    每 5s 的重试环；Claude Code 的 SessionStart 钩子（startup / resume / clear / compact 触发）先 ensure
@@ -413,9 +414,9 @@ $POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/sta
 4. **边界**：只有人用的交互会话会调用 ensure。pi step 用 daemon 专属的 `PI_CODING_AGENT_DIR`（不加载用户
    包与 `pf-chat`），claude step 以 `--bare` 运行（不跑钩子），二者环境均带 `PF_WI_ID`，适配层见之即退出。
 5. **代价（接受）**：重启后到第一个 harness 会话开始前 daemon 不在，自动领取不工作。
-6. **升级停机顺序**：先停环（关 tmux 会话；环内 daemon 以 `nohup` 运行、忽略挂断）→ 优雅停 daemon →
-   替换二进制与 `release/current` → `pf daemon ensure`（§6.3 第 5 步）。环在时 `pf ops shutdown` 等于重启
-   （5s 后被拉起）；要真正停下须先关环。
+6. **升级停机顺序**：`tools/install.sh` 持 ensure 锁 → 优雅停 daemon（环随干净退出结束；残留空环用
+   `tmux kill-session -t =polyforge-daemon` 关掉，环内 daemon 以 `nohup` 运行、不受挂断影响）→ 替换二进制与
+   `release/current` → 释放锁 → `pf daemon ensure`（§6.3 第 5 步）。
 7. **自检**：`pf doctor` 的 `daemon socket` 在 daemon 不在线时 fail 并给出 `pf daemon ensure`；`daemon
    supervision` 在 daemon 在线但无 tmux 环（亦无 systemd 单元 `polyforge-daemon.service`）时 warn，给出修复
    命令。路由 skill 的兜底：执行面动词报 daemon 不可达时先 `pf daemon ensure` 再重试一次。

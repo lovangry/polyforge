@@ -12,7 +12,8 @@
 #
 # Before asking for the chat id it runs `pf daemon ensure` (polyforge#174):
 # a daemon that is down — after a container or machine restart nothing
-# else brings it back — is started under its tmux restart loop. Bounded
+# else brings it back — is started under its tmux restart loop (skipped
+# when that loop already exists). Bounded
 # (ensure waits at most 15s, and `timeout` kills it at 20s), silent, and
 # it never blocks the session: any failure just leaves the chat id unset.
 # Claude Code fires SessionStart on startup, resume, clear and compact.
@@ -26,7 +27,13 @@ command -v pf >/dev/null 2>&1 || exit 0
 
 input=$(cat) || exit 0
 
-if command -v timeout >/dev/null 2>&1; then
+# The restart loop already exists (tmux session polyforge-daemon, exact
+# match, on the user's default tmux server): it owns the daemon — do not
+# wait on ensure at every start/resume/compact while its daemon boots or
+# keeps failing.
+if command -v tmux >/dev/null 2>&1 && env -u TMUX -u TMUX_PANE tmux has-session -t =polyforge-daemon 2>/dev/null; then
+	:
+elif command -v timeout >/dev/null 2>&1; then
 	timeout 20 pf daemon ensure --timeout 15s </dev/null >/dev/null 2>&1 || true
 else
 	pf daemon ensure --timeout 15s </dev/null >/dev/null 2>&1 || true

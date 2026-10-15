@@ -2,10 +2,12 @@
 # polyforge bootstrap — complete machine setup in one command.
 # Installs/updates (idempotent: a second run changes nothing):
 #   1. pf binary        — latest release, SHA-verified; on an upgrade the
-#        daemon's restart loop (tmux session polyforge-daemon) is stopped
-#        FIRST, then the daemon is shut down gracefully, then the binary
-#        is swapped (no old daemon revived by the loop, no two daemons
-#        racing for the socket)
+#        daemon is shut down gracefully (its restart loop, tmux session
+#        polyforge-daemon, ends with it on that clean exit), install waits
+#        until both are gone, then swaps the binary. From here until step
+#        4 the installer holds <data-dir>/ensure.lock, so a harness
+#        session's `pf daemon ensure` in that window starts nothing (no old
+#        daemon revived, no new binary against the old release)
 #   2. config           — created once, NEVER rewritten
 #   3. release + skills — own checkout of the release tag in
 #        ~/.local/share/polyforge/release/<VER> (stable symlink release/current,
@@ -72,6 +74,18 @@ daemon_running() {
 
 # ─── 1. pf binary: install or update ───────────────────────────────
 echo "== 1/5 pf binary"
+# Hold the ensure lock (the flock `pf daemon ensure` takes) from here
+# through the release swap in step 3: an adapter's ensure (a pi or Claude
+# Code session starting, resuming, compacting) waits on it and then
+# answers by the socket — it never starts a loop mid-upgrade. Released
+# right before step 4's own ensure.
+mkdir -p "$DAEMON_DATA"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>>"$DAEMON_DATA/ensure.lock"
+  flock -w 120 9 || echo "   WARN: another pf daemon ensure held $DAEMON_DATA/ensure.lock for 120s; continuing"
+else
+  echo "   WARN: flock not found: a harness session starting during this upgrade could start the daemon early"
+fi
 command -v gh >/dev/null 2>&1 || { echo "ERROR: gh not found"; exit 1; }
 VER=$(gh release list --repo "$REPO" --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null)
 [ -n "$VER" ] || { echo "ERROR: no release found"; exit 1; }
@@ -94,27 +108,29 @@ else
     [ "$GOT" = "$EXP" ] || { echo "ERROR: SHA mismatch"; rm -rf "$TMP"; exit 1; }
   fi
   mkdir -p "$(dirname "$BIN")"
-  # Upgrade order: (1) stop the restart loop, so nothing revives the old
-  # daemon — the daemon inside it ignores the hangup and keeps running;
-  # (2) stop the daemon gracefully and wait until it is really gone: the
-  # binary is never swapped under a live daemon. The wait must exceed the
-  # daemon's graceful ShutdownBudget (5 minutes), hence 330s; (3) swap;
-  # step 4 starts the new daemon through `pf daemon ensure`.
-  if loop_running; then
-    tmux_q kill-session -t "=$LOOP_SESSION" 2>/dev/null || true
-    echo "   stopped the daemon restart loop (tmux session $LOOP_SESSION)"
-  fi
-  if daemon_running; then
-    echo "   stopping daemon (graceful)"
+  # Upgrade order: stop the daemon gracefully — a clean exit also ends
+  # its restart loop — and wait until the daemon AND the loop are really
+  # gone: the binary is never swapped under a live daemon, and no loop is
+  # left to start the old binary again. A loop left without a daemon
+  # (between two restarts after a failure, or an older loop) is killed.
+  # The wait must exceed the daemon's graceful ShutdownBudget (5
+  # minutes), hence 330s. Step 4 starts the new daemon through
+  # `pf daemon ensure`.
+  if daemon_running || loop_running; then
+    echo "   stopping daemon (graceful; its restart loop ends with it)"
     if [ -x "$BIN" ] && "$BIN" ops shutdown >/dev/null 2>&1; then
       :
     else
       curl -s -m 5 -X POST --unix-socket "$DAEMON_SOCKET" http://localhost/shutdown >/dev/null 2>&1 || true
     fi
     WAITED=0
-    while daemon_running; do
+    while daemon_running || loop_running; do
+      if ! daemon_running && loop_running; then
+        tmux_q kill-session -t "=$LOOP_SESSION" 2>/dev/null || true
+        echo "   stopped a leftover restart loop (tmux session $LOOP_SESSION)"
+      fi
       if [ "$WAITED" -ge 330 ]; then
-        echo "ERROR: daemon did not stop within 330s (graceful shutdown budget is 300s); binary NOT replaced. Check: tail $DAEMON_DATA/daemon.log"
+        echo "ERROR: daemon did not stop within 330s (graceful shutdown budget is 300s); binary NOT replaced. Its restart loop ended with the shutdown request: once the daemon exits, this machine has NO daemon until \`pf daemon ensure\` runs (by hand, or at the next pi / Claude Code session start). Check: tail $DAEMON_DATA/daemon.log"
         rm -rf "$TMP"
         exit 1
       fi
@@ -173,7 +189,7 @@ daemon_socket = "$DAEMON_SOCKET"
 # [workspace."<absolute-path-to-your-workspace>"]
 # projects = ["your-project", "another-project"]
 #
-# `~` at the start of a key expands to your home directory; keys must
+# \`~\` at the start of a key expands to your home directory; keys must
 # be absolute; the daemon creates nothing but capsules/ inside each
 # workspace. Run \`pf doctor\` to check the mapping after editing.
 CFGEOF
@@ -313,11 +329,20 @@ def ours(e):
     s = src(e)
     return re.search(r"github\.com[:/]" + re.escape(repo) + r"(\.git)?(@|$)", s) is not None or local(s) == os.path.normpath(rel)
 idx = [i for i, e in enumerate(pk) if ours(e)]
-if len(idx) == 1 and pk[idx[0]] == rel:
+for i, e in enumerate(pk):
+    lp = local(src(e))
+    if i not in idx and lp and os.path.isfile(os.path.join(lp, "skills", "polyforge", "SKILL.md")):
+        print("   WARN: pi also loads another polyforge checkout (%s): remove it from %s, or pi loads the skill and pf-chat twice" % (src(e), path))
+if len(idx) == 1 and src(pk[idx[0]]) == rel:
     print("   pi package -> release/current already"); sys.exit(0)
 was = [src(pk[i]) for i in idx]
+# an object entry keeps its other fields (filters) with the new source
+entry = rel
+first = pk[idx[0]] if idx else None
+if isinstance(first, dict):
+    entry = dict(first); entry["source"] = rel
 new = [e for i, e in enumerate(pk) if i not in idx]
-new.insert(idx[0] if idx else len(new), rel)
+new.insert(idx[0] if idx else len(new), entry)
 cfg["packages"] = new
 os.makedirs(base, exist_ok=True)
 if existed:
@@ -335,8 +360,13 @@ fi
 
 # ─── 4. daemon: started only through `pf daemon ensure` ────────────
 echo "== 4/5 daemon"
+# the binary and release/current are in place: let ensure run again
+if command -v flock >/dev/null 2>&1; then
+  flock -u 9 2>/dev/null || true
+  exec 9>&-
+fi
 # the fix for a live daemon without its restart loop (same as pf doctor)
-ENSURE_FIX="pf ops shutdown && while pf ops status >/dev/null 2>&1; do sleep 2; done; pf daemon ensure"
+ENSURE_FIX="pf ops shutdown && while pf ops status >/dev/null 2>&1 || ! flock -n '$DAEMON_DATA/daemon.lock' true; do sleep 2; done; pf daemon ensure"
 if [ ! -d "$WORKFLOWS" ]; then
   echo "   SKIP: $WORKFLOWS missing (release checkout incomplete) — daemon needs workflows"
 elif [ -S "$DAEMON_SOCKET" ] && curl -s --unix-socket "$DAEMON_SOCKET" http://localhost/status 2>/dev/null | grep -q machine_id; then

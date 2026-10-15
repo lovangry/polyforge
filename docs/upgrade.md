@@ -893,23 +893,25 @@ migrates it in place; a second run changes nothing.
   now resolved through the link). Claude Code 2.1.296 accepts symlinked
   skill dirs; confirm once in an interactive session that `polyforge` is
   listed among the skills.
-- **daemon**: the upgrade stops the restart loop (tmux session
-  `polyforge-daemon`; absent on an old machine), shuts the daemon down
-  gracefully (the old `nohup` one included) and waits for it, swaps the
-  binary, then runs `pf daemon ensure`: from now on the daemon runs inside
-  the restart loop (a crash is restarted within ~5s; log
+- **daemon**: the upgrade holds `~/.local/share/polyforge/ensure.lock`
+  (a harness session starting meanwhile starts nothing), shuts the daemon
+  down gracefully (the old `nohup` one included; a loop's daemon takes its
+  loop with it on that clean exit) and waits until daemon and loop are
+  gone, swaps the binary, then runs `pf daemon ensure`: from now on the
+  daemon runs inside the restart loop (a failed exit is restarted within
+  ~5s; log
   `~/.local/share/polyforge/daemon.log`, appended, rotated at 10 MiB). When
   the binary is already current, a live daemon is left alone and an
   unsupervised one is reported with the fix:
-  `pf ops shutdown && while pf ops status >/dev/null 2>&1; do sleep 2; done; pf daemon ensure`.
+  `pf ops shutdown && while pf ops status >/dev/null 2>&1 || ! flock -n ~/.local/share/polyforge/daemon.lock true; do sleep 2; done; pf daemon ensure`.
 - **after a container / machine restart** tmux is gone too: the next
   Claude Code session start (SessionStart: startup/resume/clear/compact) or
   pi session start (pi-web replays it when it resumes its sessions) runs
   `pf daemon ensure` and brings the daemon back. Until then auto-pull does
   not run — the accepted cost of not touching the container's startup.
-- **`pf ops shutdown` now restarts** the daemon (the loop starts it again
-  after 5s). To stop it for good: `tmux kill-session -t polyforge-daemon`
-  first, then `pf ops shutdown`.
+- **`pf ops shutdown` still stops** the daemon for good: the loop restarts
+  only a failed exit (crash, panic, kill); a clean exit (`pf ops shutdown`,
+  SIGTERM) ends the loop too. Start it again with `pf daemon ensure`.
 
 ### v1 leftovers
 

@@ -56,7 +56,7 @@ reported `skip` — a skip never pretends to be a pass.
 | Result | When | What to tell the user |
 |---|---|---|
 | `pass` | the daemon answers and tmux session `polyforge-daemon` (the restart loop `pf daemon ensure` creates) exists — or a systemd unit `polyforge-daemon.service` is active | — |
-| `warn` | the daemon answers but nothing supervises it (e.g. started by hand or by an older installer with `nohup`): a crash is not restarted | Relay the fix from the detail when no job needs the daemon: `pf ops shutdown && while pf ops status >/dev/null 2>&1; do sleep 2; done; pf daemon ensure` (graceful — running jobs are checkpointed first). Without tmux installed: install it first. |
+| `warn` | the daemon answers but nothing supervises it (e.g. started by hand or by an older installer with `nohup`): a crash is not restarted | Relay the fix from the detail when no job needs the daemon: `pf ops shutdown && while pf ops status >/dev/null 2>&1 || ! flock -n ~/.local/share/polyforge/daemon.lock true; do sleep 2; done; pf daemon ensure` (graceful — running jobs are checkpointed first). Without tmux installed: install it first. |
 | `skip` | the daemon does not answer | The `daemon socket` row fails: run `pf daemon ensure`. |
 
 The loop restarts crashes within ~5s; tmux does not survive a container or

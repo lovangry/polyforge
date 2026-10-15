@@ -12,9 +12,10 @@ package test
 // Pinned: idempotence (a live daemon is left alone), the canonical argv
 // and the supervision marker, concurrency (N simultaneous ensures → one
 // loop, one daemon), the loop reviving a killed daemon within ~5s, a
-// killed loop leaving its daemon running for a graceful stop (the
-// install.sh upgrade order), the no-mapping refusal and the no-tmux
-// fallback.
+// graceful shutdown (`pf ops shutdown`, SIGTERM) ending the loop with the
+// daemon, a killed loop session (install.sh's fallback for a leftover
+// loop) leaving its daemon running for a graceful stop, the no-mapping
+// refusal and the no-tmux fallback.
 
 import (
 	"bytes"
@@ -343,9 +344,45 @@ func TestW174LoopRestartsKilledDaemon(t *testing.T) {
 	}
 }
 
-// TestW174KilledLoopLeavesDaemonForGracefulStop pins the mechanics of
-// install.sh's upgrade order: killing the loop's tmux session leaves the
-// daemon running (it ignores the hangup); the graceful shutdown then
+// TestW174GracefulStopEndsTheLoop: `pf ops shutdown` (and SIGTERM) under
+// the loop exits 0, which ends the loop: no daemon, no session, nothing
+// revived after the restart pause.
+func TestW174GracefulStopEndsTheLoop(t *testing.T) {
+	e := w174NewEnv(t, true)
+	for _, how := range []string{"pf ops shutdown", "SIGTERM"} {
+		if code, out, errOut := e.ensure(t); code != 0 {
+			t.Fatalf("ensure: exit %d %s %s", code, out, errOut)
+		}
+		pid := e.oneDaemon(t, 5*time.Second)
+		if how == "SIGTERM" {
+			if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			cmd := exec.Command(e.pf, "--config", e.cfg, "ops", "shutdown")
+			cmd.Env = e.env()
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("pf ops shutdown: %v %s", err, out)
+			}
+		}
+		waitUntil(t, 30*time.Second, how+": the daemon and its loop did not end", func() bool {
+			return len(e.daemons()) == 0 && len(e.sessions()) == 0
+		})
+		time.Sleep(7 * time.Second) // longer than the restart pause
+		if pids, s := e.daemons(), e.sessions(); len(pids) != 0 || len(s) != 0 {
+			t.Fatalf("%s: revived after a clean exit (daemons %v, sessions %v)", how, pids, s)
+		}
+		log, _ := os.ReadFile(filepath.Join(e.data, "daemon.log"))
+		if !strings.Contains(string(log), "exited cleanly; the loop ends") {
+			t.Fatalf("%s: the loop did not log its clean end:\n%s", how, log)
+		}
+		_ = os.Remove(filepath.Join(e.data, "daemon.log"))
+	}
+}
+
+// TestW174KilledLoopLeavesDaemonForGracefulStop pins install.sh's
+// fallback for a leftover loop: killing the loop's tmux session leaves
+// the daemon running (it ignores the hangup); the graceful shutdown then
 // ends it and nothing revives it.
 func TestW174KilledLoopLeavesDaemonForGracefulStop(t *testing.T) {
 	e := w174NewEnv(t, true)

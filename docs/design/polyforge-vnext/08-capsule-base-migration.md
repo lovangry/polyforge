@@ -40,9 +40,9 @@ CLI 与 Daemon 读同一份配置；**不存在任何启动期 workspace 旗标�
 # 0. 目标 workspace 先建好（Daemon 不代建它）
 mkdir -p /srv/polyforge/workspace
 
-# 1. 优雅停掉本机 daemon
+# 1. 优雅停掉本机 daemon（干净退出同时结束 `pf daemon ensure` 的 tmux 监督环，不会被重新拉起）
 pf ops shutdown
-# （systemd 机器：systemctl stop polyforge-daemon）
+# （自管 systemd 单元的机器：systemctl stop polyforge-daemon）
 
 # 2. 把「进行中」的 capsule 目录整体移动到新基底的 capsules/ 下（目录名原样搬：<project>-<seq>，#144 前认领的为 wi_id）
 mv ~/.local/share/polyforge/workspace/capsules/polyforge-140  /srv/polyforge/workspace/capsules/
@@ -53,8 +53,8 @@ mv ~/.local/share/polyforge/workspace/capsules/polyforge-140  /srv/polyforge/wor
 #      [workspace."/srv/polyforge/workspace"]
 #      projects = ["p1", "p2"]
 
-# 4. 用同一份配置重启 daemon（映射就是唯一的 workspace 来源，无旗标可传）
-pf daemon ...
+# 4. 用同一份配置重新拉起 daemon（映射就是唯一的 workspace 来源，无旗标可传；polyforge#174）
+pf daemon ensure
 ```
 
 ### 2b. 换基但不搬家：旧基底保留为映射节

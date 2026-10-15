@@ -253,6 +253,12 @@ func w174RunHook(t *testing.T, ensureMode string, extraEnv ...string) w174HookRu
 	if err := os.WriteFile(filepath.Join(work, "bin", "pf"), []byte(w174FakePf), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// a fake tmux: has-session answers per $FAKE_TMUX_LOOP (1 = the
+	// polyforge-daemon loop exists); the real tmux is never reached
+	fakeTmux := "#!/bin/sh\necho \"tmux $*\" >> \"$PF_JOURNAL\"\n[ \"$1\" = has-session ] && [ \"$3\" = =polyforge-daemon ] && [ \"${FAKE_TMUX_LOOP:-0}\" = 1 ] && exit 0\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(work, "bin", "tmux"), []byte(fakeTmux), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	journal, state, envFile := filepath.Join(work, "journal"), filepath.Join(work, "state"), filepath.Join(work, "claude-env")
 	if err := os.WriteFile(state, []byte("down"), 0o644); err != nil {
 		t.Fatal(err)
@@ -265,6 +271,7 @@ func w174RunHook(t *testing.T, ensureMode string, extraEnv ...string) w174HookRu
 		"PATH=" + filepath.Join(work, "bin") + ":/usr/bin:/bin",
 		"HOME=" + work, "PF_STATE=" + state, "PF_JOURNAL=" + journal, "PF_ENSURE=" + ensureMode,
 		"CLAUDE_ENV_FILE=" + envFile,
+		"TMUX_TMPDIR=" + t.TempDir(),
 	}, extraEnv...)
 	start := time.Now()
 	out, err := cmd.Output()
@@ -277,7 +284,14 @@ func w174RunHook(t *testing.T, ensureMode string, extraEnv ...string) w174HookRu
 		}
 	}
 	raw, _ := os.ReadFile(journal)
-	r.journal = strings.Split(strings.TrimSpace(string(raw)), "\n")
+	for _, l := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if !strings.HasPrefix(l, "tmux ") { // the pf calls only
+			r.journal = append(r.journal, l)
+		}
+	}
+	if len(r.journal) == 0 {
+		r.journal = []string{""}
+	}
 	envRaw, _ := os.ReadFile(envFile)
 	r.envFile = string(envRaw)
 	return r
@@ -297,6 +311,23 @@ func TestW174ClaudeHookEnsuresThenInits(t *testing.T) {
 	}
 	if r.envFile != "export PF_CHAT_ID=chat_w174ensure0001\n" {
 		t.Fatalf("CLAUDE_ENV_FILE = %q", r.envFile)
+	}
+}
+
+// TestW174ClaudeHookSkipsEnsureWhileTheLoopExists: with the restart loop
+// present the hook does not wait on ensure (the loop owns the daemon).
+func TestW174ClaudeHookSkipsEnsureWhileTheLoopExists(t *testing.T) {
+	r := w174RunHook(t, "hang", "FAKE_TMUX_LOOP=1")
+	if r.took > 5*time.Second {
+		t.Fatalf("the hook waited %s although the loop exists", r.took)
+	}
+	for _, l := range r.journal {
+		if strings.HasPrefix(l, "daemon ensure") {
+			t.Fatalf("the hook ran ensure although the loop exists: %q", r.journal)
+		}
+	}
+	if len(r.journal) == 0 || !strings.HasPrefix(r.journal[0], "chat init") {
+		t.Fatalf("the hook must still ask for the chat id: %q", r.journal)
 	}
 }
 
