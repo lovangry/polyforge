@@ -650,11 +650,8 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 	// is a local defect too — refuse before the claim so the work item
 	// stays queued (startClaimed re-checks as the backstop).
 	if probe.BundleName != nil {
-		if _, ferr := r.readBundleFrontmatter(*probe.BundleName); ferr != nil {
-			return &api.Error{
-				Code:   api.ErrDaemonWorkspaceYaml,
-				Detail: fmt.Sprintf("the workflow bundle of %s refused the claim before it was made (the work item stays queued): %v", wi, ferr),
-			}
+		if berr := r.CheckBundle(wi, *probe.BundleName); berr != nil {
+			return berr
 		}
 	}
 	sessionID, err := mintSessionID()
@@ -758,6 +755,24 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		r.saveManualModels(id, manual)
 	} else {
 		manual = r.loadManualModels(id)
+		if len(manual) > 0 {
+			if _, nerr := workspace.NormalizeModels(manual); nerr != nil {
+				// polyforge#175: a list recorded before the candidate
+				// format (bare ids) can never dispatch; keeping it would
+				// block every re-claim of this work item. Drop it loudly
+				// and fall back to the yaml/bundle chain.
+				fmt.Fprintf(os.Stderr, "runtime: %s: dropping the recorded pf submit --models list %v: %v — the yaml/bundle chain governs (resubmit with --models <harness>:<model>,... to pin one)\n", id, manual, nerr)
+				if r.cfg.EventTap != nil {
+					r.cfg.EventTap(id, EvManualModelsDropped, map[string]any{
+						"models": manual,
+						"note":   "recorded pf submit --models list is not <harness>:<model> (polyforge#175); dropped, the yaml/bundle chain governs",
+						"error":  nerr.Error(),
+					})
+				}
+				r.clearManualModels(id)
+				manual = nil
+			}
+		}
 	}
 	j := &job{
 		wi:                 id,
@@ -945,6 +960,38 @@ func (r *Runtime) LoadWorkspace(project string) (*workspace.Config, error) {
 		}
 	}
 	return wcfg, nil
+}
+
+// EvManualModelsDropped is the runtime event of a recorded manual
+// `--models` list dropped at re-claim because it predates the
+// `<harness>:<model>` format (polyforge#175).
+const EvManualModelsDropped = "manual_models_dropped"
+
+// CheckBundle is the polyforge#175 pre-claim bundle read: the installed
+// bundle's candidates must all be `<harness>:<model>` (and it may carry
+// no `harness` key). A refusal is the typed DAEMON-414 naming the file
+// and step — nothing is claimed, the work item stays queued. An empty
+// bundle name (not bound yet) passes.
+func (r *Runtime) CheckBundle(wi, bundle string) error {
+	if bundle == "" {
+		return nil
+	}
+	if _, ferr := r.readBundleFrontmatter(bundle); ferr != nil {
+		return &api.Error{
+			Code:   api.ErrDaemonWorkspaceYaml,
+			Detail: fmt.Sprintf("the workflow bundle of %s refused the claim before it was made (the work item stays queued): %v", wi, ferr),
+		}
+	}
+	return nil
+}
+
+// RefusedBundles answers the installed bundles whose frontmatter fails to
+// load (polyforge#175: an unprefixed candidate, a retired `harness`
+// key, or torn yaml), name → load error — the auto-pull wave skips work
+// items on them instead of enqueueing a claim that is bound to refuse.
+func (r *Runtime) RefusedBundles() map[string]error {
+	_, bad, _ := workspace.Bundles(r.cfg.WorkflowsDir, "")
+	return bad
 }
 
 // readBundleFrontmatter reads the pinned bundle's workflow.md

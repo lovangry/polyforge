@@ -345,6 +345,15 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 				writeErrOf(w, lerr)
 				return
 			}
+			// polyforge#175: the work item's installed bundle must load
+			// (every candidate `<harness>:<model>`) — refused here so
+			// `pf submit` sees it directly
+			if probe.BundleName != nil {
+				if berr := d.rt.CheckBundle(canonical, *probe.BundleName); berr != nil {
+					writeErrOf(w, berr)
+					return
+				}
+			}
 		}
 		// Accepted = enqueued; the dispatcher spawns within one tick,
 		// priority-desc against the machine's concurrency cap.

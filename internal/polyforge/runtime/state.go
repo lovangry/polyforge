@@ -275,7 +275,7 @@ func jobFromRecord(rec *jobRecord) *job {
 		origin:               rec.Origin,
 		endNote:              rec.EndNote,
 		endHead:              rec.EndHead,
-		stepCandidates:       legacyCandidates(rec.StepCandidates, rec.LegacyStepHarness),
+		stepCandidates:       legacyCandidates(rec.WorkItemID, rec.StepCandidates, rec.LegacyStepHarness),
 	}
 }
 
@@ -287,12 +287,15 @@ func jobFromRecord(rec *jobRecord) *job {
 // before the upgrade — #159 skipped the ids its harness did not serve
 // (claude: `claude-…` without `/`; pi: every other id) — so the
 // recorded model-class failures still index the same candidates. A
-// current record passes through unchanged.
-func legacyCandidates(cands map[string][]string, stepHarness map[string]string) map[string][]string {
-	if cands == nil {
-		return nil
+// current record passes through unchanged. A #159 claude step left
+// with no candidate (claude's own default model) cannot be expressed in
+// the new format and recovers on pi's default model — said once on
+// stderr.
+func legacyCandidates(wi string, cands map[string][]string, stepHarness map[string]string) map[string][]string {
+	var out map[string][]string
+	if cands != nil {
+		out = make(map[string][]string, len(cands))
 	}
-	out := make(map[string][]string, len(cands))
 	for step, list := range cands {
 		if list == nil {
 			out[step] = nil
@@ -311,6 +314,11 @@ func legacyCandidates(cands map[string][]string, stepHarness map[string]string) 
 			}
 		}
 		out[step] = conv
+	}
+	for step, h := range stepHarness {
+		if h == harness.Claude && len(out[step]) == 0 {
+			fmt.Fprintf(os.Stderr, "runtime: %s: step %s ran on claude with its default model before polyforge#175; it recovers on pi's default model (no claude: candidate to keep)\n", wi, step)
+		}
 	}
 	return out
 }

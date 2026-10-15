@@ -88,7 +88,7 @@ in, never calls a model and never reports a credential value.
 |---|---|---|
 | `pass` | the binary resolves, the version is a verified one, a credential variable is set | — (the detail lists every step with a claude candidate: its whole chain, each candidate's harness shown by its prefix, and the level the chain came from) |
 | `fail` | the claude binary does not resolve on the daemon's PATH | Install Claude Code and log it in (a human does this), or set `claude_bin` in cli.toml / `--claude-bin`. |
-| `warn` | unverified version; no credential variable visible to the daemon (neither `ANTHROPIC_AUTH_TOKEN` — env or cli.toml `anthropic_auth_token` — nor `ANTHROPIC_API_KEY`); both set; `ANTHROPIC_BASE_URL` set | Relay the note. `claude --bare` never reads the interactive login, but Claude Code's own `settings.json` `env` section is still applied — if the credential lives there, the "no credential variable" warning is not an error (the daemon cannot see that file's values). |
+| `warn` | unverified version; no credential visible (neither the `<harness-root>/claude-config/settings.json` `env` block's `ANTHROPIC_AUTH_TOKEN` nor the daemon env's `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`); both a token and an API key set; a rejected token / gateway pairing or a `CLAUDE_CONFIG_DIR` in that `env` block; `ANTHROPIC_BASE_URL` set in the daemon env | Relay the note. The claude-config `settings.json` `env` block is the single credential authority (polyforge#171; the daemon reports its keys as set/unset, never values): put ONE `ANTHROPIC_AUTH_TOKEN` (+ optional `ANTHROPIC_BASE_URL`) there, never `CLAUDE_CONFIG_DIR` — see docs/upgrade.md. |
 | `skip` | claude steps exist but the daemon is unreachable | Start the daemon and re-run. |
 
 ## Success

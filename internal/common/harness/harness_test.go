@@ -29,6 +29,8 @@ func TestParseCandidate(t *testing.T) {
 		{"sub2api-glm/glm-5.3", `"sub2api-glm/glm-5.3" needs a harness prefix (pi:… or claude:…)`},
 		{"claude-opus-5-5", "needs a harness prefix"},
 		{"codex:gpt-6", `unknown harness prefix "codex"`},
+		{"PI:x", `unknown harness prefix "PI"`}, // the prefix is case-sensitive
+		{"Claude:claude-opus-5-5", `unknown harness prefix "Claude"`},
 		{"ollama/llama3:8b", `unknown harness prefix "ollama/llama3"`},
 		{"claude-code:claude-opus-5-5", "unknown harness prefix"},
 		{":m", "unknown harness prefix"},

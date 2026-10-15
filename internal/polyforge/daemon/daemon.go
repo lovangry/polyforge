@@ -239,6 +239,12 @@ type Daemon struct {
 	// logs a given refusal once, not every tick. Same single-goroutine
 	// ownership as queueFetchDenied.
 	yamlRefused map[string]string
+	// bundleRefused is bundle → the last load refusal logged for it
+	// (polyforge#175): auto-pull skips ready work items on an installed
+	// bundle that fails to load instead of enqueueing a claim bound to
+	// refuse every wave; logged once per distinct refusal. Same
+	// single-goroutine ownership as yamlRefused.
+	bundleRefused map[string]string
 
 	// sup hands out the per-WI supervision links shared by the driver
 	// bridge (facts out, verdicts in, harness trackers) and the observe
@@ -996,12 +1002,34 @@ func (d *Daemon) fetchAutoWave() {
 	if !denied {
 		d.queueFetchDenied = false // episode cleared: this fetch fully succeeded
 	}
+	var badBundles map[string]error
+	if len(items) > 0 {
+		badBundles = d.rt.RefusedBundles()
+	}
+	for name := range d.bundleRefused {
+		if _, still := badBundles[name]; !still {
+			delete(d.bundleRefused, name)
+		}
+	}
 	for _, it := range items {
 		if budget == 0 {
 			break // the wave spent its slots; the next wave claims the rest
 		}
 		if it.BundleName == nil {
 			continue // registration tickets never execute
+		}
+		if berr, bad := badBundles[*it.BundleName]; bad {
+			// polyforge#175: the bundle fails to load (e.g. an unprefixed
+			// candidate) — a claim would be refused; leave the WI queued
+			// for other machines and log the refusal once
+			if d.bundleRefused == nil {
+				d.bundleRefused = map[string]string{}
+			}
+			if d.bundleRefused[*it.BundleName] != berr.Error() {
+				d.bundleRefused[*it.BundleName] = berr.Error()
+				fmt.Fprintf(os.Stderr, "daemon: drain skips work items on bundle %q (nothing claimed): %v\n", *it.BundleName, berr)
+			}
+			continue
 		}
 		if d.q.IsRunning(it.ID) || d.q.IsPending(it.ID) {
 			continue

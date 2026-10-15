@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -368,7 +369,12 @@ func workspaceYamlCheck(m *mapping.Plan, workflowsDir string, daemonUp bool) (st
 		for _, project := range m.ProjectsOf(ws) {
 			for _, name := range bundleNames {
 				for _, r := range workspace.ResolveSteps(name, bundles[name], cfg, project, nil) {
-					if r.Uses(harness.Claude) {
+					hs, herr := r.Harnesses()
+					if herr != nil {
+						fails = append(fails, herr.Error())
+						continue
+					}
+					if slices.Contains(hs, harness.Claude) {
 						claudeSteps = append(claudeSteps, r)
 					}
 				}

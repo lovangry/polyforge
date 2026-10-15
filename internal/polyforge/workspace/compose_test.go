@@ -180,18 +180,32 @@ func TestResolveStepsHarnessPerCandidate(t *testing.T) {
 	if len(rs) != 3 {
 		t.Fatalf("resolutions %v", rs)
 	}
+	hs := func(r StepResolution) []string {
+		t.Helper()
+		h, err := r.Harnesses()
+		if err != nil {
+			t.Fatalf("%+v: %v", r, err)
+		}
+		return h
+	}
 	fix, rev, spec := rs[0], rs[1], rs[2]
-	if fix.ModelsFrom != "bundle bug-fix defaults.model_candidates" || !reflect.DeepEqual(fix.Harnesses(), []string{"pi"}) || fix.Uses("claude") {
+	if fix.ModelsFrom != "bundle bug-fix defaults.model_candidates" || !reflect.DeepEqual(hs(fix), []string{"pi"}) {
 		t.Fatalf("fix %+v", fix)
 	}
-	if rev.ModelsFrom != "steps.p.review.models" || !reflect.DeepEqual(rev.Harnesses(), []string{"claude", "pi"}) || !rev.Uses("claude") {
+	if rev.ModelsFrom != "steps.p.review.models" || !reflect.DeepEqual(hs(rev), []string{"claude", "pi"}) {
 		t.Fatalf("review %+v", rev)
 	}
-	if !reflect.DeepEqual(spec.Harnesses(), []string{"pi"}) {
+	if !reflect.DeepEqual(hs(spec), []string{"pi"}) {
 		t.Fatalf("an empty list runs on pi's default model: %+v", spec)
 	}
 	rs = ResolveSteps("bug-fix", fm, cfg, "p", []string{"claude:claude-sonnet-5"})
-	if rs[0].ModelsFrom != "pf submit --models" || !rs[0].Uses("claude") || rs[0].Uses("pi") {
+	if rs[0].ModelsFrom != "pf submit --models" || !reflect.DeepEqual(hs(rs[0]), []string{"claude"}) {
 		t.Fatalf("manual %+v", rs[0])
+	}
+	// an unparseable candidate (unreachable past the loaders) is an error,
+	// never guessed onto pi
+	bad := StepResolution{Project: "p", Bundle: "b", Step: "s", Models: []string{"pi:a", "x/y"}, ModelsFrom: "test"}
+	if _, err := bad.Harnesses(); err == nil || !strings.Contains(err.Error(), `p/b/s: candidate 1 (test): "x/y" needs a harness prefix`) {
+		t.Fatalf("unparseable candidate: %v", err)
 	}
 }

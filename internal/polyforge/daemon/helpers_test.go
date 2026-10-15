@@ -115,6 +115,9 @@ type fakeHub struct {
 	probeFails int
 	// unknown lists canonical ids GetWorkItem answers CORE-404 for.
 	unknown map[string]bool
+	// bundles maps a canonical id to the bundle GetWorkItem reports
+	// (polyforge#175 pre-claim bundle check); unmapped ids report none.
+	bundles map[string]string
 	// canonical maps an id-or-slug form ("proj#7") to the canonical id
 	// (F2 route tests); an unmapped input echoes itself.
 	canonical map[string]string
@@ -279,7 +282,11 @@ func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 	if st == "" {
 		st = api.StatusRunning
 	}
-	return &api.WorkItem{ID: id, Slug: h.slugs[id], Status: st, ProjectName: "proj", Reporter: h.reporters[id]}, nil
+	wi := &api.WorkItem{ID: id, Slug: h.slugs[id], Status: st, ProjectName: "proj", Reporter: h.reporters[id]}
+	if b, ok := h.bundles[id]; ok {
+		wi.BundleName = &b
+	}
+	return wi, nil
 }
 
 // ResumeBlockedWorkItem is the §6.4 owner resume door (polyforge#116):

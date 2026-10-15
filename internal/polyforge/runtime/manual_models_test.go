@@ -226,3 +226,40 @@ func TestManualModelsRecordDroppedOnTerminalVerdict(t *testing.T) {
 		t.Fatalf("an empty record file must be removed, stat err %v", err)
 	}
 }
+
+// polyforge#175: a manual list recorded before the `<harness>:<model>`
+// format (bare ids in manual-models.json) would block every re-claim of
+// a blocked work item. The re-claim (pf resume, no --models) drops it
+// loudly — one event — and dispatches under the yaml/bundle chain.
+func TestManualModelsStaleBareListDroppedOnReclaim(t *testing.T) {
+	hub := newFakeHub()
+	r, ws := newManualRuntime(t, hub)
+	writeWorkspaceYaml(t, ws, w079ValidYaml)
+	var events []string
+	r.cfg.EventTap = func(wi, kind string, body map[string]any) {
+		if kind == EvManualModelsDropped {
+			events = append(events, wi)
+		}
+	}
+	r.saveManualModels("wi_stale", []string{"m/one", "m/two"})
+	if err := r.Start(context.Background(), "wi_stale"); err != nil {
+		t.Fatalf("re-claim over a stale bare list: %v", err)
+	}
+	j := r.jobOf("wi_stale")
+	if j == nil {
+		t.Fatal("the re-claim must run to a live agent")
+	}
+	if got := j.stepCandidates["grill"]; strings.Join(got, ",") != "pi:a/one" {
+		t.Fatalf("grill candidates %v, want the yaml default (the stale list dropped)", got)
+	}
+	if got := j.stepCandidates["fix"]; strings.Join(got, ",") != "pi:prov/flash,pi:prov/glm" {
+		t.Fatalf("fix candidates %v, want the bundle step list", got)
+	}
+	if got := r.loadManualModels("wi_stale"); got != nil {
+		t.Fatalf("the stale record survived: %v", got)
+	}
+	if len(events) != 1 || events[0] != "wi_stale" {
+		t.Fatalf("manual_models_dropped events %v, want exactly one", events)
+	}
+	_ = r.Stop(context.Background(), "wi_stale", protocol.FinishWrapped)
+}

@@ -107,35 +107,27 @@ type StepResolution struct {
 
 // Harnesses answers the distinct harnesses of the resolved candidates,
 // in candidate order. A step with no (or an empty) list runs on pi's
-// default model, so it answers [pi].
-func (r StepResolution) Harnesses() []string {
+// default model, so it answers [pi]. Every list reaching here was
+// validated at its load (yaml, bundle, --models), so an unparseable
+// candidate is an internal inconsistency: it is answered as an error,
+// never guessed onto a harness.
+func (r StepResolution) Harnesses() ([]string, error) {
 	var out []string
 	seen := map[string]bool{}
-	for _, m := range r.Models {
-		h := harness.Pi
-		if c, err := harness.ParseCandidate(m); err == nil {
-			h = c.Harness
+	for i, m := range r.Models {
+		c, err := harness.ParseCandidate(m)
+		if err != nil {
+			return nil, fmt.Errorf("%s/%s/%s: candidate %d (%s): %w", r.Project, r.Bundle, r.Step, i, r.ModelsFrom, err)
 		}
-		if !seen[h] {
-			seen[h] = true
-			out = append(out, h)
+		if !seen[c.Harness] {
+			seen[c.Harness] = true
+			out = append(out, c.Harness)
 		}
 	}
 	if len(out) == 0 {
 		out = []string{harness.Pi}
 	}
-	return out
-}
-
-// Uses reports whether any resolved candidate runs on harness h (a step
-// with no list runs on pi).
-func (r StepResolution) Uses(h string) bool {
-	for _, x := range r.Harnesses() {
-		if x == h {
-			return true
-		}
-	}
-	return false
+	return out, nil
 }
 
 // ResolveSteps answers the resolution of every step of one bundle for
