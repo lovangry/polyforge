@@ -11,7 +11,7 @@ binary's help faces print them; `pf help` lists the full registry and
 
 | Verb | Fragment | Command |
 |---|---|---|
-| file | `verbs/file.md` | `pf file create` / `pf file edit <id>` / `pf file show <id>` — create, edit or show a work item |
+| file | `verbs/file.md` | `pf file create` / `pf file edit <id>` / `pf file show <id>` / `pf file dep add` / `rm` / `list` — create, edit or show a work item; its `blocks` dependencies |
 | queue | `verbs/queue.md` | `pf queue` — the merged list over all mapped projects; `pf queue -project P` — one project; `pf queue -ready` — the ready queue (`-status`, `-limit` filters) |
 | cancel | `verbs/cancel.md` | `pf cancel <id>` — cancel (abandon) a queued/paused/blocked work item |
 | recall | `verbs/recall.md` | `pf recall -project P <query>` — search project memories (`-type`, `-tags`, `-limit`) |
