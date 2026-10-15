@@ -855,3 +855,106 @@ func TestRacePatchBundleVsClaim(t *testing.T) {
 	}
 	t.Logf("w140 race1: PATCH serialized first %d, claim first %d of 10 rounds", patchWins, claimFirst)
 }
+
+// polyforge#161: only a WRAPPED blocker releases its dependent. A failed
+// or canceled blocker keeps the dependent out of the ready queue, claim
+// keeps refusing DEPENDENCY_BLOCKED and the derived waiting_for names the
+// blocker; removing the edge is the way forward.
+func TestDependencyOnlyWrappedBlockerReleases(t *testing.T) {
+	env, m := sessionEnv(t)
+	inItems := func(id string) bool {
+		t.Helper()
+		q, err := env.WIs.ReadyQueue("alpha")
+		if err != nil {
+			t.Fatalf("ready queue: %v", err)
+		}
+		for _, wi := range q.Items {
+			if wi.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	waitingFor := func(id string) []WaitingBlocker {
+		t.Helper()
+		wi, err := env.WIs.Get(id, GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		v, err := env.WIs.View(wi)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v.WaitingFor
+	}
+
+	// failed blocker
+	failedBlocker := mustCreateExecWI(t, env, "blocker that fails", nil, "")
+	depF := mustCreateExecWI(t, env, "after the failing one", nil, "")
+	if err := env.WIs.AddDependency(failedBlocker, depF, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	if w := waitingFor(depF); len(w) != 1 || w[0].Status != api.StatusQueued || w[0].Slug == "" {
+		t.Fatalf("waiting_for on a queued blocker = %+v", w)
+	}
+	secret := "21212121212121212121212121212121"
+	mustSessionClaim(t, m, env, failedBlocker, secret, "f-1")
+	if err := m.End(failedBlocker, api.SessionEndRequest{SessionID: secret, Status: api.StatusFailed}, env.UserID); err != nil {
+		t.Fatalf("end failed: %v", err)
+	}
+	if inItems(depF) {
+		t.Fatalf("a failed blocker released its dependent into the ready queue")
+	}
+	if _, err := m.Claim(depF, api.SessionClaimRequest{SessionID: "22222222222222222222222222222222"}, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "DEPENDENCY_BLOCKED" {
+		t.Fatalf("claim behind a failed blocker: %v", err)
+	}
+	if w := waitingFor(depF); len(w) != 1 || w[0].Status != api.StatusFailed {
+		t.Fatalf("waiting_for behind a failed blocker = %+v", w)
+	}
+	// Removing the edge releases it.
+	if err := env.WIs.RemoveDependency(failedBlocker, depF, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	if !inItems(depF) || len(waitingFor(depF)) != 0 {
+		t.Fatalf("edge removal did not release the dependent")
+	}
+
+	// canceled blocker
+	canceledBlocker := mustCreateExecWI(t, env, "blocker that is canceled", nil, "")
+	depC := mustCreateExecWI(t, env, "after the canceled one", nil, "")
+	if err := env.WIs.AddDependency(canceledBlocker, depC, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.WIs.Cancel(canceledBlocker, env.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if inItems(depC) {
+		t.Fatalf("a canceled blocker released its dependent into the ready queue")
+	}
+	if w := waitingFor(depC); len(w) != 1 || w[0].Status != api.StatusCanceled {
+		t.Fatalf("waiting_for behind a canceled blocker = %+v", w)
+	}
+
+	// wrapped blocker releases
+	wrappedBlocker := mustCreateExecWI(t, env, "blocker that wraps", nil, "")
+	depW := mustCreateExecWI(t, env, "after the wrapped one", nil, "")
+	if err := env.WIs.AddDependency(wrappedBlocker, depW, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	secret = "23232323232323232323232323232323"
+	mustSessionClaim(t, m, env, wrappedBlocker, secret, "w-1")
+	if inItems(depW) {
+		t.Fatalf("a running blocker released its dependent")
+	}
+	if err := m.End(wrappedBlocker, api.SessionEndRequest{SessionID: secret, Status: api.StatusWrapped}, env.UserID); err != nil {
+		t.Fatalf("end wrapped: %v", err)
+	}
+	if !inItems(depW) || len(waitingFor(depW)) != 0 {
+		t.Fatalf("a wrapped blocker did not release its dependent")
+	}
+	mustSessionClaim(t, m, env, depW, "24242424242424242424242424242424", "w-2")
+	// A claimed (non-queued) WI carries no waiting_for.
+	if w := waitingFor(depW); len(w) != 0 {
+		t.Fatalf("running WI carries waiting_for %+v", w)
+	}
+}

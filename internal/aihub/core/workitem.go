@@ -910,28 +910,40 @@ type Deps struct {
 	BlockedBy []Edge `json:"blocked_by"` // these block this WI
 }
 
+// Edge is one dependency edge seen from one side: the OTHER work item's
+// id plus (additive, polyforge#161) its slug and current status, so a
+// client renders "blocked by polyforge#164 (running)" without a second
+// read.
 type Edge struct {
-	WI   string `json:"wi_id"`
-	Kind string `json:"kind"`
+	WI     string `json:"wi_id"`
+	Kind   string `json:"kind"`
+	Slug   string `json:"slug"`
+	Status string `json:"status"`
 }
 
 func (m *WIManager) Dependencies(wiID string) (*Deps, error) {
 	out := &Deps{Blocking: []Edge{}, BlockedBy: []Edge{}}
-	rows, err := m.db.Query(`SELECT blocking_wi_id, blocked_wi_id, kind FROM wi_dependencies
-		WHERE blocking_wi_id=?1 OR blocked_wi_id=?1`, wiID)
+	rows, err := m.db.Query(`SELECT d.blocking_wi_id, d.blocked_wi_id, d.kind, p.name, o.seq, o.status
+		FROM wi_dependencies d
+		JOIN work_items o ON o.id = CASE WHEN d.blocking_wi_id=?1 THEN d.blocked_wi_id ELSE d.blocking_wi_id END
+		JOIN projects p ON p.id = o.project_id
+		WHERE d.blocking_wi_id=?1 OR d.blocked_wi_id=?1
+		ORDER BY o.seq, d.kind`, wiID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var blocking, blocked, kind string
-		if err := rows.Scan(&blocking, &blocked, &kind); err != nil {
+		var blocking, blocked, kind, project, status string
+		var seq int64
+		if err := rows.Scan(&blocking, &blocked, &kind, &project, &seq, &status); err != nil {
 			return nil, err
 		}
+		slug := project + "#" + strconv.FormatInt(seq, 10)
 		if blocking == wiID {
-			out.Blocking = append(out.Blocking, Edge{WI: blocked, Kind: kind})
+			out.Blocking = append(out.Blocking, Edge{WI: blocked, Kind: kind, Slug: slug, Status: status})
 		} else {
-			out.BlockedBy = append(out.BlockedBy, Edge{WI: blocking, Kind: kind})
+			out.BlockedBy = append(out.BlockedBy, Edge{WI: blocking, Kind: kind, Slug: slug, Status: status})
 		}
 	}
 	return out, rows.Err()

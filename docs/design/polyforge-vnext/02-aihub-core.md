@@ -185,7 +185,7 @@ CREATE TABLE wi_dependencies (
 );
 ```
 
-**kind 语义**：`blocks`——blocking 未终态时 blocked 不入就绪队列（blocked WI 的 `waiting_on` 取值 `dependency:<wi_id>`（§2.4）以本表对应 `blocks` 边为其持久化依据）；`supersedes`——新 WI 取代旧 WI；`related`——纯关联标注，无调度语义。两端不得为同一 WI（`CORE-400`）。
+**kind 语义**：`blocks`——blocking 未 `wrapped` 时 blocked 不入就绪队列、认领被拒（`CORE-409 DEPENDENCY_BLOCKED`）（blocked WI 的 `waiting_on` 取值 `dependency:<wi_id>`（§2.4）以本表对应 `blocks` 边为其持久化依据）；`supersedes`——新 WI 取代旧 WI；`related`——纯关联标注，无调度语义。两端不得为同一 WI（`CORE-400`）。
 
 **写路径约束（SQLite DDL 无法表达跨表/条件自引用约束，全部在创建/删改边事务内强制）**：
 
@@ -193,6 +193,9 @@ CREATE TABLE wi_dependencies (
 - **防环**：`blocks` 边写入前，在既有 `blocks` 边集合上做有向可达性检测，会构成有向环（含自环）→ `CORE-409`（`reason=DEPENDENCY_CYCLE`）；`supersedes` 边同样检测（supersedes 链不得成环）；`related` 无方向语义，不参与环检测。
 - **父不可依赖子**：任一端为 epic 父票、另一端为其直接子票（经 `work_items.parent_id` 关联）的任何 `kind` 边一律拒绝（`CORE-400`，`reason=PARENT_CHILD_DEPENDENCY`）：父票不得依赖其子票，子票也不得以依赖边反向引用父票——依赖边不得用于回绕 epic 层级。
 - 删除边即物理删除行；依赖关系变更不新增 `wi_events` 事件类型（`§5.1a` 枚举不变）。
+- **只有 wrapped 放行（polyforge#161）**：blocker 为 `failed`/`canceled` 时 blocked 继续等待，不自动放行；只想表达先后顺序时由人删边（`pf file dep rm`）——删边就是覆盖，不设 `--force`。手动 `pf submit` 被阻塞的票同样被认领拒绝，票留在 `queued`。
+- **等待可见（只读派生）**：WI 视图（详情与列表）带 `waiting_for: [{slug, status}]`——仅 `queued` WI 的未 wrapped `blocks` blocker，不落库、不是状态，就绪队列分段不变。列边端点的每条边带对方的 `slug` 与 `status`；建边/删边的两端（path `{id}`、body `blocking_wi_id`、path `{blocking_id}`）均接受 id 或 slug。
+- **CLI 面**：`pf file create --after <id|slug>`（可重复；建票后逐条建边，建边失败不回滚建票、非 0 退出并列出失败边）、`pf file dep add <blocking> <blocked>` / `rm` / `list <id>`、`pf file show` 渲染依赖块。CLI 只开放 `blocks`；`supersedes`/`related` 服务端暂留、无 CLI 入口。
 
 **`parent_id`（epic-lite）约束（写路径强制）**：
 
@@ -558,7 +561,7 @@ token 与 `(wi_id, generation, machine_id)` 三元绑定；换机器重放同一
 }
 ```
 
-- **`items`（可执行段）**：`status='queued'` 且 `waiting_on IS NULL` 且无未终态 `blocks` 依赖边（§4.2a）的执行票。**恒排除 `bundle_name IS NULL` 的登记票**（§4.4：不可 claim），也排除一切终态与 `running`/`paused`/`blocked` 状态的 WI；因未终态 `blocks` 边而等待的 `queued` WI 同样**不出现**（无 `blocked` 数组承载等待面，依赖等待的可见性经行 3 `include=deps` 与行 26 列边端点获取）。
+- **`items`（可执行段）**：`status='queued'` 且 `waiting_on IS NULL` 且无未 `wrapped` 的 `blocks` 依赖边（§4.2a；failed/canceled blocker 不放行）的执行票。**恒排除 `bundle_name IS NULL` 的登记票**（§4.4：不可 claim），也排除一切终态与 `running`/`paused`/`blocked` 状态的 WI；因未终态 `blocks` 边而等待的 `queued` WI 同样**不出现**（无 `blocked` 数组承载等待面，依赖等待的可见性经行 3 `include=deps` 与行 26 列边端点获取）。
 - **`running` / `paused`（可见性段）**：当前处于 `running` 与 `paused` 状态的 WI 的只读可见面（供人/工具观察），不参与认领判定。
 - **排序**：各段内均按 `priority`（`urgent`→`high`→`normal`→`low`）→ `created_at`（先创建在前）。
 - **v1 无分页**：全量返回，不设 cursor/limit；规模出现压力后再议（§12）。

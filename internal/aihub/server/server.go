@@ -724,7 +724,13 @@ func (s *Server) hAddDep(w http.ResponseWriter, r *http.Request, idn *identity) 
 		writeErr(w, err)
 		return
 	}
-	if err := s.WIs.AddDependency(req.BlockingWIID, blocked, req.Kind); err != nil {
+	// The blocking side accepts an id or a slug, like the path (#161).
+	blocking, err := s.WIs.Resolve(req.BlockingWIID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := s.WIs.AddDependency(blocking, blocked, req.Kind); err != nil {
 		writeErr(w, err)
 		return
 	}

@@ -76,12 +76,16 @@ func (m *WIManager) hasUnfinishedBlockers(wiID string) (bool, error) {
 // WIManager instance; both reach the same single-writer connection, and
 // the queryRower surface lets the session claim recheck it inside its own
 // transaction snapshot).
+//
+// polyforge#161: only a WRAPPED blocker releases its dependent. A failed
+// or canceled blocker keeps the dependent waiting — "B runs after A
+// succeeded" — until a human removes the edge (`pf file dep rm`).
 func unfinishedBlockers(q queryRower, wiID string) (bool, error) {
 	var n int
 	err := q.QueryRow(`SELECT COUNT(*) FROM wi_dependencies d
 		JOIN work_items b ON b.id = d.blocking_wi_id
 		WHERE d.blocked_wi_id=?1 AND d.kind='blocks'
-		AND b.status NOT IN ('wrapped','failed','canceled')`, wiID).Scan(&n)
+		AND b.status <> 'wrapped'`, wiID).Scan(&n)
 	return n > 0, err
 }
 
