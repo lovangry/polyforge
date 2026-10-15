@@ -144,6 +144,65 @@ type WIView struct {
 	SessionMachine     string `json:"session_machine,omitempty"`
 	SessionStartedAt   string `json:"session_started_at,omitempty"`
 	CleanPause         bool   `json:"clean_pause,omitempty"`
+	// WaitingFor is the server-derived list of unfinished `blocks`
+	// blockers of a queued work item (polyforge#161).
+	WaitingFor []waitingBlocker `json:"waiting_for,omitempty"`
+}
+
+type waitingBlocker struct {
+	Slug   string `json:"slug"`
+	Status string `json:"status"`
+}
+
+// waitingText renders a waiting_for list: "polyforge#3 (running), ...".
+func waitingText(list []waitingBlocker) string {
+	parts := make([]string, 0, len(list))
+	for _, b := range list {
+		parts = append(parts, fmt.Sprintf("%s (%s)", b.Slug, b.Status))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// depsView is the two-sided dependency view (GET
+// /work-items/{id}/dependencies).
+type depsView struct {
+	Blocking  []depEdge `json:"blocking"`
+	BlockedBy []depEdge `json:"blocked_by"`
+}
+
+type depEdge struct {
+	WI     string `json:"wi_id"`
+	Kind   string `json:"kind"`
+	Slug   string `json:"slug"`
+	Status string `json:"status"`
+}
+
+// renderDeps renders the `blocks` edges (the only kind the CLI exposes;
+// polyforge#161) of a work item. nil renders nothing.
+func renderDeps(w io.Writer, d *depsView) {
+	if d == nil {
+		return
+	}
+	side := func(edges []depEdge) string {
+		var parts []string
+		for _, e := range edges {
+			if e.Kind != "blocks" {
+				continue
+			}
+			name := e.Slug
+			if name == "" {
+				name = e.WI
+			}
+			parts = append(parts, fmt.Sprintf("%s (%s)", name, orDash(e.Status)))
+		}
+		if len(parts) == 0 {
+			return "-"
+		}
+		return strings.Join(parts, ", ")
+	}
+	fmt.Fprintf(w, "  dependencies:\n")
+	fmt.Fprintf(w, "    after:  %s\n", side(d.BlockedBy))
+	fmt.Fprintf(w, "    before: %s\n", side(d.Blocking))
 }
 
 // wiRow renders the shared per-WI cells (no segment). The PROJECT
@@ -165,13 +224,31 @@ func wiRow(it WIView) []string {
 	}
 }
 
-// renderWITable renders a WI list table.
+// renderWITable renders a WI list table. When any row waits for an
+// unfinished blocker (polyforge#161 waiting_for), a WAITING-FOR column
+// is inserted before GOAL; otherwise the table keeps its usual shape.
 func renderWITable(w io.Writer, items []WIView) {
+	waiting := false
+	for _, it := range items {
+		if len(it.WaitingFor) > 0 {
+			waiting = true
+			break
+		}
+	}
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {
-		rows = append(rows, wiRow(it))
+		row := wiRow(it)
+		if waiting {
+			last := len(row) - 1
+			row = append(row[:last:last], orDash(waitingText(it.WaitingFor)), row[last])
+		}
+		rows = append(rows, row)
 	}
-	printTable(w, []string{"SLUG", "PROJECT", "STATUS", "SESSION", "PRIORITY", "BUNDLE", "GOAL"}, rows)
+	headers := []string{"SLUG", "PROJECT", "STATUS", "SESSION", "PRIORITY", "BUNDLE", "GOAL"}
+	if waiting {
+		headers = []string{"SLUG", "PROJECT", "STATUS", "SESSION", "PRIORITY", "BUNDLE", "WAITING-FOR", "GOAL"}
+	}
+	printTable(w, headers, rows)
 }
 
 // renderWIDetail renders the detail record. The v1.5 session block
@@ -198,6 +275,9 @@ func renderWIDetail(w io.Writer, wi *WIView) {
 	}
 	if wi.WaitingOn != nil {
 		fmt.Fprintf(w, "  waiting:  %s\n", *wi.WaitingOn)
+	}
+	if len(wi.WaitingFor) > 0 {
+		fmt.Fprintf(w, "  waiting-for: %s (only a wrapped blocker releases; `pf file dep rm` removes an edge)\n", waitingText(wi.WaitingFor))
 	}
 	if wi.SessionFingerprint != "" {
 		fmt.Fprintf(w, "  session:  %s", wi.SessionFingerprint)

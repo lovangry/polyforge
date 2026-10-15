@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -20,14 +21,20 @@ import (
 var cmdFile = &Command{
 	Name:    "file",
 	Group:   GroupData,
-	Summary: "Create, edit or show a work item",
-	Usage: "pf file create --project P --goal G [--repo NAME]... [flags] | --stdin\n" +
+	Summary: "Create, edit or show a work item; manage its dependencies",
+	Usage: "pf file create --project P --goal G [--repo NAME]... [--after ID]... [flags] | --stdin\n" +
 		"pf file edit <id> [flags] | --stdin\n" +
-		"pf file show <id>",
+		"pf file show <id>\n" +
+		"pf file dep add <blocking> <blocked>\n" +
+		"pf file dep rm <blocking> <blocked>\n" +
+		"pf file dep list <id>\n\n" +
+		"Dependencies are `blocks` edges inside one project: the blocked work\n" +
+		"item is not claimed until every blocker is WRAPPED. A failed or\n" +
+		"canceled blocker keeps it waiting — remove the edge to proceed.",
 	Setup: func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) == 0 {
-			return fmt.Errorf("file: expected create|edit|show (see `pf help file`)")
+			return fmt.Errorf("file: expected create|edit|show|dep (see `pf help file`)")
 		}
 		sub, rest := args[0], args[1:]
 		switch sub {
@@ -37,6 +44,8 @@ var cmdFile = &Command{
 			return fileEdit(ctx, rest)
 		case "show":
 			return fileShow(ctx, rest)
+		case "dep":
+			return fileDep(ctx, rest)
 		default:
 			return fmt.Errorf("file: unknown action %q", sub)
 		}
@@ -112,9 +121,11 @@ func fileCreate(ctx *Context, args []string) error {
 		parent    = f.String("parent", "", "parent work item id")
 		attrs     kvList
 		repos     stringList
+		after     stringList
 		useStdin  = f.Bool("stdin", false, "read the full create-body JSON from stdin")
 	)
 	f.Var(&repos, "repo", "project repo this work item works in (repeatable; only these are cloned at claim)")
+	f.Var(&after, "after", "work item (id or slug) that must WRAP before this one is claimed (repeatable; a `blocks` edge)")
 	f.Var(&content, "content", "markdown background; '-' reads stdin, '@file' reads a file")
 	f.Var(&labels, "label", "label (repeatable)")
 	f.Var(&milestone, "milestone", "milestone name")
@@ -125,6 +136,11 @@ func fileCreate(ctx *Context, args []string) error {
 	}
 	if len(rest) != 0 {
 		return fmt.Errorf("file create: unexpected arguments %v (file create takes flags only)", rest)
+	}
+	for _, a := range after {
+		if strings.TrimSpace(a) == "" {
+			return fmt.Errorf("file create: --after needs a work item id or slug")
+		}
 	}
 
 	var req aihubclient.CreateWorkItemRequest
@@ -210,11 +226,124 @@ func fileCreate(ctx *Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	edgeErr := createAfterEdges(ctx, raw, after)
+	if len(after) > 0 {
+		// Re-read so the printed record carries the derived waiting_for.
+		var created api.WorkItem
+		if json.Unmarshal(raw, &created) == nil && created.ID != "" {
+			if fresh, gerr := ctx.aihub().GetWorkItemRaw(created.ID); gerr == nil {
+				raw = fresh
+			}
+		}
+	}
 	ctx.finish(raw, func() {
 		var wi WIView
 		if err := json.Unmarshal(raw, &wi); err == nil {
 			fmt.Fprintln(ctx.Stdout)
 			renderWIDetail(ctx.Stdout, &wi)
+		}
+	})
+	return edgeErr
+}
+
+// createAfterEdges adds one `blocks` edge per --after onto the freshly
+// created work item. Create and edge are two server calls: a failed
+// edge does NOT roll the create back — every failure is reported (the
+// verb exits non-zero) naming the edge, and the work item stays as
+// created.
+func createAfterEdges(ctx *Context, raw json.RawMessage, after []string) error {
+	if len(after) == 0 {
+		return nil
+	}
+	var created api.WorkItem
+	if err := json.Unmarshal(raw, &created); err != nil || created.ID == "" {
+		return fmt.Errorf("file create: created, but the response carries no work item id; no --after edge was added")
+	}
+	name := created.Slug
+	if name == "" {
+		name = created.ID
+	}
+	var failed []string
+	for _, a := range after {
+		if _, err := ctx.aihub().AddBlocksDependency(a, created.ID); err != nil {
+			failed = append(failed, fmt.Sprintf("--after %s: %v", a, depErr(err)))
+		}
+	}
+	if len(failed) == 0 {
+		return nil
+	}
+	return fmt.Errorf("file create: %s was created, but %d of %d --after edge(s) failed (fix with `pf file dep add`):\n  %s",
+		name, len(failed), len(after), strings.Join(failed, "\n  "))
+}
+
+// depErr renders a dependency write failure with the server's reason
+// (DEPENDENCY_CYCLE ...) next to the code, which the plain envelope
+// line would otherwise drop.
+func depErr(err error) error {
+	var ae *api.Error
+	if !errors.As(err, &ae) {
+		return err
+	}
+	var extra struct {
+		Reason string `json:"reason"`
+	}
+	if len(ae.Extra) > 0 && json.Unmarshal(ae.Extra, &extra) == nil && extra.Reason != "" {
+		return &api.Error{Code: ae.Code, Detail: extra.Reason + ": " + ae.Detail, Extra: ae.Extra}
+	}
+	return err
+}
+
+// fileDep manages `blocks` edges (the only kind the CLI exposes,
+// polyforge#161). add/rm take the blocking work item first: "A blocks
+// B" is `pf file dep add A B`.
+func fileDep(ctx *Context, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("file dep: expected add|rm|list (see `pf help file`)")
+	}
+	sub, rest := args[0], args[1:]
+	f := subFlags(ctx, "file dep "+sub)
+	rest, err := parseCommandArgs(f, rest)
+	if err != nil {
+		return err
+	}
+	var (
+		raw  json.RawMessage
+		self string
+	)
+	switch sub {
+	case "add", "rm":
+		if len(rest) != 2 {
+			return fmt.Errorf("file dep %s: expected <blocking> <blocked> (\"A blocks B\" is `pf file dep %s A B`)", sub, sub)
+		}
+		blocking, blocked := rest[0], rest[1]
+		if sub == "add" {
+			raw, err = ctx.aihub().AddBlocksDependency(blocking, blocked)
+		} else {
+			raw, err = ctx.aihub().RemoveBlocksDependency(blocking, blocked)
+		}
+		if err != nil {
+			if ctx.JSON {
+				return err
+			}
+			return depErr(err)
+		}
+		self = blocked
+	case "list":
+		if len(rest) != 1 {
+			return fmt.Errorf("file dep list: expected exactly one work item id")
+		}
+		self = rest[0]
+		if raw, err = ctx.aihub().DependenciesRaw(self); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("file dep: unknown action %q (expected add|rm|list)", sub)
+	}
+	ctx.finish(raw, func() {
+		var d depsView
+		if err := json.Unmarshal(raw, &d); err == nil {
+			fmt.Fprintf(ctx.Stdout, "%s\n", self)
+			renderDeps(ctx.Stdout, &d)
 		}
 	})
 	return nil
@@ -340,11 +469,25 @@ func fileShow(ctx *Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// The human face appends the dependency block (polyforge#161); --json
+	// stays the verbatim work-item body (it carries waiting_for).
+	var deps *depsView
+	if !ctx.JSON {
+		draw, err := ctx.aihub().DependenciesRaw(rest[0])
+		if err != nil {
+			return err
+		}
+		deps = &depsView{}
+		if err := json.Unmarshal(draw, deps); err != nil {
+			return fmt.Errorf("file show: dependencies: %w", err)
+		}
+	}
 	ctx.finish(raw, func() {
 		var wi WIView
 		if err := json.Unmarshal(raw, &wi); err == nil {
 			fmt.Fprintln(ctx.Stdout)
 			renderWIDetail(ctx.Stdout, &wi)
+			renderDeps(ctx.Stdout, deps)
 		}
 	})
 	return nil

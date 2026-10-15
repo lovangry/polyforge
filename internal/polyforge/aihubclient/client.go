@@ -189,6 +189,27 @@ func (c *Client) ReadyQueueRaw(project string) (json.RawMessage, error) {
 	return c.raw("GET", "/api/v1/projects/"+url.PathEscape(project)+"/ready-queue", nil)
 }
 
+// AddBlocksDependency creates the `blocks` edge "blocking blocks
+// blocked" (POST /work-items/{blocked}/dependencies; both sides accept
+// an id or a slug). Only the `blocks` kind is exposed (polyforge#161).
+// Answers the raw two-sided dependency view of blocked.
+func (c *Client) AddBlocksDependency(blocking, blocked string) (json.RawMessage, error) {
+	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(blocked)+"/dependencies",
+		map[string]string{"blocking_wi_id": blocking, "kind": "blocks"})
+}
+
+// RemoveBlocksDependency deletes the `blocks` edge "blocking blocks
+// blocked". Answers the raw dependency view of blocked.
+func (c *Client) RemoveBlocksDependency(blocking, blocked string) (json.RawMessage, error) {
+	return c.raw("DELETE", "/api/v1/work-items/"+url.PathEscape(blocked)+"/dependencies/"+
+		url.PathEscape(blocking)+"/blocks", nil)
+}
+
+// DependenciesRaw reads a work item's two-sided dependency view.
+func (c *Client) DependenciesRaw(idOrSlug string) (json.RawMessage, error) {
+	return c.raw("GET", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/dependencies", nil)
+}
+
 // SearchMemories runs the memory retrieval (06 §5.1). q is required;
 // memType, tags and limit are optional filters.
 func (c *Client) SearchMemories(project, q, memType string, tags []string, limit int) (json.RawMessage, error) {
