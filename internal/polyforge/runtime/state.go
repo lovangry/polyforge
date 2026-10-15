@@ -187,7 +187,8 @@ type jobRecord struct {
 	StepCandidates map[string][]string `json:"step_candidates,omitempty"`
 	// StepHarness is the claim-time per-step harness snapshot
 	// (polyforge#159), daemon-private like StepCandidates. A record
-	// without it (written before #159) runs every step on pi.
+	// without it (written before #159) leaves every step to the bundle's
+	// own choice, else pi.
 	StepHarness map[string]string `json:"step_harness,omitempty"`
 }
 

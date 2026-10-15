@@ -158,7 +158,7 @@ func TestSyncLiveTranscriptClaude(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(capDir, "session"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	native := filepath.Join(cfgDir, "projects", "-caps", testSession+".jsonl")
+	native := filepath.Join(cfgDir, "projects", harness.ClaudeProjectDirName(capDir), testSession+".jsonl")
 	if err := os.MkdirAll(filepath.Dir(native), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -178,5 +178,39 @@ func TestSyncLiveTranscriptClaude(t *testing.T) {
 	got, err := os.ReadFile(dst)
 	if err != nil || !strings.Contains(string(got), `"assistant"`) {
 		t.Fatalf("capsule copy %q (%v)", got, err)
+	}
+}
+
+// Inherited Claude Code session markers and switches never reach the
+// step; the adapter's own three, CLAUDE_CONFIG_DIR and ANTHROPIC_* do.
+func TestClaudeEnvStripsInheritedClaudeCode(t *testing.T) {
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("CLAUDE_CODE_ENTRYPOINT", "cli")
+	t.Setenv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "0")
+	t.Setenv("CLAUDE_CODE_SSE_PORT", "1234")
+	t.Setenv("CLAUDE_CONFIG_DIR", "/cfg")
+	t.Setenv("ANTHROPIC_BASE_URL", "http://x")
+	sp := &claudeSpawner{cfg: &Config{}}
+	cmd, err := sp.buildCmd(SpawnParams{CapsuleDir: "/c", HarnessSession: testSession})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string][]string{}
+	for _, kv := range cmd.Env {
+		name, val, _ := strings.Cut(kv, "=")
+		seen[name] = append(seen[name], val)
+	}
+	for _, gone := range []string{"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT"} {
+		if _, ok := seen[gone]; ok {
+			t.Fatalf("%s leaked into the step env", gone)
+		}
+	}
+	if v := seen["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"]; len(v) != 1 || v[0] != "1" {
+		t.Fatalf("background switch %v, want exactly the adapter's 1", v)
+	}
+	for _, k := range []string{"CLAUDE_CODE_STARTUP_FAILURE_RESULTS", "CLAUDE_CONFIG_DIR", "ANTHROPIC_BASE_URL"} {
+		if len(seen[k]) != 1 {
+			t.Fatalf("%s = %v", k, seen[k])
+		}
 	}
 }

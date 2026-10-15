@@ -137,7 +137,7 @@ func LocateLiveTranscript(sessionsRoot, capsuleDir string, notBefore time.Time) 
 // the id may come from the agent-writable spawn journal).
 func LocateTranscript(sessionsRoot, capsuleDir string, spawnAt time.Time, h, session string) string {
 	if harness.Of(h) == harness.Claude {
-		return harness.LocateClaudeSession(session)
+		return harness.LocateClaudeSession(session, capsuleDir)
 	}
 	return LocateLiveTranscript(sessionsRoot, capsuleDir, spawnAt)
 }

@@ -136,17 +136,35 @@ func ClaudeConfigDir() string {
 	return filepath.Join(home, ".claude")
 }
 
-// LocateClaudeSession answers the native session file of uuid
-// (<config dir>/projects/*/<uuid>.jsonl, a non-empty regular file), or
-// "" when id is not a canonical uuid or no such file exists.
-func LocateClaudeSession(id string) string {
-	if !ValidSessionID(id) {
+// ClaudeProjectDirName is Claude Code's per-cwd project directory name:
+// every character outside [A-Za-z0-9] becomes '-'.
+func ClaudeProjectDirName(cwd string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '-'
+	}, cwd)
+}
+
+// LocateClaudeSession answers the native session file of uuid for a step
+// that ran in capsuleDir: <config dir>/projects/<dir of capsuleDir>/<uuid>.jsonl,
+// a non-empty regular file — or "" when id is not a canonical uuid or no
+// such file exists. Only the project directory of the capsule (as given,
+// or with symlinks resolved) is consulted: a same-named file of another
+// cwd is never copied or resumed.
+func LocateClaudeSession(id, capsuleDir string) string {
+	if !ValidSessionID(id) || capsuleDir == "" {
 		return ""
 	}
-	matches, _ := filepath.Glob(filepath.Join(ClaudeConfigDir(), "projects", "*", id+".jsonl"))
-	for _, m := range matches {
-		if st, err := os.Lstat(m); err == nil && st.Mode().IsRegular() && st.Size() > 0 {
-			return m
+	dirs := []string{ClaudeProjectDirName(capsuleDir)}
+	if real, err := filepath.EvalSymlinks(capsuleDir); err == nil && real != capsuleDir {
+		dirs = append(dirs, ClaudeProjectDirName(real))
+	}
+	for _, d := range dirs {
+		p := filepath.Join(ClaudeConfigDir(), "projects", d, id+".jsonl")
+		if st, err := os.Lstat(p); err == nil && st.Mode().IsRegular() && st.Size() > 0 {
+			return p
 		}
 	}
 	return ""

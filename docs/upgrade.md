@@ -513,7 +513,15 @@ model/harness mismatch: polyforge/bug-fix/review: harness claude (steps.polyforg
 So setting `harness: claude` without giving the step claude ids is
 caught at once (above). An empty or absent list is not a mismatch: the
 CLI's own default model runs. A `pf submit --models` list is checked the
-same way against the work item's bundle at submit time.
+same way against the work item's bundle at submit time (and, for a work
+item without a bundle at submit, at claim time).
+
+**Behavior change for bare `claude-…` ids.** Before #159 every id ran on
+pi; a bare `claude-…` id (no `provider/` prefix) in a list now routes to
+Claude Code. If such an id is the only candidate of a pi step, the claim
+is refused (above) unless the step's harness is `claude`; in a mixed list
+pi simply skips it. Provider-qualified ids (`anthropic/claude-…`,
+`sub2api-claude/…`) stay on pi.
 
 ### What a claude step runs
 
@@ -540,9 +548,11 @@ beforehand; the daemon never reads, writes or manages a credential. If
 `ANTHROPIC_AUTH_TOKEN` is set in the daemon's environment the step
 inherits it; otherwise an `anthropic_auth_token` in cli.toml is handed to
 the step as that variable (environment only, never argv). Without either
-the CLI runs bare on whatever the human set up — note that `--bare` reads
-only `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or an `apiKeyHelper`,
-not the interactive login.
+the CLI runs bare on whatever the human set up — note that `--bare` does
+not read the interactive login: it takes `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN` or an `apiKeyHelper`, and Claude Code's own
+`settings.json` `env` section is still applied, so a credential set
+there works (the daemon cannot see it).
 
 New cli.toml keys (flat, optional):
 
@@ -553,8 +563,10 @@ anthropic_auth_token = "…"                 # only when the daemon's env lacks 
 
 `pf doctor` adds a `harness claude` check whenever any step resolves to
 claude: the binary must resolve on the daemon's PATH (else fail); the
-version should be a verified one (2.1.296), a credential variable should
-be set and `ANTHROPIC_BASE_URL` unset (else warn). Credential values are
+version should be a verified one (2.1.296) and `ANTHROPIC_BASE_URL`
+unset (else warn); when no credential variable is visible to the daemon it
+warns too, noting the credential may live in Claude Code's `settings.json`
+`env` — not an error if so. Credential values are
 never shown — set/unset only. The check lists every claude step with the
 level its harness and models came from. `workspace yaml` now also runs
 the compatibility check above.

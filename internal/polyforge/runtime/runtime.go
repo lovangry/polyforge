@@ -926,8 +926,8 @@ func unmappedProjectError(project string) *api.Error {
 // polyforge#159 model/harness check runs on the same read: a step whose
 // harness serves none of its non-empty candidate list refuses with the
 // same DAEMON-414 — over every installed bundle, or, when a manual
-// `--models` list is given, over that list and the work item's bundle
-// (bundle "" = every bundle). The parsed config is nil when the
+// `--models` list is given with a known bundle, over that list and the
+// work item's bundle (a manual list without a bundle is not judged here). The parsed config is nil when the
 // workspace carries no yaml (absent-equivalent: bundle defaults).
 // Nothing is claimed or created by it; the daemon's submit face and
 // auto-pull call it too, so a refusal reaches the operator before enqueue.
@@ -938,8 +938,11 @@ func (r *Runtime) LoadWorkspace(project, bundle string, manual []string) (*works
 	}
 	wcfg, err := workspace.Load(ws, r.cfg.WorkflowsDir, r.cfg.Mapping.ProjectsOf(ws))
 	if err == nil && r.cfg.WorkflowsDir != "" {
-		if len(manual) == 0 {
-			bundle = ""
+		// a manual list is judged against the work item's bundle only; with
+		// no bundle known yet (a submit before the bundle is bound) it is
+		// left to the claim's own pre-claim read, whose probe carries it
+		if len(manual) == 0 || bundle == "" {
+			bundle, manual = "", nil
 		}
 		err = workspace.CheckHarness(ws, wcfg, r.cfg.WorkflowsDir, []string{project}, bundle, manual)
 	}
@@ -1210,8 +1213,9 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	}
 	// SessionID carries the PUBLIC fingerprint (B3): session.json is a
 	// capsule-committed file, so the secret must never ride it.
+	// No harness here: it is per step (polyforge#159), named by each
+	// dispatch's spawn-journal line.
 	sess := capsule.Session{
-		Harness:        r.cfg.Harness,
 		SessionID:      j.sessionFingerprint,
 		TranscriptPath: j.transcript,
 		UpdatedAt:      nowStamp(),

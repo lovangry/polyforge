@@ -10,6 +10,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
@@ -56,6 +57,9 @@ func TestHarnessFiltersCandidates(t *testing.T) {
 		{"pi step switches to the next pi id (claude ids skipped)", map[string]string{"review": "pi"}, "", []capsule.Attempt{model}, "pi", "g/flash"},
 		{"no map: the bundle's own harness", nil, "claude", nil, "claude", "claude-opus-5-5"},
 		{"nothing chosen: pi", nil, "", nil, "pi", "g/glm"},
+		// a pre-#159 state record rehydrates no step_harness map at all:
+		// every step resolves to pi and never dispatches a claude id
+		{"pre-#159 record (empty map): pi", map[string]string{}, "", nil, "pi", "g/glm"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -122,18 +126,36 @@ func TestAdapterClaudeSessionAndResume(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// resume without the native file: fresh, a NEW session
+	// resume without the native file: fresh, a NEW session, and the
+	// previous capsule transcript (when readable) as read-only reference
+	writeCapsuleFile(t, capDir, strings.TrimPrefix(p.TranscriptPath, capDir+"/"), "{\"type\":\"user\"}\n")
 	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "grill", WIID: "wi_sp", SpawnN: 2, Harness: "claude", Resume: true}); err != nil {
 		t.Fatal(err)
 	}
-	p, _ = sp.last()
-	if p.Resume || p.HarnessSession == first {
-		t.Fatalf("resume without a native session must start fresh: %+v", p)
+	p2, _ := sp.last()
+	if p2.Resume || p2.HarnessSession == first {
+		t.Fatalf("resume without a native session must start fresh: %+v", p2)
+	}
+	if !strings.Contains(p2.InitialPrompt, "Previous attempt (read-only reference)") || !strings.Contains(p2.InitialPrompt, p.TranscriptPath) {
+		t.Fatalf("the degraded resume carries no reference to %s", p.TranscriptPath)
 	}
 
-	// the native file appears: the resume continues the SAME session, on
-	// a new capsule transcript of its own
-	native := filepath.Join(cfgDir, "projects", "-cap", first+".jsonl")
+	// the native file appears (under the capsule's project dir only): the
+	// resume continues the SAME session, on a new capsule transcript
+	other := filepath.Join(cfgDir, "projects", "-elsewhere", first+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(other), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "grill", WIID: "wi_sp", SpawnN: 2, Harness: "claude", Resume: true}); err != nil {
+		t.Fatal(err)
+	}
+	if p3, _ := sp.last(); p3.Resume {
+		t.Fatal("resumed a same-uuid session of another cwd")
+	}
+	native := filepath.Join(cfgDir, "projects", harness.ClaudeProjectDirName(capDir), first+".jsonl")
 	if err := os.MkdirAll(filepath.Dir(native), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -151,13 +173,17 @@ func TestAdapterClaudeSessionAndResume(t *testing.T) {
 		t.Fatalf("a claude resume writes its own capsule transcript, got the previous one %s", p.TranscriptPath)
 	}
 
-	// the step switched to pi: a pi resume never picks up the claude line
+	// the step switched to pi: a pi resume never picks up the claude line,
+	// but gets its transcript as reference
 	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "grill", WIID: "wi_sp", SpawnN: 4, Harness: "pi", Resume: true}); err != nil {
 		t.Fatal(err)
 	}
-	p, _ = sp.last()
-	if p.Resume || p.HarnessSession != "" {
-		t.Fatalf("a pi dispatch after a claude one must start fresh: %+v", p)
+	p4, _ := sp.last()
+	if p4.Resume || p4.HarnessSession != "" {
+		t.Fatalf("a pi dispatch after a claude one must start fresh: %+v", p4)
+	}
+	if !strings.Contains(p4.InitialPrompt, "Previous attempt (read-only reference)") {
+		t.Fatal("the harness-change fallback carries no reference")
 	}
 }
 

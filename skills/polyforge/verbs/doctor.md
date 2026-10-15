@@ -85,7 +85,7 @@ in, never calls a model and never reports a credential value.
 |---|---|---|
 | `pass` | the binary resolves, the version is a verified one, a credential variable is set | — (the detail lists every claude step with the level its harness and models came from) |
 | `fail` | the claude binary does not resolve on the daemon's PATH | Install Claude Code and log it in (a human does this), or set `claude_bin` in cli.toml / `--claude-bin`. |
-| `warn` | unverified version; neither `ANTHROPIC_AUTH_TOKEN` (env or cli.toml `anthropic_auth_token`) nor `ANTHROPIC_API_KEY` set for the daemon; both set; `ANTHROPIC_BASE_URL` set | Relay the note. `claude --bare` reads only those variables or an `apiKeyHelper`, never the interactive login. |
+| `warn` | unverified version; no credential variable visible to the daemon (neither `ANTHROPIC_AUTH_TOKEN` — env or cli.toml `anthropic_auth_token` — nor `ANTHROPIC_API_KEY`); both set; `ANTHROPIC_BASE_URL` set | Relay the note. `claude --bare` never reads the interactive login, but Claude Code's own `settings.json` `env` section is still applied — if the credential lives there, the "no credential variable" warning is not an error (the daemon cannot see that file's values). |
 | `skip` | claude steps exist but the daemon is unreachable | Start the daemon and re-run. |
 
 ## Success

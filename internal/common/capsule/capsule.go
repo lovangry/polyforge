@@ -75,7 +75,10 @@ type WorkItemDoc struct {
 // deleted (v1.5 session model); legacy files carrying those keys parse
 // fine (encoding/json ignores unknown keys).
 type Session struct {
-	Harness        string `json:"harness"`         // pi|cc
+	// Harness is no longer written (polyforge#159: the harness is per
+	// step — the spawn journal names each dispatch's); older files carry
+	// "pi" and still parse.
+	Harness        string `json:"harness,omitempty"`
 	SessionID      string `json:"session_id"`      // harness-native session identifier
 	TranscriptPath string `json:"transcript_path"` // absolute path to the .jsonl transcript
 	UpdatedAt      string `json:"updated_at"`

@@ -195,7 +195,7 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 			// claude resumes its NATIVE session (outside the capsule) by
 			// the uuid the daemon minted; a session that never reached
 			// disk, or an id that is not ours in shape, starts fresh.
-			if harness.LocateClaudeSession(prev.HarnessSession) != "" {
+			if harness.LocateClaudeSession(prev.HarnessSession, a.WI.CapsuleDir) != "" {
 				hsession = prev.HarnessSession
 			} else {
 				resume = false
@@ -208,6 +208,12 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 			resume = false
 		default:
 			transcript = prev.Transcript
+		}
+		if !resume && usableTranscript(prev.Transcript) {
+			// the continuation cannot resume (another harness, or the
+			// native session is gone): the fresh conversation gets the
+			// previous capsule transcript as read-only reference (§2.4)
+			parts.Reference = prev.Transcript
 		}
 	}
 	if sp.Fresh && parts.Reference == "" {

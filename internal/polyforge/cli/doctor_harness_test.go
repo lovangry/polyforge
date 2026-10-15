@@ -32,7 +32,7 @@ func TestClaudeHarnessCheck(t *testing.T) {
 		{"older daemon", steps, true, map[string]HarnessStatus{}, "warn", "no harness status"},
 		{"binary missing", steps, true, map[string]HarnessStatus{"claude": {Bin: "claude"}}, "fail", "does not resolve"},
 		{"unverified version", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.Version, h.Verified = "9.9.9", false; return h }()}, "warn", "9.9.9 is not in the verified set"},
-		{"no credential variable", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.AuthTokenEnv = "unset"; return h }()}, "warn", "neither ANTHROPIC_AUTH_TOKEN"},
+		{"no credential variable", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.AuthTokenEnv = "unset"; return h }()}, "warn", "settings.json `env` section"},
 		{"base url set", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.BaseURLEnv = "set"; return h }()}, "warn", "ANTHROPIC_BASE_URL is set"},
 	}
 	for _, c := range cases {

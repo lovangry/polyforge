@@ -46,17 +46,6 @@ func TestClaimComposeHarnessRidesTheJob(t *testing.T) {
 	}
 }
 
-// A pre-#159 state record carries no step_harness: every step is pi.
-func TestStateRecordWithoutHarnessIsPi(t *testing.T) {
-	var rec jobRecord
-	if err := json.Unmarshal([]byte(`{"work_item_id":"wi_old","step_candidates":{"fix":["a/b"]}}`), &rec); err != nil {
-		t.Fatal(err)
-	}
-	if h := jobFromRecord(&rec).stepHarness; h != nil {
-		t.Fatalf("old record harness %v, want nil (pi)", h)
-	}
-}
-
 func TestHarnessMismatchRefusesBeforeClaim(t *testing.T) {
 	cases := map[string]string{
 		// fix falls through to the bundle's pi list

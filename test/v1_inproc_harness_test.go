@@ -134,6 +134,7 @@ func newInprocRig(t *testing.T, inst *v1Install, obsTune ...inprocObsTune) *inpr
 		WorkflowsDir:  inst.workflowsPath(),
 		Harness:       "pi",
 		PiBin:         inst.fakepiPath,
+		ClaudeBin:     "/nonexistent/claude-test-guard", // never the host claude
 	}
 	sp := runtime.DefaultSpawner(&rtCfg)
 	// polyforge#106: the driver IS the engine — the rig binds the real

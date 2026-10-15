@@ -200,6 +200,35 @@ func TestW159MixedHarnessWorkItem(t *testing.T) {
 	if x.Steps["fix"].Status != "done" || x.Steps["verification"].Status != "done" {
 		t.Fatalf("steps %s", execDigest(x))
 	}
+	// the token value never lands anywhere the daemon writes: the capsule
+	// tree (journals, transcripts, git objects), the data dir (state.json,
+	// the event log) and the daemon's own output
+	w159NoToken(t, capDir)
+	w159NoToken(t, d.dataDir)
+	w159NoToken(t, d.logPath)
+}
+
+// w159NoToken fails when any file under root carries the test token.
+func w159NoToken(t *testing.T, root string) {
+	t.Helper()
+	n := 0
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || !info.Mode().IsRegular() {
+			return nil
+		}
+		raw, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return nil
+		}
+		n++
+		if strings.Contains(string(raw), w159Token) {
+			t.Fatalf("%s carries the auth token value", path)
+		}
+		return nil
+	})
+	if err != nil || n == 0 {
+		t.Fatalf("token scan of %s: %d files (%v)", root, n, err)
+	}
 }
 
 // ② D7 on claude output: a 429 retries the SAME model, a 401 switches to

@@ -68,27 +68,32 @@ func TestSessionIDs(t *testing.T) {
 func TestLocateClaudeSession(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	capDir := "/tmp/ws/capsules/e2e-7"
 	id, _ := NewSessionID()
-	if LocateClaudeSession(id) != "" {
+	if LocateClaudeSession(id, capDir) != "" {
 		t.Fatal("located a missing session")
 	}
-	p := filepath.Join(dir, "projects", "-tmp-capsule", id+".jsonl")
+	p := filepath.Join(dir, "projects", "-tmp-ws-capsules-e2e-7", id+".jsonl")
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(p, nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if LocateClaudeSession(id) != "" {
+	if LocateClaudeSession(id, capDir) != "" {
 		t.Fatal("an empty file is not a session")
 	}
 	if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := LocateClaudeSession(id); got != p {
+	if got := LocateClaudeSession(id, capDir); got != p {
 		t.Fatalf("located %q, want %q", got, p)
 	}
-	if LocateClaudeSession("*") != "" {
+	// the same uuid under another cwd's project dir is never taken
+	if got := LocateClaudeSession(id, "/tmp/ws/capsules/other-1"); got != "" {
+		t.Fatalf("located another capsule's session %q", got)
+	}
+	if LocateClaudeSession("*", capDir) != "" {
 		t.Fatal("a glob pattern is not an id")
 	}
 }

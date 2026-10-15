@@ -106,7 +106,20 @@ func (s *claudeSpawner) buildCmd(p SpawnParams) (*exec.Cmd, error) {
 	if os.Getenv("ANTHROPIC_AUTH_TOKEN") == "" && s.cfg.AnthropicAuthToken != "" {
 		additions = append(additions, "ANTHROPIC_AUTH_TOKEN="+s.cfg.AnthropicAuthToken)
 	}
-	cmd.Env = newEnvSanitizer(s.cfg.EnvSecrets...).childEnv(additions...)
+	// A daemon started from inside a Claude Code session inherits that
+	// session's CLAUDECODE / CLAUDE_CODE_* markers and switches; none of
+	// them may shape the step (clean context) — only the three the
+	// adapter sets above. CLAUDE_CONFIG_DIR and ANTHROPIC_* pass through.
+	inherited := newEnvSanitizer(s.cfg.EnvSecrets...).childEnv()
+	env := make([]string, 0, len(inherited)+len(additions))
+	for _, kv := range inherited {
+		name, _, _ := strings.Cut(kv, "=")
+		if name == "CLAUDECODE" || strings.HasPrefix(name, "CLAUDE_CODE_") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	cmd.Env = append(env, additions...)
 	return cmd, nil
 }
 

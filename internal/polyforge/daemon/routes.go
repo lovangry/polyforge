@@ -346,7 +346,8 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 				bundle = *probe.BundleName
 			}
 			// polyforge#159: a --models list is checked against the
-			// harness of every step of the work item's bundle here too
+			// harness of every step of the work item's bundle here too;
+			// a WI without a bundle yet is judged at claim time instead
 			if _, lerr := d.rt.LoadWorkspace(probe.ProjectName, bundle, body.Models); lerr != nil {
 				writeErrOf(w, lerr)
 				return

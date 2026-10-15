@@ -209,7 +209,13 @@ func runDoctorChecks(ctx *Context) doctorReport {
 	} else {
 		st, detail, claudeSteps := workspaceYamlCheck(cfg.Mapping, status.WorkflowsDir, sockOK)
 		add(docChYaml, st, detail)
-		st, detail = claudeHarnessCheck(claudeSteps, status.WorkflowsDir, sockOK, status.Harnesses)
+		// the daemon's harness view (it may run `claude --version`) is
+		// asked for only when some step actually runs on claude
+		var harnesses map[string]HarnessStatus
+		if len(claudeSteps) > 0 && sockOK {
+			harnesses = probeDaemonHarnesses(cfg.DaemonSocket)
+		}
+		st, detail = claudeHarnessCheck(claudeSteps, status.WorkflowsDir, sockOK, harnesses)
 		add(docChClaude, st, detail)
 	}
 
@@ -290,20 +296,34 @@ func probeServerReach(server string) (bool, string) {
 	return true, fmt.Sprintf("aihub server %s answered (HTTP %d)", server, resp.StatusCode)
 }
 
-// probeDaemonSocket dials the daemon's UDS face and asks GET /status
-// (with the harness view); it also answers the parsed status — the
-// workflows dir and the harness statuses the daemon reports (zero when
-// unreachable).
+// probeDaemonSocket dials the daemon's UDS face and asks GET /status;
+// it also answers the parsed status (the workflows dir the daemon
+// reports; zero when unreachable).
 func probeDaemonSocket(sock string) (bool, string, StatusResponse) {
 	c := NewDaemonClient(sock)
-	c.HTTP.Timeout = 15 * time.Second
+	c.HTTP.Timeout = 5 * time.Second
 	var st StatusResponse
-	raw, err := c.StatusWithHarnesses()
+	raw, err := c.Status()
 	if err != nil {
 		return false, fmt.Sprintf("daemon socket %s does not answer GET /status: %v — is the daemon running?", sock, err), st
 	}
 	_ = json.Unmarshal(raw, &st)
 	return true, fmt.Sprintf("daemon socket %s answers (daemon %s)", sock, st.MachineID), st
+}
+
+// probeDaemonHarnesses asks GET /status?harnesses=1 — the daemon's view
+// of the step harness binaries (nil when it does not answer or is too old
+// to report it).
+func probeDaemonHarnesses(sock string) map[string]HarnessStatus {
+	c := NewDaemonClient(sock)
+	c.HTTP.Timeout = 15 * time.Second
+	raw, err := c.StatusWithHarnesses()
+	if err != nil {
+		return nil
+	}
+	var st StatusResponse
+	_ = json.Unmarshal(raw, &st)
+	return st.Harnesses
 }
 
 // workspaceYamlCheck loads every mapped workspace's .polyforge.yaml the
@@ -414,7 +434,7 @@ func claudeHarnessCheck(steps []workspace.StepResolution, workflowsDir string, d
 	tokenSet := h.AuthTokenEnv == "set" || h.AuthTokenToml == "set"
 	switch {
 	case !tokenSet && h.APIKeyEnv != "set":
-		warn("neither ANTHROPIC_AUTH_TOKEN (env or anthropic_auth_token) nor ANTHROPIC_API_KEY is set for the daemon — `claude --bare` reads no other login, so the steps rely on the human's own setup (e.g. apiKeyHelper)")
+		warn("no credential variable is visible to the daemon (neither ANTHROPIC_AUTH_TOKEN — env or anthropic_auth_token — nor ANTHROPIC_API_KEY); the credential may live in Claude Code's settings.json `env` section (applied under --bare too), which the daemon cannot see — not an error if so")
 	case tokenSet && h.APIKeyEnv == "set":
 		warn("both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are set — which one Claude Code uses is unverified")
 	}
