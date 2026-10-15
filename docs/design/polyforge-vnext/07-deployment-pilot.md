@@ -610,8 +610,8 @@ Agent 独占写入的 `runtime-state/execution.json`（INV-6）才具备 INV-D3 
    （不写 `project_members` 行）可读。
 3. **epic-lite parent**：创建登记票父票（`bundle_name IS NULL`）与带 `parent_id` 的子票 →
    断言父票不可 claim（`CORE-409`，`reason=NOT_CLAIMABLE`，`02-aihub-core.md#§4.4`）；再对子票挂父票
-   （深度 2）被拒（`CORE-400`，`reason=PARENT_DEPTH`）；父↔子任一方向的依赖边被拒
-   （`reason=PARENT_CHILD_DEPENDENCY`，`02-aihub-core.md#§4.2a`）；`include=children` 返回直接子票
+   （深度 2）被拒（`CORE-400`，`reason=PARENT_DEPTH`）；以父票（登记票）为 blocker 的依赖边被拒
+   （`reason=BLOCKER_NOT_EXECUTABLE`，`02-aihub-core.md#§4.2a`）；`include=children` 返回直接子票
    清单与派生 `rollup`（`02-aihub-core.md#§5.1c`），断言 rollup 各计数与子票实际状态一致且不落库。
 4. **milestone / assignee**：对 WI `PATCH` `milestone` 后按 `milestone=` 过滤、按 `assignee=` 过滤
    （`02-aihub-core.md#§5.1` 行 2）→ 断言过滤命中（索引路径 `02-aihub-core.md#§4.2`）；claim 成功后

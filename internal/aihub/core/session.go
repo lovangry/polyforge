@@ -205,6 +205,57 @@ type WIView struct {
 	SessionPublic
 	RepoInventory []RepoDecl   `json:"repo_inventory,omitempty"`
 	Derived       *DerivedEpic `json:"derived,omitempty"`
+	// WaitingFor (polyforge#161) is read-only and derived: the unfinished
+	// `blocks` blockers (status other than wrapped) of a QUEUED work item
+	// — who it is waiting for. Never persisted, not a state; omitted
+	// when the WI waits on nobody.
+	WaitingFor []WaitingBlocker `json:"waiting_for,omitempty"`
+}
+
+// WaitingBlocker is one entry of the derived waiting_for list.
+type WaitingBlocker struct {
+	Slug   string `json:"slug"`
+	Status string `json:"status"`
+}
+
+// waitingForBatch derives the waiting_for lists of many WIs in ONE query.
+// Only queued dependents carry one (the only status a claim starts
+// from); the release predicate is unfinishedBlockers' (only wrapped
+// releases).
+func (db *DB) waitingForBatch(ids []string) (map[string][]WaitingBlocker, error) {
+	out := map[string][]WaitingBlocker{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	var placeholders []string
+	var args []any
+	for i, id := range ids {
+		placeholders = append(placeholders, "?"+strconv.Itoa(i+1))
+		args = append(args, id)
+	}
+	rows, err := db.Query(`SELECT d.blocked_wi_id, p.name, b.seq, b.status
+		FROM wi_dependencies d
+		JOIN work_items w ON w.id = d.blocked_wi_id
+		JOIN work_items b ON b.id = d.blocking_wi_id
+		JOIN projects p ON p.id = b.project_id
+		WHERE d.kind='blocks' AND w.status='queued' AND b.status <> 'wrapped'
+		AND d.blocked_wi_id IN (`+strings.Join(placeholders, ",")+`)
+		ORDER BY b.seq`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var blocked, project, status string
+		var seq int64
+		if err := rows.Scan(&blocked, &project, &seq, &status); err != nil {
+			return nil, err
+		}
+		out[blocked] = append(out[blocked], WaitingBlocker{
+			Slug: project + "#" + strconv.FormatInt(seq, 10), Status: status,
+		})
+	}
+	return out, rows.Err()
 }
 
 // sessionPublicOf reads one WI's public session block.
@@ -226,8 +277,8 @@ func (db *DB) sessionPublicOf(wiID string) (SessionPublic, error) {
 }
 
 // View wraps one WorkItem with its public session audit block, its
-// frozen repo inventory (§4.6) and its derived epic
-// block (w140).
+// frozen repo inventory (§4.6), its derived epic
+// block (w140) and its derived waiting_for list (polyforge#161).
 func (m *WIManager) View(wi *api.WorkItem) (*WIView, error) {
 	sp, err := m.db.sessionPublicOf(wi.ID)
 	if err != nil {
@@ -241,7 +292,12 @@ func (m *WIManager) View(wi *api.WorkItem) (*WIView, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &WIView{WorkItem: *wi, SessionPublic: sp, RepoInventory: inv, Derived: derived}, nil
+	waiting, err := m.db.waitingForBatch([]string{wi.ID})
+	if err != nil {
+		return nil, err
+	}
+	return &WIView{WorkItem: *wi, SessionPublic: sp, RepoInventory: inv, Derived: derived,
+		WaitingFor: waiting[wi.ID]}, nil
 }
 
 // sessionPublicBatch reads many WIs' public session blocks in ONE query.
@@ -277,8 +333,9 @@ func (db *DB) sessionPublicBatch(ids []string) (map[string]SessionPublic, error)
 	return out, rows.Err()
 }
 
-// Views wraps a batch of WorkItems with their session blocks (one query)
-// and their derived epic blocks (one grouped query, w140).
+// Views wraps a batch of WorkItems with their session blocks (one query),
+// their derived epic blocks (one grouped query, w140) and their derived
+// waiting_for lists (one query, polyforge#161).
 // Order is preserved; a WI that vanished mid-read keeps a zero block.
 func (m *WIManager) Views(wis []api.WorkItem) ([]WIView, error) {
 	out := make([]WIView, 0, len(wis))
@@ -297,8 +354,13 @@ func (m *WIManager) Views(wis []api.WorkItem) ([]WIView, error) {
 	if err != nil {
 		return nil, err
 	}
+	waiting, err := m.db.waitingForBatch(ids)
+	if err != nil {
+		return nil, err
+	}
 	for i := range wis {
-		out = append(out, WIView{WorkItem: wis[i], SessionPublic: blocks[wis[i].ID], Derived: derived[wis[i].ID]})
+		out = append(out, WIView{WorkItem: wis[i], SessionPublic: blocks[wis[i].ID], Derived: derived[wis[i].ID],
+			WaitingFor: waiting[wis[i].ID]})
 	}
 	return out, nil
 }
@@ -331,13 +393,18 @@ func (m *SessionManager) Claim(wiID string, req api.SessionClaimRequest, callerI
 	if blocked, err := unfinishedBlockers(m.db, wiID); err != nil {
 		return nil, err
 	} else if blocked {
-		return nil, Fail(api.ErrCoreConflict, "DEPENDENCY_BLOCKED", "work item has an unfinished blocking dependency")
+		return nil, Fail(api.ErrCoreConflict, "DEPENDENCY_BLOCKED", dependencyBlockedDetail)
 	}
 	if err := diagnoseClaimBundle(row); err != nil {
 		return nil, err
 	}
 	return m.claimTx(wiID, req, callerIdentity)
 }
+
+// dependencyBlockedDetail is the DEPENDENCY_BLOCKED refusal text
+// (polyforge#161: failed/canceled blockers keep the dependent waiting).
+const dependencyBlockedDetail = "work item has an unfinished blocking dependency " +
+	"(only a wrapped blocker releases; remove the edge with `pf file dep rm` to proceed)"
 
 // diagnoseClaimGate is the M1 joint CAS gate's error face. Order matters:
 // terminal first (CORE-410), then session-held (the precise double-claim
@@ -390,7 +457,7 @@ func (m *SessionManager) claimTx(wiID string, req api.SessionClaimRequest, calle
 	if blocked, err := unfinishedBlockers(tx, wiID); err != nil {
 		return nil, err
 	} else if blocked {
-		return nil, Fail(api.ErrCoreConflict, "DEPENDENCY_BLOCKED", "work item has an unfinished blocking dependency")
+		return nil, Fail(api.ErrCoreConflict, "DEPENDENCY_BLOCKED", dependencyBlockedDetail)
 	}
 	if err := diagnoseClaimBundle(row); err != nil {
 		return nil, err

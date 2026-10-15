@@ -143,6 +143,10 @@ type CreateWorkItemRequest struct {
 	// does not accept (url, subdir, base) instead of the CLI dropping it.
 	RepoInventory     json.RawMessage `json:"repo_inventory,omitempty"`
 	RepoInventoryBase json.RawMessage `json:"repo_inventory_base,omitempty"`
+	// After lists the work items (id or slug) this one runs after: aihub
+	// writes one `blocks` edge per entry inside the create transaction,
+	// or refuses the whole create (polyforge#161).
+	After []string `json:"after,omitempty"`
 }
 
 // CreateWorkItem creates a work item and returns the raw detail record.
@@ -187,6 +191,27 @@ func (c *Client) ListWorkItemsRaw(project, status string, limit int) (json.RawMe
 // ReadyQueueRaw is the raw-body variant of Queue (same endpoint).
 func (c *Client) ReadyQueueRaw(project string) (json.RawMessage, error) {
 	return c.raw("GET", "/api/v1/projects/"+url.PathEscape(project)+"/ready-queue", nil)
+}
+
+// AddBlocksDependency creates the `blocks` edge "blocking blocks
+// blocked" (POST /work-items/{blocked}/dependencies; both sides accept
+// an id or a slug). Only the `blocks` kind is exposed (polyforge#161).
+// Answers the raw two-sided dependency view of blocked.
+func (c *Client) AddBlocksDependency(blocking, blocked string) (json.RawMessage, error) {
+	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(blocked)+"/dependencies",
+		map[string]string{"blocking_wi_id": blocking, "kind": "blocks"})
+}
+
+// RemoveBlocksDependency deletes the `blocks` edge "blocking blocks
+// blocked". Answers the raw dependency view of blocked.
+func (c *Client) RemoveBlocksDependency(blocking, blocked string) (json.RawMessage, error) {
+	return c.raw("DELETE", "/api/v1/work-items/"+url.PathEscape(blocked)+"/dependencies/"+
+		url.PathEscape(blocking)+"/blocks", nil)
+}
+
+// DependenciesRaw reads a work item's two-sided dependency view.
+func (c *Client) DependenciesRaw(idOrSlug string) (json.RawMessage, error) {
+	return c.raw("GET", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/dependencies", nil)
 }
 
 // SearchMemories runs the memory retrieval (06 §5.1). q is required;

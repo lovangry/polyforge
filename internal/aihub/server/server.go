@@ -332,12 +332,49 @@ func (s *Server) hCreateWI(w http.ResponseWriter, r *http.Request, idn *identity
 	if !s.requireWrite(w, idn, projectID) {
 		return
 	}
+	for _, ref := range req.After {
+		if _, err := s.visibleWI(idn, ref); err != nil {
+			writeErr(w, err)
+			return
+		}
+	}
 	wi, err := s.WIs.Create(req)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	s.writeWI(w, http.StatusCreated, wi)
+}
+
+// visibleWI resolves a dependency endpoint (id or slug) the caller names.
+// A work item in a project the caller cannot read answers exactly like
+// an unknown one (CORE-404 "work item <ref>"), so dependency writes are
+// no existence oracle across projects.
+func (s *Server) visibleWI(idn *identity, ref string) (string, error) {
+	notFound := core.Fail(api.ErrCoreNotFound, "", "work item %s", ref)
+	id, err := s.WIs.Resolve(ref)
+	var ae *api.Error
+	if err != nil {
+		if errors.As(err, &ae) && ae.Code == api.ErrCoreNotFound {
+			return "", notFound
+		}
+		return "", err
+	}
+	var projectID string
+	if err := s.DB.QueryRow(`SELECT project_id FROM work_items WHERE id=?1`, id).Scan(&projectID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", notFound
+		}
+		return "", err
+	}
+	ok, err := s.canRead(idn, projectID)
+	if err != nil && !errors.As(err, &ae) {
+		return "", err // a store failure stays a 5xx
+	}
+	if err != nil || !ok {
+		return "", notFound
+	}
+	return id, nil
 }
 
 // writeWI wraps a WorkItem with its public session audit block (m4:
@@ -724,7 +761,13 @@ func (s *Server) hAddDep(w http.ResponseWriter, r *http.Request, idn *identity) 
 		writeErr(w, err)
 		return
 	}
-	if err := s.WIs.AddDependency(req.BlockingWIID, blocked, req.Kind); err != nil {
+	// The blocking side accepts an id or a slug, like the path (#161).
+	blocking, err := s.visibleWI(idn, req.BlockingWIID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := s.WIs.AddDependency(blocking, blocked, req.Kind); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -774,7 +817,7 @@ func (s *Server) hDelDep(w http.ResponseWriter, r *http.Request, idn *identity) 
 		writeErr(w, err)
 		return
 	}
-	blocking, err := s.WIs.Resolve(r.PathValue("blocking"))
+	blocking, err := s.visibleWI(idn, r.PathValue("blocking"))
 	if err != nil {
 		writeErr(w, err)
 		return

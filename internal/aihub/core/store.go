@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS wi_dependencies (
   PRIMARY KEY (blocking_wi_id, blocked_wi_id, kind),
   CHECK (blocking_wi_id <> blocked_wi_id)
 );
+CREATE INDEX IF NOT EXISTS idx_dep_blocked ON wi_dependencies(blocked_wi_id, kind);
 
 CREATE TABLE IF NOT EXISTS claim_idempotency (
   idempotency_key TEXT PRIMARY KEY,

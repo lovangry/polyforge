@@ -128,6 +128,25 @@ the v2.4.x DDL. `deploy/sql/v2.5.0/probe.sql` answers 0 when the table is
 gone and the column exists (a database created by v2.5.0 is already in
 that shape).
 
+## Work item dependencies (polyforge#161)
+
+**Deploy aihub before upgrading the CLI.** `pf file create --after` sends
+its blockers in the create body (`after: [...]`); an older aihub ignores
+the unknown key and files the work item WITHOUT the dependency, silently.
+`pf file dep add|rm|list` and `pf file show` use endpoints every aihub
+already has.
+
+- Semantics change: only a **wrapped** blocker releases its dependent. A
+  failed or canceled blocker now keeps the dependent queued (before, any
+  terminal status released it); remove the edge with `pf file dep rm` to
+  proceed. Production held 0 dependency rows, so nothing existing changes.
+- A `blocks` blocker must be an execution ticket (bundle bound);
+  re-adding an existing edge is a no-op instead of a CORE-500.
+- No window SQL: the new index `idx_dep_blocked` is in the DDL that
+  `core.Open` runs on every start (`CREATE INDEX IF NOT EXISTS`), so it is
+  built on the first boot of the new server. An older server ignores it,
+  so a rollback needs nothing either.
+
 ## Optional: stale `waiting_on` cleanup (manual, NOT in the window)
 
 The server's `waiting_on` value domain dropped the `gate` and
@@ -147,7 +166,8 @@ WHERE waiting_on = 'gate' OR waiting_on LIKE 'runtime:%';
 ## No auto migration
 
 `core.Open` never rewrites an existing database: the DDL is
-`CREATE TABLE IF NOT EXISTS` and gains nothing else. An old-schema
+`CREATE TABLE/INDEX IF NOT EXISTS` — a missing table or index is created,
+nothing existing is altered (no column is added or changed). An old-schema
 database is not repaired at boot, and the new server cannot create
 projects on it (the dead `projects.identifier_hash NOT NULL` column has
 no default). The upgrade is always the deploy.sh window SQL described

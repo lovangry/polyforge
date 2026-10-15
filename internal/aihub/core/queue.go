@@ -37,7 +37,7 @@ func queueLess(a, b *WIView) bool {
 
 // ReadyQueue builds the queue for a project (name or id). A WI is
 // executable when: status queued, waiting_on empty, no unfinished
-// `blocks` dependency edge, and every repo its inventory names is still
+// `blocks` dependency edge (only a wrapped blocker releases, #161), and every repo its inventory names is still
 // one of the project's repos (02 §4.6; else its claim would be refused
 // INVENTORY_REPO_GONE on every drain wave).
 func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
