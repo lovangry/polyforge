@@ -18,14 +18,11 @@ const cannedDeps = `{"blocking":[{"wi_id":"wi_c","kind":"blocks","slug":"polyfor
 
 const cycleEnvelope = `{"code":"CORE-409","detail":"edge would close a dependency cycle","extra":{"reason":"DEPENDENCY_CYCLE"}}`
 
+// --after travels in the create body (one request; aihub writes the
+// edges inside the create transaction).
 func TestVerbFileCreateAfter(t *testing.T) {
 	var rec reqRecorder
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/dependencies") {
-			w.WriteHeader(http.StatusCreated)
-			io.WriteString(w, cannedDeps)
-			return
-		}
 		io.WriteString(w, cannedWI)
 	})
 	env := withMappingConfig(t)
@@ -36,49 +33,30 @@ func TestVerbFileCreateAfter(t *testing.T) {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
 	}
 	all := rec.all()
-	if len(all) != 4 {
+	if len(all) != 1 || all[0].Method != "POST" || all[0].Path != "/api/v1/work-items" ||
+		!strings.Contains(all[0].Body, `"after":["polyforge#3","wi_b"]`) {
 		t.Fatalf("requests = %+v", all)
 	}
-	if all[0].Method != "POST" || all[0].Path != "/api/v1/work-items" {
-		t.Errorf("create = %s %s", all[0].Method, all[0].Path)
-	}
-	for i, blocking := range []string{"polyforge#3", "wi_b"} {
-		got := all[i+1]
-		if got.Method != "POST" || got.Path != "/api/v1/work-items/wi_abc/dependencies" ||
-			!strings.Contains(got.Body, `"blocking_wi_id":"`+blocking+`"`) || !strings.Contains(got.Body, `"kind":"blocks"`) {
-			t.Errorf("edge %d = %s %s %s", i, got.Method, got.Path, got.Body)
-		}
-	}
-	if all[3].Method != "GET" || all[3].Path != "/api/v1/work-items/wi_abc" {
-		t.Errorf("re-read = %s %s", all[3].Method, all[3].Path)
+	// Without --after the body carries no after key.
+	if code, _, _ := runPf(t, env, "file", "create", "--project", "polyforge", "--goal", "g"); code != 0 ||
+		strings.Contains(rec.last().Body, `"after"`) {
+		t.Fatalf("plain create body = %s", rec.last().Body)
 	}
 }
 
-// A failed edge does not roll the create back: the verb exits 1 naming
-// the created work item and every failed edge with the server reason.
-func TestVerbFileCreateAfterEdgeRefused(t *testing.T) {
+// A refused blocker refuses the create: the server's typed error is the
+// verb's error, nothing is printed as created.
+func TestVerbFileCreateAfterRefused(t *testing.T) {
 	srv := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/dependencies") {
-			w.WriteHeader(http.StatusNotFound)
-			io.WriteString(w, `{"code":"CORE-404","detail":"work item polyforge#99"}`)
-			return
-		}
-		io.WriteString(w, cannedWI)
+		w.WriteHeader(http.StatusBadRequest)
+		io.WriteString(w, `{"code":"CORE-400","detail":"blocker polyforge#9 must be an execution ticket — bind a bundle first (a registration ticket or epic never wraps)","extra":{"reason":"BLOCKER_NOT_EXECUTABLE"}}`)
 	})
 	env := withMappingConfig(t)
 	env["PF_SERVER"] = srv.URL
 	code, stdout, stderr := runPf(t, env, "file", "create", "--project", "polyforge", "--goal", "g",
-		"--after", "polyforge#99")
-	if code != 1 {
-		t.Fatalf("code=%d stderr=%s", code, stderr)
-	}
-	if !strings.Contains(stdout, "pf-42") {
-		t.Errorf("created record not printed: %s", stdout)
-	}
-	for _, want := range []string{"pf-42 was created", "1 of 1 --after edge(s) failed", "--after polyforge#99: CORE-404"} {
-		if !strings.Contains(stderr, want) {
-			t.Errorf("stderr missing %q: %s", want, stderr)
-		}
+		"--after", "polyforge#9")
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "CORE-400: blocker polyforge#9 must be an execution ticket") {
+		t.Fatalf("code=%d stdout=%q stderr=%s", code, stdout, stderr)
 	}
 	// Local validation: an empty --after sends nothing.
 	var rec reqRecorder

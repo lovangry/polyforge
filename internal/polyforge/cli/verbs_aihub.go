@@ -29,8 +29,10 @@ var cmdFile = &Command{
 		"pf file dep rm <blocking> <blocked>\n" +
 		"pf file dep list <id>\n\n" +
 		"Dependencies are `blocks` edges inside one project: the blocked work\n" +
-		"item is not claimed until every blocker is WRAPPED. A failed or\n" +
-		"canceled blocker keeps it waiting — remove the edge to proceed.",
+		"item is not claimed until every blocker is WRAPPED. A blocker must be\n" +
+		"an execution ticket (bundle bound). A failed or canceled blocker keeps\n" +
+		"it waiting — remove the edge to proceed. --after is atomic: a bad\n" +
+		"blocker creates nothing.",
 	Setup: func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) == 0 {
@@ -125,7 +127,7 @@ func fileCreate(ctx *Context, args []string) error {
 		useStdin  = f.Bool("stdin", false, "read the full create-body JSON from stdin")
 	)
 	f.Var(&repos, "repo", "project repo this work item works in (repeatable; only these are cloned at claim)")
-	f.Var(&after, "after", "work item (id or slug) that must WRAP before this one is claimed (repeatable; a `blocks` edge)")
+	f.Var(&after, "after", "execution ticket (id or slug) that must WRAP before this one is claimed (repeatable; a `blocks` edge, written atomically with the create)")
 	f.Var(&content, "content", "markdown background; '-' reads stdin, '@file' reads a file")
 	f.Var(&labels, "label", "label (repeatable)")
 	f.Var(&milestone, "milestone", "milestone name")
@@ -211,6 +213,9 @@ func fileCreate(ctx *Context, args []string) error {
 		}
 		req.RepoInventory = raw
 	}
+	// --after travels in the create body: aihub writes the edges inside
+	// the create transaction, so a bad blocker creates nothing.
+	req.After = append(req.After, after...)
 	if len(attrs) > 0 {
 		req.Attrs = map[string]any{}
 		for _, kv := range attrs {
@@ -226,16 +231,6 @@ func fileCreate(ctx *Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	edgeErr := createAfterEdges(ctx, raw, after)
-	if len(after) > 0 {
-		// Re-read so the printed record carries the derived waiting_for.
-		var created api.WorkItem
-		if json.Unmarshal(raw, &created) == nil && created.ID != "" {
-			if fresh, gerr := ctx.aihub().GetWorkItemRaw(created.ID); gerr == nil {
-				raw = fresh
-			}
-		}
-	}
 	ctx.finish(raw, func() {
 		var wi WIView
 		if err := json.Unmarshal(raw, &wi); err == nil {
@@ -243,37 +238,7 @@ func fileCreate(ctx *Context, args []string) error {
 			renderWIDetail(ctx.Stdout, &wi)
 		}
 	})
-	return edgeErr
-}
-
-// createAfterEdges adds one `blocks` edge per --after onto the freshly
-// created work item. Create and edge are two server calls: a failed
-// edge does NOT roll the create back — every failure is reported (the
-// verb exits non-zero) naming the edge, and the work item stays as
-// created.
-func createAfterEdges(ctx *Context, raw json.RawMessage, after []string) error {
-	if len(after) == 0 {
-		return nil
-	}
-	var created api.WorkItem
-	if err := json.Unmarshal(raw, &created); err != nil || created.ID == "" {
-		return fmt.Errorf("file create: created, but the response carries no work item id; no --after edge was added")
-	}
-	name := created.Slug
-	if name == "" {
-		name = created.ID
-	}
-	var failed []string
-	for _, a := range after {
-		if _, err := ctx.aihub().AddBlocksDependency(a, created.ID); err != nil {
-			failed = append(failed, fmt.Sprintf("--after %s: %v", a, depErr(err)))
-		}
-	}
-	if len(failed) == 0 {
-		return nil
-	}
-	return fmt.Errorf("file create: %s was created, but %d of %d --after edge(s) failed (fix with `pf file dep add`):\n  %s",
-		name, len(failed), len(after), strings.Join(failed, "\n  "))
+	return nil
 }
 
 // depErr renders a dependency write failure with the server's reason

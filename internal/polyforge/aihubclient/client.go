@@ -143,6 +143,10 @@ type CreateWorkItemRequest struct {
 	// does not accept (url, subdir, base) instead of the CLI dropping it.
 	RepoInventory     json.RawMessage `json:"repo_inventory,omitempty"`
 	RepoInventoryBase json.RawMessage `json:"repo_inventory_base,omitempty"`
+	// After lists the work items (id or slug) this one runs after: aihub
+	// writes one `blocks` edge per entry inside the create transaction,
+	// or refuses the whole create (polyforge#161).
+	After []string `json:"after,omitempty"`
 }
 
 // CreateWorkItem creates a work item and returns the raw detail record.

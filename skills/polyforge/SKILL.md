@@ -57,7 +57,7 @@ EXTENDED_GLOB and starts a comment after whitespace.
 
 | Intent (EN / 中文) | Fragment | Face |
 |---|---|---|
-| file a new work item / create a ticket / new task / 建票 / 新建任务 / 提个需求 | `verbs/file.md` (create; check `pf queue --project P` first and add `--after` when it clearly touches the same work as a queued/running one) | AIHub |
+| file a new work item / create a ticket / new task / 建票 / 新建任务 / 提个需求 | `verbs/file.md` (create; check `pf queue --project P` first and add `--after <execution ticket>` when it clearly touches the same work as a queued/running one) | AIHub |
 | run it after X / this waits for X / drop that dependency / who is it waiting for / 等 X 做完再做 / 加依赖 / 去掉依赖 / 它在等谁 | `verbs/file.md` (`dep add` / `dep rm` / `dep list`) | AIHub |
 | edit a work item / update goal or content / 改一下目标 / 编辑这个票 / 更新优先级 | `verbs/file.md` (edit) | AIHub |
 | show me this work item / 看看这个票 / 详情 | `verbs/file.md` (show) | AIHub |

@@ -59,7 +59,9 @@ its dependency block.
 
 ## Dependencies
 
-A dependency is a `blocks` edge inside one project: "B runs after A". B
+A dependency is a `blocks` edge inside one project: "B runs after A". A
+must be an execution ticket (a bundle is bound) — a registration ticket or
+an epic never wraps, so aihub refuses it as a blocker. B
 stays queued — out of the ready queue, its claim refused — until A is
 **wrapped**. A failed or canceled A keeps B waiting; nobody releases it
 automatically. When only the order mattered, remove the edge (`pf file
@@ -67,12 +69,13 @@ dep rm A B`) and B becomes claimable; there is no `--force`. Wrapped
 means A finished, not that A's PR merged: a B released by a wrapped A
 whose PR is still open clones the default branch without A's changes.
 
-- `pf file create ... --after A` (repeatable, id or slug) files the work
-  item and then adds one edge per `--after`. A failed edge does not undo
-  the create: the verb prints the created work item, exits 1 and names
-  each failed edge — fix it with `pf file dep add`.
+- `pf file create ... --after A` (repeatable, id or slug of an execution
+  ticket) files the work item together with its edges in one step: if any
+  `--after` is refused (unknown, another project, not an execution
+  ticket) nothing is created — fix the value and file again.
 - `pf file dep add A B` / `pf file dep rm A B` add / remove "A blocks B";
-  `pf file dep list X` shows both sides of X (`after:` = what X waits
+  `pf file dep list X` shows both sides of X (adding an edge that already
+  exists is harmless) (`after:` = what X waits
   for, `before:` = what waits for X), each with its slug and status.
 - Who a queued work item waits for shows as `waiting-for:` in `pf file
   show` and as a WAITING-FOR column in `pf queue` (the server's derived
@@ -112,6 +115,7 @@ adds the dependency block. `dep add|rm|list` print the dependency view
 | `CORE-400` `REPO_NOT_IN_PROJECT` | A `--repo` name is not one of the project's repos | Name a repo the project has (`pf projects get <project>` lists them); a maintainer adds new repos to the project. |
 | `CORE-400` `INVENTORY_DUPLICATE_NAME` / `INVENTORY_URL_NOT_ALLOWED` / `INVENTORY_SUBDIR_UNSUPPORTED` / `INVENTORY_BASE_UNSUPPORTED` | The same repo named twice; a `--stdin` entry carrying `url`, `subdir` or `base` | Drop the duplicate; give names only. |
 | `CORE-400` (dependency) | An edge across two projects, or a work item depending on itself | Dependencies stay inside one project; name a work item of the same project. |
+| `CORE-400` `BLOCKER_NOT_EXECUTABLE` | The blocker (`--after` / the first `dep add` argument) has no bundle: a registration ticket or an epic | It can never wrap — name the execution ticket that does the work, or bind a bundle to it first (`pf file edit <id> --bundle NAME`). |
 | `CORE-404` | Unknown or invisible work item id, unknown project; `dep rm` of an edge that does not exist | No such work item (or you cannot see it) — check the `wi_` id or slug and the project name. |
 | `CORE-409` `DEPENDENCY_CYCLE` | The new edge would close a loop (B already waits, directly or not, for the other side) | Refused — the order you asked for contradicts an existing one; `pf file dep list` shows the chain. |
 | `CORE-409` | Create-time conflict (e.g. duplicate) | The state machine refuses this write — read `detail`. |

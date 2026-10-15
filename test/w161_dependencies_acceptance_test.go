@@ -88,6 +88,19 @@ func TestW161DependenciesEndToEnd(t *testing.T) {
 		t.Fatalf("cross-project refusal:\n%s", out)
 	}
 
+	// --after is atomic: a blocker that can never wrap (registration
+	// ticket) refuses the create and nothing is filed.
+	reg := w140Create(t, inst, project, "w161 registration ticket", nil, nil)
+	before := len(w140SegIDs(w161List(t, inst, project), "items"))
+	out = w113PfWant(t, inst, 1, env, "file", "create", "--project", project,
+		"--goal", "w161 refused", "--bundle", "w161-b", "--after", aSlug, "--after", w161Slug(t, inst, reg))
+	if !strings.Contains(out, "CORE-400") || !strings.Contains(out, "must be an execution ticket") {
+		t.Fatalf("registration blocker refusal:\n%s", out)
+	}
+	if after := len(w140SegIDs(w161List(t, inst, project), "items")); after != before {
+		t.Fatalf("a refused --after create filed a work item (%d -> %d)", before, after)
+	}
+
 	// A fails → B keeps waiting (owner ruling); dep rm releases it.
 	w140ClaimEnd(t, inst, a, "failed")
 	if w161InItems(t, inst, project, b.ID) {
@@ -113,4 +126,17 @@ func TestW161DependenciesEndToEnd(t *testing.T) {
 	if !w161InItems(t, inst, project, d) {
 		t.Fatalf("a wrapped blocker did not release its dependent")
 	}
+}
+
+func w161List(t *testing.T, inst *v1Install, project string) map[string]any {
+	t.Helper()
+	raw, err := inst.client.ListWorkItemsRaw(project, "", 200)
+	if err != nil {
+		t.Fatalf("list %s: %v", project, err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("list %s answer: %v (%s)", project, err, raw)
+	}
+	return m
 }
