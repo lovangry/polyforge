@@ -46,7 +46,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	workflowsDir := fs.String("workflows-dir", "", "workflows/ checkout dir (default ./workflows)")
 	piBin := fs.String("pi-bin", "", "harness binary (default pi)")
 	claudeBin := fs.String("claude-bin", "", "Claude Code binary for steps whose harness is claude (config claude_bin; default claude)")
-	sessionsRoot := fs.String("harness-sessions-root", "", "harness session store root for the live-transcript sync (env POLYFORGE_HARNESS_SESSIONS_ROOT; default <data-dir>/step-agent-sessions, the step processes' own session store)")
+	harnessRoot := fs.String("harness-root", "", "parent root of the step harness state dirs: <harness-root>/step-agent (dedicated step agent dir), /step-agent-sessions (pi sessions) and /claude-config (claude config dir: settings.json, projects/, debug/) (env POLYFORGE_HARNESS_ROOT; default <data-dir>). polyforge#171 unified the three dirs under one root; the former --harness-sessions-root (the pi sessions dir itself) was renamed so an old deployment fails loudly instead of silently moving its harness state")
 	operatorAgentDir := fs.String("operator-agent-dir", "", "SOURCE of the dedicated step agent directory's minimal set — model service credentials, model configuration and subagent definitions are copied from here into <data-dir>/step-agent (env POLYFORGE_OPERATOR_AGENT_DIR; default ~/.pi/agent). A configured source without a readable auth.json refuses the start")
 	gitRemoteBase := fs.String("git-remote-base", "", "aihub bare-repo base URL (default <server>/git)")
 	maxConcurrent := fs.Int("max-concurrent-jobs", 0, "max concurrent jobs (default 4)")
@@ -137,9 +137,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if abs, err := filepath.Abs(*workflowsDir); err == nil {
 		*workflowsDir = abs // GET /status reports it; pf doctor reads by it
 	}
-	if *sessionsRoot == "" {
-		*sessionsRoot = os.Getenv("POLYFORGE_HARNESS_SESSIONS_ROOT")
-	}
+	*harnessRoot = resolveHarnessRoot(*harnessRoot, os.Getenv("POLYFORGE_HARNESS_ROOT"))
 	if *operatorAgentDir == "" {
 		*operatorAgentDir = os.Getenv("POLYFORGE_OPERATOR_AGENT_DIR")
 	}
@@ -155,17 +153,17 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	cfg := Config{
-		MachineID:           *machineID,
-		DisplayName:         *displayName,
-		SocketPath:          *socket,
-		Mapping:             shared.Mapping,
-		DataDir:             *dataDir,
-		GitRemoteBase:       *gitRemoteBase,
-		WorkflowsDir:        *workflowsDir,
-		PiBin:               *piBin,
-		ClaudeBin:           *claudeBin,
-		AnthropicAuthToken:  shared.AnthropicAuthToken,
-		HarnessSessionsRoot: *sessionsRoot,
+		MachineID:          *machineID,
+		DisplayName:        *displayName,
+		SocketPath:         *socket,
+		Mapping:            shared.Mapping,
+		DataDir:            *dataDir,
+		GitRemoteBase:      *gitRemoteBase,
+		WorkflowsDir:       *workflowsDir,
+		PiBin:              *piBin,
+		ClaudeBin:          *claudeBin,
+		AnthropicAuthToken: shared.AnthropicAuthToken,
+		HarnessRoot:        *harnessRoot,
 		// An operator-named source is EXPLICIT: a missing auth.json
 		// under it refuses the start rather than running step agents
 		// without credentials (addendum 2).
@@ -216,6 +214,17 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// resolveHarnessRoot is the polyforge#171 resolution order for the
+// harness-root override: the --harness-root flag wins over the
+// POLYFORGE_HARNESS_ROOT env. An empty return means the documented
+// default (<data-dir>) applies — filled by the runtime's fill().
+func resolveHarnessRoot(flagVal, envVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	return envVal
 }
 
 // resolveAuto maps -auto to the initial auto switch (nil = unspecified:

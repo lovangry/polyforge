@@ -58,9 +58,9 @@ const locateSlack = 2 * time.Second
 // naming stays frozen even though the spawn-journal line's display-key
 // fossil (instance → spawn_token) is cleaned up.
 
-// HarnessSessionsRootDefault is the harness's default session store.
+// PiSessionsRootDefault is the harness's default session store.
 // A Config override exists for tests and relocated installs.
-func HarnessSessionsRootDefault() string {
+func PiSessionsRootDefault() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return filepath.Join(".pi", "agent", "sessions")
@@ -99,7 +99,7 @@ func piSessionDirName(capsuleDir string) string {
 // treat that as the typed transcript_missing condition, never an error.
 func LocateLiveTranscript(sessionsRoot, capsuleDir string, notBefore time.Time) string {
 	if sessionsRoot == "" {
-		sessionsRoot = HarnessSessionsRootDefault()
+		sessionsRoot = PiSessionsRootDefault()
 	}
 	dir := filepath.Join(sessionsRoot, piSessionDirName(capsuleDir))
 	ents, err := os.ReadDir(dir)
@@ -176,7 +176,7 @@ func (r *Runtime) syncLiveTranscript(capsuleDir string) {
 		fmt.Fprintf(os.Stderr, "runtime: transcript sync skipped: the latest spawn-journal line names an untrusted destination %q\n", last.Transcript)
 		return
 	}
-	src := LocateTranscript(r.cfg.HarnessSessionsRoot, capsuleDir, spawnAt, last.Harness, last.HarnessSession)
+	src := LocateTranscript(r.cfg.StepAgentSessionsDir(), capsuleDir, spawnAt, last.Harness, last.HarnessSession)
 	if src == "" || src == dst {
 		return
 	}

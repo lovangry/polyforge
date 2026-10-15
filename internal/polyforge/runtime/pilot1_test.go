@@ -372,7 +372,7 @@ func TestSealNeverOverwritesStepOneTranscript(t *testing.T) {
 	installOldAgent(t, sp, j)
 
 	t.Setenv("HOME", t.TempDir()) // the default harness session store
-	storeDir := filepath.Join(HarnessSessionsRootDefault(), piSessionDirName(j.capsuleDir))
+	storeDir := filepath.Join(PiSessionsRootDefault(), piSessionDirName(j.capsuleDir))
 	if err := os.MkdirAll(storeDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -430,8 +430,8 @@ func TestLiveTranscriptTailSyncedBeforeCommit(t *testing.T) {
 			j := seedJob(r, wi)
 			initGitCapsule(t, j)
 			installOldAgent(t, sp, j)
-			r.cfg.HarnessSessionsRoot = t.TempDir()
-			storeDir := filepath.Join(r.cfg.HarnessSessionsRoot, piSessionDirName(j.capsuleDir))
+			r.cfg.HarnessRoot = t.TempDir()
+			storeDir := filepath.Join(r.cfg.HarnessRoot, StepAgentSessionsDirName, piSessionDirName(j.capsuleDir))
 			if err := os.MkdirAll(storeDir, 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -515,8 +515,8 @@ func TestLiveTranscriptSyncRefusesForgedJournalDestination(t *testing.T) {
 			r, _, _ := newTestRuntime(t, newFakeHub(), sp)
 			j := seedJob(r, "wi_forge")
 			initGitCapsule(t, j)
-			r.cfg.HarnessSessionsRoot = t.TempDir()
-			storeDir := filepath.Join(r.cfg.HarnessSessionsRoot, piSessionDirName(j.capsuleDir))
+			r.cfg.HarnessRoot = t.TempDir()
+			storeDir := filepath.Join(r.cfg.HarnessRoot, StepAgentSessionsDirName, piSessionDirName(j.capsuleDir))
 			if err := os.MkdirAll(storeDir, 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -567,8 +567,8 @@ func TestLiveTranscriptSyncRefusesForgedJournalDestination(t *testing.T) {
 		r, _, _ := newTestRuntime(t, newFakeHub(), sp)
 		j := seedJob(r, "wi_honest")
 		initGitCapsule(t, j)
-		r.cfg.HarnessSessionsRoot = t.TempDir()
-		storeDir := filepath.Join(r.cfg.HarnessSessionsRoot, piSessionDirName(j.capsuleDir))
+		r.cfg.HarnessRoot = t.TempDir()
+		storeDir := filepath.Join(r.cfg.HarnessRoot, StepAgentSessionsDirName, piSessionDirName(j.capsuleDir))
 		_ = os.MkdirAll(storeDir, 0o755)
 		_ = os.WriteFile(filepath.Join(storeDir, "live.jsonl"), []byte("LIVE\n"), 0o644)
 		dst := sessionPathFor(j.capsuleDir, "tok2")

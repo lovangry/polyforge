@@ -567,11 +567,16 @@ Launch flags (with environment variable and default, where one exists):
       CLI is logged in by a human beforehand (config anthropic_auth_token,
       when set and ANTHROPIC_AUTH_TOKEN is not in the environment, is
       handed to the step as that variable, never on argv)
-  --harness-sessions-root PATH
-      harness session store root for the live-transcript sync
-      (env POLYFORGE_HARNESS_SESSIONS_ROOT; default
-      <data-dir>/step-agent-sessions — the step processes' own session
-      store, which the daemon also passes them)
+  --harness-root PATH
+      parent root of the step harness state dirs
+      (env POLYFORGE_HARNESS_ROOT; default <data-dir>):
+      <harness-root>/step-agent — the dedicated step agent dir,
+      /step-agent-sessions — the pi steps' session store the daemon
+      also passes them, /claude-config — claude's config dir (its
+      settings.json env section is the single credential authority
+      layer). polyforge#171 unified the three dirs under one root; the
+      former --harness-sessions-root (the pi sessions dir itself) was
+      renamed, so old deployments fail loudly at startup
   --operator-agent-dir PATH
       SOURCE of the dedicated step agent directory: the daemon copies
       the minimal set (auth.json, models.json, agents/,

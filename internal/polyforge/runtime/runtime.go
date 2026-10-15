@@ -77,17 +77,20 @@ type Config struct {
 	// ClaudeBin is the Claude Code binary (default "claude"; cli.toml
 	// claude_bin / --claude-bin), used by steps whose harness is claude.
 	ClaudeBin string
-	// AnthropicAuthToken is cli.toml's anthropic_auth_token: passed to a
-	// claude step process as ANTHROPIC_AUTH_TOKEN (environment only, never
-	// argv) when the daemon's own environment does not set the variable.
-	// The daemon never reads or manages any other credential.
+	// AnthropicAuthToken is cli.toml's anthropic_auth_token: passed to
+	// a claude step process as ANTHROPIC_AUTH_TOKEN (environment only,
+	// never argv) when the daemon's own environment does not set the
+	// variable. The daemon never reads or manages any other credential.
 	AnthropicAuthToken string
-	// HarnessSessionsRoot overrides the harness's default session store
-	// (the live-transcript locator of the seal/pause/bounded-fail sync).
-	// The default is the dedicated step-agent-sessions dir under DataDir
-	// (addendum 2): the step processes run with
-	// PI_CODING_AGENT_SESSION_DIR pointing at the same place.
-	HarnessSessionsRoot string
+	// HarnessRoot is the parent root of the three harness state dirs
+	// (polyforge#171): <harness-root>/step-agent (the dedicated step
+	// agent dir), <harness-root>/step-agent-sessions (the pi steps'
+	// session store) and <harness-root>/claude-config (claude's config
+	// dir: settings.json — the single credential authority layer —
+	// plus projects/ and debug/). Resolved as --harness-root >
+	// POLYFORGE_HARNESS_ROOT > DataDir; the Dir() derivations and
+	// stepagentdir.go hold the map.
+	HarnessRoot string
 	// OperatorAgentDir is the SOURCE of the dedicated step agent
 	// directory's minimal set (addendum 2, owner ruling A): the
 	// operator's agent dir by default; a flag/env-configured source is
@@ -140,13 +143,14 @@ func (c *Config) fill() {
 		c.OperatorAgentDir = OperatorAgentDirDefault()
 		c.OperatorAgentDirExplicit = false
 	}
-	// addendum 2: step processes run with their own session store
-	// (PI_CODING_AGENT_SESSION_DIR under the data dir), so the
-	// live-transcript locator's root follows them there by default. An
-	// explicit override (tests, relocated installs) still governs both
-	// sides — the spawner passes this same value to the child.
-	if c.HarnessSessionsRoot == "" && c.DataDir != "" {
-		c.HarnessSessionsRoot = c.StepAgentSessionsDir()
+	// 	v2.5.2/#171/#159: step processes run with their own session store
+	// (PI_CODING_AGENT_SESSION_DIR under the harness root)
+	// so the live-transcript locator's root follows them there by
+	// default. A harness-root override (tests, relocated installs)
+	// moves the whole harness tree together. An empty-DataDir bare
+	// Config (unit tests) keeps no redirect.
+	if c.HarnessRoot == "" && c.DataDir != "" {
+		c.HarnessRoot = c.DataDir
 	}
 	if c.MaxRecoveries <= 0 {
 		c.MaxRecoveries = 2
