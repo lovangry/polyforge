@@ -31,9 +31,11 @@ type harnessStatus struct {
 	Verified bool   `json:"verified,omitempty"`
 	// VersionError is the --version probe's failure, when it failed.
 	VersionError string `json:"version_error,omitempty"`
-	// set|unset only — never a value.
+	// set|unset only — never a value. polyforge#171: the toml line is
+	// gone (the credential key was deleted from the config; authority
+	// moves to the claude-config settings.json env block, reported by
+	// the doctor reshape below this closeout).
 	AuthTokenEnv    string `json:"auth_token_env,omitempty"`
-	AuthTokenToml   string `json:"auth_token_toml,omitempty"`
 	APIKeyEnv       string `json:"api_key_env,omitempty"`
 	BaseURLEnv      string `json:"base_url_env,omitempty"`
 	BackgroundTasks string `json:"background_tasks,omitempty"`
@@ -68,7 +70,6 @@ func (d *Daemon) harnessStatuses() map[string]harnessStatus {
 		cl.Bin = "claude"
 	}
 	cl.AuthTokenEnv = setOrUnset(os.Getenv("ANTHROPIC_AUTH_TOKEN"))
-	cl.AuthTokenToml = setOrUnset(d.cfg.AnthropicAuthToken)
 	cl.APIKeyEnv = setOrUnset(os.Getenv("ANTHROPIC_API_KEY"))
 	cl.BaseURLEnv = setOrUnset(os.Getenv("ANTHROPIC_BASE_URL"))
 	cl.BackgroundTasks = "disabled by the adapter (--bare, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1, --tools allowlist)"

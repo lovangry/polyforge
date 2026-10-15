@@ -84,10 +84,6 @@ type Config struct {
 	// claude (polyforge#159; --claude-bin / cli.toml claude_bin; default
 	// "claude").
 	ClaudeBin string
-	// AnthropicAuthToken is cli.toml's anthropic_auth_token: handed to a
-	// claude step as ANTHROPIC_AUTH_TOKEN (env only) when the daemon's
-	// own environment does not set it. Never reported, never logged.
-	AnthropicAuthToken string
 	// HarnessRoot is the parent root of the three harness state dirs
 	// (polyforge#171: <harness-root>/step-agent, /step-agent-sessions,
 	// /claude-config). "" = the default <data-dir>; the doctor's claude
@@ -325,7 +321,6 @@ func New(cfg Config) (*Daemon, error) {
 		WorkflowsDir:             cfg.WorkflowsDir,
 		PiBin:                    cfg.PiBin,
 		ClaudeBin:                cfg.ClaudeBin,
-		AnthropicAuthToken:       cfg.AnthropicAuthToken,
 		HarnessRoot:              cfg.HarnessRoot,
 		OperatorAgentDir:         cfg.OperatorAgentDir,
 		OperatorAgentDirExplicit: cfg.OperatorAgentDirExplicit,

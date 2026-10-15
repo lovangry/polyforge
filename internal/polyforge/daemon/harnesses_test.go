@@ -20,10 +20,10 @@ func TestHarnessStatusesNeverCarryValues(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
 	os.Unsetenv("ANTHROPIC_API_KEY")
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "env-SENTINEL")
-	d := &Daemon{cfg: Config{ClaudeBin: bin, PiBin: "/nonexistent/pi", AnthropicAuthToken: "toml-SENTINEL"}}
+	d := &Daemon{cfg: Config{ClaudeBin: bin, PiBin: "/nonexistent/pi"}}
 	hs := d.harnessStatuses()
 	cl := hs["claude"]
-	if !cl.Found || cl.Version != "2.1.296" || !cl.Verified || cl.AuthTokenEnv != "set" || cl.AuthTokenToml != "set" || cl.APIKeyEnv != "unset" {
+	if !cl.Found || cl.Version != "2.1.296" || !cl.Verified || cl.AuthTokenEnv != "set" || cl.APIKeyEnv != "unset" {
 		t.Fatalf("claude status %+v", cl)
 	}
 	if hs["pi"].Found {

@@ -431,18 +431,18 @@ func claudeHarnessCheck(steps []workspace.StepResolution, workflowsDir string, d
 	case !h.Verified:
 		warn(fmt.Sprintf("version %s is not in the verified set (the adapter's argv/stream contract was verified on another version)", h.Version))
 	}
-	tokenSet := h.AuthTokenEnv == "set" || h.AuthTokenToml == "set"
+	tokenSet := h.AuthTokenEnv == "set"
 	switch {
 	case !tokenSet && h.APIKeyEnv != "set":
-		warn("no credential variable is visible to the daemon (neither ANTHROPIC_AUTH_TOKEN — env or anthropic_auth_token — nor ANTHROPIC_API_KEY); the credential may live in Claude Code's settings.json `env` section (applied under --bare too), which the daemon cannot see — not an error if so")
+		warn("no credential variable is visible to the daemon (neither ANTHROPIC_AUTH_TOKEN — env — nor ANTHROPIC_API_KEY); the credential authority layer is the claude-config settings.json env block (polyforge#171), which the daemon itself reports set/unset in the doctor tokens below")
 	case tokenSet && h.APIKeyEnv == "set":
 		warn("both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are set — which one Claude Code uses is unverified")
 	}
 	if h.BaseURLEnv == "set" {
 		warn("ANTHROPIC_BASE_URL is set in the daemon's environment: claude steps inherit it (they are meant to use the official API)")
 	}
-	detail := fmt.Sprintf("%s — %s %s at %s; auth token env %s, auth token config %s, api key env %s; background tasks %s",
-		table, h.Bin, h.Version, h.Path, h.AuthTokenEnv, h.AuthTokenToml, h.APIKeyEnv, h.BackgroundTasks)
+	detail := fmt.Sprintf("%s — %s %s at %s; auth token env %s, api key env %s; background tasks %s",
+		table, h.Bin, h.Version, h.Path, h.AuthTokenEnv, h.APIKeyEnv, h.BackgroundTasks)
 	if len(notes) > 0 {
 		detail += " — " + strings.Join(notes, "; ")
 	}

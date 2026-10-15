@@ -77,11 +77,6 @@ type Config struct {
 	// ClaudeBin is the Claude Code binary (default "claude"; cli.toml
 	// claude_bin / --claude-bin), used by steps whose harness is claude.
 	ClaudeBin string
-	// AnthropicAuthToken is cli.toml's anthropic_auth_token: passed to
-	// a claude step process as ANTHROPIC_AUTH_TOKEN (environment only,
-	// never argv) when the daemon's own environment does not set the
-	// variable. The daemon never reads or manages any other credential.
-	AnthropicAuthToken string
 	// HarnessRoot is the parent root of the three harness state dirs
 	// (polyforge#171): <harness-root>/step-agent (the dedicated step
 	// agent dir), <harness-root>/step-agent-sessions (the pi steps'

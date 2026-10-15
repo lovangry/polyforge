@@ -113,12 +113,10 @@ func (s *claudeSpawner) buildCmd(p SpawnParams) (*exec.Cmd, error) {
 	// the "0" value is OFF for everything CLAUDE_CONFIG_DIR-side, so the
 	// existence is the semantic (see the WI ruling 5)
 	additions = append(additions, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")
-	// env beats the claude-config authority: an inherited
-	// ANTHROPIC_AUTH_TOKEN is left as is (deleted with the cli.toml key
-	// in the #171 closeout)
-	if os.Getenv("ANTHROPIC_AUTH_TOKEN") == "" && s.cfg.AnthropicAuthToken != "" {
-		additions = append(additions, "ANTHROPIC_AUTH_TOKEN="+s.cfg.AnthropicAuthToken)
-	}
+	// Zero credential injection (polyforge#171, closing out #159's three-layer blind spot):
+	// the adapter NEVER injects ANTHROPIC_AUTH_TOKEN or any other
+	// credential — the settings.json env block under claude-config is
+	// the single authority layer, applied by claude itself.
 	// A daemon started from inside a Claude Code session inherits that
 	// session's CLAUDECODE / CLAUDE_CODE_* markers and switches; none of
 	// them may shape the step (clean context) — only the switches the

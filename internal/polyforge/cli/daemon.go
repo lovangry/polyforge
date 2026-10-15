@@ -204,7 +204,6 @@ type HarnessStatus struct {
 	Verified        bool   `json:"verified,omitempty"`
 	VersionError    string `json:"version_error,omitempty"`
 	AuthTokenEnv    string `json:"auth_token_env,omitempty"`
-	AuthTokenToml   string `json:"auth_token_toml,omitempty"`
 	APIKeyEnv       string `json:"api_key_env,omitempty"`
 	BaseURLEnv      string `json:"base_url_env,omitempty"`
 	BackgroundTasks string `json:"background_tasks,omitempty"`

@@ -17,7 +17,7 @@ func TestClaudeHarnessCheck(t *testing.T) {
 	steps := []workspace.StepResolution{{Project: "p", Bundle: "bug-fix", Step: "review", Harness: "claude",
 		HarnessFrom: "steps.p.review.harness", Served: []string{"claude-opus-5-5"}, ModelsFrom: "steps.p.review.models"}}
 	ok := HarnessStatus{Bin: "claude", Found: true, Path: "/bin/claude", Version: "2.1.296", Verified: true,
-		AuthTokenEnv: "set", AuthTokenToml: "unset", APIKeyEnv: "unset", BaseURLEnv: "unset", BackgroundTasks: "disabled"}
+		AuthTokenEnv: "set", APIKeyEnv: "unset", BaseURLEnv: "unset", BackgroundTasks: "disabled"}
 	cases := []struct {
 		name   string
 		steps  []workspace.StepResolution
@@ -32,7 +32,7 @@ func TestClaudeHarnessCheck(t *testing.T) {
 		{"older daemon", steps, true, map[string]HarnessStatus{}, "warn", "no harness status"},
 		{"binary missing", steps, true, map[string]HarnessStatus{"claude": {Bin: "claude"}}, "fail", "does not resolve"},
 		{"unverified version", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.Version, h.Verified = "9.9.9", false; return h }()}, "warn", "9.9.9 is not in the verified set"},
-		{"no credential variable", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.AuthTokenEnv = "unset"; return h }()}, "warn", "settings.json `env` section"},
+		{"no credential variable", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.AuthTokenEnv = "unset"; return h }()}, "warn", "credential authority layer is the claude-config settings.json env block"},
 		{"base url set", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.BaseURLEnv = "set"; return h }()}, "warn", "ANTHROPIC_BASE_URL is set"},
 	}
 	for _, c := range cases {
@@ -47,14 +47,14 @@ func TestClaudeHarnessCheck(t *testing.T) {
 
 func TestConfigClaudeKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cli.toml")
-	if err := os.WriteFile(path, []byte("claude_bin = \"/opt/claude\"\nanthropic_auth_token = \"tok\"\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("claude_bin = \"/opt/claude\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ClaudeBin != "/opt/claude" || cfg.AnthropicAuthToken != "tok" {
+	if cfg.ClaudeBin != "/opt/claude" {
 		t.Fatalf("cfg %+v", cfg)
 	}
 }

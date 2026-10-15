@@ -313,3 +313,22 @@ func TestConfigUnknownTopLevelKeyRefused(t *testing.T) {
 		}
 	}
 }
+
+// TestConfigResidualAuthTokenRefused: polyforge#171 hard-delete — the
+// former anthropic_auth_token carries NO deprecation alias. An old
+// deployment's cli.toml with the residual key fails the startup parse
+// with the unknown-key error, naming the key (never silently accepted,
+// never a migrate path): the credential authority is
+// <harness-root>/claude-config/settings.json from now on.
+func TestConfigResidualAuthTokenRefused(t *testing.T) {
+	clearEnv(t)
+	path := writeTempConfig(t, "anthropic_auth_token = \"sk-old-SENTINEL\"\n")
+	_, err := LoadConfig(path)
+	want := `unknown key "anthropic_auth_token" in ` + path
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("residual token key: err = %v, want it to contain %q", err, want)
+	}
+	if strings.Contains(err.Error(), "sk-old-SENTINEL") {
+		t.Errorf("the error must name the KEY, never its value")
+	}
+}

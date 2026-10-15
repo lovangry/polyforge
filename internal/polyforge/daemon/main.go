@@ -153,17 +153,16 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	cfg := Config{
-		MachineID:          *machineID,
-		DisplayName:        *displayName,
-		SocketPath:         *socket,
-		Mapping:            shared.Mapping,
-		DataDir:            *dataDir,
-		GitRemoteBase:      *gitRemoteBase,
-		WorkflowsDir:       *workflowsDir,
-		PiBin:              *piBin,
-		ClaudeBin:          *claudeBin,
-		AnthropicAuthToken: shared.AnthropicAuthToken,
-		HarnessRoot:        *harnessRoot,
+		MachineID:     *machineID,
+		DisplayName:   *displayName,
+		SocketPath:    *socket,
+		Mapping:       shared.Mapping,
+		DataDir:       *dataDir,
+		GitRemoteBase: *gitRemoteBase,
+		WorkflowsDir:  *workflowsDir,
+		PiBin:         *piBin,
+		ClaudeBin:     *claudeBin,
+		HarnessRoot:   *harnessRoot,
 		// An operator-named source is EXPLICIT: a missing auth.json
 		// under it refuses the start rather than running step agents
 		// without credentials (addendum 2).

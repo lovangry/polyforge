@@ -563,10 +563,10 @@ Launch flags (with environment variable and default, where one exists):
   --claude-bin PATH
       Claude Code binary for the steps whose harness is claude
       (config claude_bin; default claude). A claude step runs
-      claude -p --bare; the daemon never manages its credentials — the
-      CLI is logged in by a human beforehand (config anthropic_auth_token,
-      when set and ANTHROPIC_AUTH_TOKEN is not in the environment, is
-      handed to the step as that variable, never on argv)
+      claude -p --bare; the daemon never manages its credentials —
+      the claude-config settings.json env block is the authority layer
+      (polyforge#171: the former config anthropic_auth_token was hard-
+      deleted, a residual key fails the startup parse)
   --harness-root PATH
       parent root of the step harness state dirs
       (env POLYFORGE_HARNESS_ROOT; default <data-dir>):
