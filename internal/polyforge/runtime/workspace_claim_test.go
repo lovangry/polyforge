@@ -131,6 +131,7 @@ func TestWorkspaceYamlRefusalFamilies(t *testing.T) {
 		{"retired kind key", "steps:\n  proj:\n    gate: { models: [a] }\n"},
 		{"legacy top-level models (pre-#169 shape)", "models:\n  proj:\n    default: [a]\n"},
 		{"harness not accepted yet", "steps:\n  proj:\n    default: { models: [a], harness: pi }\n"},
+		{"project not mapped to this workspace", "steps:\n  proj:\n    default: { models: [a] }\n  ghost:\n    default: { models: [b] }\n"},
 		{"empty project entry", "steps:\n  proj:\n"},
 		{"empty model id", "steps:\n  proj:\n    default: { models: [\"\"] }\n"},
 		{"scalar instead of list", "steps:\n  proj:\n    default: a\n"},

@@ -314,7 +314,10 @@ stays queued — and `pf doctor` names every unknown key
 (`steps.<project>.<key>`). A workflows dir with no readable bundle
 refuses with "no workflows found in <dir>". So a retired kind that is
 not also a step id (`qa`, `author`, `gate`) refuses; `code`, `spec` and
-`review` load but mean only the step with that id.
+`review` load but mean only the step with that id. Likewise every
+project key under `steps:` must be a project cli.toml maps to that
+workspace, and a `models` list's ids are trimmed and must be non-empty,
+unique strings (the `pf submit --models` rules).
 
 Step-id keys are checked against the workflows dir at every claim, not
 once: before deploying a workflows release that removes or renames a

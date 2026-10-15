@@ -293,8 +293,9 @@ func w079Setup(t *testing.T, inst *v1Install, wss ...w113WS) *w113Daemon {
 func TestW079AbsentAndEmptyYamlRunExactlyAsHead(t *testing.T) {
 	remoteURL, remoteHead := w079Remote(t, "w079reg.txt", "registry marker\n")
 	inst := newV1InstallRepos(t, []api.ProjectRepo{{Name: "w079reg", URL: remoteURL}})
+	w113EnsureProject(t, inst, "w079other")
 	ws := t.TempDir()
-	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
+	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e", "w079other"}})
 
 	wiA := w113NewWI(t, inst, "e2e", "w079 absent-yaml run exactly as head", envelopeQuickFix())
 	capA := w079Run(t, d, inst, ws, wiA)
@@ -511,9 +512,10 @@ func TestW079InvalidYamlRefusesWithoutClaim(t *testing.T) {
 		{"harness not accepted yet", "steps:\n  e2e:\n    fix: { models: [a], harness: pi }\n", []string{"harness"}},
 		{"empty project entry", "steps:\n  e2e:\n", nil},
 		{"null list", "steps:\n  e2e:\n    fix:\n", nil},
-		{"list not a list", "steps:\n  e2e:\n    default: abc\n", nil},
+		{"entry a scalar", "steps:\n  e2e:\n    default: abc\n", []string{"steps.e2e.default: must be `{ models: [...] }`"}},
 		{"empty model id", "steps:\n  e2e:\n    default: { models: [\"\"] }\n", nil},
-		{"type mismatch on models", "models: 42\n", nil},
+		{"legacy models as a scalar", "models: 42\n", []string{"`models:` was replaced by `steps:`"}},
+		{"project not mapped to this workspace", "steps:\n  w079ghost:\n    default: { models: [a] }\n", []string{"w079ghost", "not mapped to this workspace"}},
 		{"duplicate project key", "steps:\n  e2e:\n    default: { models: [a] }\n  w079dup:\n    default: { models: [a] }\n  w079dup:\n    default: { models: [b] }\n", []string{"w079dup"}},
 		{"duplicate list key", "steps:\n  e2e:\n    default: { models: [a] }\n    default: { models: [b] }\n", []string{"default"}},
 	}

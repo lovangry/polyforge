@@ -907,7 +907,7 @@ func (r *Runtime) LoadWorkspace(project string) (*workspace.Config, error) {
 	if err != nil {
 		return nil, unmappedProjectError(project)
 	}
-	wcfg, err := workspace.Load(ws, r.cfg.WorkflowsDir)
+	wcfg, err := workspace.Load(ws, r.cfg.WorkflowsDir, r.cfg.Mapping.ProjectsOf(ws))
 	if err != nil {
 		return nil, &api.Error{
 			Code:   api.ErrDaemonWorkspaceYaml,

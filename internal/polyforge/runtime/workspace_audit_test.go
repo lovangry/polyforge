@@ -48,7 +48,7 @@ func newAuditRuntime(t *testing.T, repos []api.ProjectRepo) (*Runtime, string) {
 	sp := &scriptedSpawner{}
 	cfg := Config{
 		MachineID:     "m-test",
-		Mapping:       mappingFor(ws, "proj"),
+		Mapping:       mappingFor(ws, "proj", "other"),
 		DataDir:       filepath.Join(t.TempDir(), "data"),
 		AgentStarter:  scriptedEngineStarter(sp),
 		MaxRecoveries: 2,
@@ -88,7 +88,7 @@ func TestGovernedClaimWritesAuditRecord(t *testing.T) {
 	}
 }
 
-// A yaml that lists only ANOTHER project, and a no-yaml claim, record NO
+// A yaml that lists only ANOTHER (mapped) project, and a no-yaml claim, record NO
 // audit content — the legacy fields (including the Repos name→SHA
 // baselines) are unchanged.
 func TestUngovernedClaimWritesNoAuditContent(t *testing.T) {

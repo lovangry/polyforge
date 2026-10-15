@@ -34,7 +34,7 @@ func writeYaml(t *testing.T, content string) string {
 // TestLoadAbsentAndEmptyAreNil pins the absent-equivalence rule: a
 // missing file and an empty/comments-only file both answer (nil, nil).
 func TestLoadAbsentAndEmptyAreNil(t *testing.T) {
-	cfg, err := Load(t.TempDir(), stepsDir(t))
+	cfg, err := Load(t.TempDir(), stepsDir(t), nil)
 	if err != nil || cfg != nil {
 		t.Fatalf("absent yaml: %+v, %v; want nil, nil", cfg, err)
 	}
@@ -45,7 +45,7 @@ func TestLoadAbsentAndEmptyAreNil(t *testing.T) {
 		"empty document": "---\n",
 		"null steps":     "steps:\n",
 	} {
-		cfg, err := Load(writeYaml(t, content), stepsDir(t))
+		cfg, err := Load(writeYaml(t, content), stepsDir(t), nil)
 		if err != nil || cfg != nil {
 			t.Fatalf("%s: %+v, %v; want nil, nil (absent-equivalent)", name, cfg, err)
 		}
@@ -54,7 +54,7 @@ func TestLoadAbsentAndEmptyAreNil(t *testing.T) {
 
 // TestLoadValidGrammars pins the valid shapes and the decoded content.
 func TestLoadValidGrammars(t *testing.T) {
-	cfg, err := Load(writeYaml(t, "steps:\n  e2e:\n    default: { models: [a, b] }\n    code: { models: [c] }\n    review: { models: [] }\n  other:\n    spec: { models: [d] }\n"), stepsDir(t))
+	cfg, err := Load(writeYaml(t, "steps:\n  e2e:\n    default: { models: [a, b] }\n    code: { models: [c] }\n    review: { models: [] }\n  other:\n    spec: { models: [d] }\n"), stepsDir(t), nil)
 	if err != nil || cfg == nil {
 		t.Fatalf("valid yaml refused: %v", err)
 	}
@@ -91,24 +91,30 @@ func TestLoadRefusals(t *testing.T) {
 		{"blank model id in step list", "steps:\n  e2e:\n    code: { models: [a, \"  \"] }\n", []string{"e2e", "code"}},
 		{"null project entry", "steps:\n  e2e:\n", []string{"e2e"}},
 		{"null list", "steps:\n  e2e:\n    code:\n", []string{"e2e", "code"}},
-		{"models not a map", "models: 42\n", nil},
-		{"project not a map", "steps:\n  e2e: [a]\n", nil},
-		{"list not a list", "steps:\n  e2e:\n    code: a\n", nil},
-		{"list of non-strings", "steps:\n  e2e:\n    code: { models: [[a]] }\n", nil},
+		{"steps not a map", "steps: 42\n", []string{"steps: must be a mapping of project → step entries"}},
+		{"steps a list", "steps: [a]\n", []string{"steps: must be a mapping"}},
+		{"project not a map", "steps:\n  e2e: [a]\n", []string{"steps.e2e: must be a mapping of step entries"}},
+		{"entry a scalar", "steps:\n  e2e:\n    code: a\n", []string{"steps.e2e.code: must be `{ models: [...] }`"}},
+		{"list of non-strings", "steps:\n  e2e:\n    code: { models: [[a]] }\n", []string{"steps.e2e.code.models[0]: must be a model-id string"}},
+		{"null model item", "steps:\n  e2e:\n    code: { models: [a, ~] }\n", []string{"steps.e2e.code.models[1]"}},
+		{"numeric model item", "steps:\n  e2e:\n    code: { models: [a, 42] }\n", []string{"steps.e2e.code.models[1]: must be a model-id string"}},
+		{"duplicate model id after trim", "steps:\n  e2e:\n    code: { models: [a, \" a \"] }\n", []string{"steps.e2e.code.models[1]: repeats \"a\""}},
+		{"models a scalar", "steps:\n  e2e:\n    code: { models: a }\n", []string{"steps.e2e.code.models: must be a list of model ids"}},
+		{"legacy models wins over other unknown keys", "workflow_defaults: {}\nmodels:\n  e2e:\n    code: [a]\n", []string{"`models:` was replaced by `steps:`"}},
 		{"duplicate project key", "steps:\n  e2e:\n    code: { models: [a] }\n  e2e:\n    code: { models: [b] }\n", []string{"e2e"}},
 		{"duplicate step key", "steps:\n  e2e:\n    code: { models: [a] }\n    code: { models: [b] }\n", []string{"code"}},
 		{"duplicate steps key", "steps:\n  e2e:\n    code: { models: [a] }\nsteps:\n  x:\n    code: { models: [b] }\n", []string{"steps"}},
 		{"legacy top-level models", "models:\n  e2e:\n    default: [a]\n", []string{"`models:` was replaced by `steps:`", "steps.<project>.<key>.models", "docs/upgrade.md"}},
 		{"legacy models beside steps", "steps:\n  e2e:\n    default: { models: [a] }\nmodels:\n  e2e:\n    code: [b]\n", []string{"`models:` was replaced by `steps:`"}},
-		{"unknown sub-key", "steps:\n  e2e:\n    fix: { models: [a], modles: [b] }\n", []string{"modles", "only `models`"}},
-		{"harness not accepted yet", "steps:\n  e2e:\n    fix: { models: [a], harness: pi }\n", []string{"harness", "only `models`"}},
+		{"unknown sub-key", "steps:\n  e2e:\n    fix: { models: [a], modles: [b] }\n", []string{"steps.e2e.fix.modles", "only key is `models`"}},
+		{"harness not accepted yet", "steps:\n  e2e:\n    fix: { models: [a], harness: pi }\n", []string{"steps.e2e.fix.harness", "only key is `models`"}},
 		{"entry without models", "steps:\n  e2e:\n    fix: {}\n", []string{"steps.e2e.fix.models"}},
-		{"bare list instead of entry", "steps:\n  e2e:\n    fix: [a]\n", nil},
+		{"bare list instead of entry", "steps:\n  e2e:\n    fix: [a]\n", []string{"steps.e2e.fix: must be `{ models: [...] }` (the pre-#169 list form?)"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			ws := writeYaml(t, c.yaml)
-			cfg, err := Load(ws, stepsDir(t))
+			cfg, err := Load(ws, stepsDir(t), nil)
 			if err == nil {
 				t.Fatalf("invalid yaml accepted: %+v", cfg)
 			}
@@ -138,7 +144,7 @@ func TestUnreadableYamlIsTyped(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(ws, FileName), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(ws, stepsDir(t)); err == nil {
+	if _, err := Load(ws, stepsDir(t), nil); err == nil {
 		t.Fatal("a directory at the yaml path must refuse")
 	}
 }
@@ -148,14 +154,14 @@ func TestUnreadableYamlIsTyped(t *testing.T) {
 // serve several step ids.
 func TestLoadStepKeysNeedTheInstalledSet(t *testing.T) {
 	ws := writeYaml(t, "steps:\n  e2e:\n    code: { models: &c [a, b] }\n    fix: { models: *c }\n    bogus: { models: *c }\n")
-	if _, err := Load(ws, stepsDir(t)); err == nil || !strings.Contains(err.Error(), "steps.e2e.bogus") {
+	if _, err := Load(ws, stepsDir(t), nil); err == nil || !strings.Contains(err.Error(), "steps.e2e.bogus") {
 		t.Fatalf("an unknown step id must refuse, got %v", err)
 	}
-	cfg, err := Load(ws, "")
+	cfg, err := Load(ws, "", nil)
 	if err != nil || len(cfg.Models["e2e"]["fix"]) != 2 {
 		t.Fatalf("no workflows dir: %+v, %v; want the anchored lists loaded", cfg, err)
 	}
-	if _, err := Load(ws, filepath.Join(t.TempDir(), "missing")); err == nil || !strings.Contains(err.Error(), "unreadable") {
+	if _, err := Load(ws, filepath.Join(t.TempDir(), "missing"), nil); err == nil || !strings.Contains(err.Error(), "unreadable") {
 		t.Fatalf("an unreadable workflows dir must refuse, got %v", err)
 	}
 }
@@ -165,11 +171,26 @@ func TestLoadStepKeysNeedTheInstalledSet(t *testing.T) {
 // every key unknown; a default-only yaml still loads.
 func TestLoadEmptyWorkflowsDirSaysSo(t *testing.T) {
 	empty := t.TempDir()
-	_, err := Load(writeYaml(t, "steps:\n  e2e:\n    fix: { models: [a] }\n    code: { models: [b] }\n"), empty)
+	_, err := Load(writeYaml(t, "steps:\n  e2e:\n    fix: { models: [a] }\n    code: { models: [b] }\n"), empty, nil)
 	if err == nil || !strings.Contains(err.Error(), "no workflows found in "+empty) || strings.Contains(err.Error(), "unknown key") {
 		t.Fatalf("empty workflows dir: %v", err)
 	}
-	if cfg, err := Load(writeYaml(t, "steps:\n  e2e:\n    default: { models: [a] }\n"), empty); err != nil || cfg == nil {
+	if cfg, err := Load(writeYaml(t, "steps:\n  e2e:\n    default: { models: [a] }\n"), empty, nil); err != nil || cfg == nil {
 		t.Fatalf("default-only yaml over an empty workflows dir: %+v, %v", cfg, err)
+	}
+}
+
+// TestLoadProjectsMustBeMapped: a project key under steps that cli.toml
+// does not map to this workspace refuses, naming it and the mapped set;
+// nil skips the check. Model ids are trimmed on load.
+func TestLoadProjectsMustBeMapped(t *testing.T) {
+	ws := writeYaml(t, "steps:\n  e2e:\n    fix: { models: [\" a \"] }\n  ghost:\n    default: { models: [b] }\n")
+	_, err := Load(ws, stepsDir(t), []string{"e2e", "other"})
+	if err == nil || !strings.Contains(err.Error(), "project(s) ghost are not mapped to this workspace in cli.toml (it maps: e2e, other)") {
+		t.Fatalf("unmapped project: %v", err)
+	}
+	cfg, err := Load(ws, stepsDir(t), nil)
+	if err != nil || cfg.Models["e2e"]["fix"][0] != "a" {
+		t.Fatalf("nil project set: %+v, %v; want loaded with trimmed ids", cfg, err)
 	}
 }

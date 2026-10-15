@@ -220,7 +220,7 @@ One row per sub-package, exactly as `internal/` exists today:
 | `internal/polyforge/mapping` | The workspace→projects plan read from cli.toml's `[workspace]` sections, and its validated inverse (project → workspace). |
 | `internal/polyforge/sessionjsonl` | The single parser of the harness session-jsonl format (live transcript tail extraction). |
 | `internal/polyforge/supervise` | The driver↔supervisor contract: facts, verdicts and the per-WI link (v2-converge §2.2–2.5). |
-| `internal/polyforge/workspace` | The `.polyforge.yaml` per-project model-candidates loader, read and validated by the daemon before every claim (an invalid file refuses the claim without claiming). |
+| `internal/polyforge/workspace` | The `.polyforge.yaml` loader (`steps.<project>.<default\|step-id>.models`), read and validated by the daemon before every claim and by `pf doctor` (an invalid file refuses the claim without claiming). |
 | `internal/polyforge/observe` | Observe lane: the events log, per-WI monitor goroutines, live-transcript streaming, session verification, and the live activity / pending-question / progress views the daemon reads. |
 | `internal/polyforge/driver` | The Go execution driver: owns `runtime-state/execution.json`, spawns one step process per workflow step and validates each result envelope (needs_input rules, human gate, command-evidence gate). |
 | `internal/polyforge/watcher` | The `pf watch` engine: decision classification (fixed-template wake-up lines) and the resident per-chat watcher with its progress file. |
@@ -467,8 +467,9 @@ the mapping.
 Per-project model candidates. A workspace root may carry a
 `.polyforge.yaml` whose only section is `steps` (strict: unknown keys at
 any level, duplicate keys, type mismatches, empty model ids and a
-per-step key that is no step id of the daemon's installed workflows are
-load errors; a step entry's only key is `models`; the pre-#169
+per-step key that is no step id of the daemon's installed workflows, a
+project the cli.toml mapping does not route to this workspace, and
+duplicate model ids in one list are load errors; a step entry's only key is `models`; the pre-#169
 top-level `models:` section and the old `projects:` / `workflow_defaults:`
 shapes fail loudly):
 

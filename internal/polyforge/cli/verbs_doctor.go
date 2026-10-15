@@ -12,6 +12,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
+	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
@@ -194,7 +195,7 @@ func runDoctorChecks(ctx *Context) doctorReport {
 	if cfg.Mapping.Empty() {
 		add(docChYaml, "skip", "not run: the mapping is absent")
 	} else {
-		st, detail := workspaceYamlCheck(cfg.Mapping.Workspaces(), workflowsDir, sockOK)
+		st, detail := workspaceYamlCheck(cfg.Mapping, workflowsDir, sockOK)
 		add(docChYaml, st, detail)
 	}
 
@@ -292,15 +293,15 @@ func probeDaemonSocket(sock string) (bool, string, string) {
 // workspaceYamlCheck loads every mapped workspace's .polyforge.yaml the
 // way a claim does. Without the daemon's workflows dir the per-step keys
 // cannot be judged: a yaml that otherwise loads is a warn, never a pass.
-func workspaceYamlCheck(workspaces []string, workflowsDir string, daemonUp bool) (string, string) {
+func workspaceYamlCheck(m *mapping.Plan, workflowsDir string, daemonUp bool) (string, string) {
 	var fails []string
 	present := 0
-	for _, ws := range workspaces {
+	for _, ws := range m.Workspaces() {
 		if _, err := os.Stat(workspace.PathFor(ws)); err != nil {
 			continue
 		}
 		present++
-		if _, err := workspace.Load(ws, workflowsDir); err != nil {
+		if _, err := workspace.Load(ws, workflowsDir, m.ProjectsOf(ws)); err != nil {
 			fails = append(fails, err.Error())
 		}
 	}

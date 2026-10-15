@@ -57,7 +57,8 @@ the user saying "init workspace".
 4. **Optionally write `.polyforge.yaml`** at the workspace root to pin
    model candidates per project, in the exact closed schema the loader
    enforces (any other key, a duplicate key, a type mismatch, a per-step
-   key that is no step id of the installed workflows, a step-entry key
+   key that is no step id of the installed workflows, a project key this
+   workspace's cli.toml section does not list, a step-entry key
    other than `models`, a top-level `models:` section (the pre-#169 shape)
    or an empty model id refuses to load):
 

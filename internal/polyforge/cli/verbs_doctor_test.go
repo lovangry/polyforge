@@ -323,6 +323,14 @@ func TestDoctorWorkspaceYamlReportsUnknownStepKeys(t *testing.T) {
 		t.Fatalf("legacy models: section: %s %q, want fail with the migration message", st, detail)
 	}
 
+	if err := os.WriteFile(yaml, []byte("steps:\n  ghost:\n    fix: { models: [b] }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, doc = doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "fail" || !strings.Contains(detail, "ghost are not mapped to this workspace in cli.toml (it maps: polyforge)") {
+		t.Fatalf("unmapped project: %s %q, want fail naming it", st, detail)
+	}
+
 	env = doctorServerConfig(t, srv.URL, "k", liveDaemonSocket(t, "m-old"), "polyforge")
 	yaml = filepath.Join(filepath.Dir(env["XDG_CONFIG_HOME"]), "ws-polyforge", ".polyforge.yaml")
 	if err := os.WriteFile(yaml, []byte("steps:\n  polyforge:\n    fix: { models: [b] }\n"), 0o600); err != nil {
