@@ -91,6 +91,7 @@ const env = {
 // simulates the OWNER's pi session, so drop it.
 delete env.PF_WI_ID;
 delete process.env.PF_WI_ID;
+Object.assign(process.env, { PATH: env.PATH, PF_STATE: env.PF_STATE, PF_JOURNAL: env.PF_JOURNAL });
 
 // ---- mock pi ExtensionAPI ----
 const handlers = {};
