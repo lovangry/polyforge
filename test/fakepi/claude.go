@@ -73,7 +73,9 @@ func claudeJournal(kind string, body map[string]any) {
 }
 
 // claudeNativeSession answers the native session file of uuid for the
-// process cwd (Claude Code's projects/<dashed cwd>/<uuid>.jsonl).
+// process cwd under the step's CLAUDE_CONFIG_DIR (polyforge#171: the
+// claude-config dir the spawner hard-set; projects/<dashed cwd>/<uuid>.
+// jsonl) — exactly the path the runtime's locator then reads by.
 func claudeNativeSession(uuid string) string {
 	root := os.Getenv("CLAUDE_CONFIG_DIR")
 	if root == "" {
@@ -88,6 +90,59 @@ func claudeNativeSession(uuid string) string {
 		return '-'
 	}, cwd)
 	return filepath.Join(root, "projects", dashed, uuid+".jsonl")
+}
+
+// claudeEnvironFacts reads the RAW environ (polyforge#171 step-harness
+// acceptance evidence): how many entries carry a given name, so the test
+// can pin the zero-credential injection and the no-duplicate env
+// contract (os.Getenv only sees the first value; ordinary reads cannot
+// count).
+func claudeEnvironFacts() (claudeConfigDirCount, anthropicAuthTokenCount, nonessentialOff int, claudeConfigDirVal string) {
+	for _, kv := range os.Environ() {
+		name, val, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		switch name {
+		case "CLAUDE_CONFIG_DIR":
+			claudeConfigDirCount++
+			claudeConfigDirVal = val
+		case "ANTHROPIC_AUTH_TOKEN":
+			anthropicAuthTokenCount++
+		case "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":
+			nonessentialOff = 1
+		}
+	}
+	return
+}
+
+// claudeSettingsEnvFacts answers the env-block facts of the settings.json
+// the step's CLAUDE_CONFIG_DIR names (what real claude applies from the
+// authority layer polyforge#171 ruling 1): which of the pairing keys
+// exist. Values are never journaled — set/unset only. An unreadable or
+// malformed settings.json: unset facts (the fake never judges what it
+// cannot read).
+func claudeSettingsEnvFacts() (authTokenSet, baseUrlSet, cfgDirSet bool) {
+	raw, err := os.ReadFile(filepath.Join(os.Getenv("CLAUDE_CONFIG_DIR"), "settings.json"))
+	if err != nil {
+		return
+	}
+	var doc struct {
+		Env map[string]any `json:"env"`
+	}
+	if json.Unmarshal(raw, &doc) != nil || doc.Env == nil {
+		return
+	}
+	if doc.Env["ANTHROPIC_AUTH_TOKEN"] != nil {
+		authTokenSet = true
+	}
+	if doc.Env["ANTHROPIC_BASE_URL"] != nil {
+		baseUrlSet = true
+	}
+	if doc.Env["CLAUDE_CONFIG_DIR"] != nil {
+		cfgDirSet = true
+	}
+	return
 }
 
 func emitClaude(rec map[string]any) {
@@ -108,23 +163,36 @@ func runClaude() {
 	prompt, _ := io.ReadAll(os.Stdin) // the whole prompt, then EOF
 	wi := os.Getenv("PF_WI_ID")
 	entry, ok := spawnJournalSelf(wi)
+	settingsTokenSet, settingsBaseURLSet, settingsCfgDirSet := claudeSettingsEnvFacts()
 	argv := append([]string(nil), os.Args[1:]...)
+	clCfgDirCount, clAuthTokenCount, clNonessentialOff, clCfgDirVal := claudeEnvironFacts()
 	claudeJournal("spawn", map[string]any{
-		"pid":                os.Getpid(),
-		"spawn_n":            entry.SpawnN,
-		"step":               entry.Step,
-		"argv":               argv,
-		"session":            session,
-		"resume":             resume != "",
-		"model":              claudeArg("--model"),
-		"auth_token_set":     os.Getenv("ANTHROPIC_AUTH_TOKEN") != "",
-		"background_off":     os.Getenv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS") == "1",
-		"autoupdater_off":    os.Getenv("DISABLE_AUTOUPDATER") == "1",
-		"startup_results":    os.Getenv("CLAUDE_CODE_STARTUP_FAILURE_RESULTS") == "1",
-		"pi_agent_dir":       os.Getenv("PI_CODING_AGENT_DIR"),
-		"prompt_bytes":       len(prompt),
-		"prompt_has_handoff": strings.Contains(string(prompt), "# Handoff from step"),
-		"wi":                 wi,
+		"pid":             os.Getpid(),
+		"spawn_n":         entry.SpawnN,
+		"step":            entry.Step,
+		"argv":            argv,
+		"session":         session,
+		"resume":          resume != "",
+		"model":           claudeArg("--model"),
+		"auth_token_set":  os.Getenv("ANTHROPIC_AUTH_TOKEN") != "",
+		"background_off":  os.Getenv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS") == "1",
+		"autoupdater_off": os.Getenv("DISABLE_AUTOUPDATER") == "1",
+		"startup_results": os.Getenv("CLAUDE_CODE_STARTUP_FAILURE_RESULTS") == "1",
+		"pi_agent_dir":    os.Getenv("PI_CODING_AGENT_DIR"),
+		// polyforge#171 acceptance evidence: raw-environ counts (no
+		// duplicates, no injected token), the hard-set config dir value,
+		// the NONESSENTIAL switch and what the settings.json authority
+		// layer carries (set/unset only)
+		"env_count_claude_config_dir": clCfgDirCount,
+		"env_count_auth_token":        clAuthTokenCount,
+		"claude_config_dir":           clCfgDirVal,
+		"nonessential_off":            clNonessentialOff == 1,
+		"settings_auth_token_set":     settingsTokenSet,
+		"settings_base_url_set":       settingsBaseURLSet,
+		"settings_cfg_dir_set":        settingsCfgDirSet,
+		"prompt_bytes":                len(prompt),
+		"prompt_has_handoff":          strings.Contains(string(prompt), "# Handoff from step"),
+		"wi":                          wi,
 	})
 	if ok && entry.SpawnN > 0 {
 		_ = os.WriteFile(filepath.Join("logs", "fakeclaude-prompt-"+strconv.Itoa(entry.SpawnN)+".txt"), prompt, 0o644)

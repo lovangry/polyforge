@@ -5,9 +5,11 @@ package test
 // the fake harness binary (test/fakepi), which is BOTH the fake `pi` and
 // the fake `claude` (argv[1] == "-p", test/fakepi/claude.go). No real
 // `claude` or `pi` ever runs, no model is called: the daemon is pointed
-// at the fake with --pi-bin / --claude-bin, HOME is a scratch dir (the
-// fake writes Claude's native session under it), and the cli.toml token
-// is a sentinel.
+// at the fake with --pi-bin / --claude-bin, HOME is a scratch dir, and
+// the credentials live where the #171 closeout (#159 ruling 1) put them —
+// the settings.json env block under <harness-root>/claude-config, written
+// by the test in the operator-migration shape (the token sentinel is
+// asserted never to reach the daemon, the capsule tree or the CLI).
 
 import (
 	"bufio"
@@ -21,28 +23,35 @@ import (
 
 const w159Token = "w159-SENTINEL-token"
 
-// w159Daemon starts a daemon over one workspace (project e2e) whose
-// cli.toml also carries the claude keys; claudeBin "" = the fake.
-func w159Daemon(t *testing.T, inst *v1Install, ws, claudeBin string) (*w113Daemon, string) {
+// w159HarnessRoot starts a daemon over one workspace (project e2e) at an
+// EXPLICIT harness root whose claude-config settings.json the test writes
+// in the operator-migration shape (the env credential pair — the single
+// authority layer, polyforge#171 ruling 1); claudeBin "" = the fake. It
+// answers the daemon, the config path and the harness root. Note the
+// cli.toml carries no credential key ever again: a residual
+// anthropic_auth_token refuses the boot (TestConfigResidualAuthTokenRefused).
+func w159HarnessRoot(t *testing.T, inst *v1Install, ws, claudeBin string) (*w113Daemon, string, string) {
 	t.Helper()
 	sock := filepath.Join(shortTmp("/tmp", "w159sock"), "d.sock")
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"), inst.url, inst.adminKey, sock,
 		[]w113WS{{key: ws, projects: []string{"e2e"}}})
-	f, err := os.OpenFile(cfg, os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
+	root := t.TempDir() // an explicit --harness-root: the settings live outside the data dir
+	ccDir := filepath.Join(root, "claude-config")
+	if err := os.MkdirAll(ccDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteString("anthropic_auth_token = \"" + w159Token + "\"\n"); err != nil {
+	body := `{"env":{"ANTHROPIC_AUTH_TOKEN":"` + w159Token + `","ANTHROPIC_BASE_URL":"https://gw.w159.example"}}`
+	if err := os.WriteFile(filepath.Join(ccDir, "settings.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f.Close()
 	if claudeBin == "" {
 		claudeBin = filepath.Join(v1Bins(t), "fakepi")
 	}
-	d := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptSock(sock), w113DOptArgs("--claude-bin", claudeBin))
+	d := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptSock(sock),
+		w113DOptArgs("--claude-bin", claudeBin, "--harness-root", root))
 	d.start()
 	t.Cleanup(d.stop)
-	return d, cfg
+	return d, cfg, root
 }
 
 // w159Plan writes the fake's plan file verbatim (bad_models etc.).
@@ -127,7 +136,7 @@ func TestW159MixedHarnessWorkItem(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
 	w079Yaml(t, ws, w159Yaml)
-	d, _ := w159Daemon(t, inst, ws, "")
+	d, _, root := w159HarnessRoot(t, inst, ws, "")
 	wi := w113NewWI(t, inst, "e2e", "w159 mixed harness", envelopeQuickFix())
 	capDir := w079Run(t, d, inst, ws, wi)
 
@@ -155,10 +164,34 @@ func TestW159MixedHarnessWorkItem(t *testing.T) {
 			t.Fatalf("claude argv carries %q: %s", banned, argv)
 		}
 	}
-	for _, k := range []string{"auth_token_set", "background_off", "autoupdater_off", "startup_results", "prompt_has_handoff"} {
+	// polyforge#171 acceptance evidence: the step env and the settings
+	// authority layer. The fakes pin the RAW environment — the adapter
+	// never injects a credential (zero-credential injection, ruling 1:
+	// exactly 0 auth-token entries, at most one CLAUDE_CONFIG_DIR),
+	// hard-sets the claude-config dir and switches nonessential traffic
+	// off; the settings.json env block (written by this test in the
+	// migration shape) is read by the step persona — what real claude
+	// applies from the authority layer — and its VALUES stay out of every
+	// journal line while a resume dispatch reads the same file again.
+	for _, k := range []string{"background_off", "autoupdater_off", "startup_results", "prompt_has_handoff", "nonessential_off", "settings_auth_token_set"} {
 		if cl[0][k] != true {
 			t.Fatalf("claude spawn %s = %v (entry %v)", k, cl[0][k], cl[0])
 		}
+	}
+	if cl[0]["auth_token_set"] != false || cl[0]["env_count_auth_token"] != float64(0) {
+		t.Fatalf("the adapter injected a credential: %v", cl[0])
+	}
+	if n, _ := cl[0]["env_count_claude_config_dir"].(float64); n != 1 {
+		t.Fatalf("CLAUDE_CONFIG_DIR entries %v, want exactly one (no duplicate)", cl[0]["env_count_claude_config_dir"])
+	}
+	if dir, _ := cl[0]["claude_config_dir"].(string); dir != root+"/claude-config" {
+		t.Fatalf("claude config dir %v, want %q", cl[0]["claude_config_dir"], root+"/claude-config")
+	}
+	if cl[0]["settings_base_url_set"] != true {
+		t.Fatalf("the settings.json env pair was not read by the step: %v", cl[0])
+	}
+	if cl[0]["settings_cfg_dir_set"] != false {
+		t.Fatalf("the settings env block must not set CLAUDE_CONFIG_DIR: %v", cl[0])
 	}
 	if cl[0]["pi_agent_dir"] != "" {
 		t.Fatalf("a claude step got the pi agent dir: %v", cl[0]["pi_agent_dir"])
@@ -195,6 +228,20 @@ func TestW159MixedHarnessWorkItem(t *testing.T) {
 	if err != nil || !strings.Contains(string(raw), `"sessionId"`) {
 		t.Fatalf("claude transcript copy %s: %q (%v)", tr, raw, err)
 	}
+	// polyforge#171: the native session file is exactly the claude-config
+	// path the ruling 7 pin: <harness-root>/claude-config/projects/<dashed
+	// capsule path>/<session-id>.jsonl — the seal-copy SOURCE (the locator
+	// must find it BEFORE the capsule copy by the same shape, no mtime
+	// hunt), direct concatenation.
+	sess, _ := claudeLine["harness_session"].(string)
+	native := filepath.Join(root, "claude-config", "projects", w159DashedName(t, capDir), sess+".jsonl")
+	nb, err := os.ReadFile(native)
+	if err != nil || len(nb) == 0 {
+		t.Fatalf("native claude session %s missing (%v)", native, err)
+	}
+	if !strings.Contains(string(nb), sess) {
+		t.Fatalf("native session %s: %q", native, nb)
+	}
 	// the fix step's V-gates ran on the claude result exactly as on pi
 	x := readExecution(t, capDir)
 	if x.Steps["fix"].Status != "done" || x.Steps["verification"].Status != "done" {
@@ -206,6 +253,20 @@ func TestW159MixedHarnessWorkItem(t *testing.T) {
 	w159NoToken(t, capDir)
 	w159NoToken(t, d.dataDir)
 	w159NoToken(t, d.logPath)
+}
+
+// w159DashedName mirrors Claude Code's per-cwd project dir naming rule:
+// every character outside [A-Za-z0-9] becomes '-' (the harness package's
+// ClaudeProjectDirName, mirrored here inline so the test binary holds no
+// internal import).
+func w159DashedName(t *testing.T, capDir string) string {
+	t.Helper()
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '-'
+	}, capDir)
 }
 
 // w159NoToken fails when any file under root carries the test token.
@@ -238,7 +299,7 @@ func TestW159ClaudeD7(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
 	w079Yaml(t, ws, w159Yaml)
-	d, _ := w159Daemon(t, inst, ws, "")
+	d, _, _ := w159HarnessRoot(t, inst, ws, "")
 	wi := w113NewWI(t, inst, "e2e", "w159 claude d7", nil)
 	w159Plan(t, inst, wi, map[string]any{"actions": []map[string]any{
 		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
@@ -277,7 +338,7 @@ func TestW159ClaudeCandidatesExhaustedBlocks(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
 	w079Yaml(t, ws, w159Yaml)
-	d, _ := w159Daemon(t, inst, ws, "")
+	d, _, _ := w159HarnessRoot(t, inst, ws, "")
 	wi := w113NewWI(t, inst, "e2e", "w159 exhausted", nil)
 	w159Plan(t, inst, wi, map[string]any{
 		"bad_models": []string{"claude-opus-5-5", "claude-sonnet-5"},
@@ -309,7 +370,7 @@ func TestW159ClaudeNeedsInputResumes(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
 	w079Yaml(t, ws, w159Yaml)
-	d, _ := w159Daemon(t, inst, ws, "")
+	d, _, root := w159HarnessRoot(t, inst, ws, "")
 	const qid = "q_w159"
 	wi := w113NewWI(t, inst, "e2e", "w159 needs_input", []map[string]any{
 		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
@@ -338,7 +399,11 @@ func TestW159ClaudeNeedsInputResumes(t *testing.T) {
 		t.Fatalf("continuation %v did not resume session %s", cl[1], first)
 	}
 	// the resumed dispatch copied the (shared) native session onto its
-	// OWN capsule transcript: both fix dispatches' files exist
+	// OWN capsule transcript: both fix dispatches' files exist; the TWO
+	// claude dispatches share ONE native session file under the
+	// claude-config dir (polyforge#171: <harness-root>/claude-config/
+	// projects/<dashed capsule path>/<session-id>.jsonl — the resume path
+	// decision located it there explicitly, no daemon process env)
 	n := 0
 	for _, e := range w159SpawnJournal(t, capDir) {
 		if e["step_id"] != "fix" {
@@ -347,6 +412,10 @@ func TestW159ClaudeNeedsInputResumes(t *testing.T) {
 		tr, _ := e["transcript"].(string)
 		if raw, err := os.ReadFile(tr); err != nil || !strings.Contains(string(raw), first) {
 			t.Fatalf("fix transcript %s: %q (%v)", tr, raw, err)
+		}
+		native := filepath.Join(root, "claude-config", "projects", w159DashedName(t, capDir), first+".jsonl")
+		if raw, err := os.ReadFile(native); err != nil || len(raw) == 0 {
+			t.Fatalf("native claude session %s missing (%v)", native, err)
 		}
 		n++
 	}
@@ -363,7 +432,7 @@ func TestW159MismatchRefusedAndDoctor(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
 	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { harness: claude }\n")
-	d, cfg := w159Daemon(t, inst, ws, "")
+	d, cfg, _ := w159HarnessRoot(t, inst, ws, "")
 	wi := w113NewWI(t, inst, "e2e", "w159 mismatch", envelopeQuickFix())
 	out, code := w113Pf(t, inst, w113Env{socket: d.sock}, "submit", wi)
 	w079Refused(t, d, inst, ws, wi, out, code, "model/harness mismatch", "e2e/quick-fix/fix: harness claude (steps.e2e.fix.harness)")
@@ -393,7 +462,7 @@ func TestW159MismatchRefusedAndDoctor(t *testing.T) {
 
 	// a daemon whose claude binary does not resolve: doctor fails it
 	d.stop()
-	d2, cfg2 := w159Daemon(t, inst, ws, "/nonexistent/claude-w159")
+	d2, cfg2, _ := w159HarnessRoot(t, inst, ws, "/nonexistent/claude-w159")
 	_ = d2
 	doc = w079PfWant(t, inst, 1, w079Env{config: cfg2}, "--json", "doctor")
 	if !strings.Contains(doc, "does not resolve on the daemon's PATH") {
