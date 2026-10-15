@@ -544,29 +544,120 @@ tool in `--tools`). The native session stays at
 same session (`--resume`).
 
 **Credentials are the human's.** Log Claude Code in on the work machine
-beforehand; the daemon never reads, writes or manages a credential. If
-`ANTHROPIC_AUTH_TOKEN` is set in the daemon's environment the step
-inherits it; otherwise an `anthropic_auth_token` in cli.toml is handed to
-the step as that variable (environment only, never argv). Without either
-the CLI runs bare on whatever the human set up — note that `--bare` does
-not read the interactive login: it takes `ANTHROPIC_API_KEY`,
-`ANTHROPIC_AUTH_TOKEN` or an `apiKeyHelper`, and Claude Code's own
-`settings.json` `env` section is still applied, so a credential set
-there works (the daemon cannot see it).
+beforehand; the daemon never reads, writes or manages a credential — the
+step's credential authority layer is its own
+`<harness-root>/claude-config/settings.json` (polyforge#171; see the
+later section), and an explicit daemon-env `ANTHROPIC_AUTH_TOKEN` is
+what the step inherits when its settings carry none (the daemon
+injects none itself). `--bare` does not read the interactive login: the
+settings env block is applied on a bare step, and the adapter hard-sets
+`CLAUDE_CONFIG_DIR` to the claude-config dir, so the daemon CAN see that
+layer from the machine it runs on.
 
 New cli.toml keys (flat, optional):
 
 ```toml
 claude_bin = "/root/.local/bin/claude"     # default: claude on the daemon's PATH (or --claude-bin)
-anthropic_auth_token = "…"                 # only when the daemon's env lacks ANTHROPIC_AUTH_TOKEN
 ```
 
 `pf doctor` adds a `harness claude` check whenever any step resolves to
 claude: the binary must resolve on the daemon's PATH (else fail); the
-version should be a verified one (2.1.296) and `ANTHROPIC_BASE_URL`
-unset (else warn); when no credential variable is visible to the daemon it
-warns too, noting the credential may live in Claude Code's `settings.json`
-`env` — not an error if so. Credential values are
-never shown — set/unset only. The check lists every claude step with the
-level its harness and models came from. `workspace yaml` now also runs
-the compatibility check above.
+version should be a verified one (2.1.296); when no credential is
+visible — neither the daemon env nor the claude-config
+`settings.json` env block (the daemon reports set/unset, never a
+value) — it warns too. Credential values are never shown. The check
+lists every claude step with the level its harness and models came
+from. `workspace yaml` now also runs the compatibility check above.
+
+## CC harness auth + directory unification (polyforge#171, #159 closeout)
+
+The v2.5.2 per-step claude harness carried the credential through a
+cli.toml key AND scattered the step harness directories over the data
+dir and the daemon user's `~/.claude`. The closeout unifies them: the
+`settings.json` of the harness root's `claude-config` dir is the single
+credential authority layer, and all three step-harness directories
+derive from one root.
+
+### The daemons move
+
+- `--harness-sessions-root` is REMOVED. Its old semantics ("the pi
+  session dir itself") made an upgrade silently re-home the live
+  transcript sync, so the flag was renamed instead: the new daemon
+  refuses the old value with the unknown-flag error.
+
+- `--harness-root` (env `POLYFORGE_HARNESS_ROOT`, default
+  `<data-dir>`, higher than DataDir) is now the PARENT root of the
+  three harness dirs:
+
+      <harness-root>/step-agent            pi step agent dir (the dedicated minimal set)
+      <harness-root>/step-agent-sessions   pi step sessions (the live-transcript sync's source)
+      <harness-root>/claude-config         claude config dir (settings.json, projects/, debug/)
+
+  The default keeps the byte-identical step-session and step-agent dirs
+  under `<data-dir>`; only the claude dir is new and only the explicit
+  override moves all three together.
+
+### The credential key moves
+
+- cli.toml's `anthropic_auth_token` is HARD-DELETED (no deprecation
+  path). A residual key fails the boot with the unknown-key parse
+  error — that is the intended migration story, not a bug:
+
+      pf daemon: config ~/.config/polyforge/cli.toml: unknown key "anthropic_auth_token" in …
+
+- Migrate (manual, ONCE): the claude step reads its credentials from
+  the settings `env` block only — copy ONE credential pair from wherever
+  it lives today (the daemon user's `~/.claude/settings.json` or a
+  cli.toml you never checked in) into
+  `<harness-root>/claude-config/settings.json`:
+
+      {
+        "env": {
+          "ANTHROPIC_AUTH_TOKEN": "…",
+          "ANTHROPIC_BASE_URL": "…"        // optional — paired with the token
+        }
+      }
+
+  Copy only the two keys; never write credentials into project-level or
+  capsule settings (a capsule is sealed and distributed), and NEVER set
+  `CLAUDE_CONFIG_DIR` inside the settings `env` block: the adapter
+  hard-sets the step's config dir and a value there would override it.
+
+- The adapter injects ZERO credentials henceforth: no token rides the
+  environment or argv from the daemon. `ANTHROPIC_*` variables set in
+  the daemon's environment pass through to claude (an env token is
+  what the step sees when its settings carry none). The daemon-started
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and the claude-config
+  `CLAUDE_CONFIG_DIR` are added, and the operator's inherited config-dir
+  value is stripped (it is hard-set).
+
+### The pairing table (generic wording)
+
+| what the settings env block carries | what a claude step does |
+| --- | --- |
+| gateway-credential + gateway address | gateway profile |
+| subscription long-lived token (`claude setup-token`, `sk-ant-oat01-`, ~365 days) with NO gateway address | subscription direct profile |
+| subscription long-lived token with ANY gateway address | REJECTED combination |
+| no token at all | the step cannot authenticate (it will not run) |
+
+Notes: `claude login`'s interactive credentials do not serve headless
+steps — mint a long-lived token with `claude setup-token` and put it in
+the settings env block; it is valid about a year, so re-mint before it
+expires. An `ANTHROPIC_BASE_URL` in the DAEMON environment is inherited
+(the doctor notes it); the rejection clause above is the doctor's
+pairing clause — token shape and gateway address TOGETHER, values
+never printed.
+
+### The doctor sees the authority layer
+
+`pf doctor`'s `harness claude` now reports (daemon-reported
+harness-root layout, polyforge#171):
+
+- the three dirs' existence (present/missing) under the daemon's
+  harness root;
+- the claude-config `settings.json` env block's key facts
+  (ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / CLAUDE_CONFIG_DIR) as
+  set/unset — values are read in-memory, NEVER printed;
+- the pairing clause above whenever the shape says rejected, and a
+  remove-it clause whenever the settings env block carries
+  `CLAUDE_CONFIG_DIR` (it would override the adapter's value).
