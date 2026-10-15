@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/aihub/core"
@@ -129,3 +130,152 @@ func isWire(err error, code, reason string) bool {
 	_ = json.Unmarshal(ae.Extra, &extra)
 	return extra.Reason == reason
 }
+
+// Re-adding an existing edge is idempotent (201 + current view), never a
+// CORE-500 carrying raw SQLite text.
+func TestDependencyDuplicateEdgeIdempotent(t *testing.T) {
+	e := newSrvEnv(t)
+	c := aihubclient.New(e.ts.URL, e.key)
+	a := createExecWIOverHTTP(t, e, "dup blocker")
+	b := createExecWIOverHTTP(t, e, "dup blocked")
+	for i := 0; i < 2; i++ {
+		raw, err := c.AddBlocksDependency(a, b)
+		if err != nil {
+			t.Fatalf("add #%d: %v", i+1, err)
+		}
+		var deps core.Deps
+		if err := json.Unmarshal(raw, &deps); err != nil || len(deps.BlockedBy) != 1 {
+			t.Fatalf("add #%d view: %v %s", i+1, err, raw)
+		}
+	}
+}
+
+// A `blocks` blocker must be an execution ticket: a registration ticket
+// or an epic never wraps (POST and create body alike).
+func TestDependencyBlockerMustBeExecutionTicket(t *testing.T) {
+	e := newSrvEnv(t)
+	c := aihubclient.New(e.ts.URL, e.key)
+	var reg, epic, child struct {
+		ID   string `json:"id"`
+		Slug string `json:"slug"`
+	}
+	e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{"project": "alpha", "goal": "registration"}, &reg)
+	e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{"project": "alpha", "goal": "epic"}, &epic)
+	if code, raw := e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{"project": "alpha", "goal": "child",
+		"parent_id": epic.ID, "bundle_name": "demo-bundle"}, &child); code != 201 {
+		t.Fatalf("child: %d %s", code, raw)
+	}
+	b := createExecWIOverHTTP(t, e, "after a registration ticket")
+	for _, blocker := range []string{reg.Slug, epic.Slug} {
+		if _, err := c.AddBlocksDependency(blocker, b); !isWire(err, "CORE-400", "BLOCKER_NOT_EXECUTABLE") {
+			t.Fatalf("blocker %s: %v", blocker, err)
+		}
+	}
+	// The child waiting on its own epic is the same refusal.
+	if _, err := c.AddBlocksDependency(epic.Slug, child.Slug); !isWire(err, "CORE-400", "BLOCKER_NOT_EXECUTABLE") {
+		t.Fatalf("child after epic: %v", err)
+	}
+}
+
+// --after in the create body is atomic: the edges land with the work
+// item, and any bad entry creates nothing.
+func TestCreateWithAfterAtomic(t *testing.T) {
+	e := newSrvEnv(t)
+	c := aihubclient.New(e.ts.URL, e.key)
+	a := createExecWIOverHTTP(t, e, "atomic blocker")
+	aSlug := slugOf(t, e, a)
+	count := func() int {
+		var n int
+		if err := e.db.QueryRow(`SELECT COUNT(*) FROM work_items`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	raw, err := c.CreateWorkItem(aihubclient.CreateWorkItemRequest{Project: "alpha", Goal: "after a",
+		BundleName: strPtrSrv("demo-bundle"), After: []string{aSlug, a}})
+	if err != nil {
+		t.Fatalf("create --after: %v", err)
+	}
+	var view core.WIView
+	if err := json.Unmarshal(raw, &view); err != nil || len(view.WaitingFor) != 1 || view.WaitingFor[0].Slug != aSlug {
+		t.Fatalf("created view: %v %s", err, raw)
+	}
+
+	if _, err := e.admin.CreateProject(core.CreateProjectRequest{Name: "beta"}); err != nil {
+		t.Fatal(err)
+	}
+	var other, reg struct {
+		Slug string `json:"slug"`
+	}
+	e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{"project": "beta", "goal": "elsewhere", "bundle_name": "x"}, &other)
+	e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{"project": "alpha", "goal": "registration"}, &reg)
+	before := count()
+	for _, tc := range []struct {
+		after        []string
+		code, reason string
+	}{
+		{[]string{aSlug, "alpha#999"}, "CORE-404", ""},
+		{[]string{other.Slug}, "CORE-400", ""},
+		{[]string{aSlug, reg.Slug}, "CORE-400", "BLOCKER_NOT_EXECUTABLE"},
+	} {
+		_, err := c.CreateWorkItem(aihubclient.CreateWorkItemRequest{Project: "alpha", Goal: "refused",
+			BundleName: strPtrSrv("demo-bundle"), After: tc.after})
+		if !isWire(err, tc.code, tc.reason) {
+			t.Fatalf("after %v: %v", tc.after, err)
+		}
+	}
+	if got := count(); got != before {
+		t.Fatalf("a refused create wrote %d work item(s)", got-before)
+	}
+}
+
+// Dependency writes are no existence oracle: a work item in a project the
+// caller cannot read answers exactly like an unknown one.
+func TestDependencyNoCrossProjectOracle(t *testing.T) {
+	e := newSrvEnv(t)
+	if _, err := e.admin.CreateProject(core.CreateProjectRequest{Name: "beta"}); err != nil {
+		t.Fatal(err)
+	}
+	var hidden struct {
+		Slug string `json:"slug"`
+	}
+	e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{"project": "beta", "goal": "hidden", "bundle_name": "x"}, &hidden)
+	b := createExecWIOverHTTP(t, e, "alpha blocked")
+	bSlug := slugOf(t, e, b)
+	u, err := e.admin.CreateUser("w161", "w161@example.com", "writer", "human")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := e.admin.CreateAPIKey(u.ID, "w161", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.admin.AddMember(e.adminProjectID(t, "alpha"), u.ID, "writer"); err != nil {
+		t.Fatal(err)
+	}
+	c := aihubclient.New(e.ts.URL, key.Plain)
+	detail := func(err error) string {
+		var ae *api.Error
+		if !errors.As(err, &ae) || ae.Code != "CORE-404" {
+			t.Fatalf("want CORE-404, got %v", err)
+		}
+		return ae.Detail
+	}
+	unknown := strings.Replace(hidden.Slug, "beta#", "beta#9", 1)
+	for _, op := range []func(ref string) error{
+		func(ref string) error { _, err := c.AddBlocksDependency(ref, bSlug); return err },
+		func(ref string) error { _, err := c.RemoveBlocksDependency(ref, bSlug); return err },
+		func(ref string) error {
+			_, err := c.CreateWorkItem(aihubclient.CreateWorkItemRequest{Project: "alpha", Goal: "g", After: []string{ref}})
+			return err
+		},
+	} {
+		got, want := detail(op(hidden.Slug)), detail(op(unknown))
+		if got != strings.Replace(want, unknown, hidden.Slug, 1) {
+			t.Fatalf("hidden %q vs unknown %q", got, want)
+		}
+	}
+}
+
+func strPtrSrv(s string) *string { return &s }
