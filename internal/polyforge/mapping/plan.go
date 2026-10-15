@@ -180,14 +180,15 @@ func (p *Plan) Projects() []string {
 }
 
 // ProjectsOf answers the projects one workspace maps, in array order
-// (nil when the workspace is not mapped).
+// (non-nil, possibly empty, for a mapped workspace; nil when the
+// workspace is not mapped).
 func (p *Plan) ProjectsOf(workspace string) []string {
 	if p == nil {
 		return nil
 	}
 	for _, e := range p.entries {
 		if e.Workspace == workspace {
-			return append([]string(nil), e.Projects...)
+			return append([]string{}, e.Projects...)
 		}
 	}
 	return nil

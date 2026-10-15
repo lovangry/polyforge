@@ -95,9 +95,9 @@ func TestLoadRefusals(t *testing.T) {
 		{"steps a list", "steps: [a]\n", []string{"steps: must be a mapping"}},
 		{"project not a map", "steps:\n  e2e: [a]\n", []string{"steps.e2e: must be a mapping of step entries"}},
 		{"entry a scalar", "steps:\n  e2e:\n    code: a\n", []string{"steps.e2e.code: must be `{ models: [...] }`"}},
-		{"list of non-strings", "steps:\n  e2e:\n    code: { models: [[a]] }\n", []string{"steps.e2e.code.models[0]: must be a model-id string"}},
+		{"list of non-strings", "steps:\n  e2e:\n    code: { models: [[a]] }\n", []string{"steps.e2e.code.models[0]: must be a plain model-id string"}},
 		{"null model item", "steps:\n  e2e:\n    code: { models: [a, ~] }\n", []string{"steps.e2e.code.models[1]"}},
-		{"numeric model item", "steps:\n  e2e:\n    code: { models: [a, 42] }\n", []string{"steps.e2e.code.models[1]: must be a model-id string"}},
+		{"numeric model item", "steps:\n  e2e:\n    code: { models: [a, 42] }\n", []string{"steps.e2e.code.models[1]: must be a plain model-id string"}},
 		{"duplicate model id after trim", "steps:\n  e2e:\n    code: { models: [a, \" a \"] }\n", []string{"steps.e2e.code.models[1]: repeats \"a\""}},
 		{"models a scalar", "steps:\n  e2e:\n    code: { models: a }\n", []string{"steps.e2e.code.models: must be a list of model ids"}},
 		{"legacy models wins over other unknown keys", "workflow_defaults: {}\nmodels:\n  e2e:\n    code: [a]\n", []string{"`models:` was replaced by `steps:`"}},
@@ -109,6 +109,17 @@ func TestLoadRefusals(t *testing.T) {
 		{"unknown sub-key", "steps:\n  e2e:\n    fix: { models: [a], modles: [b] }\n", []string{"steps.e2e.fix.modles", "only key is `models`"}},
 		{"harness not accepted yet", "steps:\n  e2e:\n    fix: { models: [a], harness: pi }\n", []string{"steps.e2e.fix.harness", "only key is `models`"}},
 		{"entry without models", "steps:\n  e2e:\n    fix: {}\n", []string{"steps.e2e.fix.models"}},
+		{"merge key at top level", "base: &b {}\n<<: *b\nsteps:\n  e2e:\n    fix: { models: [a] }\n", []string{"top level: YAML merge keys (`<<`) are not supported", "{ models: *x }"}},
+		{"legacy models wins over a top-level merge key", "<<: {}\nmodels:\n  e2e:\n    code: [a]\n", []string{"`models:` was replaced by `steps:`"}},
+		{"merge key at project level", "steps:\n  base: &p\n    fix: { models: [a] }\n  e2e:\n    <<: *p\n", []string{"steps.e2e: YAML merge keys (`<<`) are not supported"}},
+		{"merge key at entry level", "steps:\n  e2e:\n    fix: &f { models: [a] }\n    <<: { code: *f }\n", []string{"steps.e2e: YAML merge keys"}},
+		{"merge key inside an entry", "steps:\n  e2e:\n    fix: { <<: { models: [a] } }\n", []string{"steps.e2e.fix: YAML merge keys"}},
+		{"merge key list form", "steps:\n  base: &p\n    fix: { models: [a] }\n  other: &q\n    code: { models: [b] }\n  e2e:\n    <<: [*p, *q]\n", []string{"steps.e2e: YAML merge keys (`<<`) are not supported"}},
+		{"second yaml document", "steps:\n  e2e:\n    fix: { models: [a] }\n---\nsteps: {}\n", []string{"exactly one YAML document"}},
+		{"null project key", "steps:\n  ~:\n    fix: { models: [a] }\n", []string{"steps: a null key"}},
+		{"null step key", "steps:\n  e2e:\n    null: { models: [a] }\n", []string{"steps.e2e: a null key"}},
+		{"alias item in a list", "steps:\n  e2e:\n    fix: { models: [&m a, *m] }\n", []string{"steps.e2e.fix.models[1]: must be a plain model-id string"}},
+		{"tagged item in a list", "steps:\n  e2e:\n    fix: { models: [!!binary aGk=] }\n", []string{"steps.e2e.fix.models[0]"}},
 		{"bare list instead of entry", "steps:\n  e2e:\n    fix: [a]\n", []string{"steps.e2e.fix: must be `{ models: [...] }` (the pre-#169 list form?)"}},
 	}
 	for _, c := range cases {
@@ -192,5 +203,31 @@ func TestLoadProjectsMustBeMapped(t *testing.T) {
 	cfg, err := Load(ws, stepsDir(t), nil)
 	if err != nil || cfg.Models["e2e"]["fix"][0] != "a" {
 		t.Fatalf("nil project set: %+v, %v; want loaded with trimmed ids", cfg, err)
+	}
+}
+
+// TestLoadRefusesFirstDefectInFileOrder: with several defects the
+// refusal is the first one in file order — deterministic, never Go map
+// iteration order.
+func TestLoadRefusesFirstDefectInFileOrder(t *testing.T) {
+	yaml := "steps:\n  a:\n    fix: { models: [x] }\n  b:\n    fix: [x]\n  c:\n    fix: { bogus: [x] }\n  d:\n    fix: { models: [~] }\n"
+	for i := 0; i < 20; i++ {
+		_, err := Load(writeYaml(t, yaml), stepsDir(t), nil)
+		if err == nil || !strings.Contains(err.Error(), "steps.b.fix: must be `{ models: [...] }`") {
+			t.Fatalf("run %d: %v, want the first defect in file order (steps.b.fix)", i, err)
+		}
+	}
+	yaml = "steps:\n  e2e:\n    zz: { models: [x] }\n    fix: { models: [~] }\n    aa: { models: [y, y] }\n"
+	if _, err := Load(writeYaml(t, yaml), stepsDir(t), nil); err == nil || !strings.Contains(err.Error(), "steps.e2e.fix.models[0]") {
+		t.Fatalf("within one project: %v, want steps.e2e.fix.models[0] first", err)
+	}
+}
+
+// TestLoadZeroProjectWorkspaceRefusesProjectKeys: a mapped workspace with
+// no projects answers a non-nil empty set, so every project key refuses.
+func TestLoadZeroProjectWorkspaceRefusesProjectKeys(t *testing.T) {
+	_, err := Load(writeYaml(t, "steps:\n  e2e:\n    fix: { models: [a] }\n"), stepsDir(t), []string{})
+	if err == nil || !strings.Contains(err.Error(), "project(s) e2e are not mapped") {
+		t.Fatalf("zero-project workspace: %v", err)
 	}
 }

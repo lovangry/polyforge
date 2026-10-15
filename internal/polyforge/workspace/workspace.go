@@ -35,7 +35,10 @@
 package workspace
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -117,12 +120,20 @@ func Load(workspaceRoot, workflowsDir string, projects []string) (*Config, error
 // yaml path, never a Go type) and answers the flattened config or the
 // refusal reason. (nil, "") is absent-equivalent.
 func parse(raw []byte, projects []string) (*Config, string) {
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	var doc yaml.Node
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
+	if err := dec.Decode(&doc); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, "" // empty or comments-only
+		}
 		return nil, strings.ReplaceAll(err.Error(), "\n", "; ")
 	}
+	var second yaml.Node
+	if err := dec.Decode(&second); !errors.Is(err, io.EOF) {
+		return nil, "the file must hold exactly one YAML document (found a second `---` document)"
+	}
 	if len(doc.Content) == 0 {
-		return nil, "" // empty or comments-only
+		return nil, ""
 	}
 	root := deref(doc.Content[0])
 	if isNull(root) {
@@ -140,12 +151,13 @@ func parse(raw []byte, projects []string) (*Config, string) {
 	if reason != "" {
 		return nil, reason
 	}
-	for key := range top {
-		if key != "steps" {
-			return nil, fmt.Sprintf("unknown top-level key %q (only `steps`)", key)
+	var stepsNode *yaml.Node
+	for _, kv := range top {
+		if kv.key != "steps" {
+			return nil, fmt.Sprintf("unknown top-level key %q (only `steps`)", kv.key)
 		}
+		stepsNode = kv.val
 	}
-	stepsNode := top["steps"]
 	if stepsNode == nil || isNull(stepsNode) {
 		return nil, "" // a file declaring nothing governs nothing
 	}
@@ -158,7 +170,8 @@ func parse(raw []byte, projects []string) (*Config, string) {
 	}
 	cfg := &Config{Models: make(map[string]map[string][]string, len(byProject))}
 	var unmapped []string
-	for project, pn := range byProject {
+	for _, pkv := range byProject {
+		project, pn := pkv.key, pkv.val
 		if projects != nil && !contains(projects, project) {
 			unmapped = append(unmapped, project)
 		}
@@ -174,16 +187,15 @@ func parse(raw []byte, projects []string) (*Config, string) {
 			return nil, reason
 		}
 		cfg.Models[project] = make(map[string][]string, len(entries))
-		for key, en := range entries {
-			list, reason := stepModels(en, where+"."+key)
+		for _, ekv := range entries {
+			list, reason := stepModels(ekv.val, where+"."+ekv.key)
 			if reason != "" {
 				return nil, reason
 			}
-			cfg.Models[project][key] = list
+			cfg.Models[project][ekv.key] = list
 		}
 	}
 	if len(unmapped) > 0 {
-		sort.Strings(unmapped)
 		return nil, fmt.Sprintf("project(s) %s are not mapped to this workspace in cli.toml (it maps: %s)", strings.Join(unmapped, ", "), strings.Join(projects, ", "))
 	}
 	return cfg, ""
@@ -193,7 +205,6 @@ func parse(raw []byte, projects []string) (*Config, string) {
 // models is the only key; its items are non-empty, unique model-id
 // strings (trimmed — the same rules as a `pf submit --models` list).
 func stepModels(en *yaml.Node, where string) ([]string, string) {
-	en = deref(en)
 	if en.Kind != yaml.MappingNode {
 		hint := ""
 		if en.Kind == yaml.SequenceNode {
@@ -205,21 +216,21 @@ func stepModels(en *yaml.Node, where string) ([]string, string) {
 	if reason != "" {
 		return nil, reason
 	}
-	for k := range keys {
-		if k != "models" {
-			return nil, fmt.Sprintf("%s.%s: not allowed (a step entry's only key is `models`)", where, k)
+	var mn *yaml.Node
+	for _, kv := range keys {
+		if kv.key != "models" {
+			return nil, fmt.Sprintf("%s.%s: not allowed (a step entry's only key is `models`)", where, kv.key)
 		}
+		mn = kv.val
 	}
-	mn := keys["models"]
 	if mn == nil || mn.Kind != yaml.SequenceNode {
 		return nil, where + ".models: must be a list of model ids"
 	}
 	list := make([]string, 0, len(mn.Content))
 	seen := map[string]bool{}
 	for i, item := range mn.Content {
-		item = deref(item)
 		if item.Kind != yaml.ScalarNode || item.Tag != "!!str" {
-			return nil, fmt.Sprintf("%s.models[%d]: must be a model-id string", where, i)
+			return nil, fmt.Sprintf("%s.models[%d]: must be a plain model-id string", where, i)
 		}
 		id := strings.TrimSpace(item.Value)
 		if id == "" {
@@ -234,23 +245,41 @@ func stepModels(en *yaml.Node, where string) ([]string, string) {
 	return list, ""
 }
 
-// mapping answers a mapping node's key → value nodes, refusing a
-// non-scalar or duplicate key (where names the mapping's yaml path).
-func mapping(n *yaml.Node, where string) (map[string]*yaml.Node, string) {
-	out := make(map[string]*yaml.Node, len(n.Content)/2)
+// keyVal is one mapping entry, kept in file order (refusals are then
+// deterministic: the first defect in the file wins).
+type keyVal struct {
+	key string
+	val *yaml.Node
+}
+
+// MergeKeyReason is the refusal suffix for a YAML merge key (`<<`):
+// merge semantics are not implemented; anchors on lists are.
+const MergeKeyReason = "YAML merge keys (`<<`) are not supported — use anchors on lists (`models: &x [...]` / `{ models: *x }`)"
+
+// mapping answers a mapping node's entries in file order (values with
+// aliases followed), refusing a merge key, a null, non-scalar or
+// duplicate key (where names the mapping's yaml path).
+func mapping(n *yaml.Node, where string) ([]keyVal, string) {
+	out := make([]keyVal, 0, len(n.Content)/2)
+	seen := map[string]bool{}
 	prefix := where
 	if prefix != "" {
 		prefix += "."
 	}
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		k := n.Content[i]
-		if k.Kind != yaml.ScalarNode {
+		switch {
+		case k.Kind == yaml.ScalarNode && (k.Tag == "!!merge" || k.Value == "<<"):
+			return nil, orTop(where) + ": " + MergeKeyReason
+		case k.Kind != yaml.ScalarNode:
 			return nil, fmt.Sprintf("%s: keys must be plain names", orTop(where))
-		}
-		if _, dup := out[k.Value]; dup {
+		case k.Tag == "!!null":
+			return nil, fmt.Sprintf("%s: a null key (`~` / `null`) is not a name", orTop(where))
+		case seen[k.Value]:
 			return nil, fmt.Sprintf("%s%s: duplicate key", prefix, k.Value)
 		}
-		out[k.Value] = deref(n.Content[i+1])
+		seen[k.Value] = true
+		out = append(out, keyVal{k.Value, deref(n.Content[i+1])})
 	}
 	return out, ""
 }
