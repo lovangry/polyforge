@@ -172,6 +172,9 @@ type Runtime struct {
 
 	mu   sync.Mutex
 	jobs map[string]*job
+	// slots (under mu) are the per-work-item state locks (locks.go), by
+	// canonical id.
+	slots map[string]*wiSlot
 	// aliases maps every NON-canonical id form the runtime has ever been
 	// asked to run (a "<project>#<seq>" slug, most often) to the
 	// canonical work-item id the claim resolved it to. In-memory only:
