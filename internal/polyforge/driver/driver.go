@@ -351,7 +351,7 @@ func (d *Driver) Run(ctx context.Context) error {
 			// already torn down; this is the dispatch's one failure record.
 			var ed *EnvelopeDefectError
 			if errors.As(werr, &ed) {
-				// the step DID write an envelope (B-12): the retry prompt
+				// the step DID write an envelope: the retry prompt
 				// names the defect instead of "you wrote no envelope"
 				d.mu.Lock()
 				d.priorRejection[stepID] = fmt.Sprintf("dispatch %d: %v", n, ed.Defect)
@@ -885,7 +885,7 @@ func (d *Driver) outputSchema(stepID string) *jsonschema.Schema {
 	d.mu.Unlock()
 	if !ok {
 		var err error
-		s, err = loadStepOutputSchema(d.bundleDir, stepID)
+		s, err = loadStepOutputSchema(d.bundleDir, stepID, d.workflow.stepVars(stepID))
 		if err != nil {
 			// loud, never a silent nil: stderr AND a durable event
 			fmt.Fprintf(os.Stderr, "driver: %s: %v (output not schema-validated)\n", d.wi.ID, err)

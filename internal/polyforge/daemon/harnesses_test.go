@@ -107,7 +107,7 @@ func TestClaudeConfigFacts(t *testing.T) {
 	const token = "sk-ant-oat01-SENTINEL-171"
 	write(fmt.Sprintf(`{"env":{"ANTHROPIC_AUTH_TOKEN":%q,"ANTHROPIC_BASE_URL":"https://gw.example"}}`, token))
 	facts, _, warn = factsProbe(root, "")
-	if facts["ANTHROPIC_AUTH_TOKEN"] != "set" || facts["ANTHROPIC_BASE_URL"] != "set" || facts["CLAUDE_CONFIG_DIR"] != "unset" {
+	if facts["ANTHROPIC_AUTH_TOKEN"] != "set" || facts["ANTHROPIC_BASE_URL"] != "set" || facts["CLAUDE_CONFIG_DIR"] != "unset" || facts["ANTHROPIC_API_KEY"] != "unset" {
 		t.Fatalf("gateway facts %v", facts)
 	}
 	if warn == "" || !strings.Contains(warn, settingsTokenPrefix) || !strings.Contains(warn, "rejected") {
@@ -183,5 +183,30 @@ func TestClaudeVersionAtLeast(t *testing.T) {
 		if got := claudeVersionAtLeast(v, minClaudeVersion); got != want {
 			t.Errorf("claudeVersionAtLeast(%q) = %v, want %v", v, got, want)
 		}
+	}
+}
+
+// env hygiene: the names pi's models.json interpolates (`$NAME` /
+// `${NAME}` in apiKey and header values) — never a literal, a command
+// or any other field.
+func TestPiModelsEnvRefs(t *testing.T) {
+	root := t.TempDir()
+	d := &Daemon{cfg: Config{HarnessRoot: root}}
+	if got := d.piModelsEnvRefs(); len(got) != 0 {
+		t.Fatalf("no models.json: %v", got)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "step-agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"providers":{
+		"a":{"apiKey":"$OPENROUTER_API_KEY","baseUrl":"$NOT_A_KEY_FIELD","headers":{"Authorization":"Bearer ${GW_TOKEN}","X":"literal-SENTINEL"}},
+		"b":{"apiKey":"!pass show x $CMD_VAR"},
+		"c":{"apiKey":"sk-literal-SENTINEL"},
+		"d":{"apiKey":"${OPENROUTER_API_KEY}"}}}`
+	if err := os.WriteFile(filepath.Join(root, "step-agent", "models.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.piModelsEnvRefs(); strings.Join(got, " ") != "GW_TOKEN OPENROUTER_API_KEY" {
+		t.Fatalf("refs = %v", got)
 	}
 }

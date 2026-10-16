@@ -86,7 +86,12 @@ func validPriority(p string) bool {
 
 // forbidden attrs keys (execution-state blacklist; reference.md §2.3, kept from v0
 // business semantics): Core never persists workflow execution state.
+// blocked_seal is reserved too: Core itself writes it on a blocked close
+// (setBlockedSealTx, a direct UPDATE that never passes through
+// checkAttrs), so a create must not plant a fake seal that the next
+// cross-machine claim would then check a clone against.
 var executionStateKeys = map[string]bool{
+	blockedSealKey: true,
 	"current_step": true, "step_id": true, "step_attempt_id": true,
 	"attempt": true, "review_round": true, "review_rounds": true,
 	"review_verdict": true, "progress": true, "workflow_status": true,
@@ -102,7 +107,7 @@ func checkAttrs(v any, path string) error {
 			p := path + "." + k
 			if executionStateKeys[k] {
 				return Fail(api.ErrCoreBadInput, "EXECUTION_STATE_REJECTED",
-					"attrs key %s carries execution state; Core never persists it", p)
+					"attrs key %s carries execution state or a Core-written key; a create cannot set it", p)
 			}
 			if err := checkAttrs(val, p); err != nil {
 				return err
@@ -237,8 +242,8 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 
 	// Display seq: PER-PROJECT monotonic (<project>#<seq>). The legacy
 	// library numbers WIs per project (aiterm#1 and defswitch#1 both
-	// exist) and slugs have always resolved by (project, seq); the seq-fix
-	// owner ruling makes the numbering match — MAX(seq) scoped to this
+	// exist) and slugs resolve by (project, seq); the owner ruling makes
+	// the numbering match — MAX(seq) scoped to this
 	// project, not the whole table.
 	var maxSeq sql.NullInt64
 	if err := tx.QueryRow(`SELECT MAX(seq) FROM work_items WHERE project_id=?1`, projectID).Scan(&maxSeq); err != nil {
@@ -495,11 +500,9 @@ func bundleRef(name *string) (bundleName any) {
 }
 
 // patchableFields (reference.md §4.1). Workflow refs and parent are immutable.
-// clean_pause rides the whitelist per the session-end paused verdict (reference.md §3.3)
-// ("pf resume clears the flag via WI PATCH (whitelist gained
-// clean_pause)") — the operator resume face; the update half below was
-// wired at merge, the whitelist entry was missed there (found by the
-// Lane D e2e s03 pause/resume scenario).
+// clean_pause rides the whitelist per the session-end paused verdict
+// (reference.md §3.3): `pf resume` clears the flag via WI PATCH — the
+// operator resume face.
 //
 // bundle_name rides the R2 window (w140): it is patchable exactly
 // while the WI is queued and never claimed — the window gate below

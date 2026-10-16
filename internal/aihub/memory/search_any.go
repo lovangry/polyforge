@@ -71,6 +71,53 @@ var anyStopwords = func() map[string]bool {
 	return m
 }()
 
+// cjkParticles are Chinese particles and function characters: high
+// frequency, little topic signal. Only characters that are almost never
+// content belong here: 中 上 下 对 将 一 等 are excluded on purpose, since
+// they carry real terms (上下文, 下载中, 对账, 将来, 一致性, 等待) that the
+// ≥2 rule would otherwise wipe out. cjkFunctionWords are multi-rune
+// function words whose runes are not particles alone (进 in 进程 is
+// content; 进行 is filler). See cjkParticleMask.
+var cjkParticles = func() map[rune]bool {
+	m := map[rune]bool{}
+	for _, r := range "的了是在和与及或为把被从到也都就而这那之其" {
+		m[r] = true
+	}
+	return m
+}()
+
+var cjkFunctionWords = [][]rune{
+	[]rune("一个"), []rune("进行"), []rune("以及"), []rune("这个"), []rune("那个"),
+	[]rune("可以"), []rune("如果"), []rune("因为"), []rune("所以"), []rune("但是"),
+	[]rune("已经"), []rune("没有"), []rune("需要"), []rune("通过"), []rune("关于"),
+	[]rune("等等"), []rune("一下"), []rune("一些"),
+}
+
+// cjkParticleMask marks each rune of a CJK run that is a particle or
+// part of a function word. A shingle with ≥2 marked runes of its 3 is
+// dropped: it holds at most one content character, so as an OR term it
+// matches nearly every Chinese memory ("的是在" in 修复的是在重试时) and
+// takes a term slot from a real stretch. One marked rune is kept: 的重试
+// still pins 重试, and dropping every shingle that touches a particle
+// would leave short clauses with nothing. A run the filter would empty
+// keeps its unfiltered shingles: some recall beats none.
+func cjkParticleMask(rs []rune) []bool {
+	mask := make([]bool, len(rs))
+	for i, r := range rs {
+		mask[i] = cjkParticles[r]
+	}
+	for _, w := range cjkFunctionWords {
+		for i := 0; i+len(w) <= len(rs); i++ {
+			if string(rs[i:i+len(w)]) == string(w) {
+				for j := range w {
+					mask[i+j] = true
+				}
+			}
+		}
+	}
+	return mask
+}
+
 // isCJK reports whether r belongs to a script written without spaces
 // between words (Han, Hiragana, Katakana, Hangul): such a run is a whole
 // clause, not a word, so anyTerms shingles it instead of keeping it as
@@ -98,7 +145,8 @@ func isWordRune(r rune) bool {
 //     pieces the trigram index can match, so any memory sharing a 3-rune
 //     stretch of the clause is a candidate and bm25 favours the ones
 //     sharing more of them. A CJK run under 3 runes yields nothing (the
-//     trigram index cannot answer it).
+//     trigram index cannot answer it), and a shingle made mostly of
+//     particles / function words is dropped (cjkParticleMask).
 //
 // Terms are deduplicated, then capped at maxAnyTerms by interleaving two
 // pools so neither script can starve the other: words (longest first —
@@ -143,9 +191,26 @@ func anyTerms(q string) []string {
 	var shingleRuns [][]string
 	for _, rn := range runs {
 		if rn.cjk {
-			var sh []string
+			var all, kept []string
+			mask := cjkParticleMask(rn.rs)
 			for i := 0; i+cjkShingleRunes <= len(rn.rs); i++ {
 				t := string(rn.rs[i : i+cjkShingleRunes])
+				all = append(all, t)
+				marked := 0
+				for _, m := range mask[i : i+cjkShingleRunes] {
+					if m {
+						marked++
+					}
+				}
+				if marked < 2 {
+					kept = append(kept, t)
+				}
+			}
+			if len(kept) == 0 {
+				kept = all
+			}
+			var sh []string
+			for _, t := range kept {
 				if !seen[t] {
 					seen[t] = true
 					sh = append(sh, t)

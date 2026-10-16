@@ -79,12 +79,11 @@ func (h *Handle) Terminate(bound time.Duration) error {
 
 // Config carries what the bridge needs from the runtime's job.
 type Config struct {
-	WI            string
-	CapsuleDir    string
-	BundleName    string
-	SessionHandle string
-	SpawnN        int64
-	Spawner       rt.Spawner
+	WI         string
+	CapsuleDir string
+	BundleName string
+	SpawnN     int64
+	Spawner    rt.Spawner
 	// StepCandidates is the polyforge#79 effective per-step candidate
 	// map the runtime computed at claim time (or rehydrated/re-derived
 	// at recovery); nil = no yaml layer, the bundle's own resolution.
@@ -166,7 +165,7 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 	// driver-owned derivation ledger), NOT the job's relaunch ordinal:
 	// step ordinals are the observable contract (drop paths, archive
 	// dirs, the e2e fakepi's action indexing — all 1-based for a fresh
-	// capsule), while cfg.SpawnN (≥1 since the observe-lane fix) is the
+	// capsule), while cfg.SpawnN (≥1) is the
 	// job ordinal the RTStarted emission needs. A fresh capsule seeds 0
 	// → first dispatch is ordinal 1; a relaunch seeds past every ordinal
 	// the predecessor's dispatches used, so stale drops stay fenced.

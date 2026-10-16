@@ -78,6 +78,9 @@ func TestDoctorWorkspaceLayoutWarnsWithDestination(t *testing.T) {
 			t.Fatalf("layout detail lacks %q: %s", want, detail)
 		}
 	}
+	if strings.Contains(detail, "pf init") {
+		t.Fatalf("no CLAUDE.md, yet the detail suggests pf init: %s", detail)
+	}
 	for _, f := range []string{"brief.md", "app.apk", ".polyforge/design-review.md"} {
 		if _, err := os.Stat(filepath.Join(ws, f)); err != nil {
 			t.Fatalf("doctor touched %s: %v", f, err)
@@ -86,6 +89,30 @@ func TestDoctorWorkspaceLayoutWarnsWithDestination(t *testing.T) {
 	// warn never moves the exit code: the only fail here is the dead socket
 	if code != 1 || countFails(doctorReport{Checks: toChecks(doc)}) != 1 {
 		t.Fatalf("exit %d, checks %+v", code, doc.Checks)
+	}
+}
+
+// A CLAUDE.md without the layout section warns with the `pf init` fix;
+// `pf init` clears it. (No CLAUDE.md at all is the clean case above
+// minus init — see TestDoctorWorkspaceLayoutWarnsWithDestination, whose
+// detail carries no layout-section row.)
+func TestDoctorWorkspaceNotesWithoutLayoutWarns(t *testing.T) {
+	env, ws := doctorWorkspace(t)
+	notes := "<!-- polyforge:managed:version=\"1.0\" -->\n## Repos\n<!-- /polyforge:managed -->\n\n<!-- polyforge:layout --> quoted outside the block\n"
+	if err := os.WriteFile(filepath.Join(ws, "CLAUDE.md"), []byte(notes), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, doc := doctorStatus(t, env, "--json", "doctor")
+	st, detail := doctorFind(t, doc, docChLayout)
+	if st != "warn" || !strings.Contains(detail, "pf init "+ws) || !strings.Contains(detail, "polyforge:layout") {
+		t.Fatalf("layout = %s (%s), want warn suggesting pf init %s", st, detail, ws)
+	}
+	if code, _, stderr := runPf(t, env, "init", ws); code != 0 {
+		t.Fatalf("pf init: exit %d (%s)", code, stderr)
+	}
+	_, _, doc = doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, docChLayout); st != "pass" {
+		t.Fatalf("after pf init: layout = %s (%s), want pass", st, detail)
 	}
 }
 

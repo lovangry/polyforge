@@ -332,3 +332,29 @@ func TestInitMarkerEdgeCases(t *testing.T) {
 		}
 	})
 }
+
+// LayoutSection: no CLAUDE.md, no managed block, a layout marker only
+// outside the block, the section in place, and an unclosed block (an
+// error, as pf init refuses it).
+func TestLayoutSection(t *testing.T) {
+	cases := []struct {
+		name, notes      string // notes "" = no CLAUDE.md
+		exists, has, err bool
+	}{
+		{"absent", "", false, false, false},
+		{"no managed block", "# notes\n", true, false, false},
+		{"marker outside the block", managedOpen + "\n" + managedClose + "\n" + layoutOpen + "\n", true, false, false},
+		{"in place", managedOpen + "\n" + LayoutBlock() + managedClose + "\n", true, true, false},
+		{"unclosed block", managedOpen + "\n" + LayoutBlock(), true, false, true},
+	}
+	for _, c := range cases {
+		root := t.TempDir()
+		if c.notes != "" {
+			writeFile(t, filepath.Join(root, NotesFile), c.notes)
+		}
+		exists, has, err := LayoutSection(root)
+		if exists != c.exists || has != c.has || (err != nil) != c.err {
+			t.Fatalf("%s: LayoutSection = %v, %v, %v; want %v, %v, err=%v", c.name, exists, has, err, c.exists, c.has, c.err)
+		}
+	}
+}

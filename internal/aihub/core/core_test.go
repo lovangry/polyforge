@@ -156,6 +156,14 @@ func TestWorkItemCRUD(t *testing.T) {
 	}); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "EXECUTION_STATE_REJECTED" {
 		t.Fatalf("execution-state attrs not rejected: %v", err)
 	}
+	// blocked_seal is Core-written (the blocked close): a create cannot
+	// plant one.
+	if _, err := env.WIs.Create(CreateRequest{
+		Project: "alpha", Goal: "fake seal", Reporter: env.UserID,
+		Attrs: map[string]any{"blocked_seal": map[string]any{"head": "abc123", "machine": "m9"}},
+	}); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "EXECUTION_STATE_REJECTED" {
+		t.Fatalf("a planted blocked_seal not rejected: %v", err)
+	}
 	// Execution ticket: bundle_name pins the workflow reference (the name
 	// is the reference — the digest chain is deleted, polyforge#149). The
 	// reference freezes at FIRST CLAIM (the R2 window, w140): this ticket

@@ -14,9 +14,67 @@ steps:
   # artifact, not the chat.
   - { id: root-cause, context_policy: fresh, handoff: true, gate: true, model_candidates: [pi:sub2api-claude/pi-claude-opus-5, pi:sub2api-openai/gpt-6-astra, pi:sub2api-glm/glm-5.3], on_fail: { target: repro } }
   - { id: fix, context_policy: inherit }
-  - { id: verification, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, on_fail: { target: fix }, model_candidates: [pi:sub2api-glm/glm-5.3-flash, pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5] }
-  - { id: review, context_policy: fresh, handoff: false, gate: true, on_fail: { target: fix } }
-  - { id: deliver, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, on_fail: { target: fix } }
+  - id: verification
+    context_policy: fresh
+    gate: true
+    requires_command_evidence: true
+    on_fail: { target: fix }
+    model_candidates: [pi:sub2api-glm/glm-5.3-flash, pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5]
+    vars:
+      output_required: verdict, checks
+      build_step: fix
+      position: >-
+        Specific to this lane, you also re-run the original reproduction: the lane's core
+        acceptance signal is *the artifact that originally failed now passes*. Design
+        quality is `review`'s job, next.
+      lane_checks: |-
+        **Re-run the repro.** Read `artifacts/repro.md` and execute its `## Steps` verbatim
+        against the fixed tree; if `repro` authored a failing test, run that test. Record the
+        outcome as its own named check, `repro`. The observed
+        behavior must match `## Expected` — a repro that now fails *differently* is a fail,
+        not a pass. When `repro` reproduced the bug (`reproduces: true`), a `pass` verdict
+        must record the repro re-run as a check named `repro` with status `pass` — the
+        driver rejects a pass whose repro check is skipped or missing.
+      never_pre_existing: the repro re-run (its check and the original repro case), every test in `steps.repro.output.test_files`, and the `steps.fix.output.regression_test` test(s)
+  - id: review
+    context_policy: fresh
+    gate: true
+    on_fail: { target: fix }
+    vars:
+      build_step: fix
+      scope_source: the WI and the root-cause scope guidance
+      intro: |-
+        Judge whether this bug fix is ready to release. Unlike `verification`, this step is a
+        genuine quality judgment, not a mechanical check — and in this lane it has a specific
+        question to answer above all: **did the fix remove the actual cause?** The lane's whole
+        reason to exist is preventing symptom-patches, and this is the last step positioned to
+        catch one; ship-readiness judgment needs both the mechanical results and the evidence
+        chain (repro -> cause -> fix -> verified) in hand.
+      judge: |-
+        1. Read, in this order: `artifacts/root-cause.md` (the proven cause),
+           `artifacts/repro.md` (the observed failure), the full diff (in each task repo
+           `git diff $(git merge-base HEAD origin/HEAD)..HEAD`, falling back to `origin/main` or
+           `origin/master` when `origin/HEAD` is unset — this carries `repro`'s test commit,
+           `fix`'s commits and any commit `fix` did not report), and
+           `artifacts/verification-report.md` (the mechanical results, repro re-run included).
+        2. Judge the causal fit: does the diff remove the *diagnosed condition*, or does it
+           merely suppress the observed symptom at one call site? Would the failure still occur
+           through a path the diff did not touch? If `fix` reported
+           `root_cause_addressed: false`, that is an automatic blocking finding — the lane
+           requires the cause itself to be gone.
+        3. Judge the blast radius: the diff's effect on adjacent behavior the diagnosis did not
+           implicate; scope creep beyond what the cause demanded; missing test coverage of the
+           corrected behavior if the project expects tests alongside fixes.
+           Judge the tests in the diff too: a repro or regression test that does not actually
+           reproduce the diagnosed failure (vacuous, or passing whatever the code does) is a
+           blocking finding — `fix` may not change it on its own (the driver's authored-tests
+           gate) and must ask a human through `needs_input`, so name the test and why. A
+           redundant or oversized test is a `non-blocking` finding.
+        4. If your blocking finding is that the *diagnosis* was wrong, say exactly that in
+           `fail_reason` — `fix` is expected to report it honestly rather than re-litigate the
+           cause mid-flow (there is no direct rewind to `root-cause` in this lane; see
+           `workflow.md`'s rewind-boundaries section).
+  - { id: deliver, context_policy: fresh, gate: true, requires_command_evidence: true, on_fail: { target: fix } }
 ---
 
 # bug-fix — root-cause lane
@@ -106,26 +164,12 @@ surface that honestly instead of burning the budget on repeat attempts.
 No workflow-level budget and no step `budget.wall_minutes`: the bounds are the rewind limits
 above and the daemon's per-step runtime bound T (README, `pf daemon` flags).
 
-## No release slot
+## Delivery and releases
 
-This bundle has no release step. Releases and deploys never ride a delivery lane: they
-happen only through the dedicated `release` workflow bundle (a separate WI), so shipping
-is always an explicit, separately-gated act on a verified origin head.
-
-## Delivery: the `deliver` step
-
-`deliver` runs last, after every gate passed (a failing gate never reaches it). Per declared
-repo it fetches and merges the latest origin default branch (a conflict is resolved in the
-capsule, then the full test bar is re-run and a fresh-context reviewer checks the
-resolution), pushes ONLY the feature branch `polyforge/<project>-<seq>`, opens or reuses
-the PR, and merges it with `gh pr merge --merge` iff the independent review passed with no
-blocking finding, the tests passed, no conflict was LLM-resolved and its mechanical
-pre-flight (nothing uncommitted, no release residue) found nothing. Otherwise it asks a
-human-only question (merge / don't merge / back to code). The independent review is this workflow's `review` gate (`steps.review.output`). "Back to code" is a
-`gate_failed` verdict that rewinds to `fix`; a re-run reuses the same branch and PR. The
-result records branch, PR URL and merge commit (or why not merged) per repo, plus the
-delivery note (`artifacts/delivery.md`). The driver refuses a completed `deliver` whose
-recorded commands push anything but the feature branch, merge other than `--merge`, or
-merge/leave unmerged outside the rule without a human answer. Step definition:
-`steps/deliver.md`. Releases stay in the separate `release` bundle, cut from the merged
-origin head.
+`deliver` runs last, after every gate passed; its contract (merge the latest default branch,
+push only the feature branch, open or reuse the PR, merge under the merge rule or ask a
+human) is the shared step definition `workflows/_shared/steps/deliver.md`. Lane facts:
+its "back to code" answer rewinds to `fix`, and the independent review it reads is this
+workflow's `review` gate (`steps.review.output`). There is no release slot: releases and
+deploys happen only through the separate `release` bundle (a separate WI), cut from the
+merged origin head.

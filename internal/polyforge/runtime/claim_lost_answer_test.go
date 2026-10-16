@@ -126,11 +126,11 @@ func TestJournalReplayTransportErrorKeepsEntry(t *testing.T) {
 	hub.hold(wi, session, api.StatusRunning)
 	hub.claimFaults = []claimFault{{err: errTransport}}
 
-	r.resumeClaiming(context.Background())
+	replayClaims(r)
 	if r.loadClaiming()[wi] == nil {
 		t.Fatal("a transport error on the claim replay must keep the journal entry")
 	}
-	r.resumeClaiming(context.Background())
+	replayClaims(r)
 	t.Cleanup(func() { terminateJobAgent(r, wi) })
 	if ji, ok := r.Info(wi); !ok || ji.SessionID != session {
 		t.Fatalf("the second replay must adopt the journaled session, job = %+v (ok=%v)", ji, ok)

@@ -2193,10 +2193,9 @@ func TestW113InstallDaemonFlagSurface(t *testing.T) {
 // TestW113DesignDocsTeachMappingContract pins criterion #25's automated
 // floor: the live design docs — reference.md (the current-system
 // reference) and 08-capsule-base-migration.md — describe the
-// `[workspace."<path>"]` mapping shape. (04-local-runtime.md and
-// 00-architecture.md, which this test read before, were archived by the
-// repo review 2026-10-16 wave 4. The current-surface-vs-history judgment
-// is the manual document-only review in artifacts/e2e-scenarios.md.)
+// `[workspace."<path>"]` mapping shape. (The current-surface-vs-history
+// judgment is the manual document-only review in
+// artifacts/e2e-scenarios.md.)
 func TestW113DesignDocsTeachMappingContract(t *testing.T) {
 	root := v1Root(t)
 	docs := []string{

@@ -12,11 +12,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/polyforge/supervisor"
 )
+
+var supervisorAllowed = supervisor.DaemonEnvAllowed
 
 func TestEnsureMachineID(t *testing.T) {
 	dir := t.TempDir()
@@ -38,22 +43,37 @@ func TestEnsureLoopScript(t *testing.T) {
 		socket: "/d/data/daemon.sock", workflowsDir: "/d/data/release/current/workflows",
 		machineID: "m-x", home: "/home/u", timeout: time.Second,
 	}
+	// the wrapper carries environment values: checked, never printed
 	script := p.loopScript()
 	if out, err := exec.Command("sh", "-n", "-c", script).CombinedOutput(); err != nil {
-		t.Fatalf("loop script is not valid sh: %v %s\n%s", err, out, script)
+		t.Fatalf("loop script is not valid sh: %v %s", err, out)
+	}
+	for _, want := range []string{
+		"exec /usr/bin/env -i ", " HOME='/home/u' ", " POLYFORGE_SUPERVISOR='tmux:polyforge-daemon' /bin/sh -c ",
+		"cd '/home/u' 2>/dev/null || cd /\n",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("loop script wrapper lacks %q", want)
+		}
+	}
+	body := p.loopBody()
+	if !strings.Contains(script, shQuote(body)) {
+		t.Fatal("the wrapper does not run the loop body")
+	}
+	if out, err := exec.Command("sh", "-n", "-c", body).CombinedOutput(); err != nil {
+		t.Fatalf("loop body is not valid sh: %v %s\n%s", err, out, body)
 	}
 	for _, want := range []string{
 		"nohup '/opt/pf bin/pf' 'daemon' '--config' '/c/it'\\''s cli.toml' '-machine-id' 'm-x' '-data-dir' '/d/data' '-socket' '/d/data/daemon.sock' '-workflows-dir' '/d/data/release/current/workflows' < /dev/null >> '/d/data/daemon.log' 2>&1",
-		"while :; do", "rc=$?", "if [ \"$rc\" -eq 0 ]", "break", "sleep 5", "POLYFORGE_SUPERVISOR='tmux:polyforge-daemon'",
-		"unset TMUX TMUX_PANE PF_CHAT_ID PF_WI_ID",
+		"while :; do", "rc=$?", "if [ \"$rc\" -eq 0 ]", "break", "sleep 5",
 	} {
-		if !strings.Contains(script, want) {
-			t.Fatalf("loop script lacks %q:\n%s", want, script)
+		if !strings.Contains(body, want) {
+			t.Fatalf("loop body lacks %q:\n%s", want, body)
 		}
 	}
 	for _, banned := range []string{"-auto", "-max-concurrent-jobs", "--harness-root"} {
-		if strings.Contains(script, banned) {
-			t.Fatalf("loop script forces %q:\n%s", banned, script)
+		if strings.Contains(body, banned) {
+			t.Fatalf("loop body forces %q:\n%s", banned, body)
 		}
 	}
 }
@@ -61,8 +81,8 @@ func TestEnsureLoopScript(t *testing.T) {
 // TestEnsureLoopRestartsFailuresAndEndsOnCleanExit runs the real loop
 // script (no tmux) around a fake daemon that fails once, then exits 0:
 // the failure is restarted after the pause, the clean exit ends the loop;
-// every inherited CLAUDE* and the step/chat markers are gone from the
-// daemon's environment.
+// the daemon's environment is exactly the allow-list (env hygiene) — every
+// inherited CLAUDE*, ANTHROPIC_*, credential and step/chat marker is gone.
 func TestEnsureLoopRestartsFailuresAndEndsOnCleanExit(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "pf")
@@ -72,7 +92,10 @@ func TestEnsureLoopRestartsFailuresAndEndsOnCleanExit(t *testing.T) {
 	}
 	p := &ensurePlan{pfBin: fake, configPath: "/c", dataDir: dir, socket: dir + "/s", workflowsDir: dir, machineID: "m-x", home: dir}
 	cmd := exec.Command("sh", "-c", p.loopScript())
-	cmd.Env = append(os.Environ(), "CLAUDECODE=1", "CLAUDE_CODE_SSE_PORT=1", "CLAUDE_ANYTHING=x", "PF_WI_ID=wi_1", "PF_CHAT_ID=chat_1", "TMUX=/x,1,0")
+	// the loop runs in a polluted environment (what a tmux server started
+	// from a human's session carries); the script itself cleans it
+	cmd.Env = append(os.Environ(), "CLAUDECODE=1", "CLAUDE_CODE_SSE_PORT=1", "CLAUDE_ANYTHING=x", "PF_WI_ID=wi_1", "PF_CHAT_ID=chat_1", "TMUX=/x,1,0",
+		"ANTHROPIC_AUTH_TOKEN=junk", "ANTHROPIC_BASE_URL=http://junk", "FOO_TOKEN=junk", "POLYFORGE_V1_API_KEY=junk")
 	start := time.Now()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("loop: %v %s", err, out)
@@ -83,14 +106,17 @@ func TestEnsureLoopRestartsFailuresAndEndsOnCleanExit(t *testing.T) {
 	if n, _ := os.ReadFile(filepath.Join(dir, "n")); strings.TrimSpace(string(n)) != "2" {
 		t.Fatalf("daemon runs = %q, want 2 (failure restarted, clean exit final)", n)
 	}
-	env, _ := os.ReadFile(filepath.Join(dir, "env.1"))
-	for _, banned := range []string{"CLAUDE", "PF_WI_ID=", "PF_CHAT_ID=", "TMUX="} {
-		if strings.Contains(string(env), banned) {
-			t.Fatalf("the daemon inherited %q:\n%s", banned, env)
-		}
+	// exactly the allow-list (names compared; values never printed)
+	want := map[string]bool{"PWD": true}
+	for _, kv := range p.daemonEnv(true) {
+		name, _, _ := strings.Cut(kv, "=")
+		want[name] = true
 	}
-	if !strings.Contains(string(env), "POLYFORGE_SUPERVISOR=tmux:polyforge-daemon") {
-		t.Fatal("the supervision marker is missing")
+	for _, f := range []string{"env.1", "env.2"} {
+		got := envNames(t, filepath.Join(dir, f))
+		if strings.Join(got, " ") != strings.Join(sortedKeys(want), " ") {
+			t.Fatalf("%s: daemon env names %v, want exactly %v", f, got, sortedKeys(want))
+		}
 	}
 	log, _ := os.ReadFile(filepath.Join(dir, "daemon.log"))
 	if !strings.Contains(string(log), "failed (exit 3); restarting") || !strings.Contains(string(log), "exited cleanly; the loop ends") {
@@ -205,4 +231,78 @@ func TestEnsureArgvIgnoresDaemonTable(t *testing.T) {
 	if code := Main([]string{"--config", bad}, nil, &out, &errb); code != ExitNeedsOperator || !strings.Contains(errb.String(), "[daemon] step_timeout") {
 		t.Fatalf("daemon on an invalid [daemon]: exit %d stderr %q", code, errb.String())
 	}
+}
+
+// envNames answers the sorted variable names of an `env` dump.
+func envNames(t *testing.T, path string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		if name, _, ok := strings.Cut(line, "="); ok && name != "" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// TestEnsureDaemonEnvIsTheCallersAllowList (env hygiene): the daemon
+// environment is the allow-list filtered from the ensure caller's
+// environment, HOME pinned, PWD never copied, the marker only for the
+// loop.
+func TestEnsureDaemonEnvIsTheCallersAllowList(t *testing.T) {
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "junk")
+	t.Setenv("FOO_TOKEN", "junk")
+	t.Setenv("PF_CHAT_ID", "chat_1")
+	t.Setenv("LC_ALL", "C")
+	t.Setenv("https_proxy", "http://proxy.invalid:1")
+	t.Setenv("POLYFORGE_DATA_DIR", "/d")
+	t.Setenv("PWD", "/somewhere")
+	t.Setenv("LC_$(touch pwned)", "x") // a crafted name never reaches the script
+	p := &ensurePlan{home: "/home/u"}
+	if strings.Contains(p.loopScript(), "pwned") {
+		t.Fatal("the loop script carries a non-shell variable name")
+	}
+	names := func(env []string) []string {
+		var out []string
+		for _, kv := range env {
+			name, _, _ := strings.Cut(kv, "=")
+			out = append(out, name)
+		}
+		return out
+	}
+	loop := names(p.daemonEnv(true))
+	joined := " " + strings.Join(loop, " ") + " "
+	for _, want := range []string{"HOME", "PATH", "LC_ALL", "https_proxy", "POLYFORGE_DATA_DIR", "POLYFORGE_SUPERVISOR"} {
+		if !strings.Contains(joined, " "+want+" ") {
+			t.Fatalf("daemon env lacks %s: %v", want, loop)
+		}
+	}
+	for _, name := range loop {
+		if name != "HOME" && name != "POLYFORGE_SUPERVISOR" && (!supervisorAllowed(name) || name == "PWD") {
+			t.Fatalf("daemon env carries %s: %v", name, loop)
+		}
+	}
+	if strings.Contains(" "+strings.Join(names(p.daemonEnv(false)), " ")+" ", " POLYFORGE_SUPERVISOR ") {
+		t.Fatal("the detached start carries the tmux supervision marker")
+	}
+	for _, kv := range p.daemonEnv(true) {
+		if kv == "HOME=/home/u" {
+			return
+		}
+	}
+	t.Fatal("HOME is not pinned to the resolved home")
 }

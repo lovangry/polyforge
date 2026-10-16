@@ -139,8 +139,7 @@ const (
 // delivered result — ends the streak and the backoff starts over. The
 // audit-only interruption entries a driver relaunch or daemon restart
 // archives are not dispatch outcomes and are skipped: a restart must not
-// reset the D7 backoff or the upstream-transient retry bound (repo
-// review 2026-10-16 B-22).
+// reset the D7 backoff or the upstream-transient retry bound.
 func trailingCause(attempts []capsule.Attempt, cause string) int {
 	n := 0
 	for i := len(attempts) - 1; i >= 0; i-- {
@@ -212,8 +211,8 @@ type ExitedError struct {
 // EnvelopeDefectError is a dispatch wait cut short (a supervisor verdict,
 // shutdown) while the drop path held an UNUSABLE envelope: the step did
 // write a result, and the defect must reach the failure record and the
-// retry prompt instead of reading as "no envelope" (repo review
-// 2026-10-16 B-12). It unwraps to the cancellation cause.
+// retry prompt instead of reading as "no envelope". It unwraps to the
+// cancellation cause.
 type EnvelopeDefectError struct {
 	Defect error
 	Cause  error

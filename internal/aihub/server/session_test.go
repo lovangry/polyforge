@@ -499,6 +499,13 @@ func TestBlockedExitsUnifiedAuthorization(t *testing.T) {
 // seal.
 func TestBlockedSealHeadRoundTrip(t *testing.T) {
 	e := newSrvEnv(t)
+	// a create cannot plant the seal: only the blocked close writes it
+	if code, raw := e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{
+		"project": "alpha", "goal": "fake seal", "bundle_name": "demo-bundle",
+		"attrs": map[string]any{"blocked_seal": map[string]any{"head": "abc123", "machine": "m9"}},
+	}, nil); code != 400 || !strings.Contains(string(raw), "EXECUTION_STATE_REJECTED") {
+		t.Fatalf("create with attrs.blocked_seal: %d %s, want 400 EXECUTION_STATE_REJECTED", code, raw)
+	}
 	id := createExecWIOverHTTP(t, e, "sealed head")
 	end := func(secret string, body map[string]string) {
 		t.Helper()

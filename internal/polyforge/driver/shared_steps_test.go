@@ -62,7 +62,7 @@ func TestShippedStepDefinitionsResolve(t *testing.T) {
 			t.Errorf("%s/%s: no step definition (own or shared): %v", filepath.Base(bs[0]), bs[1], err)
 		}
 		used[filepath.Clean(p)] = true
-		if _, err := readStepDefinition(bs[0], bs[1]); err != nil {
+		if _, err := readStepDefinition(bs[0], bs[1], shippedVars(t, bs[0], bs[1])); err != nil {
 			t.Errorf("%s/%s: %v", filepath.Base(bs[0]), bs[1], err)
 		}
 	}
@@ -182,7 +182,7 @@ func TestOldLayoutCapsuleOwnDeliverStillRuns(t *testing.T) {
 	if !strings.Contains(prompt, strings.TrimSpace(stepDefBody(shared))[:80]) {
 		t.Fatalf("deliver prompt does not carry the snapshot's deliver body\n%s", prompt)
 	}
-	s, err := loadStepOutputSchema(filepath.Join(capDir, "workflows", "autopilot"), "deliver")
+	s, err := loadStepOutputSchema(filepath.Join(capDir, "workflows", "autopilot"), "deliver", nil)
 	if err != nil || s == nil || s.Schema == nil {
 		t.Fatalf("old-layout deliver schema: %v", err)
 	}
@@ -230,5 +230,111 @@ func TestVerificationIDAloneOwesNoEvidenceInPrompt(t *testing.T) {
 	}
 	if p, _ = sp.last(); !strings.Contains(p.InitialPrompt, "this step requires `command_evidence`") {
 		t.Fatalf("a declared step must be told to carry command_evidence\n%s", p.InitialPrompt)
+	}
+}
+
+// spawnStepPrompt dispatches stepID of the shipped bundle from a fresh
+// capsule carrying the bundle and the shipped workflows/_shared/ (the
+// materialized layout) and answers the assembled prompt.
+func spawnStepPrompt(t *testing.T, bundle, stepID string) string {
+	t.Helper()
+	capDir := capsuleWithShippedBundle(t, bundle)
+	shared, _ := filepath.Glob(filepath.Join(shippedWorkflowsDir, workflow.SharedDir, "steps", "*.md"))
+	for _, p := range shared {
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeCapsuleFile(t, capDir, "workflows/"+workflow.SharedDir+"/steps/"+filepath.Base(p), string(raw))
+	}
+	sp := &captureSpawner{}
+	ad, err := NewStepSpawnAdapter(StepSpawnAdapter{
+		WI:           WIInfo{ID: "wi_sh", CapsuleDir: capDir, BundleName: bundle},
+		Spawner:      sp,
+		PollInterval: 2 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewStepSpawnAdapter: %v", err)
+	}
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: stepID, SpawnN: 1}); err != nil {
+		t.Fatalf("SpawnStep %s/%s: %v", bundle, stepID, err)
+	}
+	p, _ := sp.last()
+	return p.InitialPrompt
+}
+
+// TestSharedStepPromptsKeepLaneFacts (decision 2026-10-16 G1 follow-up):
+// verification and review are one shared text each, the lane-specific
+// facts rendered from the workflow.md step entry's vars. Every bundle's
+// dispatched prompt must still carry the facts its pre-dedup step file
+// carried (artifact names, lane checks, rewind target, schema
+// requirements) — and none of another lane's.
+func TestSharedStepPromptsKeepLaneFacts(t *testing.T) {
+	type facts struct{ want []string }
+	lanes := map[string]map[string]facts{
+		"verification": {
+			"chore": {[]string{"`plan-conformance`", "`artifacts/plan.md`'s", "any test the plan names as pinning this change",
+				"there is no release slot behind you"}},
+			"autopilot": {[]string{"`memo-conformance`", "`artifacts/fix-memo.md`'s `## Scope` and `## Non-goals`",
+				"the memo's `## What is broken or missing` case", "no separate review step behind you"}},
+			"bug-fix": {[]string{"Read `artifacts/repro.md` and execute its `## Steps` verbatim", "(`reproduces: true`)",
+				"a check named `repro` with status `pass`", "every test in `steps.repro.output.test_files`",
+				"`steps.fix.output.regression_test`", "*the artifact that originally failed now passes*"}},
+			"feature-full": {[]string{"Copy `steps.e2e-author.output.scenario_titles`", "(`authored-scenarios`)",
+				"required: [verdict, checks, authored_titles, scenarios]", "the authored acceptance tests (`steps.e2e-author.output.test_files`)",
+				"`fail_reason` names its title and\nexpected vs observed"}},
+		},
+		"review": {
+			"chore": {[]string{"`artifacts/code-summary.md`", "Judge the deletion-type acceptance bar",
+				"concepts the WI and the plan did not request", "(the WI and the plan)"}},
+			"bug-fix": {[]string{"Read, in this order: `artifacts/root-cause.md`", "`root_cause_addressed: false`",
+				"the *diagnosis* was wrong", "concepts the WI and the root-cause scope guidance did not request"}},
+			"feature-full": {[]string{"Read, in this order: `artifacts/spec.md`", "`steps.e2e-author.output.already_satisfied`",
+				"400-line", "concepts the spec did not request"}},
+		},
+	}
+	common := map[string][]string{
+		"verification": {"command_evidence: [{argv, exit_code, duration_ms}]", "AT LEAST ONE entry", "## Pre-existing failures", "`test_bar`", "`no-untracked-test-files`",
+			"Write `artifacts/verification-report.md`", "which plan step or memo scope item"},
+		"review": {"No faked concurrency semantics", "Agent reachability for new entry points", "**Do not run tests or builds.**", "Write `artifacts/review.md`", "If any of the change's own requirements"},
+	}
+	for stepID, byBundle := range lanes {
+		for bundle, f := range byBundle {
+			wf, err := LoadWorkflow(filepath.Join(shippedWorkflowsDir, bundle))
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec := wf.step(stepID)
+			if spec == nil || spec.OnFail == nil {
+				t.Fatalf("%s/%s: no gate with on_fail", bundle, stepID)
+			}
+			if p := workflow.StepDefinitionPath(filepath.Join(shippedWorkflowsDir, bundle), stepID); filepath.Base(filepath.Dir(filepath.Dir(p))) != workflow.SharedDir {
+				t.Errorf("%s/%s resolves to %s, want the shared definition", bundle, stepID, p)
+			}
+			prompt := spawnStepPrompt(t, bundle, stepID)
+			if strings.Contains(prompt, "{{") {
+				t.Errorf("%s/%s prompt carries an unrendered placeholder", bundle, stepID)
+			}
+			// the rewind target the text names is the gate's declared on_fail target
+			target := "`" + spec.OnFail.Target + "`'s"
+			if !strings.Contains(prompt, target+" `pending_rewind_input`") && !strings.Contains(prompt, target+" next attempt") {
+				t.Errorf("%s/%s prompt does not name its on_fail target %s as the rewind receiver", bundle, stepID, spec.OnFail.Target)
+			}
+			for _, w := range append(f.want, common[stepID]...) {
+				if !strings.Contains(prompt, w) {
+					t.Errorf("%s/%s prompt lost lane fact %q", bundle, stepID, w)
+				}
+			}
+			for other, of := range byBundle {
+				if other == bundle {
+					continue
+				}
+				for _, w := range of.want {
+					if strings.Contains(prompt, w) {
+						t.Errorf("%s/%s prompt carries %s's lane fact %q", bundle, stepID, other, w)
+					}
+				}
+			}
+		}
 	}
 }

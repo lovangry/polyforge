@@ -277,6 +277,7 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 	if err := r2.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
+	r2.replays.Wait() // the journal replays clone outside Restart (B-8)
 	defer terminateJobAgent(r2, wi)
 	ji, ok := r2.Info(wi)
 	if !ok || ji.State != StateRunning || ji.SessionID != rec.SessionID {

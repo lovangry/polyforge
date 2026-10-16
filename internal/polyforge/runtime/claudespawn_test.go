@@ -10,6 +10,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -90,26 +91,35 @@ func TestClaudeBuildCmdArgvEnv(t *testing.T) {
 	}
 }
 
-// polyforge#171 zero-credential injection (closing out #159's toml token):
-// the adapter never injects ANTHROPIC_AUTH_TOKEN from any config; an
-// inherited token (the daemon's environment) is what claude sees.
+// polyforge#171 zero-credential injection (closing out #159's toml token)
+// + env hygiene: the adapter never injects ANTHROPIC_AUTH_TOKEN from any
+// config, and strips every inherited ANTHROPIC_* (the daemon's
+// environment) — claude-config/settings.json is the only source.
 func TestClaudeTokenPrecedence(t *testing.T) {
-	t.Setenv("ANTHROPIC_AUTH_TOKEN", "env-token")
+	for _, k := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"} {
+		t.Setenv(k, "junk")
+	}
 	sp := &claudeSpawner{cfg: &Config{}}
 	cmd, _ := sp.buildCmd(SpawnParams{CapsuleDir: "/c", HarnessSession: testSession})
-	env := strings.Join(cmd.Env, "\n")
-	if !strings.Contains(env, "ANTHROPIC_AUTH_TOKEN=env-token") {
-		t.Fatalf("the inherited token disappeared")
-	}
-	os.Unsetenv("ANTHROPIC_AUTH_TOKEN")
-	cmd, _ = sp.buildCmd(SpawnParams{CapsuleDir: "/c", HarnessSession: testSession})
 	for _, kv := range cmd.Env {
-		if strings.HasPrefix(kv, "ANTHROPIC_AUTH_TOKEN=") {
-			t.Fatalf("no token configured, env carries %q", kv)
+		if name, _, _ := strings.Cut(kv, "="); strings.HasPrefix(name, "ANTHROPIC_") {
+			t.Fatalf("the claude step inherited %s", name)
 		}
 	}
-	if strings.Contains(env, "toml-SENTINEL") {
-		t.Errorf("the test's argv scan already covered that")
+}
+
+// env hygiene: pi steps keep the inherited environment unchanged (pi
+// authenticates from its own auth.json; nothing ANTHROPIC_* is stripped
+// there).
+func TestPiStepEnvKeepsInheritedAnthropic(t *testing.T) {
+	t.Setenv("ANTHROPIC_BASE_URL", "junk")
+	t.Setenv("ANTHROPIC_AUTH_TOKEN", "junk")
+	cmd := newPiSpawner(&Config{}).buildCmd(SpawnParams{CapsuleDir: "/c", SpawnN: 1})
+	for _, k := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"} {
+		if !slices.Contains(cmd.Env, k+"=junk") {
+			t.Fatalf("the pi step env lost the inherited %s", k)
+		}
 	}
 }
 
@@ -236,9 +246,10 @@ func TestClaudeEnvStripsInheritedClaudeCode(t *testing.T) {
 	if v := seen["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"]; len(v) != 1 || v[0] != "1" {
 		t.Fatalf("background switch %v, want exactly the adapter's 1", v)
 	}
-	for _, k := range []string{"CLAUDE_CODE_STARTUP_FAILURE_RESULTS", "ANTHROPIC_BASE_URL"} {
-		if len(seen[k]) != 1 {
-			t.Fatalf("%s = %v", k, seen[k])
-		}
+	if len(seen["CLAUDE_CODE_STARTUP_FAILURE_RESULTS"]) != 1 {
+		t.Fatalf("CLAUDE_CODE_STARTUP_FAILURE_RESULTS = %v", seen["CLAUDE_CODE_STARTUP_FAILURE_RESULTS"])
+	}
+	if _, ok := seen["ANTHROPIC_BASE_URL"]; ok {
+		t.Fatal("ANTHROPIC_BASE_URL leaked into the step env")
 	}
 }

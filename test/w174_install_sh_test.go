@@ -782,7 +782,7 @@ func TestW174InstallRefusesWhileJobsRunThenForceProceeds(t *testing.T) {
 }
 
 // TestW174InstallJobCheckFailsClosed (repo
-// review 2026-10-16 V-3 follow-up): the job check fails closed — a socket
+// review 2026-10-16 V-3): the job check fails closed — a socket
 // that does not answer /status with a job list refuses the upgrade (no
 // shutdown, nothing changed); paused and end_pending jobs alone (no agent
 // tree) let it proceed without the override.
@@ -820,8 +820,8 @@ func TestW174InstallJobCheckFailsClosed(t *testing.T) {
 	in.oneDaemon(t, 10*time.Second)
 }
 
-// TestW174InstallAbortAfterStopReportsState (repo review 2026-10-16 V-3
-// follow-up): a failure after the daemon was asked to stop (here: the
+// TestW174InstallAbortAfterStopReportsState (repo review 2026-10-16 V-3):
+// a failure after the daemon was asked to stop (here: the
 // release/current switch) exits non-zero and says where the machine
 // stands — daemon stopped, which binary, where release/current points,
 // what to run — without restarting anything itself.

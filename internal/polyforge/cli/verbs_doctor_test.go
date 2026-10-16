@@ -80,7 +80,7 @@ func liveDaemonSocket(t *testing.T, machineID string) string {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"machine_id":"`+machineID+`","auto":false,"shutting_down":false,"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":1}}`)
+		io.WriteString(w, `{"machine_id":"`+machineID+`","auto":false,"shutting_down":false,"env_names":["HOME","PATH"],"jobs":[],"queue":{"pending":0,"running":0,"max_concurrent":1}}`)
 	})
 	return newFakeDaemon(t, mux)
 }
@@ -372,5 +372,47 @@ func TestRetiredEnvCheck(t *testing.T) {
 	}, []string{"POLYFORGE_HARNESS_ROOT=/x is set but no longer read"})
 	if c.Status != "warn" || !strings.Contains(c.Detail, `[daemon] operator_agent_dir = "/op"`) || !strings.Contains(c.Detail, "daemon: POLYFORGE_HARNESS_ROOT=/x") {
 		t.Fatalf("retired env check = %+v", c)
+	}
+}
+
+// env hygiene: the "daemon env" check judges the running daemon's
+// environment NAMES (GET /status env_names) — ANTHROPIC_* and other
+// credential-looking names outside the ensure allow-list warn with the
+// clean-restart fix; the allow-listed set passes; names only, never
+// values.
+func TestDaemonEnvCheck(t *testing.T) {
+	if c := daemonEnvCheck(false, nil, nil); c.Status != "skip" {
+		t.Fatalf("daemon down: %+v", c)
+	}
+	if c := daemonEnvCheck(true, nil, nil); c.Status != "skip" || !strings.Contains(c.Detail, "older daemon") {
+		t.Fatalf("older daemon: %+v", c)
+	}
+	clean := []string{"HOME", "LANG", "LC_ALL", "PATH", "POLYFORGE_DATA_DIR", "POLYFORGE_SUPERVISOR", "PWD", "https_proxy", "SSH_AUTH_SOCK_DIR"}
+	if c := daemonEnvCheck(true, clean, []string{"https_proxy"}); c.Status != "pass" {
+		t.Fatalf("clean daemon env: %+v", c)
+	}
+	dirty := append(clean, "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "FOO_TOKEN", "POLYFORGE_V1_API_KEY", "DB_PASSWORD", "aws_secret")
+	c := daemonEnvCheck(true, dirty, nil)
+	if c.Status != "warn" {
+		t.Fatalf("dirty daemon env: %+v", c)
+	}
+	for _, want := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "FOO_TOKEN", "POLYFORGE_V1_API_KEY", "DB_PASSWORD", "aws_secret", "pf ops shutdown", "pf daemon ensure"} {
+		if !strings.Contains(c.Detail, want) {
+			t.Fatalf("warn detail lacks %q: %s", want, c.Detail)
+		}
+	}
+	for _, clean := range []string{"HOME", "PATH,", "https_proxy"} {
+		if strings.Contains(c.Detail, clean) {
+			t.Fatalf("warn detail names the allow-listed %q: %s", clean, c.Detail)
+		}
+	}
+}
+
+// env hygiene: a pi models.json `$NAME` outside the allow-list warns
+// (pi steps see only the daemon's allow-listed environment).
+func TestDaemonEnvCheckPiModelsRefs(t *testing.T) {
+	c := daemonEnvCheck(true, []string{"HOME", "PATH"}, []string{"GOPATH", "OPENROUTER_API_KEY", "ZAI_KEY"})
+	if c.Status != "warn" || !strings.Contains(c.Detail, "$OPENROUTER_API_KEY, $ZAI_KEY") || strings.Contains(c.Detail, "$GOPATH") || !strings.Contains(c.Detail, "auth.json") {
+		t.Fatalf("pi models refs: %+v", c)
 	}
 }

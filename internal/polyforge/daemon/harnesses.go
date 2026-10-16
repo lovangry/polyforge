@@ -12,7 +12,8 @@ package daemon
 //   - the three harness dirs' existence (step-agent, step-agent-sessions,
 //     claude-config under the daemon's harness root);
 //   - the claude-config/settings.json env block's key facts
-//     (ANTHROPIC_AUTH_TOKEN, ANTHROPIC_BASE_URL, CLAUDE_CONFIG_DIR) as
+//     (ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL,
+//     CLAUDE_CONFIG_DIR) as
 //     set/unset — values are read in-memory for the pairing heuristic
 //     and NEVER reported;
 //   - its heuristic warnings: an OAuth setup-token (sk-ant-oat01-)
@@ -29,6 +30,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -88,7 +91,7 @@ type harnessDirStatus struct {
 }
 
 // settingsEnvKeys are the env block keys the doctor reports facts about.
-var settingsEnvKeys = []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR"}
+var settingsEnvKeys = []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR"}
 
 // settingsTokenPrefix is the OAuth setup-token prefix Claude Code mints
 // (`claude setup-token`, scoped to the subscription, ~365d live).
@@ -211,6 +214,59 @@ func (d *Daemon) claudeConfigFacts() (map[string]string, map[string]harnessDirSt
 		warns = append(warns, "the claude-config settings.json env block sets CLAUDE_CONFIG_DIR: remove it — the adapter hard-sets the step's config dir and the settings value overrides the adapter's")
 	}
 	return facts, dirs, strings.Join(warns, "; ")
+}
+
+// modelsEnvRefRe matches pi's models.json environment interpolation:
+// `$NAME` or `${NAME}`.
+var modelsEnvRefRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
+
+// piModelsEnvRefs (env hygiene) answers the variable NAMES the step agent
+// dir's models.json references through `$NAME` / `${NAME}` interpolation
+// in an apiKey or header value — pi resolves them from the step's
+// environment, which an ensure-started daemon limits to the allow-list.
+// Sorted, deduplicated; never a value (a literal key or a `!command`
+// value contributes nothing). Absent or unparsable file: none.
+func (d *Daemon) piModelsEnvRefs() []string {
+	root := d.cfg.HarnessRoot
+	if root == "" {
+		root = d.cfg.DataDir
+	}
+	raw, err := os.ReadFile(filepath.Join(root, "step-agent", "models.json"))
+	if err != nil {
+		return nil
+	}
+	var doc any
+	if json.Unmarshal(raw, &doc) != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var walk func(v any, key string, inHeaders bool)
+	walk = func(v any, key string, inHeaders bool) {
+		switch t := v.(type) {
+		case map[string]any:
+			for k, c := range t {
+				walk(c, k, inHeaders || k == "headers")
+			}
+		case []any:
+			for _, c := range t {
+				walk(c, key, inHeaders)
+			}
+		case string:
+			if (key != "apiKey" && !inHeaders) || strings.HasPrefix(t, "!") {
+				return
+			}
+			for _, m := range modelsEnvRefRe.FindAllStringSubmatch(t, -1) {
+				seen[m[1]+m[2]] = true
+			}
+		}
+	}
+	walk(doc, "", false)
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // claudeVersion runs `<path> --version` (bounded), cached per path+mtime.

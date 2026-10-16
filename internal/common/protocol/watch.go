@@ -10,7 +10,24 @@ package protocol
 //	POST /chats/{id}/unsubscribe {"wi"}        -> ChatSubscribeAnswer
 //	POST /chats/{id}/ack         ChatAck       -> {"ok":true}
 //	POST /chats/{id}/heartbeat   {"pid"}       -> {"ok":true}
-//	GET  /chats/{id}/attention?owner=&mark=1   -> ChatAttention
+//	GET  /chats/{id}/attention?owner=&mark=1[&ack=1] -> ChatAttention
+//	POST /chats/{id}/attention/ack {"keys"}    -> {"ok":true}
+//
+// Delivery is fetch-then-ack on both decision paths, so a watcher that
+// dies after fetching and before printing loses nothing:
+//   - subscription decisions: the daemon-held cursor/notified set moves
+//     only on POST ack, which the watcher sends after printing;
+//   - attention notices: with ack=1 the daemon lists each notice with its
+//     Key and keeps listing it on every fetch until POST attention/ack
+//     names that key (acks are idempotent; unknown keys are ignored).
+//     Without ack=1 (an older watcher), mark=1 marks the
+//     listed notices shown at fetch, as before; an older daemon ignores
+//     ack=1 and answers items without a Key, and a watcher acks nothing
+//     then.
+//
+// A crash between printing and acking re-delivers: the next watcher
+// start prints that line once more (at-least-once; the only duplicate).
+// Within one watcher run a failed ack is retried without re-printing.
 
 // WatchSnapshot is one WI's authoritative state plus the events after a
 // cursor. Execution (execution.json) is the authority; Job is the daemon's
@@ -145,6 +162,15 @@ type ChatAttentionItem struct {
 	WI     string `json:"wi"`
 	Slug   string `json:"slug,omitempty"` // display name; empty = show WI
 	Reason string `json:"reason"`         // needs_input
+	// Key names the notice for POST attention/ack; set only when the
+	// fetch asked for fetch-then-ack (ack=1) and the daemon supports it.
+	Key string `json:"key,omitempty"`
+}
+
+// ChatAttentionAck is the POST /chats/{id}/attention/ack body: the Keys of
+// the attention notices the watcher printed.
+type ChatAttentionAck struct {
+	Keys []string `json:"keys"`
 }
 
 // ChatAttention is the GET /chats/{id}/attention answer.

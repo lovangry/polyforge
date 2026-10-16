@@ -531,7 +531,7 @@ else
   # -workflows-dir release/current/workflows. polyforge#113: the
   # mapping-bearing config is the daemon's only workspace source and
   # carries the api_key, so neither appears in argv; auto and
-  # max-concurrent-jobs stay the daemon's persisted settings (audit B4).
+  # max-concurrent-jobs stay the daemon's persisted settings.
   if ENSURE_OUT=$(POLYFORGE_DATA_DIR="$DAEMON_DATA" "$BIN" daemon ensure --config "$CFG" 2>&1); then
     printf '%s\n' "$ENSURE_OUT" | sed 's/^/   /'
     echo "   NOTE: if heartbeat fails, admin must register this daemon's id (pf ops status shows it)"

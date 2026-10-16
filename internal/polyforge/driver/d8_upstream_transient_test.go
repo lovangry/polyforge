@@ -1,7 +1,7 @@
 package driver
 
 // d8_upstream_transient_test.go: the upstream-transient class of
-// wi_seWTgHeKtaa8 (audit 2026-10-13, the #147 incident's follow-up).
+// wi_seWTgHeKtaa8.
 // An upstream's OCCASIONAL return corruption — truncated tool-call
 // arguments, an empty response, a dropped connection — is NOT a
 // model-class death: the same model is retried under the D7 backoff,

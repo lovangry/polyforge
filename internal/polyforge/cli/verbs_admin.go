@@ -392,7 +392,7 @@ var cmdBackup = &Command{
 }
 
 // ---------------------------------------------------------------------------
-// machines (M3 heartbeat wiring, lane hb-m3) — the machines liveness read
+// machines (M3 heartbeat wiring) — the machines liveness read
 // face; the operator half of GET /api/v1/machines (admin).
 
 var cmdMachines = &Command{

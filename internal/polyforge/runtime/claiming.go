@@ -24,10 +24,9 @@ package runtime
 //
 // The file is a map keyed by the SUBMITTED id spelling (a slug is legal:
 // the claim endpoint accepts id-or-slug), so clearClaiming and the
-// restart replay agree on keys. opMu serializes every writer (Start
-// and Restart both hold it — Start releases it only for the clone and
-// the materialize, which never touch the journal), so no lock beyond
-// the file's own atomic write is needed.
+// restart replay agree on keys. claimMu serializes the read-modify-write
+// of every writer: the claim-end retry lane (and a claim's session end
+// outside opMu, B-8) clears entries without opMu.
 
 import (
 	"context"
@@ -121,6 +120,8 @@ func (r *Runtime) writeClaiming(items map[string]*claimingRec) error {
 // fatal to the start (the caller refuses to claim): a claim we cannot
 // journal is exactly the dangling-session risk this file exists to close.
 func (r *Runtime) noteClaiming(wi, sessionID, key string, models []string) error {
+	r.claimMu.Lock()
+	defer r.claimMu.Unlock()
 	items := r.loadClaiming()
 	items[wi] = &claimingRec{
 		WorkItemID:     wi,
@@ -136,9 +137,18 @@ func (r *Runtime) noteClaiming(wi, sessionID, key string, models []string) error
 // clearClaiming settles one journal entry (the start completed, the
 // session ended, or the claim never opened). A missing entry is a no-op;
 // a write failure is loud but never blocks the caller.
-func (r *Runtime) clearClaiming(wi string) {
+func (r *Runtime) clearClaiming(wi string) { r.clearClaimingSession(wi, "") }
+
+// clearClaimingSession is clearClaiming that, with sessionID set, only
+// drops an entry still journaling that session: a close settling outside
+// opMu must never drop the entry a newer start of the same work item
+// wrote meanwhile.
+func (r *Runtime) clearClaimingSession(wi, sessionID string) {
+	r.claimMu.Lock()
+	defer r.claimMu.Unlock()
 	items := r.loadClaiming()
-	if _, ok := items[wi]; !ok {
+	rec, ok := items[wi]
+	if !ok || (sessionID != "" && rec.SessionID != sessionID) {
 		return
 	}
 	delete(items, wi)
@@ -148,7 +158,8 @@ func (r *Runtime) clearClaiming(wi string) {
 }
 
 // resumeClaiming replays every uncleared journal entry at daemon start
-// (called from Restart, opMu held, BEFORE the state.json records are
+// (called from Restart, opMu held — released only around a compensation
+// SessionEnd, claimEndOffLock — BEFORE the state.json records are
 // seeded — a journaled start must win over any stale record of the same
 // WI). Per entry:
 //
@@ -157,8 +168,10 @@ func (r *Runtime) clearClaiming(wi string) {
 //   - SessionVerify says the journaled session still holds the WI →
 //     adopt: replay the claim with the SAME idempotency key (D4: the
 //     same response — bundle pin, repos, fingerprint — comes back) and
-//     run the post-claim continuation; its own failure paths compensate
-//     with SessionEnd(blocked) and clear the entry;
+//     enter its CLAIMING placeholder; the answered replays are carried
+//     to their agents by runReplays once Restart's records are seeded
+//     (B-8: the clone runs outside opMu), and their own failure paths
+//     compensate with SessionEnd(blocked) and clear the entry;
 //   - verify says otherwise (another session holds it, the WI went
 //     terminal, the session was cleared) → the intention can no longer
 //     be honored: drop the entry. The restart reconciliation still
@@ -168,7 +181,7 @@ func (r *Runtime) clearClaiming(wi string) {
 // session secret means the crashed start had already registered the job
 // (the crash hit between persist and clearClaiming) — the record path
 // owns the reconciliation then, and only the journal entry is stale.
-func (r *Runtime) resumeClaiming(ctx context.Context) {
+func (r *Runtime) resumeClaiming(ctx context.Context) (replays []claimReplay) {
 	for wi, rec := range r.loadClaiming() {
 		v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
 		if err != nil {
@@ -232,15 +245,43 @@ func (r *Runtime) resumeClaiming(ctx context.Context) {
 			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay refused (session ended blocked): %v\n", wi, werr)
 			continue
 		}
-		if err := r.startClaimed(ctx, rec.WorkItemID, rec.SessionID, resp, wcfg, rec.Models); err != nil {
-			if IsClaimDeferred(err) {
-				// a shutdown during the replay (B-8): the entry stays
-				continue
-			}
-			// startClaimed already compensated (blocked) and cleared
+		j, err := r.claimPlaceholder(ctx, rec.WorkItemID, rec.SessionID, resp, wcfg, rec.Models)
+		if err != nil {
+			// claimPlaceholder already compensated (blocked) and cleared
 			// the entry; the log line is for the operator.
 			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay start failed (session ended blocked): %v\n", wi, err)
+			continue
 		}
+		replays = append(replays, claimReplay{wi: rec.WorkItemID, j: j})
+	}
+	return replays
+}
+
+// claimReplay is one journal replay whose CLAIMING placeholder is in the
+// table, waiting for its capsule clone and materialize (runReplays).
+type claimReplay struct {
+	wi string // the journal key (the submitted spelling)
+	j  *job
+}
+
+// runReplays carries the restart's journal replays to their agents, each
+// on its own goroutine like Start's lane (repo review 2026-10-16 B-8): the
+// capsule clone and materialize no longer run under opMu inside Restart,
+// so a hung clone holds neither the other records' reconciliation nor the
+// daemon's socket. A shutdown meanwhile defers them (AbortClaims) with
+// their journal entries kept.
+func (r *Runtime) runReplays(ctx context.Context, replays []claimReplay) {
+	for _, cr := range replays {
+		r.replays.Add(1)
+		go func(cr claimReplay) {
+			defer r.replays.Done()
+			if err := r.runClaim(ctx, cr.wi, cr.j); err != nil {
+				if IsClaimDeferred(err) {
+					return // a shutdown during the replay: the entry stays
+				}
+				fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay start failed: %v\n", cr.wi, err)
+			}
+		}(cr)
 	}
 }
 

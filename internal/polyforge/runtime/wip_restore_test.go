@@ -104,7 +104,7 @@ func (g *wipRig) block(t *testing.T) {
 	if j == nil {
 		t.Fatal("no live job to block")
 	}
-	g.r.boundedFail(context.Background(), j, "test: blocked")
+	underOpMu(g.r, func() { g.r.boundedFail(context.Background(), j, "test: blocked") })
 	if last := g.hub.lastEnd(); last.Status != api.StatusBlocked {
 		t.Fatalf("close = %+v, want blocked", last)
 	}
@@ -262,7 +262,9 @@ func TestWrappedCloseLeavesNoWIPRef(t *testing.T) {
 	if _, ok := g.hubRef(t, gitops.TaskWIPRefName("app")); !ok {
 		t.Fatal("setup: no stale WIP ref")
 	}
-	if err := g.r.stopOp(context.Background(), j, "wrapped", false, ""); err != nil {
+	var err error
+	underOpMu(g.r, func() { err = g.r.stopOp(context.Background(), j, "wrapped", false, "") })
+	if err != nil {
 		t.Fatalf("wrapped close: %v", err)
 	}
 	if wip, ok := g.hubRef(t, gitops.TaskWIPRefName("app")); ok {

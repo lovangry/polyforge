@@ -42,6 +42,7 @@ fails, 2 usage errors. `--json` emits one machine document:
 |---|---|---|
 | `config` | the config loads (including the `[daemon]` table: every value validated) | the load error verbatim (an old-shape flat `project` key, a malformed mapping or a bad `[daemon]` value — `line N: [daemon] <key>: …` — names itself) plus migration guidance; every config-dependent check is then `skip` — never a faked green |
 | `retired env` | no retired `POLYFORGE_HARNESS_ROOT` / `POLYFORGE_OPERATOR_AGENT_DIR` is in effect (this shell, or the daemon's `env_warnings`) | `warn` naming the variable and the `[daemon]` key (`harness_root` / `operator_agent_dir`) to set instead — the variable is no longer read, so harness state would move |
+| `daemon env` | the running daemon's environment (GET /status `env_names`: names only, never values) carries no `ANTHROPIC_*` and no credential-looking name (`…TOKEN`, `…KEY`, `…SECRET`, `PASSWORD`) outside the `pf daemon ensure` allow-list, and the pi step agent's `models.json` interpolates (`$NAME`) no variable off that list; `skip` when the daemon is down or too old to report names | `warn` naming the variables: a polluted daemon environment (an older ensure under a tmux server carrying a human's credentials) — restart it clean: `pf ops shutdown`, wait until it is gone, `pf daemon ensure`; a `models.json` `$NAME` off the list — pi steps cannot see it: put the key in `auth.json` (pi `/login`) or as a literal in `models.json` |
 | `workspace mapping` | at least one `[workspace."<path>"]` section exists | guidance to add the shape (a zero-section config is the fresh-install template) |
 | `workspace dirs` | every mapped workspace pre-exists as a directory | the missing path(s), named |
 | `workspace yaml` | every mapped `.polyforge.yaml` loads and every candidate (yaml and installed bundles) is `<harness>:<model>` (see below) | the refusal a claim would meet (DAEMON-414), file and key named |
@@ -103,7 +104,7 @@ fail):
 
 | Check | `pass` | `warn` | `skip` |
 |---|---|---|---|
-| `workspace layout` | the root holds only `.repo/`, `capsules/`, `scratch/`, `.polyforge/`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `go.work` / `go.work.sum` (a Go workspace tying the `.repo/` clones together) and dot-entries (`.polyforge.yaml`, `.gitignore`, `.pi`, `.claude`, `.mcp.json`, … — harness/tool owned), and `.polyforge/` only `repo-map/` and `watchers/` (legacy v1 artifacts nothing generates any more — tolerated, safe to delete) | each other entry, with its destination: a document (`.md`, `.txt`, `.pdf`, `.html`, …) → aihub (`pf file edit <wi> --content @f` while the work item is open, else `pf remember --type doc.design\|doc.review\|doc.decision\|doc.audit`); a `.polyforge.yaml.*` backup or other file → `scratch/`; a directory holding `.git` → `.repo/`; another directory → `scratch/`. Nothing is moved or deleted | no mapping |
+| `workspace layout` | the root holds only `.repo/`, `capsules/`, `scratch/`, `.polyforge/`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `go.work` / `go.work.sum` (a Go workspace tying the `.repo/` clones together) and dot-entries (`.polyforge.yaml`, `.gitignore`, `.pi`, `.claude`, `.mcp.json`, … — harness/tool owned), and `.polyforge/` only `repo-map/` and `watchers/` (legacy v1 artifacts nothing generates any more — tolerated, safe to delete) | each other entry, with its destination: a document (`.md`, `.txt`, `.pdf`, `.html`, …) → aihub (`pf file edit <wi> --content @f` while the work item is open, else `pf remember --type doc.design\|doc.review\|doc.decision\|doc.audit`); a `.polyforge.yaml.*` backup or other file → `scratch/`; a directory holding `.git` → `.repo/`; another directory → `scratch/`. Also a `CLAUDE.md` whose `polyforge:managed` block has no `<!-- polyforge:layout -->` section — run `pf init <ws>` (a workspace without `CLAUDE.md` is not flagged). Nothing is moved or deleted | no mapping |
 | `workspace scratch` | no `scratch/` entry older than 14 days (or `--prune-scratch` removed them — the detail lists each path) | entries whose newest change — the later of mtime and ctime, of the entry and everything under it, so a download keeping old mtimes is not stale on arrival — is older than 14 days, listed; run `pf doctor --prune-scratch` to remove them. Also a `scratch` that is a symlink or a file (never scanned or pruned), and an entry that could not be read (skipped, the rest still judged) | no mapping |
 
 Stale scratch is reported, not removed, by default: the doctor is a probe
@@ -142,18 +143,17 @@ in, never calls a model and never reports a credential value.
 
 | Result | When | What to tell the user |
 |---|---|---|
-| `pass` | the binary resolves, the version is a verified one, a credential variable is set | — (the detail lists every step with a claude candidate: its whole chain, each candidate's harness shown by its prefix, and the level the chain came from) |
+| `pass` | the binary resolves, the version is a verified one, the claude-config `settings.json` `env` block sets `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` | — (the detail lists every step with a claude candidate: its whole chain, each candidate's harness shown by its prefix, and the level the chain came from) |
 | `fail` | the claude binary does not resolve on the daemon's PATH | Install Claude Code and log it in (a human does this), or set `claude_bin` in cli.toml / `--claude-bin`. |
-| `warn` | version older than the verified minimum (2.1.296) or unparsable; no credential visible (neither the `<harness-root>/claude-config/settings.json` `env` block's `ANTHROPIC_AUTH_TOKEN` nor the daemon env's `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`); both a token and an API key set; a rejected token / gateway pairing or a `CLAUDE_CONFIG_DIR` in that `env` block; `ANTHROPIC_BASE_URL` set in the daemon env | Relay the note. The claude-config `settings.json` `env` block is the single credential authority (polyforge#171; the daemon reports its keys as set/unset, never values): put ONE `ANTHROPIC_AUTH_TOKEN` (+ optional `ANTHROPIC_BASE_URL`) there, never `CLAUDE_CONFIG_DIR` — see docs/upgrade.md. |
+| `warn` | version older than the verified minimum (2.1.296) or unparsable; neither `ANTHROPIC_AUTH_TOKEN` nor `ANTHROPIC_API_KEY` in the `<harness-root>/claude-config/settings.json` `env` block (the steps' only credential source); a rejected token / gateway pairing or a `CLAUDE_CONFIG_DIR` in that `env` block | Relay the note. The claude-config `settings.json` `env` block is the single credential authority (polyforge#171; the daemon reports its keys as set/unset, never values): put ONE `ANTHROPIC_AUTH_TOKEN` (+ optional `ANTHROPIC_BASE_URL`) there, never `CLAUDE_CONFIG_DIR` — see docs/upgrade.md. |
 | `skip` | claude steps exist but the daemon is unreachable | Start the daemon and re-run. |
 
-Note (V-11): the daemon's environment — and so every claude step's — is the
-environment of the `polyforge-daemon` tmux server, captured when that server
-first started (possibly from a human's shell). `ANTHROPIC_*` set there pass
-through to the steps; whether the settings.json `env` block overrides a
-same-named process variable is not verified. Keep credentials out of the
-tmux server's environment, or set every needed `ANTHROPIC_*` in the
-claude-config `settings.json` (docs/upgrade.md, #171 section).
+Note (env hygiene, superseding V-11): claude steps strip every inherited
+`ANTHROPIC_*`, so the claude-config `settings.json` `env` block is the ONLY
+credential / endpoint source; the daemon env's `ANTHROPIC_*` are reported
+as facts in the detail but neither count as a credential nor reach a step.
+`pf daemon ensure` gives the daemon no `ANTHROPIC_*` anyway (an allow-listed
+environment, see `daemon env`).
 
 ## Success
 

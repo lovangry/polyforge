@@ -130,7 +130,7 @@ type StepEnded struct {
 
 // ExecCommitted is the commit-boundary notice (additive to the spec'd
 // facts): the driver persisted a new execution.json Version. It is the
-// event that triggers the capsule push (the supervisor no longer polls
+// event that triggers the capsule push (the supervisor does not poll
 // the file).
 type ExecCommitted struct {
 	Version int64  `json:"version"`

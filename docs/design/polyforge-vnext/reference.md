@@ -76,8 +76,10 @@ The blocked WI has exactly two exits: `pf resume` (continue = resume-blocked + a
 Create refuses these keys (at any nesting depth) with `CORE-400 EXECUTION_STATE_REJECTED` (`core/workitem.go`
 `executionStateKeys`): `current_step step_id step_attempt_id attempt review_round review_rounds
 review_verdict progress workflow_status steps rewind_stats budget_consumed command_count
-step_start_refs pending_question`. Execution state lives only in the capsule's `execution.json`
-(§7.3). The one daemon-written key is `blocked_seal` (§3.5).
+step_start_refs pending_question blocked_seal`. Execution state lives only in the capsule's `execution.json`
+(§7.3). `blocked_seal` is not execution state but is reserved: aihub itself writes it when a
+daemon's session-end reports `blocked` with a head (§3.5), through a direct update that bypasses
+this create-time check; a create cannot plant one.
 
 ## 3. Sessions and fencing <!-- §3 -->
 
@@ -117,10 +119,11 @@ aihub proxy only — pushes a step makes to an external origin are not fenced.
 
 ### 3.5 Daemon-side session state <!-- §3.5 -->
 
-- **Claiming journal** `<data-dir>/claiming.json` (`runtime/claiming.go`): `{work_item_id, session_id, idempotency_key, machine_id, at, models}` written durably **before** the claim call (write failure refuses the claim); cleared when the start settles. Restart replay (`resumeClaiming`): verify transport error → keep; no match → drop; already in the job table → drop; else re-claim with the same key; a refused re-claim ends the session blocked. Corrupt file → quarantined `claiming.json.corrupt.<ts>`.
+- **Claiming journal** `<data-dir>/claiming.json` (`runtime/claiming.go`): `{work_item_id, session_id, idempotency_key, machine_id, at, models}` written durably **before** the claim call (write failure refuses the claim); cleared when the start settles. Restart replay (`resumeClaiming`): verify transport error → keep; no match → drop; already in the job table → drop; else re-claim with the same key; a refused re-claim ends the session blocked. An adopted replay enters the job table as a CLAIMING placeholder; its capsule clone and materialize run after Restart returns, outside the runtime's lock (a shutdown defers it, entry kept). Corrupt file → quarantined `claiming.json.corrupt.<ts>`.
 - **Job record** `<data-dir>/runtime-state.json` (`runtime/state.go`): secret, fingerprint, job state, capsule/git dirs, remote, `spawn_n`, recovery-failure count, per-step candidate snapshot.
 - **M4 revalidation**: the monitor re-verifies every running job's session (default every 5m, `--revalidate-every`, `observe/session.go`); `matches=false` → kill tree, quarantine the capsule (`<name>.quarantined.<ts>`), drop the record, event `session_superseded`; no hub transition.
-- **end_pending lane** (`runtime/endpending.go`): a failed `SessionEnd(blocked)` is retried (pushing the local chain first) until aihub accepts it or verify shows the session is no longer held.
+- **end_pending lane** (`runtime/endpending.go`): a failed `SessionEnd(blocked)` is retried (pushing the local chain first) until aihub accepts it or verify shows the session is no longer held; a permanently rejected chain push is recorded on the job record (`end_push_gave_up`) and the retry, restarts included, closes without it.
+- **Runtime lock** (`runtime.go` `opMu`): closes, recovery pushes, the claim-end SessionEnd and the replay clones run outside it with the job latched busy (its wrap/pause/resume answer `DAEMON-409`, a Start `DAEMON-503`); only the claim's own hub calls and `pf resume`'s verify/attach run under it (60s hub-client timeout). See `v2-converge.md#§6`.
 - **Blocked seal**: `End(blocked)` with `head_sha` stores `attrs.blocked_seal={head, machine}`; a claim by another machine whose clone head differs is refused `DAEMON-518` (`runtime.go` `verifySealedHead`; `v2-converge.md#§E`).
 - **Single daemon per data dir**: `<data-dir>/daemon.lock` flock taken before the socket probe (`daemon/daemon.go` `acquireDataDirLock`); a live listener on the socket also refuses a second daemon.
 
@@ -233,8 +236,8 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 
 ### 6.1 UDS routes <!-- §6.1 -->
 
-`internal/polyforge/daemon/routes.go` `routes()` — 17 routes, all wrapped by `refuseStepOrigin`: every
-non-read request whose peer (or its ancestors / process-group leader) carries this daemon's
+`internal/polyforge/daemon/routes.go` `routes()` — 18 routes, all wrapped by `refuseStepOrigin`: every
+non-read request (including a `GET /chats/{id}/attention` with `mark=1` or `ack=1`) whose peer (or its ancestors / process-group leader) carries this daemon's
 `PF_WI_ID`+`PF_DAEMON_ID` markers — or whose peer credential cannot be read — is refused `DAEMON-403`
 (SO_PEERCRED capture `daemon/peercred.go`, check `runtime/stepproc.go` `StepProcessOrigin`).
 
@@ -254,7 +257,8 @@ non-read request whose peer (or its ancestors / process-group leader) carries th
 | GET | `/chats/{id}/subscriptions` | list | `pf watch` |
 | POST | `/chats/{id}/subscribe`, `/unsubscribe` | manage subscriptions | `pf watch subscribe|unsubscribe` |
 | POST | `/chats/{id}/ack`, `/heartbeat` | cursor advance; watcher liveness (TTL 20s) | resident `pf watch --chat` |
-| GET | `/chats/{id}/attention` | pending human decisions | resident `pf watch --chat` |
+| GET | `/chats/{id}/attention?ack=1` | pending human decisions, each with a key; listed until acked (no `ack=1`: `mark=1` marks shown at fetch, legacy). With `mark=1`/`ack=1` it records state and is step-origin guarded (DAEMON-403); a plain list stays an open read | resident `pf watch --chat` |
+| POST | `/chats/{id}/attention/ack` | `{"keys"}` the watcher printed; idempotent, unknown keys ignored | resident `pf watch --chat` |
 
 Socket: `--socket` > `PF_DAEMON_SOCKET` > cli.toml `daemon_socket` > `/run/polyforge.sock`
 (`cli/config.go`, `daemon/main.go`).
@@ -263,6 +267,7 @@ Socket: `--socket` > `PF_DAEMON_SOCKET` > cli.toml `daemon_socket` > `/run/polyf
 
 - **Start = `pf daemon ensure` only** (`daemon/ensure.go`). Called by `tools/install.sh`, the Claude SessionStart hook (`--timeout 15s`) and the pi `pf-chat` extension. Socket answers → exit 0. Refuses inside a step (`PF_WI_ID` set). `<data-dir>/ensure.lock` (flock) serializes callers; losers wait and answer by the socket. Canonical argv: `--config`, `-machine-id`, `-data-dir`, `-socket`, `-workflows-dir <data-dir>/release/current/workflows`.
 - **tmux loop** (loop script in `daemon/ensure.go`; `internal/polyforge/supervisor` only names the session and the systemd unit): session `polyforge-daemon`; loop runs `nohup pf daemon …`, appends to `<data-dir>/daemon.log` (rotated at 10 MiB); exit 0 → loop ends; **exit 78** → loop ends ("needs an operator fix"); anything else → restart after 5s. No tmux → one unsupervised start with a warning. `pf doctor` also accepts a self-managed `polyforge-daemon.service`.
+- **Daemon environment = an allow-list** (`supervisor/env.go`, the one definition): ensure gives the daemon ONLY `PATH`, `HOME` (pinned), `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_*`, `TZ`, `TMPDIR`, the proxy vars (`http_proxy`/`https_proxy`/`no_proxy`/`all_proxy`, both cases), `SSL_CERT_FILE`/`SSL_CERT_DIR`, the XDG base dirs (`XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`), the Go toolchain (`GOPATH`, `GOROOT`, `GOPROXY`, `GOPRIVATE`, `GONOSUMDB`, `GONOPROXY`, `GOFLAGS`, `GOTOOLCHAIN`, `GO111MODULE`, `GOCACHE`, `GOMODCACHE`), `POLYFORGE_DATA_DIR`, `GOCOVERDIR`, the marker `POLYFORGE_SUPERVISOR=tmux:polyforge-daemon` and the loop shell's own `PWD` — values from the CALLER of ensure, never the tmux server (whose environment is whatever shell first started it). The loop script runs `exec /usr/bin/env -i <assignments> /bin/sh -c <loop>`; the no-tmux fallback sets the same list as `cmd.Env`. Names that are not `^[A-Za-z_][A-Za-z0-9_]*$` are never carried (they would be shell syntax in the script); empty values are kept. No `ANTHROPIC_*`, no `PF_*` (ensure's own config load still honours them; the daemon reads `cli.toml`), no retired `POLYFORGE_*`, no harness-session markers. Steps see only this environment: pi provider keys belong in `auth.json` / literal `models.json` keys. Adding a variable is one line there; never a credential. `GET /status` reports the daemon's env NAMES (`env_names`, never values); `pf doctor`'s `daemon env` row warns on any `ANTHROPIC_*` or credential-looking name (`…TOKEN`/`…KEY`/`…SECRET`/`PASSWORD`) outside the list, with the clean restart (`pf ops shutdown`, wait, `pf daemon ensure`), and on any `$NAME` the step agent's `models.json` interpolates (`pi_models_env_refs` in `/status`) that is off the list.
 - **Exit 78** = `ExitNeedsOperator` (`daemon/main.go`): startup failure only an operator can fix — config, identity mismatch, no `[workspace]` mapping, workspace dirs, on-disk state, failed restart reconciliation. Fix, then `pf daemon ensure`. After a machine/container reboot the daemon is down until the next
   interactive harness session runs ensure (auto-pull idles meanwhile); the skill retries an
   execution-plane verb once after `pf daemon ensure` when the daemon is unreachable.
@@ -291,7 +296,7 @@ Default `~/.local/share/polyforge`. File inventory: `v2-converge.md#§E` (E.4), 
 
 ### 7.1 Bundles and materialization <!-- §7.1 -->
 
-- Shipped bundles: `workflows/{feature-full,bug-fix,chore,autopilot,release}`; shared step files in `workflows/_shared/steps/` (today `deliver.md`). `_shared` is not a bundle (no `workflow.md`; claiming it is refused).
+- Shipped bundles: `workflows/{feature-full,bug-fix,chore,autopilot,release}`; shared step files in `workflows/_shared/steps/` (today `deliver.md`, `verification.md`, `review.md`; `{{name}}` placeholders rendered from the workflow.md step entry's `vars`, `01-workflow-skills.md#§4.4`). `_shared` is not a bundle (no `workflow.md`; claiming it is refused).
 - Step file lookup `workflow.StepDefinitionPath` (`internal/common/workflow/workflow.go`): the bundle's own `steps/<id>.md` wins, else `_shared/steps/<id>.md`. Do not share by symlink — materialization skips symlinks.
 - Source: the daemon's `-workflows-dir` (production `<data-dir>/release/current/workflows`). At claim the bundle frontmatter is read from that checkout; then `materializeBundle` (`runtime/materialize.go`) copies the bundle to `<capsule>/workflows/<bundle>/` and `_shared/` beside it via `sync/materialize-staging/`, marking completion in `sync/materialized.json`. A missing bundle warns and continues. No digest check (deleted, polyforge#149).
 - The driver loads the materialized copy: `driver/workflow.go` `LoadWorkflow` → `validateWorkflow`. Authoring guide: `01-workflow-skills.md#§4`.
@@ -353,7 +358,7 @@ later retries start fresh with the old transcript as read-only reference (`v2-co
 | | pi (`runtime/spawn.go`) | Claude Code (`runtime/claudespawn.go`) |
 |---|---|---|
 | argv | `pi --mode rpc --no-skills --no-context-files --no-prompt-templates [--session <transcript>] [--model] [--thinking]` | `claude -p --bare --output-format stream-json --verbose --include-partial-messages --session-id <uuid>`/`--resume <uuid> [--model] [--effort] --tools/--allowedTools Bash,Read,Edit,Write,Glob,Grep,TodoWrite,Agent --permission-mode dontAsk --strict-mcp-config --disable-slash-commands …`; prompt on stdin |
-| env | `PF_WI_ID`, `PF_DAEMON_ID`, `PI_CODING_AGENT_DIR=<harness-root>/step-agent`, `PI_CODING_AGENT_SESSION_DIR=<harness-root>/step-agent-sessions`; all other `PF_*` stripped | `CLAUDE_CONFIG_DIR=<harness-root>/claude-config`, `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, `DISABLE_AUTOUPDATER=1`, …; no credential injected |
+| env | `PF_WI_ID`, `PF_DAEMON_ID`, `PI_CODING_AGENT_DIR=<harness-root>/step-agent`, `PI_CODING_AGENT_SESSION_DIR=<harness-root>/step-agent-sessions`; all other `PF_*` stripped | `CLAUDE_CONFIG_DIR=<harness-root>/claude-config`, `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, `DISABLE_AUTOUPDATER=1`, …; no credential injected; every inherited `ANTHROPIC_*`, `CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_CONFIG_DIR` stripped (the settings.json `env` block is the only credential/endpoint source) |
 | transcript | live file located in the session store, copied verbatim to `session/session-<token>.jsonl` at commit boundaries (`runtime/pitranscript.go`) | `<claude-config>/projects/<dashed cwd>/<uuid>.jsonl`; resume only if it exists |
 
 Provider errors (pi, `supervise/pi.go`): a `message_end`/`turn_end` whose message has `stopReason=="error"` is an error signal; an `agent_end` whose last assistant message ended in error and `willRetry=false` ends the turn as failed (rule ① / D7 classification in `v2-converge.md#§2.3`); `willRetry=true` means pi retries itself and the turn is not judged.

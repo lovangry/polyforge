@@ -104,9 +104,8 @@ func main() {
 	httpSrv := &http.Server{Addr: *listen, Handler: srv}
 
 	// Bind BEFORE the reconcile starts: the port must exist while any
-	// long background pass runs (polyforge#129: the old order reconciled
-	// synchronously first, so the port refused every connection for the
-	// whole pass).
+	// long background pass runs (polyforge#129: reconciling synchronously
+	// first would refuse every connection for the whole pass).
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
 		log.Fatalf("aihub: listen: %v", err)
@@ -119,9 +118,8 @@ func main() {
 	// is still O(library) — it runs in the
 	// background so the listener binds immediately, with progress logs
 	// for any long pass and a batch yield that lets API writers
-	// interleave. The completion line (always logged, previously gated
-	// on n>0, which made a no-op reconcile silent) is the readiness
-	// signal.
+	// interleave. The completion line (always logged, a no-op reconcile
+	// included) is the readiness signal.
 	go func() {
 		start := time.Now()
 		n, err := mems.RebuildIndex()
@@ -151,7 +149,7 @@ func main() {
 
 // newServer assembles the HTTP server and returns the memory store the
 // startup reconcile must run on. It is srv.Mems itself — exactly one
-// memory.Store per process (repo review 2026-10-16 B-3): the store's
+// memory.Store per process: the store's
 // per-entry lock table is per instance, so a second instance reconciling
 // in the background could sweep the serving instance's in-flight
 // memory.md.tmp or delete a row whose file rename had not landed yet.
