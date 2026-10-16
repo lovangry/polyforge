@@ -65,9 +65,6 @@
 #   RELEASE_XREFS_CMD   xrefs gate command        (default: python3 -I
 #                       docs/design/polyforge-vnext/tools/check-xrefs.py)
 #   RELEASE_TEST_CMD    test gate command         (default: GOWORK=off make test)
-# Each *_CMD override, when non-empty, runs via sh -c INSTEAD of its default;
-# unset or empty keeps the default. They are independent: RELEASE_TEST_CMD
-# replaces only the test gate, the xrefs gate still runs.
 #   RELEASE_BUILD_CMD   build command; sees TAG; must leave
 #                       artifacts/release-$TAG/aihub and .../pf
 #                                                 (default: GOWORK=off make release VERSION=$TAG)
@@ -76,6 +73,9 @@
 #   RELEASE_REMOTE      git remote                (default: origin)
 #   RELEASE_BRANCH      branch HEAD must equal    (default: main)
 #   DOCKER_CONFIG       docker config dir (ghcr login check; default ~/.docker)
+# Each *_CMD override, when non-empty, runs via sh -c INSTEAD of its default;
+# unset or empty keeps the default. They are independent: RELEASE_TEST_CMD
+# replaces only the test gate, the xrefs gate still runs.
 set -eu
 
 REMOTE="${RELEASE_REMOTE:-origin}"

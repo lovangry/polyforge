@@ -1,7 +1,8 @@
 package core
 
-// seq_test.go: the per-project seq semantics (owner ruling). The legacy library numbers WIs per project (aiterm#1 and
-// defswitch#1 both exist), so:
+// seq_test.go: the per-project seq semantics (owner ruling). The legacy
+// library numbers WIs per project (aiterm#1 and defswitch#1 both
+// exist), so:
 //
 //   - create numbers each project from 1;
 //   - slugs always resolved by (project, seq), which is unique.

@@ -211,7 +211,8 @@ type ExitedError struct {
 // EnvelopeDefectError is a dispatch wait cut short (a supervisor verdict,
 // shutdown) while the drop path held an UNUSABLE envelope: the step did
 // write a result, and the defect must reach the failure record and the
-// retry prompt instead of reading as "no envelope". It unwraps to the cancellation cause.
+// retry prompt instead of reading as "no envelope". It unwraps to the
+// cancellation cause.
 type EnvelopeDefectError struct {
 	Defect error
 	Cause  error

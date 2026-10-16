@@ -416,7 +416,8 @@ func writeAtomic(path string, data []byte, mode fs.FileMode) error {
 // when it does, whether its polyforge-managed block carries the layout
 // section (the same placement rule as upsertLayout: a layout marker
 // outside the managed block does not count). A missing CLAUDE.md is
-// (false, false, nil): there is nothing `pf init` would be repairing.
+// (false, false, nil): there is nothing `pf init` would be repairing. A
+// managed block without its closing marker is an error, as in Init.
 func LayoutSection(root string) (exists, has bool, err error) {
 	raw, err := os.ReadFile(filepath.Join(root, NotesFile))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -430,11 +431,12 @@ func LayoutSection(root string) (exists, has bool, err error) {
 	if i < 0 {
 		return true, false, nil
 	}
-	inner := text[i:]
-	if j := strings.Index(inner, managedClose); j >= 0 {
-		inner = inner[:j]
+	j := strings.Index(text[i:], managedClose)
+	if j < 0 {
+		// the same refusal pf init answers: suggesting it would not help
+		return true, false, fmt.Errorf("the polyforge-managed block has no closing %s — fix the file by hand", managedClose)
 	}
-	return true, strings.Contains(inner, layoutOpen), nil
+	return true, strings.Contains(text[i:i+j], layoutOpen), nil
 }
 
 // upsertLayout answers the CLAUDE.md text with the layout section in

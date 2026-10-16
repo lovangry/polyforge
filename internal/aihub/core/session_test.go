@@ -1,9 +1,9 @@
 package core
 
-// session_test.go — the v1.5 session model's core-level red lines: CAS race, idempotent replay, compare-only verify,
-// attach gates, force-end + audit event, session-end fence + full
-// field clear, claim gates, the pause/clean_pause distinction, and the
-// git credential's session path.
+// session_test.go — the v1.5 session model's core-level red lines: CAS
+// race, idempotent replay, compare-only verify, attach gates, force-end
+// + audit event, session-end fence + full field clear, claim gates, the
+// pause/clean_pause distinction, and the git credential's session path.
 
 import (
 	"database/sql"

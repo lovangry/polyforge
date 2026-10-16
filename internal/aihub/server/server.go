@@ -793,7 +793,8 @@ func (s *Server) hDeps(w http.ResponseWriter, r *http.Request, idn *identity) {
 
 // depsView renders the dependency edges of wiID. A query failure is a
 // typed 5xx envelope via writeErr — never a false "no edges" answer
-// (the empty lists stay reserved for a genuinely edge-free work item). Answers nil after writing the error envelope.
+// (the empty lists stay reserved for a genuinely edge-free work item).
+// Answers nil after writing the error envelope.
 func (s *Server) depsView(w http.ResponseWriter, wiID string) *core.Deps {
 	deps, err := s.WIs.Dependencies(wiID)
 	if err != nil {

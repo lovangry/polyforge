@@ -289,8 +289,9 @@ func (s *Store) sweepTransients() error {
 // carries. Every row is a DELETE+INSERT inside a shared transaction: at
 // real-library scale (thousands of entries) the old per-entry transaction
 // made the rebuild one fsync PER ENTRY and blew past any sane client
-// timeout (a 3760-entry rebuild exceeded the CLI's 60s). The batch holds Core's ONLY connection for its full duration, so
-// a request arriving mid-batch — read or write — queues until it
+// timeout (a 3760-entry rebuild exceeded the CLI's 60s). The batch
+// holds Core's ONLY connection for its full duration, so a request
+// arriving mid-batch — read or write — queues until it
 // commits: the cap is deliberately small (polyforge#129 ruling b① — a
 // concurrent request may wait a few hundred milliseconds, never the
 // batch count × per-entry cost) and ftsRebuildHold bounds the hold in
