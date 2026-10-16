@@ -391,7 +391,7 @@ deployment pipeline, not a release system (`07-deployment-pilot.md §1.1/§6.3`,
                               v
  DEPLOYMENT: `deploy.sh` for the aihub host; re-run `tools/install.sh` on work machines
  +-----------------------------------------------------------+
- |  download -> sha256 verify -> stop daemon -> replace -> restart  |
+ |  fetch+verify -> refuse if jobs run -> stop -> swap -> ensure    |
  +-----------------------------------------------------------+
 ```
 

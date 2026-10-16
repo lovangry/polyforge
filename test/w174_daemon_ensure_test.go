@@ -79,8 +79,18 @@ func w174NewEnv(t *testing.T, withMapping bool) *w174Env {
 func (e *w174Env) env() []string {
 	var out []string
 	for _, kv := range os.Environ() {
-		switch strings.SplitN(kv, "=", 2)[0] {
-		case "TMUX", "TMUX_PANE", "HOME", "TMUX_TMPDIR", "POLYFORGE_DATA_DIR", "PATH", "PF_DAEMON_SOCKET", "XDG_CONFIG_HOME":
+		k := strings.SplitN(kv, "=", 2)[0]
+		switch k {
+		case "TMUX", "TMUX_PANE", "HOME", "TMUX_TMPDIR", "POLYFORGE_DATA_DIR", "PATH", "XDG_CONFIG_HOME",
+			// anything that could point a run at the real harness dirs or
+			// the real daemon / machine
+			"PI_CODING_AGENT_DIR", "CLAUDE_CONFIG_DIR", "POLYFORGE_HARNESS_ROOT", "POLYFORGE_OPERATOR_AGENT_DIR",
+			"POLYFORGE_MACHINE_ID", "POLYFORGE_DISPLAY_NAME", "XDG_DATA_HOME", "XDG_STATE_HOME":
+			continue
+		}
+		// PF_*: socket, server, key, and install.sh's PF_BIN / PF_HOST /
+		// PF_INSTALL_FORCE (a test sets what it needs explicitly)
+		if strings.HasPrefix(k, "PF_") {
 			continue
 		}
 		out = append(out, kv)
