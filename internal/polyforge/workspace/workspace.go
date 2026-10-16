@@ -68,10 +68,6 @@ type Config struct {
 	Models map[string]map[string][]string
 }
 
-// LegacyModelsReason is the refusal of a file still using the retired
-// top-level `models:` section (no backward compatibility).
-const LegacyModelsReason = "top-level `models:` was replaced by `steps:` (polyforge#169) — move models.<project>.<key>: [...] to steps.<project>.<key>.models: [...] (see docs/upgrade.md)"
-
 // Error is the typed load failure: the file that refused and the
 // reason. Every consumer surfaces it verbatim — the file name and the
 // offending key/reason are the contract.
@@ -147,11 +143,6 @@ func parse(raw []byte, projects []string) (*Config, string) {
 	if root.Kind != yaml.MappingNode {
 		return nil, "the file must be a mapping with one `steps:` section"
 	}
-	for i := 0; i < len(root.Content); i += 2 {
-		if root.Content[i].Value == "models" {
-			return nil, LegacyModelsReason // wins over every other defect
-		}
-	}
 	top, reason := mapping(root, "")
 	if reason != "" {
 		return nil, reason
@@ -214,11 +205,7 @@ func parse(raw []byte, projects []string) (*Config, string) {
 // refuses with the rewrite hint.
 func stepEntry(en *yaml.Node, where string) ([]string, string) {
 	if en.Kind != yaml.MappingNode {
-		hint := ""
-		if en.Kind == yaml.SequenceNode {
-			hint = " (the pre-#169 list form?)"
-		}
-		return nil, where + ": must be `{ models: [...] }`" + hint
+		return nil, where + ": must be `{ models: [...] }`"
 	}
 	keys, reason := mapping(en, where)
 	if reason != "" {

@@ -157,13 +157,15 @@ func TestVerificationEvidenceGate(t *testing.T) {
 	}
 }
 
-func TestVerificationEvidenceFromStepIDAndField(t *testing.T) {
-	d := &Driver{wi: WIInfo{ID: "wi_1"}, workflow: &Workflow{}, exec: &capsule.Execution{Steps: map[string]*capsule.Step{}}}
-	if !d.buildResultSpec("verification", 1).RequireCommandEvidence {
-		t.Fatal("step id verification must require evidence")
+// The command-evidence duty comes from the declaration alone (decision
+// 2026-10-16 G10): the step id "verification" implies nothing.
+func TestCommandEvidenceFromDeclarationOnly(t *testing.T) {
+	d := &Driver{wi: WIInfo{ID: "wi_1"}, workflow: &Workflow{Steps: []StepSpec{{ID: "verification"}, {ID: "check", RequiresCommandEvidence: true}}}, exec: &capsule.Execution{Steps: map[string]*capsule.Step{}}}
+	if d.buildResultSpec("verification", 1).RequireCommandEvidence {
+		t.Fatal("an undeclared verification step must not owe evidence by its id")
 	}
-	if d.buildResultSpec("fix", 1).RequireCommandEvidence {
-		t.Fatal("other steps must not")
+	if !d.buildResultSpec("check", 1).RequireCommandEvidence {
+		t.Fatal("a declared step must owe evidence")
 	}
 	wf, err := parseWorkflow([]byte("steps:\n  - {id: a, requires_human_answer: true}\n  - {id: b, requires_command_evidence: true}\n"))
 	if err != nil {

@@ -8,8 +8,8 @@ defaults:
   model_candidates: [pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5, pi:sub2api-openai/gpt-6-astra]
 steps:
   - { id: plan, context_policy: fresh, handoff: true }
-  - { id: code, context_policy: inherit, handoff: true }
-  - { id: verification, context_policy: fresh, handoff: false, gate: true, on_fail: { target: code }, model_candidates: [pi:sub2api-glm/glm-5.3-flash, pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5] }
+  - { id: code, context_policy: inherit }
+  - { id: verification, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, on_fail: { target: code }, model_candidates: [pi:sub2api-glm/glm-5.3-flash, pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5] }
   - { id: review, context_policy: fresh, handoff: false, gate: true, on_fail: { target: code } }
   - { id: deliver, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, on_fail: { target: code } }
 ---
@@ -98,12 +98,8 @@ honestly instead of burning the budget.
 
 ## Budget guidance
 
-There is no workflow-level budget; the bounds are the rewind limits above and the daemon's
-per-step runtime bound. No step declares `budget.wall_minutes` (polyforge#164): the daemon
-bounds a step's total runtime across its dispatches at T = max(3 × `budget.wall_minutes`,
-the daemon's `--step-timeout`, default 90 minutes), so any estimate of 30 minutes or less is
-inert and T is 90 minutes for every step here. Declare a wall only for a step that
-legitimately needs more than 90 minutes in total (31 or more).
+No workflow-level budget and no step `budget.wall_minutes`: the bounds are the rewind limits
+above and the daemon's per-step runtime bound T (README, `pf daemon` flags).
 
 ## Delivery: the `deliver` step
 

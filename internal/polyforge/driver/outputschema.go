@@ -26,7 +26,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
@@ -64,7 +63,8 @@ type stepOutputSchema struct {
 	Schema *jsonschema.Schema
 }
 
-// loadStepOutputSchema reads workflows/<bundle>/steps/<id>.md and
+// loadStepOutputSchema reads workflows/<bundle>/steps/<id>.md (or the
+// shared workflows/_shared/steps/<id>.md it falls back to) and
 // answers its declared output schema; (nil, nil) when the definition
 // declares none (or there is no definition file). A declared schema
 // that does not parse or compile is an error — a bundle whose contract
@@ -74,7 +74,7 @@ func loadStepOutputSchema(bundleDir, stepID string) (*stepOutputSchema, error) {
 	if bundleDir == "" {
 		return nil, nil
 	}
-	raw, err := os.ReadFile(filepath.Join(bundleDir, dirStepDefs, stepID+".md"))
+	raw, err := os.ReadFile(workflow.StepDefinitionPath(bundleDir, stepID))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

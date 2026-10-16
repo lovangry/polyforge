@@ -1,7 +1,6 @@
 ---
 name: plan
 description: Write the maintenance plan - ordered, compilable units of work with declared touched files - proportionate to the chore's actual size.
-tools: [read, bash]
 output:
   type: object
   required: [plan_path, step_ids, touched_files]

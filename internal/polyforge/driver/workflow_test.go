@@ -281,11 +281,7 @@ func TestValidateOnFail(t *testing.T) {
 // TestShippedBundlesValidate: every shipped workflow bundle passes the
 // load-time validation.
 func TestShippedBundlesValidate(t *testing.T) {
-	dirs, err := filepath.Glob(filepath.Join("..", "..", "..", "workflows", "*"))
-	if err != nil || len(dirs) == 0 {
-		t.Fatalf("no shipped bundles found: %v", err)
-	}
-	for _, dir := range dirs {
+	for _, dir := range shippedBundleDirs(t) {
 		if _, err := LoadWorkflow(dir); err != nil {
 			t.Errorf("%s: %v", filepath.Base(dir), err)
 		}

@@ -345,9 +345,9 @@ see "Per-step harness" below); any other key is refused, naming it. YAML anchors
 
 **No backward compatibility — edit all three workspace files together
 with the deploy.** A file that still has the top-level `models:` section
-is refused at every claim (DAEMON-414: "top-level `models:` was replaced
-by `steps:` (polyforge#169) — move models.<project>.<key>: [...] to
-steps.<project>.<key>.models: [...] (see docs/upgrade.md)"), the work
+is refused at every claim (DAEMON-414: `unknown top-level key "models"
+(only `steps`)`; earlier versions added a migration hint, dropped by
+decision 2026-10-16 G10 once every workspace was rewritten), the work
 item stays queued, and `pf doctor` reports the same under `workspace
 yaml`. Deploying this version therefore requires rewriting osp-ws,
 gmi-ws and yf-ws's `.polyforge.yaml` (below) at the same time; until a
@@ -1138,3 +1138,33 @@ checkout, and the old name no longer exists there. Before deploying:
   the first claim. Let them finish before the upgrade, or cancel them and
   file again with `--bundle autopilot`.
 
+
+## Bundle simplification: shared step files and dead keys removed (decision 2026-10-16 G1/G10)
+
+**Shared step definitions (G1).** `deliver.md` now exists once, at
+`workflows/_shared/steps/deliver.md`. The driver reads a bundle's own
+`steps/<id>.md` when it has one and falls back to
+`workflows/_shared/steps/<id>.md` when it does not; the daemon copies
+`workflows/_shared/` into every new capsule beside the bundle. `_shared`
+is not a bundle: a work item bound to it is refused before the claim.
+**The `pf` binary and the workflows checkout must move together.** An
+older binary running against the new checkout cannot find the shared
+`deliver.md`, so every delivery lane fails at its `deliver` step.
+`tools/install.sh` swaps both together; do not update only the checkout
+under `release/current`.
+
+**Dead bundle keys removed (G10).** Step files no longer carry `tools:`.
+Seven steps whose handoff file nobody read no longer declare
+`handoff: true`. The release bundle's inert `rewind: 1/1` is gone. The
+evidence rule changed: the step id `verification` no longer implies
+`requires_command_evidence`. The four delivery bundles now declare it
+explicitly, so new claims behave as before.
+
+**Gap for work items claimed before this release:** when the same daemon
+recovers such a work item, it reuses that capsule's own copy of the old
+`workflow.md`, where `verification` does not declare the flag. Its
+verification step therefore no longer requires command evidence. Deploy
+when no claimed work item still has `verification` ahead of it (check
+with `pf queue` and `pf watch`), or accept that those few runs skip the
+evidence gate. A work item claimed fresh after the upgrade gets the new
+bundle and is not affected.

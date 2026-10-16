@@ -1,7 +1,6 @@
 ---
 name: verify
 description: Fresh-context audit of the release the previous step claims. Re-derives everything from the remote by commands - release commit vs origin head, the new tag, immutability of every older tag, non-empty release notes - then runs the repo's own `release.sh --verify <version>`. The only step whose pass lets deploy run.
-tools: [read, bash]
 output:
   type: object
   required: [verdict, checks]

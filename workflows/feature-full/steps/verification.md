@@ -1,7 +1,6 @@
 ---
 name: verification
 description: Machine-checkable gate that the build, lint, and unit/integration tests pass on the code step's output, with a per-scenario result for every e2e-author scenario - the machine gate before review.
-tools: [read, bash]
 output:
   type: object
   required: [verdict, checks, authored_titles, scenarios]

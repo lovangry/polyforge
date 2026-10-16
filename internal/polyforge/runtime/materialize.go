@@ -5,7 +5,9 @@ package runtime
 // (v0/internal/capsule/materialize.go, git history):
 //
 //   - the full bundle tree lands under workflows/<bundle>/ and the
-//     step definitions (the bundle's steps/) under agents/;
+//     step definitions (the bundle's steps/) under agents/; the
+//     shared step definitions (workflows/_shared/, when the checkout
+//     has them) land beside it under workflows/_shared/;
 //   - the completion marker sync/materialized.json records the pinned
 //     bundle identity (name), the adapter set and the full
 //     targets list, written ATOMICALLY AFTER the last target rename and
@@ -36,6 +38,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/common/workflow"
 )
 
 const (
@@ -143,6 +146,9 @@ func (r *Runtime) materializeBundle(j *job) error {
 	if r.cfg.WorkflowsDir == "" || j.bundleName == "" {
 		return nil
 	}
+	if j.bundleName == workflow.SharedDir {
+		return fmt.Errorf("runtime: %s: %q holds the shared step definitions and is not a workflow bundle", j.wi, workflow.SharedDir)
+	}
 	src := filepath.Join(r.cfg.WorkflowsDir, j.bundleName)
 	if !dirExists(src) {
 		fmt.Fprintf(os.Stderr, "runtime: %s: bundle %s not in checkout; capsule materialized without it\n", j.wi, j.bundleName)
@@ -188,6 +194,17 @@ func (r *Runtime) materializeBundleSet(j *job, src string) error {
 	if dirExists(filepath.Join(src, "steps")) {
 		pieces = append(pieces, capsule.DirAgents) // capsule dir name unchanged (steps/ content)
 		if err := copyTree(filepath.Join(src, "steps"), filepath.Join(stage, filepath.FromSlash(capsule.DirAgents))); err != nil {
+			os.RemoveAll(stage)
+			return err
+		}
+	}
+	// The shared step definitions (workflows/_shared/) ride along beside
+	// the bundle: the driver falls back to them for any step the bundle
+	// carries no own steps/<id>.md for.
+	if shared := filepath.Join(filepath.Dir(src), workflow.SharedDir); dirExists(shared) {
+		sharedRel := capsule.DirWorkflows + "/" + workflow.SharedDir
+		pieces = append(pieces, sharedRel)
+		if err := copyTree(shared, filepath.Join(stage, filepath.FromSlash(sharedRel))); err != nil {
 			os.RemoveAll(stage)
 			return err
 		}

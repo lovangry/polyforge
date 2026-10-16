@@ -100,12 +100,11 @@ func TestLoadRefusals(t *testing.T) {
 		{"numeric model item", "steps:\n  e2e:\n    code: { models: [pi:a, 42] }\n", []string{"steps.e2e.code.models[1]: must be a plain `<harness>:<model>` string"}},
 		{"duplicate model id after trim", "steps:\n  e2e:\n    code: { models: [pi:a, \" pi:a \"] }\n", []string{"steps.e2e.code.models[1]: repeats \"pi:a\""}},
 		{"models a scalar", "steps:\n  e2e:\n    code: { models: a }\n", []string{"steps.e2e.code.models: must be a list of `<harness>:<model>` candidates"}},
-		{"legacy models wins over other unknown keys", "workflow_defaults: {}\nmodels:\n  e2e:\n    code: [a]\n", []string{"`models:` was replaced by `steps:`"}},
 		{"duplicate project key", "steps:\n  e2e:\n    code: { models: [pi:a] }\n  e2e:\n    code: { models: [pi:b] }\n", []string{"e2e"}},
 		{"duplicate step key", "steps:\n  e2e:\n    code: { models: [pi:a] }\n    code: { models: [pi:b] }\n", []string{"code"}},
 		{"duplicate steps key", "steps:\n  e2e:\n    code: { models: [pi:a] }\nsteps:\n  x:\n    code: { models: [pi:b] }\n", []string{"steps"}},
-		{"legacy top-level models", "models:\n  e2e:\n    default: [a]\n", []string{"`models:` was replaced by `steps:`", "steps.<project>.<key>.models", "docs/upgrade.md"}},
-		{"legacy models beside steps", "steps:\n  e2e:\n    default: { models: [pi:a] }\nmodels:\n  e2e:\n    code: [b]\n", []string{"`models:` was replaced by `steps:`"}},
+		{"legacy top-level models", "models:\n  e2e:\n    default: [a]\n", []string{`unknown top-level key "models" (only ` + "`steps`)"}},
+		{"legacy models beside steps", "steps:\n  e2e:\n    default: { models: [pi:a] }\nmodels:\n  e2e:\n    code: [b]\n", []string{`unknown top-level key "models"`}},
 		{"unknown sub-key", "steps:\n  e2e:\n    fix: { models: [pi:a], modles: [b] }\n", []string{"steps.e2e.fix.modles", "a step entry's only key is `models`"}},
 		// polyforge#175: the retired harness key and the candidate format
 		{"retired harness key", "steps:\n  e2e:\n    fix: { models: [claude:claude-opus-5-5], harness: claude }\n", []string{"steps.e2e.fix.harness: the `harness` key was removed (polyforge#175) — move it into each model candidate's prefix"}},
@@ -117,7 +116,6 @@ func TestLoadRefusals(t *testing.T) {
 		{"empty model after prefix", "steps:\n  e2e:\n    fix: { models: [\"claude:\"] }\n", []string{`steps.e2e.fix.models[0]: "claude:" names no model`}},
 		{"entry without models", "steps:\n  e2e:\n    fix: {}\n", []string{"steps.e2e.fix: entry is empty"}},
 		{"merge key at top level", "base: &b {}\n<<: *b\nsteps:\n  e2e:\n    fix: { models: [pi:a] }\n", []string{"top level: YAML merge keys (`<<`) are not supported", "{ models: *x }"}},
-		{"legacy models wins over a top-level merge key", "<<: {}\nmodels:\n  e2e:\n    code: [a]\n", []string{"`models:` was replaced by `steps:`"}},
 		{"merge key at project level", "steps:\n  base: &p\n    fix: { models: [pi:a] }\n  e2e:\n    <<: *p\n", []string{"steps.e2e: YAML merge keys (`<<`) are not supported"}},
 		{"merge key at entry level", "steps:\n  e2e:\n    fix: &f { models: [pi:a] }\n    <<: { code: *f }\n", []string{"steps.e2e: YAML merge keys"}},
 		{"merge key inside an entry", "steps:\n  e2e:\n    fix: { <<: { models: [pi:a] } }\n", []string{"steps.e2e.fix: YAML merge keys"}},
@@ -127,7 +125,7 @@ func TestLoadRefusals(t *testing.T) {
 		{"null step key", "steps:\n  e2e:\n    null: { models: [pi:a] }\n", []string{"steps.e2e: a null key"}},
 		{"alias item in a list", "steps:\n  e2e:\n    fix: { models: [&m pi:a, *m] }\n", []string{"steps.e2e.fix.models[1]: must be a plain `<harness>:<model>` string"}},
 		{"tagged item in a list", "steps:\n  e2e:\n    fix: { models: [!!binary aGk=] }\n", []string{"steps.e2e.fix.models[0]"}},
-		{"bare list instead of entry", "steps:\n  e2e:\n    fix: [a]\n", []string{"steps.e2e.fix: must be `{ models: [...] }` (the pre-#169 list form?)"}},
+		{"bare list instead of entry", "steps:\n  e2e:\n    fix: [a]\n", []string{"steps.e2e.fix: must be `{ models: [...] }`"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

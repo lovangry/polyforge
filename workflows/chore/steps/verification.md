@@ -1,7 +1,6 @@
 ---
 name: verification
 description: Machine-checkable gate that the build, lint, and tests pass on the maintenance change before the chore is done.
-tools: [read, bash]
 output:
   type: object
   required: [verdict, checks]

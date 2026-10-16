@@ -1,9 +1,6 @@
 ---
 name: release
 description: Release lane - cut a release from the verified origin head via the repo's own procedure, independently verify what was published, then deploy exactly that verified version if the project has a deploy procedure.
-rewind:
-  max_total: 1
-  max_per_step: 1
 defaults:
   model_candidates: [pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5, pi:sub2api-openai/gpt-6-astra]
 steps:
@@ -85,11 +82,6 @@ procedure directly, `.polyforge/deploy.sh <version> --confirm <version>`, for th
 already-verified version. Never file a new release WI for that: a second release of the
 same commit would cut a duplicate version, and a project's release procedure may refuse
 it outright. A new release WI is only for new code.
-
-The `rewind` bounds above are inert: no step declares `on_fail`, so nothing ever rewinds.
-They are declared at 1/1 only to keep the minimum explicit; if they were absent (or not
-positive) the engine would fall back to its defaults (4 total, 2 per step), which would
-also never be used.
 
 ## Budget guidance
 

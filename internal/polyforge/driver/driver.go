@@ -855,9 +855,6 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 		spec.RequiresHumanAnswer = ss.RequiresHumanAnswer
 		spec.RequireCommandEvidence = ss.RequiresCommandEvidence
 	}
-	if stepID == verificationStepID {
-		spec.RequireCommandEvidence = true
-	}
 	if d.wi.CapsuleDir != "" {
 		spec.ReposDir = filepath.Join(d.wi.CapsuleDir, capsule.DirRepos)
 		// deliver is exempt from the authored-tests gate: merging the

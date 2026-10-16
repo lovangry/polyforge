@@ -1,7 +1,6 @@
 ---
 name: verification
 description: Machine-checkable gate that the build, lint, and tests pass on the fix step's output before the change is shipped.
-tools: [read, bash]
 output:
   type: object
   required: [verdict, checks]

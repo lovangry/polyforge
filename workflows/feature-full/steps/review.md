@@ -1,7 +1,6 @@
 ---
 name: review
 description: Human-judgment gate over the completed implementation — the full diff including the authored tests, the verification report, and the plan/spec together — deciding whether the change is ready to deliver.
-tools: [read, bash]
 output:
   type: object
   required: [verdict]
