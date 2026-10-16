@@ -49,6 +49,8 @@
 #                       of aihub.db -> rsync catch-up; snapshot integrity + counts
 #   4 consistency       memories rows in the snapshot == memory.md files in the backup
 #   5 off-host          rsync backup to BACKUP_ROOT, manifests equal, integrity + counts
+#                       then retention: keep the newest 3 aihub-backup-<ver>-<TS> dirs
+#                       (this one included) on the server and locally, prune older ones
 #   6 load + swap       docker save | ssh docker load (service keeps running), verify
 #                       the image ID on the server == the verified local one, tag it
 #                       polyforge/aihub:<tag>, back up and edit ONLY the aihub service
@@ -1029,6 +1031,33 @@ done
 BIN_SAVED="$SRV_ROOT/aihub-bin-$OLDVER-$TS"
 SRV_BACKUP="$SRV_ROOT/aihub-backup-$OLDVER-$TS"
 LOCAL_BACKUP="$BACKUP_ROOT/aihub-backup-$OLDVER-$TS"
+BACKUP_NAME="aihub-backup-$OLDVER-$TS"
+
+# Backup retention: the newest KEEP_BACKUPS backup dirs (this run's
+# included) are kept on the server (SRV_ROOT) and locally (BACKUP_ROOT);
+# older ones are pruned only after this run's backup passed step 5's
+# verification. Only directories whose name matches the exact pattern
+# aihub-backup-<version>-<YYYYMMDDTHHMMSSZ> are ever candidates; age is
+# the timestamp suffix, and this run's backup is never pruned.
+KEEP_BACKUPS=3
+BACKUP_NAME_RE='^aihub-backup-[A-Za-z0-9._+-]+-[0-9]{8}T[0-9]{6}Z$'
+# shellcheck disable=SC2016
+LIST_BACKUPS='cd "$1" 2>/dev/null || exit 0
+for d in aihub-backup-*; do [ -d "$d" ] && [ ! -L "$d" ] && printf "%s\n" "$d"; done
+exit 0'
+srv_backups() { printf '%s\n' "$LIST_BACKUPS" | rssh sh -s -- "$SRV_ROOT"; }
+local_backups() { sh -c "$LIST_BACKUPS" sh "$BACKUP_ROOT"; }
+# prune_candidates: backup dir names on stdin; prints the ones beyond the
+# newest KEEP_BACKUPS once this run's $BACKUP_NAME is counted in (it may
+# not exist yet: the plan), never $BACKUP_NAME itself.
+prune_candidates() {
+  { cat; printf '%s\n' "$BACKUP_NAME"; } | grep -E "$BACKUP_NAME_RE" | LC_ALL=C sort -u \
+    | awk '{ print substr($0, length($0) - 15) " " $0 }' | LC_ALL=C sort -r \
+    | awk -v keep="$KEEP_BACKUPS" -v cur="$BACKUP_NAME" 'NR > keep && $2 != cur { print $2 }'
+}
+words() { if [ -n "$1" ]; then printf '%s' "$1" | tr '\n' ' '; else printf 'nothing'; fi; }
+PLAN_SRV_PRUNE="$(srv_backups | prune_candidates)"
+PLAN_LOCAL_PRUNE="$(local_backups | prune_candidates)"
 OLDIMG="$IMAGE_REPO:$OLDVER"
 NEWIMG="$IMAGE_REPO:$TAG"
 COMPOSE_BAK="$COMPOSE_FILE.bak-$TS"
@@ -1057,6 +1086,9 @@ cat <<EOF
 4. consistency       rows in the snapshot's memories == memory.md files under $SRV_BACKUP/memory (retry up to 2x; still different -> stop, nothing changed)
 5. off-host copy     rsync $AIHUB_HOST:$SRV_BACKUP/ -> $LOCAL_BACKUP/
                      server manifest == local manifest; integrity_check ok + row counts == frozen baseline on the local aihub.db
+   retention         then keep the newest $KEEP_BACKUPS aihub-backup-* dirs (this one included) on each side; would prune:
+                     server $SRV_ROOT: $(words "$PLAN_SRV_PRUNE")
+                     local $BACKUP_ROOT: $(words "$PLAN_LOCAL_PRUNE")
 6. load + swap       (already verified in step 0 on this machine: $GHCR_IMAGE:$TAG repo digest == $ASSET_DIGEST, -version == $TAG)
                      docker save $GHCR_IMAGE:$TAG | ssh $AIHUB_HOST docker load  (service keeps running); server image ID == $NEW_LOCAL_ID
                      docker tag on the server -> $NEWIMG ; verify git, curl in it
@@ -1192,6 +1224,30 @@ probe_to local "$LOCAL_BACKUP/aihub.db" copy "$WORK/local.counts"
 note "local aihub.db: integrity_check ok"
 counts_cmp "$WORK/frozen.counts" "$WORK/local.counts" eq || die "row counts of the local copy differ from the baseline"
 note "local row counts equal the frozen baseline"
+# retention, only now that this run's backup verified on both sides; a
+# failed prune warns and never fails the deploy (the backup is good)
+SRV_PRUNE="$(srv_backups | prune_candidates)" || SRV_PRUNE=""
+if [ -n "$SRV_PRUNE" ]; then
+  # shellcheck disable=SC2086 # names match BACKUP_NAME_RE: no blanks or quotes
+  if printf '%s\n' 'cd "$1" && shift && rm -rf -- "$@"' | rssh sh -s -- "$SRV_ROOT" $SRV_PRUNE; then
+    note "retention: pruned on the server ($SRV_ROOT): $(words "$SRV_PRUNE")"
+  else
+    note "WARN: retention: could not prune on the server ($SRV_ROOT): $(words "$SRV_PRUNE")"
+  fi
+else
+  note "retention: nothing to prune on the server (keeping the newest $KEEP_BACKUPS)"
+fi
+LOCAL_PRUNE="$(local_backups | prune_candidates)" || LOCAL_PRUNE=""
+if [ -n "$LOCAL_PRUNE" ]; then
+  # shellcheck disable=SC2086 # names match BACKUP_NAME_RE: no blanks or quotes
+  if (cd "$BACKUP_ROOT" && rm -rf -- $LOCAL_PRUNE); then
+    note "retention: pruned locally ($BACKUP_ROOT): $(words "$LOCAL_PRUNE")"
+  else
+    note "WARN: retention: could not prune locally ($BACKUP_ROOT): $(words "$LOCAL_PRUNE")"
+  fi
+else
+  note "retention: nothing to prune locally (keeping the newest $KEEP_BACKUPS)"
+fi
 
 # ---------------------------------------------------------------- step 6
 step 6 "load image, edit compose, run the switch window (stop -> upgrade SQL -> up)"

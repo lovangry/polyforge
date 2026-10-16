@@ -362,3 +362,120 @@ func TestDeployUnexpectedExitAfterSwapRollsBackAndCleansUp(t *testing.T) {
 		t.Errorf("the lock is still held after the script exited")
 	}
 }
+
+// seedBackups creates backup-shaped dirs (and decoys) under root.
+func seedBackups(t *testing.T, root string, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		if err := os.MkdirAll(filepath.Join(root, n, "memory"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func dirNames(t *testing.T, root string) []string {
+	t.Helper()
+	ents, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range ents {
+		out = append(out, e.Name())
+	}
+	return out
+}
+
+// retentionWorld seeds four old server backups, three old local ones and
+// decoys that must never be touched (wrong name shape, a file, the old
+// binary).
+func retentionWorld(t *testing.T) (*deployWorld, string, string) {
+	d := newReadyWorld(t)
+	srv := filepath.Join(d.w, "srv", "data")
+	local := filepath.Join(d.w, "backups")
+	seedBackups(t, srv,
+		"aihub-backup-v2.0.0-20260101T000000Z", "aihub-backup-v2.1.0-20260201T000000Z",
+		"aihub-backup-v2.2.0-20260301T000000Z", "aihub-backup-v1.9.0-20260401T000000Z",
+		"aihub-backup-notes", "aihub-backup-v2.0.0-2026", "aihub-bin-v2.0.0-20260101T000000Z")
+	wf(t, filepath.Join(srv, "aihub-backup-v0.1.0-20250101T000000Z"), "a file, not a backup dir\n", 0o644)
+	seedBackups(t, local, "aihub-backup-v2.0.0-20260101T000000Z", "aihub-backup-v2.1.0-20260201T000000Z",
+		"aihub-backup-v2.2.0-20260301T000000Z", "keep-me")
+	return d, srv, local
+}
+
+// TestDeployBackupRetention (owner decision on repo review 2026-10-16
+// V-12): after this run's backup verified, the newest 3 aihub-backup-*
+// dirs (this one included, age = the timestamp suffix) are kept on the
+// server and locally; older ones are pruned and named; nothing that does
+// not match the exact name pattern is touched.
+func TestDeployBackupRetention(t *testing.T) {
+	d, srv, local := retentionWorld(t)
+	out, err := d.run("", "v2.3.0", "--confirm", "v2.3.0")
+	if err != nil {
+		t.Fatalf("deploy failed: %v\n%s", err, out)
+	}
+	srvNames := strings.Join(dirNames(t, srv), " ")
+	for _, gone := range []string{"aihub-backup-v2.0.0-20260101T000000Z", "aihub-backup-v2.1.0-20260201T000000Z"} {
+		if strings.Contains(srvNames, gone) {
+			t.Errorf("server still has %s: %s", gone, srvNames)
+		}
+	}
+	for _, kept := range []string{"aihub-backup-v2.2.0-20260301T000000Z", "aihub-backup-v1.9.0-20260401T000000Z",
+		"aihub-backup-v2.2.1-", "aihub-backup-notes", "aihub-backup-v2.0.0-2026", "aihub-bin-v2.0.0-20260101T000000Z",
+		"aihub-backup-v0.1.0-20250101T000000Z", "aihub"} {
+		if !strings.Contains(srvNames, kept) {
+			t.Errorf("server lost %s: %s", kept, srvNames)
+		}
+	}
+	if !strings.Contains(out, "retention: pruned on the server ("+srv+"): aihub-backup-v2.1.0-20260201T000000Z aihub-backup-v2.0.0-20260101T000000Z") {
+		t.Errorf("the server prune is not reported:\n%s", out)
+	}
+	localNames := strings.Join(dirNames(t, local), " ")
+	if strings.Contains(localNames, "aihub-backup-v2.0.0-20260101T000000Z") ||
+		!strings.Contains(localNames, "aihub-backup-v2.2.0-20260301T000000Z") || !strings.Contains(localNames, "keep-me") ||
+		!strings.Contains(localNames, "aihub-backup-v2.2.1-") {
+		t.Errorf("local backups after retention: %s", localNames)
+	}
+	if !strings.Contains(out, "retention: pruned locally ("+local+"): aihub-backup-v2.0.0-20260101T000000Z") {
+		t.Errorf("the local prune is not reported:\n%s", out)
+	}
+}
+
+// TestDeployBackupRetentionDryRunAndUnverified: a dry run prints what
+// would be pruned and deletes nothing; a run whose backup fails
+// verification (step 4 here) prunes nothing.
+func TestDeployBackupRetentionDryRunAndUnverified(t *testing.T) {
+	d, srv, local := retentionWorld(t)
+	before := strings.Join(dirNames(t, srv), " ") + " | " + strings.Join(dirNames(t, local), " ")
+	out, err := d.run("", "v2.3.0", "--dry-run")
+	if err != nil {
+		t.Fatalf("dry-run failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"server " + srv + ": aihub-backup-v2.1.0-20260201T000000Z aihub-backup-v2.0.0-20260101T000000Z",
+		"local " + local + ": aihub-backup-v2.0.0-20260101T000000Z",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dry-run plan lacks %q:\n%s", want, out)
+		}
+	}
+	if after := strings.Join(dirNames(t, srv), " ") + " | " + strings.Join(dirNames(t, local), " "); after != before {
+		t.Errorf("dry-run changed the backup dirs:\n%s\n%s", before, after)
+	}
+
+	// a memory file without its row: step 4 never verifies the backup
+	wf(t, filepath.Join(srv, "aihub", "memory", "p", "mem_x", "memory.md"), "orphan\n", 0o644)
+	out, err = d.run("", "v2.3.0", "--confirm", "v2.3.0")
+	if exitCode(err) != 1 {
+		t.Fatalf("want exit 1 at step 4, got %v\n%s", err, out)
+	}
+	srvNames := strings.Join(dirNames(t, srv), " ")
+	for _, n := range []string{"aihub-backup-v2.0.0-20260101T000000Z", "aihub-backup-v2.1.0-20260201T000000Z"} {
+		if !strings.Contains(srvNames, n) {
+			t.Errorf("an unverified run pruned %s: %s", n, srvNames)
+		}
+	}
+	if strings.Contains(out, "retention: pruned") {
+		t.Errorf("an unverified run reported a prune:\n%s", out)
+	}
+}
