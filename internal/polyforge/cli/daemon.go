@@ -163,6 +163,9 @@ type AnswerPayload struct {
 type OpsConfigRequest struct {
 	Auto *bool `json:"auto,omitempty"`
 	Max  *int  `json:"max,omitempty"`
+	// MaxReset drops an explicit `pf ops max` cap: the configured one
+	// (cli.toml [daemon] max_concurrent_jobs, else 4) applies again.
+	MaxReset bool `json:"max_reset,omitempty"`
 }
 
 // SubmitResponse is the claim-family answer.
@@ -186,6 +189,9 @@ type StatusResponse struct {
 	// WorkflowsDir is the absolute workflows dir the daemon runs bundles
 	// from (pf doctor judges the workspace yaml's step-id keys by it).
 	WorkflowsDir string `json:"workflows_dir,omitempty"`
+	// EnvWarnings: retired POLYFORGE_* variables the daemon found set to
+	// a differing value at boot (decision 2026-10-16 G2).
+	EnvWarnings []string `json:"env_warnings,omitempty"`
 	// Harnesses is the daemon's view of the step harness binaries, only
 	// on GET /status?harnesses=1 (polyforge#159).
 	Harnesses    map[string]HarnessStatus `json:"harnesses,omitempty"`
@@ -265,9 +271,10 @@ type JobOrigin struct {
 
 // QueueStats is the local job queue counters.
 type QueueStats struct {
-	Pending       int `json:"pending"`
-	Running       int `json:"running"`
-	MaxConcurrent int `json:"max_concurrent"`
+	Pending       int    `json:"pending"`
+	Running       int    `json:"running"`
+	MaxConcurrent int    `json:"max_concurrent"`
+	MaxSource     string `json:"max_source,omitempty"` // "ops" | "config"
 }
 
 // ---------------------------------------------------------------------------

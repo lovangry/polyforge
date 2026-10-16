@@ -19,7 +19,6 @@ import "encoding/json"
 
 // Capsule directory layout (relative to capsule root).
 const (
-	DirAgents       = "agents"        // materialized step-agent definitions
 	DirArtifacts    = "artifacts"     // step outputs; release trees under artifacts/release-*/
 	DirLogs         = "logs"          // daemons logs, step journals
 	DirRepos        = "repos"         // task repo checkouts (own git histories)

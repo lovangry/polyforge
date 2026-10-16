@@ -707,19 +707,6 @@ func (a *StepSpawnAdapter) producerDone(stepID string) (bool, error) {
 	return st.Status == "done", nil
 }
 
-// parseSpawnToken decodes one archive token directory name ("s<N>",
-// N ≥ 1).
-func parseSpawnToken(name string) (int64, bool) {
-	if !strings.HasPrefix(name, "s") || len(name) < 2 {
-		return 0, false
-	}
-	n, err := strconv.ParseInt(name[1:], 10, 64)
-	if err != nil || n <= 0 {
-		return 0, false
-	}
-	return n, true
-}
-
 // spawnTokenDir is the archive token directory for spawn ordinal n.
 func spawnTokenDir(n int64) string { return "s" + strconv.FormatInt(n, 10) }
 

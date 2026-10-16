@@ -333,6 +333,7 @@ func TestOpsAutoAndMaxVerbs(t *testing.T) {
 		{[]string{"ops", "auto", "on"}, `{"auto":true}`},
 		{[]string{"ops", "auto", "off"}, `{"auto":false}`},
 		{[]string{"ops", "max", "3"}, `{"max":3}`},
+		{[]string{"ops", "max", "--reset"}, `{"max_reset":true}`},
 	} {
 		if code, _, stderr := runPf(t, env, c.args...); code != 0 {
 			t.Fatalf("%v: code=%d stderr=%s", c.args, code, stderr)

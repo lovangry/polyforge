@@ -168,3 +168,41 @@ func TestEnsureUsageAndRefusals(t *testing.T) {
 		t.Fatalf("missing workflows: exit %d stderr %q", code, errb.String())
 	}
 }
+
+// TestEnsureArgvIgnoresDaemonTable (decision 2026-10-16 G2): the
+// daemon reads the cli.toml [daemon] table itself, so ensure's argv is
+// the fixed canonical one with or without the table; ensure still
+// validates the file and refuses an invalid table naming the key.
+func TestEnsureArgvIgnoresDaemonTable(t *testing.T) {
+	t.Setenv("POLYFORGE_DATA_DIR", t.TempDir())
+	dir := t.TempDir()
+	withTable := filepath.Join(dir, "table.toml")
+	body := "server = \"http://127.0.0.1:1\"\n\n[daemon]\nmax_concurrent_jobs = 6\n" +
+		"harness_root = \"/srv/harness\"\nstep_timeout = \"1h30m\"\n"
+	if err := os.WriteFile(withTable, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := planEnsure(withTable, "", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"daemon", "--config", p.configPath, "-machine-id", p.machineID,
+		"-data-dir", p.dataDir, "-socket", p.socket, "-workflows-dir", p.workflowsDir}
+	if got := p.daemonArgv(); strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("argv with [daemon]:\n got %q\nwant %q", got, want)
+	}
+
+	bad := filepath.Join(dir, "bad.toml")
+	if err := os.WriteFile(bad, []byte("[daemon]\nstep_timeout = \"soon\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := Main([]string{"ensure", "--config", bad, "--timeout", "1s"}, nil, &out, &errb); code != 1 || !strings.Contains(errb.String(), "[daemon] step_timeout") {
+		t.Fatalf("invalid [daemon]: exit %d stderr %q, want 1 naming the key", code, errb.String())
+	}
+	// and the daemon itself refuses the same file at boot (exit 78)
+	errb.Reset()
+	if code := Main([]string{"--config", bad}, nil, &out, &errb); code != ExitNeedsOperator || !strings.Contains(errb.String(), "[daemon] step_timeout") {
+		t.Fatalf("daemon on an invalid [daemon]: exit %d stderr %q", code, errb.String())
+	}
+}

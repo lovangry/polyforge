@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -105,7 +106,7 @@ func TestSubmitQueueSurvivesRestartAndReplays(t *testing.T) {
 		t.Fatalf("submit status %d", code)
 	}
 	ents := readQueueFile(t, data)
-	if len(ents) != 1 || ents[0].WorkItemID != wi || ents[0].Intent != "claim" || ents[0].SubmittedAt.IsZero() {
+	if len(ents) != 1 || ents[0].WorkItemID != wi || ents[0].SubmittedAt.IsZero() {
 		t.Fatalf("persisted queue = %+v", ents)
 	}
 	if ents[0].Origin != (runtime.Origin{Kind: runtime.OriginChat, ChatID: "chat-9", Owner: "usr_1"}) {
@@ -176,36 +177,41 @@ func TestSubmitModelsPersistedAndValidated(t *testing.T) {
 	}
 }
 
-// Replay drops what must not run: a WI aihub shows claimed elsewhere, and
-// resume and unknown intents — each with a submit_dropped event.
-func TestSubmitReplayDropsClaimedAndNonClaimIntents(t *testing.T) {
+// Replay drops what must not run: a WI aihub shows claimed elsewhere gets
+// a submit_dropped event. A persisted entry from an older daemon still
+// carrying an "intent" key replays as the plain claim it always was.
+func TestSubmitReplayDropsClaimedElsewhere(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
 	const (
 		wiOK    = "wi_r_ok"
 		wiTaken = "wi_r_claimed_elsewhere"
-		wiTake  = "wi_r_unknown_intent"
-		wiRes   = "wi_r_resume"
+		wiOld   = "wi_r_old_intent_key"
 	)
 	hub.status[wiOK] = api.StatusQueued
 	hub.status[wiTaken] = api.StatusRunning
-	hub.status[wiTake] = api.StatusQueued
-	hub.status[wiRes] = api.StatusQueued
+	hub.status[wiOld] = api.StatusQueued
 	td := newTestDaemon(t, func(c *Config) {
 		c.Hub = hub
 		now := time.Now().UTC()
 		var es []qEntry
-		for _, e := range []struct{ wi, intent string }{{wiOK, "claim"}, {wiTaken, "claim"}, {wiTake, "bogus"}, {wiRes, "resume"}} {
-			es = append(es, qEntry{WorkItemID: e.wi, Intent: e.intent, SubmittedAt: now, EnqueuedAt: now})
+		for _, wi := range []string{wiOK, wiTaken} {
+			es = append(es, qEntry{WorkItemID: wi, SubmittedAt: now, EnqueuedAt: now})
 		}
 		blob, _ := json.Marshal(submitQueueState{Version: 1, Entries: es})
+		// an older daemon's entry: the retired "intent" key is ignored
+		old := fmt.Sprintf(`{"work_item_id":%q,"intent":"claim","submitted_at":%q,"enqueued_at":%q}`,
+			wiOld, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+		blob = []byte(strings.Replace(string(blob), `"entries":[`, `"entries":[`+old+`,`, 1))
 		if err := os.WriteFile(filepath.Join(c.DataDir, submitQueueFile), blob, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		mkBare(t, c.GitRemoteBase, wiOK)
+		mkBare(t, c.GitRemoteBase, wiOld)
 	})
 	td.waitLive(t, wiOK)
-	for _, w := range []string{wiTaken, wiTake, wiRes} {
+	td.waitLive(t, wiOld)
+	for _, w := range []string{wiTaken} {
 		if !hasKind(eventKinds(td.Daemon, w), observe.EvSubmitDropped) {
 			t.Errorf("%s: want a submit_dropped event, got %v", w, eventKinds(td.Daemon, w))
 		}
@@ -213,8 +219,8 @@ func TestSubmitReplayDropsClaimedAndNonClaimIntents(t *testing.T) {
 			t.Errorf("%s must not be started", w)
 		}
 	}
-	if hub.claimCount() != 1 {
-		t.Fatalf("only the plain queued claim may run (claims=%d)", hub.claimCount())
+	if hub.claimCount() != 2 {
+		t.Fatalf("only the two queued claims may run (claims=%d)", hub.claimCount())
 	}
 }
 
@@ -228,7 +234,7 @@ func TestSubmitRejectedRecordedAsEvent(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) {
 		c.Hub = hub
 		now := time.Now().UTC()
-		blob, _ := json.Marshal(submitQueueState{Version: 1, Entries: []qEntry{{WorkItemID: wi, Intent: "claim", SubmittedAt: now, EnqueuedAt: now}}})
+		blob, _ := json.Marshal(submitQueueState{Version: 1, Entries: []qEntry{{WorkItemID: wi, SubmittedAt: now, EnqueuedAt: now}}})
 		_ = os.WriteFile(filepath.Join(c.DataDir, submitQueueFile), blob, 0o600)
 	})
 	waitFor(t, "submit_rejected event", 10*time.Second, func() bool {
@@ -264,8 +270,8 @@ func TestSubmitReplayDropsAutoOriginEntriesWhenAutoOff(t *testing.T) {
 		// a persisted queue from the previous, auto-ON process: one auto
 		// entry and one explicit entry, both still queued at aihub.
 		blob, _ := json.Marshal(submitQueueState{Version: 1, Entries: []qEntry{
-			{WorkItemID: wiAuto, Intent: "claim", SubmittedAt: now, EnqueuedAt: now, Origin: runtime.Origin{Kind: runtime.OriginAuto}},
-			{WorkItemID: wiCLI, Intent: "claim", SubmittedAt: now, EnqueuedAt: now, Origin: runtime.Origin{Kind: runtime.OriginChat}},
+			{WorkItemID: wiAuto, SubmittedAt: now, EnqueuedAt: now, Origin: runtime.Origin{Kind: runtime.OriginAuto}},
+			{WorkItemID: wiCLI, SubmittedAt: now, EnqueuedAt: now, Origin: runtime.Origin{Kind: runtime.OriginChat}},
 		}})
 		if err := os.WriteFile(filepath.Join(c.DataDir, submitQueueFile), blob, 0o600); err != nil {
 			t.Fatal(err)

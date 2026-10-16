@@ -58,16 +58,6 @@ const locateSlack = 2 * time.Second
 // naming stays frozen even though the spawn-journal line's display-key
 // fossil (instance → spawn_token) is cleaned up.
 
-// PiSessionsRootDefault is the harness's default session store.
-// A Config override exists for tests and relocated installs.
-func PiSessionsRootDefault() string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return filepath.Join(".pi", "agent", "sessions")
-	}
-	return filepath.Join(home, ".pi", "agent", "sessions")
-}
-
 // piSessionDirName derives the harness's per-cwd session directory name
 // (the dashify rule above). capsuleDir is resolved through symlinks
 // first: the harness derives the name from the process's real cwd.
@@ -99,7 +89,7 @@ func piSessionDirName(capsuleDir string) string {
 // treat that as the typed transcript_missing condition, never an error.
 func LocateLiveTranscript(sessionsRoot, capsuleDir string, notBefore time.Time) string {
 	if sessionsRoot == "" {
-		sessionsRoot = PiSessionsRootDefault()
+		return "" // no step session store configured: never the operator's ~/.pi
 	}
 	dir := filepath.Join(sessionsRoot, piSessionDirName(capsuleDir))
 	ents, err := os.ReadDir(dir)

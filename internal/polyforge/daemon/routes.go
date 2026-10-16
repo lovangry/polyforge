@@ -15,7 +15,7 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -81,6 +81,8 @@ type queueStats struct {
 	Pending       int `json:"pending"`
 	Running       int `json:"running"`
 	MaxConcurrent int `json:"max_concurrent"`
+	// MaxSource: "ops" (an explicit pf ops max) or "config".
+	MaxSource string `json:"max_source"`
 }
 
 type statusResponse struct {
@@ -104,13 +106,19 @@ type statusResponse struct {
 	// `claude --version`); pf doctor judges the claude harness by it.
 	Harnesses    map[string]harnessStatus `json:"harnesses,omitempty"`
 	ShuttingDown bool                     `json:"shutting_down"`
-	Jobs         []statusJob              `json:"jobs"`
-	Queue        queueStats               `json:"queue"`
+	// EnvWarnings: retired POLYFORGE_* variables the daemon found set to
+	// a differing value at boot (no longer read; pf doctor relays them).
+	EnvWarnings []string    `json:"env_warnings,omitempty"`
+	Jobs        []statusJob `json:"jobs"`
+	Queue       queueStats  `json:"queue"`
 }
 
 type opsConfigResponse struct {
 	Auto bool `json:"auto"`
 	Max  int  `json:"max"`
+	// MaxSource is where Max comes from: "ops" (explicit pf ops max) or
+	// "config" (cli.toml [daemon] / flag / default).
+	MaxSource string `json:"max_source"`
 }
 
 type closeResponse struct {
@@ -242,7 +250,7 @@ func (d *Daemon) routes() *http.ServeMux {
 		writeErr(w, api.ErrDaemonConflict,
 			"no live bridge handle for work item "+wi+": the workflow is between derivations — retry after the daemon re-derives it")
 	})
-	mux.HandleFunc("POST /jobs/{wi}/claim", d.submitRoute("claim"))
+	mux.HandleFunc("POST /jobs/{wi}/claim", d.submitRoute())
 	// polyforge#116: the §6.4 owner move on a workflow parked blocked on an
 	// honest incomplete result — the state the bounded close leaves has no
 	// live driver, no bridge handle and no job record; the owner's moves
@@ -290,9 +298,9 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 // ---------------------------------------------------------------------------
-// submit family: claim | resume.
+// submit: claim.
 
-func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
+func (d *Daemon) submitRoute() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		wi := r.PathValue("wi")
 		var body struct {
@@ -369,7 +377,7 @@ func (d *Daemon) submitRoute(intent string) http.HandlerFunc {
 		// priority-desc against the machine's concurrency cap.
 		// `accepted` is answered only once the entry is on disk (v2 §5).
 		cursor := d.lastSeq(canonical)
-		if err := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: intent, Models: body.Models, Origin: body.Origin.origin()}); err != nil {
+		if err := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Models: body.Models, Origin: body.Origin.origin()}); err != nil {
 			writeErr(w, api.ErrDaemonInternal, "submit queue could not be persisted: "+err.Error())
 			return
 		}
@@ -444,7 +452,7 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 		// queue the claim like a submit (persisted, retried with backoff).
 		var ae *api.Error
 		if errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable {
-			if qerr := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Intent: "claim", Origin: body.Origin.origin()}); qerr != nil {
+			if qerr := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Origin: body.Origin.origin()}); qerr != nil {
 				writeErr(w, api.ErrDaemonInternal, "submit queue could not be persisted: "+qerr.Error())
 				return
 			}
@@ -713,6 +721,7 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 	// rt.List() reports). F15c rides the same loop: the per-job progress
 	// staleness for the LAST-PROGRESS column.
 	jobs, running := d.statusJobs()
+	maxN, maxSrc := d.q.MaxState()
 	var harnesses map[string]harnessStatus
 	if r.URL.Query().Get("harnesses") == "1" {
 		harnesses = d.harnessStatuses()
@@ -725,27 +734,36 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 		Workspaces:   d.cfg.Mapping.Workspaces(),
 		WorkflowsDir: d.cfg.WorkflowsDir,
 		ShuttingDown: d.modes.ShuttingDown(),
+		EnvWarnings:  d.cfg.EnvWarnings,
 		Jobs:         jobs,
 		Queue: queueStats{
 			Pending:       d.q.LenPending(),
 			Running:       running,
-			MaxConcurrent: d.q.MaxConcurrent(),
+			MaxConcurrent: maxN,
+			MaxSource:     maxSrc,
 		},
 	})
 }
 
-// opsConfigRoute is POST /ops/config {"auto":bool?,"max":int?}: the one
-// switch and the one number. At least one must be present.
+// opsConfigRoute is POST /ops/config {"auto":bool?,"max":int?,
+// "max_reset":bool?}: the one switch and the one number. At least one
+// must be present; max and max_reset exclude each other. max is an
+// explicit cap (persisted); max_reset returns to the configured cap.
 func (d *Daemon) opsConfigRoute(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Auto *bool `json:"auto"`
-		Max  *int  `json:"max"`
+		Auto     *bool `json:"auto"`
+		Max      *int  `json:"max"`
+		MaxReset bool  `json:"max_reset"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	if req.Auto == nil && req.Max == nil {
-		writeErr(w, api.ErrDaemonBadInput, "ops config requires auto and/or max")
+	if req.Auto == nil && req.Max == nil && !req.MaxReset {
+		writeErr(w, api.ErrDaemonBadInput, "ops config requires auto, max and/or max_reset")
+		return
+	}
+	if req.Max != nil && req.MaxReset {
+		writeErr(w, api.ErrDaemonBadInput, "ops config: max and max_reset exclude each other")
 		return
 	}
 	if req.Max != nil && *req.Max < 1 {
@@ -766,13 +784,17 @@ func (d *Daemon) opsConfigRoute(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.Max != nil {
-		if err := d.q.SetMaxConcurrent(*req.Max); err != nil {
+		if err := d.q.SetExplicitMax(*req.Max); err != nil {
 			writeErr(w, api.ErrDaemonBadInput, err.Error())
 			return
 		}
 	}
+	if req.MaxReset {
+		d.q.ResetMax(d.cfg.MaxConcurrent)
+	}
 	d.persistModeQuietly()
-	writeJSON(w, http.StatusOK, opsConfigResponse{Auto: d.modes.Auto(), Max: d.q.MaxConcurrent()})
+	maxN, maxSrc := d.q.MaxState()
+	writeJSON(w, http.StatusOK, opsConfigResponse{Auto: d.modes.Auto(), Max: maxN, MaxSource: maxSrc})
 }
 
 func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
@@ -847,36 +869,25 @@ func (d *Daemon) answerFromStepProcess(r *http.Request) string {
 	return ""
 }
 
-// pendingQuestionIDs reads the capsule's execution.json and returns the
-// ids of ALL currently open pending questions (empty when none). The
-// steps map's iteration order is meaningless, so callers must not treat
-// the result's order as a choice: the answer route accepts a no-id
-// answer only when exactly one id comes back (audit B10).
+// pendingQuestionIDs answers the ids of ALL currently open pending
+// questions in the capsule's execution.json (empty when none), sorted.
+// The answer route accepts a no-id answer only when exactly one id comes
+// back (audit B10).
 func (d *Daemon) pendingQuestionIDs(wi string) []string {
 	wid := d.rt.CanonicalID(wi)
 	if wid == "" {
 		wid = wi
 	}
-	execPath := filepath.Join(d.rt.CapsuleDirFor(wid), "runtime-state", "execution.json")
-	data, err := os.ReadFile(execPath)
-	if err != nil {
-		return nil
-	}
-	var exec struct {
-		Steps map[string]struct {
-			PendingQuestion *struct {
-				ID string `json:"id"`
-			} `json:"pending_question"`
-		} `json:"steps"`
-	}
-	if json.Unmarshal(data, &exec) != nil {
+	ex := d.loadExecution(wid, nil)
+	if ex == nil {
 		return nil
 	}
 	var ids []string
-	for _, st := range exec.Steps {
-		if st.PendingQuestion != nil && st.PendingQuestion.ID != "" {
+	for _, st := range ex.Steps {
+		if st != nil && st.PendingQuestion != nil && st.PendingQuestion.ID != "" {
 			ids = append(ids, st.PendingQuestion.ID)
 		}
 	}
+	sort.Strings(ids)
 	return ids
 }

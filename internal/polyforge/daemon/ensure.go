@@ -30,9 +30,12 @@ package daemon
 // The canonical argv is the one tools/install.sh used to launch with:
 // --config, -machine-id (the recorded <data-dir>/daemon-id, else
 // m-<short hostname>), -data-dir, -socket (the config's daemon_socket)
-// and -workflows-dir <data-dir>/release/current/workflows. The harness
-// root keeps its default (<data-dir>, polyforge#171); auto and the job
-// cap stay the daemon's persisted settings (never forced on argv).
+// and -workflows-dir <data-dir>/release/current/workflows — nothing
+// else. The production knobs live in the config's [daemon] table, which
+// the daemon reads itself from --config (decision 2026-10-16 G2); ensure
+// only validates the file (a bad table refuses the start). Every other
+// daemon flag is test/dev-only. Auto and an explicit `pf ops max` stay
+// the daemon's persisted settings.
 
 import (
 	"encoding/json"

@@ -330,7 +330,6 @@ type proc struct {
 
 	pending map[string]bool
 	exited  chan struct{}
-	exitErr error
 	exit    spawn.ExitInfo // valid once exited is closed
 	tail    *tailBuffer
 }
@@ -387,7 +386,7 @@ func newProcOpts(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, o pr
 		// bounded moment, and the group kill releases the pipe.
 		done := make(chan struct{})
 		go func() {
-			p.exitErr = cmd.Wait()
+			_ = cmd.Wait()
 			close(done)
 		}()
 		ticker := time.NewTicker(5 * time.Second)

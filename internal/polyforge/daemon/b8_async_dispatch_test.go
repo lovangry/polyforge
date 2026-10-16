@@ -25,7 +25,7 @@ import (
 func TestB8QueueCountsClaimsUnderWayAgainstSlots(t *testing.T) {
 	q := NewJobQueue(1, func() map[string]bool { return map[string]bool{} })
 	for _, wi := range []string{"wi_a", "wi_b"} {
-		if err := q.Enqueue(qEntry{WorkItemID: wi, Intent: "claim"}); err != nil {
+		if err := q.Enqueue(qEntry{WorkItemID: wi}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -49,11 +49,11 @@ func TestB8QueueCountsClaimsUnderWayAgainstSlots(t *testing.T) {
 	}
 
 	q = NewJobQueue(4, func() map[string]bool { return map[string]bool{} })
-	_ = q.Enqueue(qEntry{WorkItemID: "wi_dup", Intent: "claim"})
+	_ = q.Enqueue(qEntry{WorkItemID: "wi_dup"})
 	if e := q.Take(); e == nil {
 		t.Fatal("no take")
 	}
-	_ = q.Enqueue(qEntry{WorkItemID: "wi_dup", Intent: "claim"})
+	_ = q.Enqueue(qEntry{WorkItemID: "wi_dup"})
 	if e := q.Take(); e != nil {
 		t.Fatalf("a second claim of a work item under way was started: %+v", e)
 	}

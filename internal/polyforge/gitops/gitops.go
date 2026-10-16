@@ -840,18 +840,14 @@ var carrierFlags = []string{
 	"-c", "http.proxy=",
 }
 
-// carrierSource validates the task repo repos/<name> and reads its HEAD.
+// carrierSourceT validates the task repo repos/<name> and reads its HEAD
+// within timeout.
 // reposDir is already symlink-resolved. It answers the repo's object
 // directory and the HEAD commit SHA ("" = unborn: nothing to carry), or a
 // refusal reason. The repo must own its storage outright
 // (carrierLayoutRefusal), and git must resolve the repo to exactly its
 // own .git. The calls only READ (rev-parse); none of them pushes or
 // holds the credential.
-func carrierSource(reposDir, name string) (objects, sha, reason string) {
-	return carrierSourceT(reposDir, name, carrierCheckTimeout)
-}
-
-// carrierSourceT is carrierSource with an explicit per-call timeout.
 func carrierSourceT(reposDir, name string, timeout time.Duration) (objects, sha, reason string) {
 	dir := filepath.Join(reposDir, name)
 	gitDir := filepath.Join(dir, ".git")

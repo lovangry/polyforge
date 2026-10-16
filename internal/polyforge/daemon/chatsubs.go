@@ -562,11 +562,13 @@ func watchProgress(lp observe.LiveProgress) *protocol.WatchProgress {
 	return p
 }
 
-// readExecution reads the WI's execution.json (the authority), from the
+// loadExecution reads the WI's execution.json (the authority), from the
 // job record's capsule or, for a WI the daemon no longer holds, from the
 // capsule its hub record names: capsules/<project>-<seq> under the
-// project's mapped workspace (item nil = no record, nothing to read).
-func (d *Daemon) readExecution(wi string, item *api.WorkItem) *protocol.WatchExecution {
+// project's mapped workspace (item nil = no record to fall back on). It
+// is the one execution.json reader of the daemon (the watch projection
+// and the no-id answer both use it).
+func (d *Daemon) loadExecution(wi string, item *api.WorkItem) *capsule.Execution {
 	var candidates []string
 	if d.rt != nil {
 		if ji, ok := d.rt.Info(wi); ok && ji.CapsuleDir != "" {
@@ -587,27 +589,36 @@ func (d *Daemon) readExecution(wi string, item *api.WorkItem) *protocol.WatchExe
 		if json.Unmarshal(raw, &ex) != nil {
 			continue
 		}
-		out := &protocol.WatchExecution{
-			WorkflowStatus: ex.WorkflowStatus, CurrentStep: ex.CurrentStep, UpdatedAt: ex.UpdatedAt,
-			Steps: map[string]protocol.WatchStep{},
-		}
-		ids := make([]string, 0, len(ex.Steps))
-		for id := range ex.Steps {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids) // deterministic pick when several steps hold a question
-		for _, id := range ids {
-			st := ex.Steps[id]
-			if st == nil {
-				continue
-			}
-			out.Steps[id] = protocol.WatchStep{Status: st.Status, StartedAt: st.StepStartedAt}
-			if st.PendingQuestion != nil && st.PendingQuestion.ID != "" && out.PendingQuestion == nil {
-				out.PendingQuestion = &protocol.WatchPendingQuestion{ID: st.PendingQuestion.ID,
-					Step: st.PendingQuestion.Step, Question: st.PendingQuestion.Question, AskedAt: st.PendingQuestion.AskedAt}
-			}
-		}
-		return out
+		return &ex
 	}
 	return nil
+}
+
+// readExecution projects loadExecution onto the watch wire shape.
+func (d *Daemon) readExecution(wi string, item *api.WorkItem) *protocol.WatchExecution {
+	ex := d.loadExecution(wi, item)
+	if ex == nil {
+		return nil
+	}
+	out := &protocol.WatchExecution{
+		WorkflowStatus: ex.WorkflowStatus, CurrentStep: ex.CurrentStep, UpdatedAt: ex.UpdatedAt,
+		Steps: map[string]protocol.WatchStep{},
+	}
+	ids := make([]string, 0, len(ex.Steps))
+	for id := range ex.Steps {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids) // deterministic pick when several steps hold a question
+	for _, id := range ids {
+		st := ex.Steps[id]
+		if st == nil {
+			continue
+		}
+		out.Steps[id] = protocol.WatchStep{Status: st.Status, StartedAt: st.StepStartedAt}
+		if st.PendingQuestion != nil && st.PendingQuestion.ID != "" && out.PendingQuestion == nil {
+			out.PendingQuestion = &protocol.WatchPendingQuestion{ID: st.PendingQuestion.ID,
+				Step: st.PendingQuestion.Step, Question: st.PendingQuestion.Question, AskedAt: st.PendingQuestion.AskedAt}
+		}
+	}
+	return out
 }

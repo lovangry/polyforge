@@ -69,12 +69,7 @@ type Config struct {
 	DataDir       string // state.json + external git-dirs live here
 	GitRemoteBase string // e.g. https://aihub.example/git → <base>/<wi>.git
 	WorkflowsDir  string // daemon checkout's workflows/ (materialization source)
-	// Harness is the adapter whose agent definitions the capsule
-	// materializes (pi: the subagent extension's agents/). It is NOT the
-	// step harness — that is per model candidate (polyforge#175: the
-	// `<harness>:` prefix of each candidate).
-	Harness string
-	PiBin   string // harness binary (default "pi")
+	PiBin         string // harness binary (default "pi")
 	// ClaudeBin is the Claude Code binary (default "claude"; cli.toml
 	// claude_bin / --claude-bin), used by steps whose harness is claude.
 	ClaudeBin string
@@ -83,8 +78,8 @@ type Config struct {
 	// agent dir), <harness-root>/step-agent-sessions (the pi steps'
 	// session store) and <harness-root>/claude-config (claude's config
 	// dir: settings.json — the single credential authority layer —
-	// plus projects/ and debug/). Resolved as --harness-root >
-	// POLYFORGE_HARNESS_ROOT > DataDir; the Dir() derivations and
+	// plus projects/ and debug/). Resolved as --harness-root (cli.toml
+	// [daemon] harness_root) > DataDir; the Dir() derivations and
 	// stepagentdir.go hold the map.
 	HarnessRoot string
 	// OperatorAgentDir is the SOURCE of the dedicated step agent
@@ -130,11 +125,6 @@ type Config struct {
 }
 
 func (c *Config) fill() {
-	// The harness adapter defaults to the only one that exists today
-	// (the pi spawner).
-	if c.Harness == "" {
-		c.Harness = "pi"
-	}
 	if c.OperatorAgentDir == "" {
 		c.OperatorAgentDir = OperatorAgentDirDefault()
 		c.OperatorAgentDirExplicit = false
@@ -277,9 +267,6 @@ type job struct {
 	// not part of the persisted job record.
 	repos []api.ProjectRepo
 
-	// workspaceYaml is the claim's pre-claim-validated .polyforge.yaml
-	// (nil when the workspace carries none). In-memory only.
-	workspaceYaml *workspace.Config
 	// stepCandidates is the polyforge#79 claim-time compose: the
 	// per-step post-precedence candidate lists (step id → list; a
 	// present-empty entry governs and means no switchable chain). In-
@@ -919,24 +906,6 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, wi, sessionID string, re
 		r.saveManualModels(id, manual)
 	} else {
 		manual = r.loadManualModels(id)
-		if len(manual) > 0 {
-			if _, nerr := workspace.NormalizeModels(manual); nerr != nil {
-				// polyforge#175: a list recorded before the candidate
-				// format (bare ids) can never dispatch; keeping it would
-				// block every re-claim of this work item. Drop it loudly
-				// and fall back to the yaml/bundle chain.
-				fmt.Fprintf(os.Stderr, "runtime: %s: dropping the recorded pf submit --models list %v: %v — the yaml/bundle chain governs (resubmit with --models <harness>:<model>,... to pin one)\n", id, manual, nerr)
-				if r.cfg.EventTap != nil {
-					r.cfg.EventTap(id, EvManualModelsDropped, map[string]any{
-						"models": manual,
-						"note":   "recorded pf submit --models list is not <harness>:<model> (polyforge#175); dropped, the yaml/bundle chain governs",
-						"error":  nerr.Error(),
-					})
-				}
-				r.clearManualModels(id)
-				manual = nil
-			}
-		}
 	}
 	j := &job{
 		wi:                 id,
@@ -981,7 +950,6 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, wi, sessionID string, re
 	// polyforge#79: the workspace yaml was loaded and validated BEFORE the
 	// claim (Start / the journal replay); compose the per-step candidates
 	// for the claimed project from that snapshot.
-	j.workspaceYaml = wcfg
 	// polyforge#175: a bundle whose candidates are not `<harness>:<model>`
 	// (or that still declares a `harness` key) is a load error naming the
 	// file and the step; the claim ends blocked with it.
@@ -1223,11 +1191,6 @@ func (r *Runtime) LoadWorkspace(project string) (*workspace.Config, error) {
 // `pf resume` re-claims the work item.
 const EvClaimPausedEndedBlocked = "claim_paused_ended_blocked"
 
-// EvManualModelsDropped is the runtime event of a recorded manual
-// `--models` list dropped at re-claim because it predates the
-// `<harness>:<model>` format (polyforge#175).
-const EvManualModelsDropped = "manual_models_dropped"
-
 // CheckBundle is the polyforge#175 pre-claim bundle read: the installed
 // bundle's candidates must all be `<harness>:<model>` (and it may carry
 // no `harness` key). A refusal is the typed DAEMON-414 naming the file
@@ -1351,19 +1314,7 @@ func (r *Runtime) prepareCapsule(ctx context.Context, j *job) error {
 	// together, so the fresh clone can never meet a previous session's
 	// HEAD/index (a stale git-dir reused under a fresh worktree made
 	// every later push non-fast-forward).
-	//
-	// A capsule claimed before the readable naming (polyforge#144) sits at
-	// the id-named sibling capsules/<wi> with the same id-keyed git-dir:
-	// on a re-claim into capsules/<project>-<seq> that old worktree and
-	// the git-dir are the unit, so they move aside together.
-	gitDir := o.GitDir
-	if old := filepath.Join(filepath.Dir(o.CapsuleDir), j.wi); old != o.CapsuleDir && dirExists(old) {
-		if err := quarantineCapsule(old, gitDir); err != nil {
-			return err
-		}
-		gitDir = ""
-	}
-	if err := quarantineCapsule(o.CapsuleDir, gitDir); err != nil {
+	if err := quarantineCapsule(o.CapsuleDir, o.GitDir); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(o.GitDir), 0o755); err != nil {
@@ -1461,7 +1412,7 @@ func quarantineCapsule(capsuleDir, gitDir string) error {
 // injected-failure test).
 var renameFn = os.Rename
 
-// materialize lays out the capsule: workflows/, agents/,
+// materialize lays out the capsule: workflows/,
 // capsule.json, session.json, .gitignore and the runtime-state/ tree.
 // The bundle is materialized as ONE atomic set with a completion marker
 // (F7, materialize.go; no digest verification — the digest chain is
@@ -1470,7 +1421,7 @@ var renameFn = os.Rename
 // written, so the recorded baselines are the true claim-time SHAs.
 func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	for _, d := range []string{
-		capsule.DirAgents, capsule.DirArtifacts, capsule.DirLogs, capsule.DirRepos,
+		capsule.DirArtifacts, capsule.DirLogs, capsule.DirRepos,
 		capsule.DirRuntimeState, capsule.DirSession, capsule.DirWorkflows,
 		filepath.Join(capsule.DirLogs, "session"),
 	} {
@@ -1542,8 +1493,8 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	// plus a notice, never a failed spawn (see recall.go).
 	r.writeRecalledMemories(j)
 	// F7: the bundle copy is ONE atomic set with a completion marker
-	// (materialize.go): the bundle lands under workflows/<bundle> and
-	// agents/, and sync/materialized.json gates every later consumer.
+	// (materialize.go): the bundle lands under workflows/<bundle>, and
+	// sync/materialized.json gates every later consumer.
 	return r.materializeBundle(j)
 }
 
@@ -2145,20 +2096,4 @@ func (r *Runtime) CanonicalID(wi string) string {
 		return id
 	}
 	return wi
-}
-
-// CapsuleDirFor returns the capsule directory of a WI: the live job's
-// own recorded dir (routed by its project at claim time, polyforge#113);
-// "" when the WI holds no live job — a route caller for a non-live WI
-// has no capsule to address.
-func (r *Runtime) CapsuleDirFor(wi string) string {
-	id := r.Resolve(wi)
-	if id == "" {
-		id = wi
-	}
-	j := r.jobOf(id)
-	if j == nil {
-		return ""
-	}
-	return j.capsuleDir
 }

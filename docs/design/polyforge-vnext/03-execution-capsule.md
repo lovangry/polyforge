@@ -284,7 +284,7 @@ WI 创建时可声明 repo inventory：`[{name}]`（项目仓库名），1 ≤ �
 
 ### 4.5 subagent 定义文件与 workflow 快照：第 0 步物化与防冲突三层（本节权威=物化协议与防冲突；workflow.md frontmatter schema 与 step skill 定义的权威在 `01-workflow-skills.md#§4.1`/`#§4.4`，本文不重复定义） <!-- §4.5 -->
 
-> **PARTIALLY ARCHIVED（2026-10-16）— 物化的原子集合 + 完成标记（信任门：没有完成标记的物化不被信任、整体重做）是现行机制**（`runtime/materialize.go`）：daemon 把 bundle 整树物化到 capsule 的 `workflows/<bundle>/`，并把其 `steps/` 另拷一份到 capsule 的 `agents/`；driver 直接读 `workflows/<bundle>/steps/<id>.md`。**已删除、do not build from this 的部分**：WI Agent 第 0 步、`.pi/agents/`、`.claude/agents/`、根 `workflow.md` 等物化目标。
+> **PARTIALLY ARCHIVED（2026-10-16）— 物化的原子集合 + 完成标记（信任门：没有完成标记的物化不被信任、整体重做）是现行机制**（`runtime/materialize.go`）：daemon 把 bundle 整树物化到 capsule 的 `workflows/<bundle>/`，driver 直接读 `workflows/<bundle>/steps/<id>.md`（`steps/` 另拷到 capsule `agents/` 的第二份副本已于 2026-10-16 G4 删除；旧 capsule 里残留的 `agents/` 惰性无读者）。**已删除、do not build from this 的部分**：WI Agent 第 0 步、`.pi/agents/`、`.claude/agents/`、根 `workflow.md` 等物化目标。
 
 本节裁定 Capsule 内三个物化目标（`.pi/agents/`、`.claude/agents/`、`workflow.md` 或 `workflow/`）的内容来源、校验口径、文件模型与防冲突机制；目录本身的建立时机见 §6.1 第 5 步，同步侧排除见 `05-sync-revision-recovery.md#§4.1`。
 

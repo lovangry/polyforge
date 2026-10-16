@@ -177,7 +177,7 @@ func TestProbeFailureClaimsNothing(t *testing.T) {
 }
 
 // A workspace WITHOUT a yaml runs exactly as before: the claim
-// proceeds, the job carries no yaml snapshot.
+// proceeds.
 func TestAbsentWorkspaceYamlEqualsToday(t *testing.T) {
 	hub := newFakeHub()
 	r, ws, _ := newWorkspaceTestRuntime(t, hub, "proj")
@@ -190,12 +190,6 @@ func TestAbsentWorkspaceYamlEqualsToday(t *testing.T) {
 	j := r.jobOf("wi_w079abs")
 	if j == nil {
 		t.Fatal("the claim must run to a live agent")
-	}
-	j.mu.Lock()
-	snap := j.workspaceYaml
-	j.mu.Unlock()
-	if snap != nil {
-		t.Fatalf("no yaml must answer a nil snapshot, got %+v", snap)
 	}
 	if err := r.Stop(context.Background(), "wi_w079abs", protocol.FinishWrapped); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -213,12 +207,6 @@ func TestCommentsOnlyWorkspaceYamlIsAbsentEquivalent(t *testing.T) {
 	j := r.jobOf("wi_w079cmt")
 	if j == nil {
 		t.Fatal("the claim must run to a live agent")
-	}
-	j.mu.Lock()
-	snap := j.workspaceYaml
-	j.mu.Unlock()
-	if snap != nil {
-		t.Fatalf("a comments-only yaml must answer a nil snapshot, got %+v", snap)
 	}
 	if err := r.Stop(context.Background(), "wi_w079cmt", protocol.FinishWrapped); err != nil {
 		t.Fatalf("Stop: %v", err)

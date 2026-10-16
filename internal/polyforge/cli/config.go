@@ -17,8 +17,8 @@
 // 2xx → 0, 4xx → 1, 5xx → 2 (usage errors also 2).
 //
 // Configuration precedence: command-line flags > PF_* environment >
-// ~/.config/polyforge/cli.toml (flat string keys + [workspace."<path>"]
-// sections) > defaults. There is NO default project (polyforge#113): the
+// ~/.config/polyforge/cli.toml (flat string keys, [workspace."<path>"]
+// sections and the [daemon] table) > defaults. There is NO default project (polyforge#113): the
 // [workspace] mapping decides capsule placement, and project scoping is
 // per-invocation --project.
 package cli
@@ -28,7 +28,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 )
@@ -56,6 +58,123 @@ type Config struct {
 	// hard-deleted, ruling 2: a residual key now fails the unknown-key
 	// parse with the startup error it deserved.
 	ClaudeBin string
+	// Daemon is the [daemon] table: the production daemon knobs the
+	// daemon reads from its --config file (decision 2026-10-16 G2).
+	// Validated on load by every pf command and the daemon alike; the
+	// zero value = every daemon default.
+	Daemon DaemonSettings
+}
+
+// DaemonSettings is the cli.toml [daemon] table. A zero field is unset
+// (the daemon's own default applies); an explicit daemon command-line
+// flag (tests/dev) beats the table. Every value is validated on load.
+type DaemonSettings struct {
+	// StepTimeout is T, the cumulative step runtime bound (Go duration,
+	// > 0; daemon default 90m); flag --step-timeout.
+	StepTimeout time.Duration
+	// StallWindow is N, the driver-stalled-between-steps bound (Go
+	// duration, non-zero; negative disables; daemon default 10m); flag
+	// --stall-window.
+	StallWindow time.Duration
+	// HarnessRoot is the parent of the step harness dirs (absolute path;
+	// daemon default <data-dir>); flag --harness-root.
+	HarnessRoot string
+	// OperatorAgentDir is the source of the step agent dir's credential
+	// and model files (absolute path; daemon default ~/.pi/agent; a set
+	// value without a readable auth.json refuses the daemon start); flag
+	// --operator-agent-dir.
+	OperatorAgentDir string
+	// MaxConcurrentJobs is the configured job cap (>= 1; 0 = unset,
+	// daemon default 4); flag --max-concurrent-jobs. An explicit
+	// `pf ops max N` (persisted until `pf ops max --reset`) wins over it.
+	MaxConcurrentJobs int
+}
+
+// daemonTableKeys are the [daemon] keys, in the order the docs list them.
+var daemonTableKeys = []string{"step_timeout", "stall_window", "harness_root", "operator_agent_dir", "max_concurrent_jobs"}
+
+// DaemonKeyError is the typed refusal of one [daemon] entry: it names
+// the file, the line and the key.
+type DaemonKeyError struct {
+	File   string
+	Line   int
+	Key    string
+	Reason string
+}
+
+func (e *DaemonKeyError) Error() string {
+	return fmt.Sprintf("config %s: line %d: [daemon] %s: %s", e.File, e.Line, e.Key, e.Reason)
+}
+
+// daemonKV is one raw `key = value` line of the [daemon] table.
+type daemonKV struct {
+	key, val string
+	line     int
+}
+
+// parseDaemonTable validates the [daemon] entries into DaemonSettings.
+func parseDaemonTable(file string, kvs []daemonKV) (DaemonSettings, error) {
+	var s DaemonSettings
+	seen := map[string]bool{}
+	for _, kv := range kvs {
+		refuse := func(reason string) error {
+			return &DaemonKeyError{File: file, Line: kv.line, Key: kv.key, Reason: reason}
+		}
+		if seen[kv.key] {
+			return s, refuse("duplicate key")
+		}
+		seen[kv.key] = true
+		switch kv.key {
+		case "step_timeout", "stall_window":
+			v, err := parseQuotedValue(kv.val, kv.line)
+			if err != nil {
+				return s, refuse(`must be a quoted Go duration, e.g. "45m"`)
+			}
+			d, err := time.ParseDuration(v)
+			if err != nil {
+				return s, refuse(fmt.Sprintf(`%q is not a Go duration (e.g. "45m", "1h30m")`, v))
+			}
+			if kv.key == "step_timeout" {
+				if d <= 0 {
+					return s, refuse("must be > 0")
+				}
+				s.StepTimeout = d
+			} else {
+				if d == 0 {
+					return s, refuse("must be non-zero (a negative value disables the stall check; remove the key for the default)")
+				}
+				s.StallWindow = d
+			}
+		case "harness_root", "operator_agent_dir":
+			v, err := parseQuotedValue(kv.val, kv.line)
+			if err != nil {
+				return s, refuse("must be a quoted absolute path")
+			}
+			if !filepath.IsAbs(v) {
+				return s, refuse(fmt.Sprintf("%q is not an absolute path (no ~ or $HOME expansion)", v))
+			}
+			if kv.key == "harness_root" {
+				s.HarnessRoot = v
+			} else {
+				s.OperatorAgentDir = v
+			}
+		case "max_concurrent_jobs":
+			n, err := strconv.Atoi(kv.val)
+			if err != nil {
+				return s, refuse(fmt.Sprintf("must be an unquoted integer >= 1, got %s", kv.val))
+			}
+			if n < 1 {
+				return s, refuse("must be >= 1")
+			}
+			s.MaxConcurrentJobs = n
+		default:
+			if coreFlatKeys[kv.key] {
+				return s, refuse("a top-level key: move it above the [daemon] header (every key below the header belongs to the table)")
+			}
+			return s, refuse("unknown key (the [daemon] table carries only " + strings.Join(daemonTableKeys, ", ") + ")")
+		}
+	}
+	return s, nil
 }
 
 // DefaultConfigPath returns the single documented config location:
@@ -101,11 +220,12 @@ func LoadConfig(path string) (Config, error) {
 	var (
 		flat     map[string]string
 		sections []workspaceSection
+		dkvs     []daemonKV
 	)
 	data, err := os.ReadFile(path)
 	if err == nil {
 		var perr error
-		flat, sections, perr = parseConfigTOML(path, string(data))
+		flat, sections, dkvs, perr = parseConfigTOML(path, string(data))
 		if perr != nil {
 			var uk *unknownKeyError
 			if errors.As(perr, &uk) {
@@ -114,6 +234,9 @@ func LoadConfig(path string) (Config, error) {
 			return cfg, fmt.Errorf("config %s: %w", path, perr)
 		}
 		applyConfigFile(&cfg, flat)
+		if cfg.Daemon, perr = parseDaemonTable(path, dkvs); perr != nil {
+			return cfg, perr
+		}
 		entries := make([]mapping.Entry, 0, len(sections))
 		for _, s := range sections {
 			entries = append(entries, mapping.Entry{Workspace: s.key, Projects: s.projects})
@@ -201,7 +324,11 @@ func (e *unknownKeyError) Error() string {
 //     unknown-key refusal (the credentials now live in
 //     <harness-root>/claude-config/settings.json, ruling 1-2);
 //   - one section family: `[workspace."<path>"]` (quoted key mandatory)
-//     — inside, only `projects = ["a", "b"]`.
+//     — inside, only `projects = ["a", "b"]`;
+//   - one `[daemon]` table (at most once): its raw `key = value` lines
+//     are answered as-is and validated by parseDaemonTable. Every key
+//     after the header belongs to the table (TOML semantics), so the
+//     flat keys must come before it.
 //
 // Other tables, unquoted section keys, non-array or wrongly-typed
 // projects values, a bare `projects` key at the top level, and duplicate
@@ -210,12 +337,15 @@ func (e *unknownKeyError) Error() string {
 // containing a backslash is rejected — and values are taken literally
 // between their quotes. A `#` inside a quoted value is data, not a
 // comment.
-func parseConfigTOML(file, text string) (map[string]string, []workspaceSection, error) {
+func parseConfigTOML(file, text string) (map[string]string, []workspaceSection, []daemonKV, error) {
 	flat := map[string]string{}
 	var sections []workspaceSection
+	var daemon []daemonKV
 	var (
-		inWS  bool
-		curWS = -1 // index into sections while inside a [workspace] section
+		inWS       bool
+		inDaemon   bool
+		daemonSeen bool
+		curWS      = -1 // index into sections while inside a [workspace] section
 	)
 	for ln, line := range strings.Split(text, "\n") {
 		line = stripTOMLComment(line)
@@ -224,37 +354,48 @@ func parseConfigTOML(file, text string) (map[string]string, []workspaceSection, 
 			continue
 		}
 		if strings.HasPrefix(line, "[") {
+			if strings.HasSuffix(line, "]") && strings.TrimSpace(line[1:len(line)-1]) == "daemon" {
+				if daemonSeen {
+					return nil, nil, nil, fmt.Errorf("line %d: duplicate [daemon] table", ln+1)
+				}
+				daemonSeen, inDaemon, inWS, curWS = true, true, false, -1
+				continue
+			}
 			key, err := parseSectionHeader(line, ln+1)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			for _, s := range sections {
 				if s.key == key {
-					return nil, nil, fmt.Errorf("line %d: duplicate [workspace] section for %s", ln+1, key)
+					return nil, nil, nil, fmt.Errorf("line %d: duplicate [workspace] section for %s", ln+1, key)
 				}
 			}
 			sections = append(sections, workspaceSection{key: key, line: ln + 1})
 			curWS = len(sections) - 1
-			inWS = true
+			inWS, inDaemon = true, false
 			continue
 		}
 		eq := strings.IndexByte(line, '=')
 		if eq < 0 {
-			return nil, nil, fmt.Errorf("line %d: expected `key = \"value\"`, got %q", ln+1, line)
+			return nil, nil, nil, fmt.Errorf("line %d: expected `key = \"value\"`, got %q", ln+1, line)
 		}
 		key := strings.TrimSpace(line[:eq])
 		val := strings.TrimSpace(line[eq+1:])
 		if key == "" {
-			return nil, nil, fmt.Errorf("line %d: empty key", ln+1)
+			return nil, nil, nil, fmt.Errorf("line %d: empty key", ln+1)
+		}
+		if inDaemon {
+			daemon = append(daemon, daemonKV{key: key, val: val, line: ln + 1})
+			continue
 		}
 		if coreFlatKeys[key] {
 			// Known flat key: root-level wherever it appears.
 			inner, err := parseQuotedValue(val, ln+1)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			if _, dup := flat[key]; dup {
-				return nil, nil, fmt.Errorf("line %d: duplicate key %q", ln+1, key)
+				return nil, nil, nil, fmt.Errorf("line %d: duplicate key %q", ln+1, key)
 			}
 			flat[key] = inner
 			continue
@@ -262,24 +403,24 @@ func parseConfigTOML(file, text string) (map[string]string, []workspaceSection, 
 		if inWS {
 			// Inside a workspace section: only the projects array.
 			if key != "projects" {
-				return nil, nil, fmt.Errorf("line %d: unknown key %q in section [workspace.%q] (a workspace section carries only `projects`)", ln+1, key, sections[curWS].key)
+				return nil, nil, nil, fmt.Errorf("line %d: unknown key %q in section [workspace.%q] (a workspace section carries only `projects`)", ln+1, key, sections[curWS].key)
 			}
 			if len(sections[curWS].projects) > 0 {
-				return nil, nil, fmt.Errorf("line %d: duplicate projects array in the [workspace] section of %s", ln+1, sections[curWS].key)
+				return nil, nil, nil, fmt.Errorf("line %d: duplicate projects array in the [workspace] section of %s", ln+1, sections[curWS].key)
 			}
 			list, err := parseStringArray(val, ln+1)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			sections[curWS].projects = append(sections[curWS].projects, list...)
 			continue
 		}
 		if key == "projects" {
-			return nil, nil, fmt.Errorf("line %d: `projects` belongs inside a [workspace.\"<path>\"] section, not the top level", ln+1)
+			return nil, nil, nil, fmt.Errorf("line %d: `projects` belongs inside a [workspace.\"<path>\"] section, not the top level", ln+1)
 		}
-		return nil, nil, &unknownKeyError{key: key, file: file}
+		return nil, nil, nil, &unknownKeyError{key: key, file: file}
 	}
-	return flat, sections, nil
+	return flat, sections, daemon, nil
 }
 
 // parseSectionHeader validates one `[...]` line: the only legal section
@@ -292,7 +433,7 @@ func parseSectionHeader(line string, ln int) (string, error) {
 	inner := strings.TrimSpace(line[1 : len(line)-1])
 	const wsPrefix = `workspace.`
 	if !strings.HasPrefix(inner, wsPrefix) {
-		return "", fmt.Errorf("line %d: unknown section %q — only [workspace.\"<path>\"] sections are supported", ln, line)
+		return "", fmt.Errorf("line %d: unknown section %q — only [workspace.\"<path>\"] sections and the [daemon] table are supported", ln, line)
 	}
 	keyExpr := strings.TrimSpace(inner[len(wsPrefix):])
 	if len(keyExpr) < 2 {
