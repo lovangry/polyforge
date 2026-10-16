@@ -235,8 +235,8 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 
 ### 6.1 UDS routes <!-- §6.1 -->
 
-`internal/polyforge/daemon/routes.go` `routes()` — 17 routes, all wrapped by `refuseStepOrigin`: every
-non-read request whose peer (or its ancestors / process-group leader) carries this daemon's
+`internal/polyforge/daemon/routes.go` `routes()` — 18 routes, all wrapped by `refuseStepOrigin`: every
+non-read request (including a `GET /chats/{id}/attention` with `mark=1` or `ack=1`) whose peer (or its ancestors / process-group leader) carries this daemon's
 `PF_WI_ID`+`PF_DAEMON_ID` markers — or whose peer credential cannot be read — is refused `DAEMON-403`
 (SO_PEERCRED capture `daemon/peercred.go`, check `runtime/stepproc.go` `StepProcessOrigin`).
 
@@ -256,7 +256,8 @@ non-read request whose peer (or its ancestors / process-group leader) carries th
 | GET | `/chats/{id}/subscriptions` | list | `pf watch` |
 | POST | `/chats/{id}/subscribe`, `/unsubscribe` | manage subscriptions | `pf watch subscribe|unsubscribe` |
 | POST | `/chats/{id}/ack`, `/heartbeat` | cursor advance; watcher liveness (TTL 20s) | resident `pf watch --chat` |
-| GET | `/chats/{id}/attention` | pending human decisions | resident `pf watch --chat` |
+| GET | `/chats/{id}/attention?ack=1` | pending human decisions, each with a key; listed until acked (no `ack=1`: `mark=1` marks shown at fetch, legacy). With `mark=1`/`ack=1` it records state and is step-origin guarded (DAEMON-403); a plain list stays an open read | resident `pf watch --chat` |
+| POST | `/chats/{id}/attention/ack` | `{"keys"}` the watcher printed; idempotent, unknown keys ignored | resident `pf watch --chat` |
 
 Socket: `--socket` > `PF_DAEMON_SOCKET` > cli.toml `daemon_socket` > `/run/polyforge.sock`
 (`cli/config.go`, `daemon/main.go`).

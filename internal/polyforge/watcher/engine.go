@@ -19,8 +19,12 @@ type API interface {
 	Ack(a protocol.ChatAck) error
 	Heartbeat(pid int) error
 	// Attention lists WIs that need a human and have no live watcher, for
-	// this chat or owner, marking them shown.
+	// this chat or owner. Items carrying a Key stay listed until acked via
+	// AckAttention (fetch-then-ack); an older daemon marks them shown at
+	// fetch and answers no Key.
 	Attention(owner string) ([]protocol.ChatAttentionItem, error)
+	// AckAttention records the printed attention notices by Key.
+	AckAttention(keys []string) error
 }
 
 // Options configure Run.
@@ -84,6 +88,13 @@ var ErrParentGone = errors.New("parent process gone")
 // daemon restart needs no special case). Decisions print as fixed-template
 // lines on Out; progress goes to the status file. With WaitDecision the
 // first non-empty batch is printed, acked and Run returns nil.
+//
+// Delivery is fetch-then-ack: nothing the daemon hands out counts as
+// delivered until the watcher acks it after printing, so a crash between
+// fetch and print loses no line — the next start prints it. A crash
+// between print and ack prints that line once more on the next start
+// (the only duplicate); a failed ack inside one run is retried without
+// re-printing (B-9/B-23).
 func Run(ctx context.Context, api API, opts Options) error {
 	opts.defaults()
 	var (
@@ -97,6 +108,13 @@ func Run(ctx context.Context, api API, opts Options) error {
 		// printed again, only their acks retried, until an ack round
 		// fully succeeds.
 		unacked = map[string]bool{}
+		// attnKeys are the attention notices printed but not yet acked
+		// (B-25 WA-4): retried every cycle until an ack lands.
+		attnKeys []string
+		// attnWarned: the attention-ack failure was reported (once until an
+		// ack lands); attnNoRoute: the daemon has no attention/ack route
+		// (older daemon, it marked at fetch) — stop acking.
+		attnWarned, attnNoRoute bool
 	)
 	for {
 		if opts.ParentAlive != nil && !opts.ParentAlive() {
@@ -107,13 +125,16 @@ func Run(ctx context.Context, api API, opts Options) error {
 		}
 		lines, batch, err := cycle(api, &opts, &attended)
 		if err != nil {
-			// The attention notice is marked shown by the daemon when it is
-			// fetched: a cycle that fails after fetching it still prints it
-			// (repo review 2026-10-16 B-25, the WA-4 item).
+			// A cycle that fails after fetching the attention notice still
+			// prints it (an older daemon marked it shown at fetch); its ack
+			// waits for the daemon to come back (B-25 WA-4).
 			for _, l := range batch.out {
 				if _, werr := fmt.Fprintln(opts.Out, l); werr != nil {
 					return werr
 				}
+			}
+			if !attnNoRoute {
+				attnKeys = append(attnKeys, batch.attnKeys...)
 			}
 			if !paused || opts.Now().Sub(lastNotice) >= time.Minute {
 				fmt.Fprintf(opts.Err, "polyforge watch: %s (%s); retrying in %s\n", pausedText(err), shortErr(err), backoff)
@@ -161,6 +182,21 @@ func Run(ctx context.Context, api API, opts Options) error {
 		} else {
 			unacked = map[string]bool{}
 		}
+		if !attnNoRoute {
+			attnKeys = append(attnKeys, batch.attnKeys...)
+		}
+		if len(attnKeys) > 0 {
+			switch aerr := api.AckAttention(attnKeys); {
+			case aerr == nil:
+				attnKeys, attnWarned = nil, false
+			case routeAbsent(aerr):
+				// an older daemon: it marked the notices shown at fetch
+				attnKeys, attnNoRoute = nil, true
+			case !attnWarned:
+				fmt.Fprintf(opts.Err, "polyforge watch: attention ack failed (%s); retrying without re-printing\n", shortErr(aerr))
+				attnWarned = true
+			}
+		}
 		if printed > 0 && opts.WaitDecision {
 			return nil
 		}
@@ -187,6 +223,15 @@ func sleepChecked(ctx context.Context, o *Options, d time.Duration) {
 type batch struct {
 	out  []string
 	acks []protocol.ChatAck
+	// attnKeys: the Keys of the attention notices in out (fetch-then-ack)
+	attnKeys []string
+}
+
+// routeAbsent reports the daemon's answer for a route it does not serve
+// (the mux's untyped 404/405, decoded as HTTP-404/HTTP-405).
+func routeAbsent(err error) bool {
+	var ae *api.Error
+	return errors.As(err, &ae) && (ae.Code == "HTTP-404" || ae.Code == "HTTP-405")
 }
 
 func pausedText(err error) string {
@@ -241,9 +286,14 @@ func cycle(d API, o *Options, attended *bool) ([]string, batch, error) {
 				wis = append(wis, api.DisplayName(it.Slug, it.WI))
 			}
 			b.out = append(b.out, AttentionLine(wis))
+			for _, it := range items {
+				if it.Key != "" {
+					b.attnKeys = append(b.attnKeys, it.Key)
+				}
+			}
 		}
 	}
-	attention := append([]string(nil), b.out...)
+	attention := batch{out: append([]string(nil), b.out...), attnKeys: b.attnKeys}
 	now := o.Now()
 	var lines []string
 	for _, sub := range subs.Subscriptions {
@@ -266,7 +316,7 @@ func cycle(d API, o *Options, attended *bool) ([]string, batch, error) {
 			if !errors.As(err, &ae) {
 				// transport: the daemon went away mid-cycle; only the
 				// already-fetched (and daemon-marked) attention line survives
-				return nil, batch{out: attention}, err
+				return nil, attention, err
 			}
 			lines = append(lines, safeID(api.DisplayName(sub.Slug, sub.WI))+" unavailable ("+ae.Code+")")
 			continue

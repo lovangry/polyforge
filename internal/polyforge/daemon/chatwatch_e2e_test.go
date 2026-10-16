@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -31,6 +33,7 @@ func (c clientAPI) Heartbeat(pid int) error      { return c.d.ChatHeartbeat(c.ch
 func (c clientAPI) Attention(owner string) ([]protocol.ChatAttentionItem, error) {
 	return c.d.ChatAttention(c.chat, owner)
 }
+func (c clientAPI) AckAttention(keys []string) error { return c.d.ChatAttentionAck(c.chat, keys) }
 
 // The real watcher against the real daemon: a chat submits, the step asks a
 // question, the watcher prints ONE fixed-template line (no question text),
@@ -132,5 +135,44 @@ func TestWatcherGetsDecisionAfterManualClose(t *testing.T) {
 				t.Fatalf("subscription must be Done after the terminal decision: %+v", subs)
 			}
 		})
+	}
+}
+
+type deadStdout struct{}
+
+func (deadStdout) Write([]byte) (int, error) { return 0, errors.New("write: broken pipe") }
+
+// repo review 2026-10-16 B-25 (WA-4): the real watcher dies after fetching
+// the attention notice and before printing it — the next start prints it
+// (fetch-then-ack), and once printed and acked it never repeats.
+func TestWatcherCrashBeforePrintingAttentionRedelivers(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.client.Origin = &cli.SubmitOrigin{ChatID: "chat_origin", Owner: "alice"}
+	td.submitClaim(t, "wi_crash")
+	td.waitMonitored(t, "wi_crash")
+	td.seedPendingQuestion(t, "wi_crash", "q-1", "plan", "?")
+	waitNeedsInput(t, td, "wi_crash")
+
+	// alice's other chat: told through owner routing
+	api := clientAPI{d: td.client, chat: "chat_other"}
+	run := func(out io.Writer, d time.Duration) error {
+		ctx, cancel := context.WithTimeout(context.Background(), d)
+		defer cancel()
+		return watcher.Run(ctx, api, watcher.Options{Owner: "alice", WaitDecision: true, Out: out, Poll: 20 * time.Millisecond})
+	}
+	if err := run(deadStdout{}, 5*time.Second); err == nil {
+		t.Fatal("a dead stdout must end the run")
+	}
+	var out bytes.Buffer
+	if err := run(&out, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "needs you: wi_crash") {
+		t.Fatalf("the notice fetched by the crashed watcher must print now: %q", out.String())
+	}
+	var out2 bytes.Buffer
+	_ = run(&out2, 300*time.Millisecond)
+	if out2.Len() != 0 {
+		t.Fatalf("an acked notice must not repeat: %q", out2.String())
 	}
 }

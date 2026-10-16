@@ -216,3 +216,32 @@ func TestMutatingRoutesFromHumanSessionPassTheGuard(t *testing.T) {
 		}
 	}
 }
+
+// GET attention with mark=1 / ack=1 records delivery state: a step agent
+// fetching it could mark a human's notices shown (or pending) and hide
+// them, so it is guarded like a mutation. The plain list stays a read; a
+// human watcher's recording fetch and its attention ack pass.
+func TestRecordingAttentionFetchFromStepProcessIsRefused(t *testing.T) {
+	td, _ := pf122Daemon(t)
+	marks := []string{"PF_WI_ID=wi_122", "PF_DAEMON_ID=" + td.cfg.MachineID}
+	for _, q := range []string{"?mark=1", "?ack=1", "?mark=1&ack=1", "?owner=alice&ack=1"} {
+		out := stepOriginRequest(t, td, "GET", "/chats/c1/attention"+q, marks...)
+		if !strings.Contains(out, "PFSO-STATUS 403") || !strings.Contains(out, "DAEMON-403") || !strings.Contains(out, "step process tree") {
+			t.Errorf("GET attention%s from a step process was not refused: %s", q, out)
+		}
+	}
+	if out := stepOriginRequest(t, td, "POST", "/chats/c1/attention/ack", marks...); !strings.Contains(out, "PFSO-STATUS 403") {
+		t.Errorf("POST attention/ack from a step process was not refused: %s", out)
+	}
+	for _, q := range []string{"", "?owner=alice", "?mark=0"} {
+		if out := stepOriginRequest(t, td, "GET", "/chats/c1/attention"+q, marks...); !strings.Contains(out, "PFSO-STATUS 200") {
+			t.Errorf("plain GET attention%s from a step process must stay open: %s", q, out)
+		}
+	}
+	human := []string{"PF_WI_ID=wi_other", "PF_DAEMON_ID=another-daemon"}
+	for _, req := range [][2]string{{"GET", "/chats/c1/attention?mark=1&ack=1"}, {"POST", "/chats/c1/attention/ack"}} {
+		if out := stepOriginRequest(t, td, req[0], req[1], human...); !strings.Contains(out, "PFSO-STATUS 200") {
+			t.Errorf("%s %s from a human session must pass: %s", req[0], req[1], out)
+		}
+	}
+}

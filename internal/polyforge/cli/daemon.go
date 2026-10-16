@@ -439,10 +439,12 @@ func (d *DaemonClient) ChatHeartbeat(chat string, pid int) error {
 	return err
 }
 
-// ChatAttention lists WIs that need a human and have no live watcher
-// (marking them shown to the chat).
+// ChatAttention lists WIs that need a human and have no live watcher,
+// fetch-then-ack: a supporting daemon answers each item with a Key and
+// keeps listing it until ChatAttentionAck names it; an older one ignores
+// ack=1 and marks the items shown at fetch (mark=1), answering no Key.
 func (d *DaemonClient) ChatAttention(chat, owner string) ([]protocol.ChatAttentionItem, error) {
-	q := url.Values{"mark": {"1"}}
+	q := url.Values{"mark": {"1"}, "ack": {"1"}}
 	if owner != "" {
 		q.Set("owner", owner)
 	}
@@ -455,4 +457,11 @@ func (d *DaemonClient) ChatAttention(chat, owner string) ([]protocol.ChatAttenti
 		return nil, err
 	}
 	return out.Items, nil
+}
+
+// ChatAttentionAck records the attention notices (by Key) the chat's
+// watcher printed. Idempotent; unknown keys are ignored by the daemon.
+func (d *DaemonClient) ChatAttentionAck(chat string, keys []string) error {
+	_, err := d.do("POST", chatPath(chat, "attention/ack"), "", protocol.ChatAttentionAck{Keys: keys}, nil)
+	return err
 }
