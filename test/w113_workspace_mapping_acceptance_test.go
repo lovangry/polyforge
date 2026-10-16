@@ -453,14 +453,14 @@ func (d *w113Daemon) pfWant(inst *v1Install, wantExit int, args ...string) strin
 // the e2e project; the mapping scenarios need more).
 // ---------------------------------------------------------------------------
 
-// w113NewWI files one quick-fix execution ticket in the given project
+// w113NewWI files one autopilot execution ticket in the given project
 // and scripts its agent with the given plan actions.
 func w113NewWI(t *testing.T, inst *v1Install, project, goal string, actions []map[string]any) string {
 	t.Helper()
 	raw, err := inst.client.CreateWorkItem(aihubclient.CreateWorkItemRequest{
 		Project:    project,
 		Goal:       goal,
-		BundleName: strPtr("quick-fix"),
+		BundleName: strPtr("autopilot"),
 		Attrs:      nil,
 	})
 	if err != nil {
@@ -871,9 +871,9 @@ func TestW113MappingTildeExpansionAndRouting(t *testing.T) {
 	defer d.stop()
 
 	wiA := w113NewWI(t, inst, "e2e", "w113 tilde-keyed workspace claim",
-		envelopeQuickFix())
+		envelopeAutopilot())
 	wiB := w113NewWI(t, inst, "ieops", "w113 absolute-keyed workspace claim",
-		envelopeQuickFix())
+		envelopeAutopilot())
 	d.pfWant(inst, -1, "submit", wiA)
 	d.pfWant(inst, -1, "submit", wiB)
 
@@ -1142,7 +1142,7 @@ func TestW113DaemonDefaultConfigLocation(t *testing.T) {
 	w113ConfigFile(t, std, inst.url, inst.adminKey, "",
 		[]w113WS{{key: defaultWS, projects: []string{"e2e"}}})
 
-	wiA := w113NewWI(t, inst, "e2e", "w113 default-config-location claim", envelopeQuickFix())
+	wiA := w113NewWI(t, inst, "e2e", "w113 default-config-location claim", envelopeAutopilot())
 	d := w113NewDaemon(t, inst, w113DOptHome(home)) // NO --config
 	d.start()
 	defer d.stop()
@@ -1157,7 +1157,7 @@ func TestW113DaemonDefaultConfigLocation(t *testing.T) {
 	cfg2 := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
 		inst.url, inst.adminKey, "",
 		[]w113WS{{key: otherWS, projects: []string{"e2e"}}})
-	wiB := w113NewWI(t, inst, "e2e", "w113 explicit-config-override claim", envelopeQuickFix())
+	wiB := w113NewWI(t, inst, "e2e", "w113 explicit-config-override claim", envelopeAutopilot())
 	d2 := w113NewDaemon(t, inst, w113DOptConfig(cfg2))
 	d2.start()
 	defer d2.stop()
@@ -1264,8 +1264,8 @@ func TestW113CrossProjectClaimsRoutePerWorkspace(t *testing.T) {
 	d.start()
 	defer d.stop()
 
-	wiA := w113NewWI(t, inst, "e2e", "w113 neighborhood A claim", envelopeQuickFix())
-	wiB := w113NewWI(t, inst, "ieops", "w113 neighborhood B claim", envelopeQuickFix())
+	wiA := w113NewWI(t, inst, "e2e", "w113 neighborhood A claim", envelopeAutopilot())
+	wiB := w113NewWI(t, inst, "ieops", "w113 neighborhood B claim", envelopeAutopilot())
 	d.pfWant(inst, -1, "submit", wiA)
 	d.pfWant(inst, -1, "submit", wiB)
 
@@ -1323,7 +1323,7 @@ func TestW113UnmappedProjectClaimRefused(t *testing.T) {
 	d.start()
 	defer d.stop()
 
-	wi := w113NewWI(t, inst, "ghostproj", "w113 unmapped-project claim refusal", envelopeQuickFix())
+	wi := w113NewWI(t, inst, "ghostproj", "w113 unmapped-project claim refusal", envelopeAutopilot())
 	before := inst.wiStatus(t, wi)
 	for _, argv := range [][]string{
 		{"submit", wi},
@@ -1740,8 +1740,8 @@ func TestW113DrainIteratesAllMappedProjects(t *testing.T) {
 			{key: wsA, projects: []string{"e2e"}},
 			{key: wsB, projects: []string{"ieops"}},
 		})
-	wiA := w113NewWI(t, inst, "e2e", "w113 drain across workspaces alpha", envelopeQuickFix())
-	wiB := w113NewWI(t, inst, "ieops", "w113 drain across workspaces beta", envelopeQuickFix())
+	wiA := w113NewWI(t, inst, "e2e", "w113 drain across workspaces alpha", envelopeAutopilot())
+	wiB := w113NewWI(t, inst, "ieops", "w113 drain across workspaces beta", envelopeAutopilot())
 
 	d := w113NewDaemon(t, inst, w113DOptConfig(cfg), w113DOptArgs("--auto"))
 	d.start()

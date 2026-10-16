@@ -7,7 +7,7 @@ package driver
 // project's repo (.polyforge/release.sh, .polyforge/deploy.sh), so the
 // shared text must carry no polyforge-private procedure markers. And
 // releases happen ONLY through this bundle: no delivery lane (feature-full,
-// bug-fix, quick-fix, chore) may carry a release step.
+// bug-fix, autopilot, chore) may carry a release step.
 
 import (
 	"os"
@@ -148,7 +148,7 @@ func TestReleaseBundleShape(t *testing.T) {
 // TestDeliveryBundlesCarryNoReleaseStep pins decision B: releases happen
 // only via workflows/release.
 func TestDeliveryBundlesCarryNoReleaseStep(t *testing.T) {
-	for _, bundle := range []string{"feature-full", "bug-fix", "quick-fix", "chore"} {
+	for _, bundle := range []string{"feature-full", "bug-fix", "autopilot", "chore"} {
 		if _, err := os.Stat(bundlePath(bundle, "steps", "release.md")); err == nil {
 			t.Fatalf("%s still ships steps/release.md - releases happen only via the release bundle", bundle)
 		}

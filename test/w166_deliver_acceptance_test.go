@@ -405,14 +405,14 @@ func TestW166DeliverHandResolvedConflictStopsAtHuman(t *testing.T) {
 	}
 }
 
-// TestW166DeliverQuickFixAutoMerges: quick-fix has no review step;
+// TestW166DeliverAutopilotAutoMerges: autopilot has no review step;
 // verification's pass stands in for it (owner decision), so a clean
 // delivery on the verified commit auto-merges without a human.
-func TestW166DeliverQuickFixAutoMerges(t *testing.T) {
+func TestW166DeliverAutopilotAutoMerges(t *testing.T) {
 	inst := newV1Install(t)
 	w := newDeliverWorld(t)
 	origin := w.origin("demo")
-	wi, branch := newDeliverWI(t, inst, "w166: quick-fix auto-merges on verification", "quick-fix")
+	wi, branch := newDeliverWI(t, inst, "w166: autopilot auto-merges on verification", "autopilot")
 	inst.setPlanFull(t, wi, []map[string]any{
 		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "name": "demo", "origin": origin},
@@ -432,15 +432,15 @@ func TestW166DeliverQuickFixAutoMerges(t *testing.T) {
 	}
 }
 
-// TestW166DeliverQuickFixHandResolvedConflictAsks: quick-fix still asks when
+// TestW166DeliverAutopilotHandResolvedConflictAsks: autopilot still asks when
 // merging main needed a hand-resolved conflict (driver-derived, whatever
 // the step reports); the human answers "don't merge" and the lane
 // completes with the PR open and origin main untouched by it.
-func TestW166DeliverQuickFixHandResolvedConflictAsks(t *testing.T) {
+func TestW166DeliverAutopilotHandResolvedConflictAsks(t *testing.T) {
 	inst := newV1Install(t)
 	w := newDeliverWorld(t)
 	origin := w.origin("demo")
-	wi, branch := newDeliverWI(t, inst, "w166: quick-fix hand-resolved conflict asks", "quick-fix")
+	wi, branch := newDeliverWI(t, inst, "w166: autopilot hand-resolved conflict asks", "autopilot")
 	const qid = "deliver-merge"
 	resolve := dPre("demo") + `git fetch -q origin; if git merge -q --no-edit origin/main; then exit 9; fi; ` +
 		`{ echo "fake agent repo work"; echo "main moved on"; } > work.txt; git add work.txt; git commit -q --no-edit; ` +

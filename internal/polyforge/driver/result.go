@@ -62,7 +62,7 @@ const EvEnvelopeRejected = "envelope_rejected"
 const EvGateVerdictBound = "gate_verdict_bound"
 
 // EvHumanGateUnasked is the durable event kind recording that a
-// requires_human_answer: if_asked step (quick-fix grill) completed with
+// requires_human_answer: if_asked step (autopilot grill) completed with
 // zero human answers (polyforge#164 H11). The completion is accepted —
 // zero questions is a legitimate outcome — but never silent: the event
 // is the record and the watcher's decision table notifies the owner.

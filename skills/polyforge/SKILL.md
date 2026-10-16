@@ -23,7 +23,7 @@ Nothing else. The split between the target faces is fixed (the architecture's ro
   domain socket** (default `/run/polyforge.sock`); the daemon translates each
   route into its Runtime (lifecycle) and Observe (supervision) modules.
 - **Delivery** is not a verb: the delivery lanes (`feature-full`, `bug-fix`,
-  `quick-fix`, `chore`) end with a `deliver` workflow step that pushes the
+  `autopilot`, `chore`) end with a `deliver` workflow step that pushes the
   feature branch and opens the PR. There is no `pf ship`; see `verbs/ship.md`.
 
 Direct connection does not bypass any permission boundary: the `pf` CLI passes
@@ -106,7 +106,7 @@ verb: delivery is the workflow's own final `deliver` step (`verbs/ship.md`) — 
 `--bundle release` (the project-agnostic release bundle: release, then an independent verify,
 then deploy). Put any bump keyword the user named (`major`/`minor`/`patch`) verbatim in `--goal`;
 otherwise name none and let the repo's procedure default. Never file a release on a delivery
-bundle (`feature-full`, `bug-fix`, `quick-fix`, `chore` have no release step), and never run a
+bundle (`feature-full`, `bug-fix`, `autopilot`, `chore` have no release step), and never run a
 release or deploy procedure from this skill directly.
 
 ## Human coordination: `pf watch` (subscription = adoption)

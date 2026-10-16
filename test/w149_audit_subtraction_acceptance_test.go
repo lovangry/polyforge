@@ -39,7 +39,7 @@ import (
 
 // w149Bundle is an arbitrary bundle name: the aihub side stores the
 // name as a scalar, so any name binds.
-const w149Bundle = "quick-fix"
+const w149Bundle = "autopilot"
 
 // w149Setup boots the real aihub and one fresh scratch project.
 func w149Setup(t *testing.T, project string) *v1Install {

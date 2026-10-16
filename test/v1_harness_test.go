@@ -123,12 +123,12 @@ type v1Install struct {
 	pfPath      string
 	fakepiPath  string
 
-	// gateQuickFixGrill makes daemons run a copy of the shipped bundles
-	// whose quick-fix grill additionally declares requires_human_answer
-	// (no shipped quick-fix step carries the flag: its grill allows zero
+	// gateAutopilotGrill makes daemons run a copy of the shipped bundles
+	// whose autopilot grill additionally declares requires_human_answer
+	// (no shipped autopilot step carries the flag: its grill allows zero
 	// questions); by default workflowsPath hands out a copy with every
 	// human gate flag stripped so unattended plans run.
-	gateQuickFixGrill bool
+	gateAutopilotGrill bool
 	// keepDeliver keeps the delivery bundles' `deliver` step in the
 	// daemons' workflows copy (stripped by default: see workflowsPath).
 	keepDeliver bool
@@ -408,7 +408,7 @@ func (u *v1Install) pfExit(t *testing.T, wantExit int, sock string, args ...stri
 	return stdout.String()
 }
 
-// newWI files one execution ticket (bundle quick-fix, no human session
+// newWI files one execution ticket (bundle autopilot, no human session
 // required) and scripts its agent with the given plan actions.
 // resumeActions, when non-nil, script the crash-continuation derivation
 // (the recovery engine's resume spawn).
@@ -417,7 +417,7 @@ func (u *v1Install) newWI(t *testing.T, goal string, actions, resumeActions []ma
 	raw, err := u.client.CreateWorkItem(aihubclient.CreateWorkItemRequest{
 		Project:    v1Project,
 		Goal:       goal,
-		BundleName: strPtr("quick-fix"),
+		BundleName: strPtr("autopilot"),
 		Attrs:      nil,
 	})
 	if err != nil {
@@ -1661,11 +1661,11 @@ func latestSpawnPID(t *testing.T, d *v1Daemon, wi string) int {
 	return int(pid)
 }
 
-// envelopeQuickFix is the canonical driver-era quick-fix plan: four
+// envelopeAutopilot is the canonical driver-era autopilot plan: four
 // envelope actions, one per workflow step in declaration order, with the
 // handoff chain (grill, fix) the inherit policy needs. The Nth envelope
 // action fires for spawn ordinal N.
-func envelopeQuickFix() []map[string]any {
+func envelopeAutopilot() []map[string]any {
 	return []map[string]any{
 		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},

@@ -25,7 +25,7 @@ func TestW157ClaimClonesOnlyDeclaredRepos(t *testing.T) {
 	raw, err := inst.client.CreateWorkItem(aihubclient.CreateWorkItemRequest{
 		Project:       v1Project,
 		Goal:          "w157: only the declared repo is cloned",
-		BundleName:    strPtr("quick-fix"),
+		BundleName:    strPtr("autopilot"),
 		RepoInventory: json.RawMessage(`[{"name":"yingfang"}]`),
 	})
 	if err != nil {

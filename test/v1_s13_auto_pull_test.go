@@ -9,15 +9,15 @@ import (
 // v1_s13_auto_pull_test.go: auto-pull, driver/envelope edition. The daemon
 // (booted with --auto) autonomously claims the
 // project's ready queue in waves and runs every ticket to completion with
-// no operator action — each member a driver-pinned quick-fix workflow,
+// no operator action — each member a driver-pinned autopilot workflow,
 // completed and sealed by the terminal wiring. An explicit `pf submit`
 // stays legal while auto is on, and `pf ops auto off` stops further
 // pulls.
 func TestV1S13AutoPull(t *testing.T) {
 	inst := newV1Install(t)
-	wiA := inst.newWI(t, "s13: auto-pull member A", envelopeQuickFix(), nil)
-	wiB := inst.newWI(t, "s13: auto-pull member B", envelopeQuickFix(), nil)
-	wiC := inst.newWI(t, "s13: auto-pull member C", envelopeQuickFix(), nil)
+	wiA := inst.newWI(t, "s13: auto-pull member A", envelopeAutopilot(), nil)
+	wiB := inst.newWI(t, "s13: auto-pull member B", envelopeAutopilot(), nil)
+	wiC := inst.newWI(t, "s13: auto-pull member C", envelopeAutopilot(), nil)
 
 	d := newV1Daemon(t, inst, optAuto())
 	d.start()
@@ -33,7 +33,7 @@ func TestV1S13AutoPull(t *testing.T) {
 	inst.waitWIStatus(t, wiC, "wrapped", 120*time.Second)
 
 	// Each member ran on this daemon as a driver workflow: the
-	// execution.json face shows the completed quick-fix chain, and the
+	// execution.json face shows the completed autopilot chain, and the
 	// auto-seal pushed the chain server-side.
 	for _, wi := range []string{wiA, wiB, wiC} {
 		waitWorkflowStatus(t, d, wi, "completed", 30*time.Second)
@@ -49,7 +49,7 @@ func TestV1S13AutoPull(t *testing.T) {
 	}
 
 	// A manual submit is legal while auto is on (no DAEMON-409).
-	wiD := inst.newWI(t, "s13: manual submit while auto is on", envelopeQuickFix(), nil)
+	wiD := inst.newWI(t, "s13: manual submit while auto is on", envelopeAutopilot(), nil)
 	if out := d.pf(t, "submit", wiD); strings.Contains(out, "DAEMON-409") {
 		t.Fatalf("manual submit refused while auto is on: %q", out)
 	}

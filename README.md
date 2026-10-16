@@ -109,12 +109,12 @@ bin/pf --config /tmp/pf-quickstart/cli.toml api-keys create --user <MACHINE_USER
 ```
 
 **5. File a minimal smoke work item.** `--bundle` makes it an execution
-ticket — only execution tickets can be claimed; `quick-fix` is one of
+ticket — only execution tickets can be claimed; `autopilot` is one of
 the workflow bundles shipped in `workflows/`:
 
 ```
 bin/pf --config /tmp/pf-quickstart/cli.toml file create --project demo \
-  --bundle quick-fix \
+  --bundle autopilot \
   --goal "Quickstart smoke: exercise the file -> submit -> watch -> wrap chain." \
   --content "Minimal smoke work item; no product change is expected." \
   --label smoke
@@ -293,7 +293,7 @@ ordinary blocked exits.
 The platform ships with zero release-specific code in its engine: a release is a
 work item filed against the project-agnostic `release` workflow bundle
 (`workflows/release/`), and the delivery lanes (`feature-full`, `bug-fix`,
-`quick-fix`, `chore`) never release or deploy. Trigger it by filing a release WI
+`autopilot`, `chore`) never release or deploy. Trigger it by filing a release WI
 (`pf file --bundle release ...`, or ask the routing skill: "release" / "deploy" /
 "发版" files that WI). If the goal names a bump (`major`, `minor`, `patch`) it is
 passed verbatim to the repo's procedure; otherwise the repo default applies.
