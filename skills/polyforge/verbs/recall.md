@@ -13,10 +13,10 @@ memories) are not part of this verb — retrieval only.
 ## Command
 
 ```
-pf recall [--project P] <query> [--type T] [--tags a,b] [--limit N]
+pf recall --project P <query> [--type T] [--tags a,b] [--limit N]
 ```
 
-The query is the positional argument; `--project` is REQUIRED
+The query is the positional argument (or `--q`); `--project` is REQUIRED
 (polyforge#113 — no default project exists) but NOT restricted to the
 machine's `[workspace]` mapping: memory lives in AIHub, so recall works
 for any project the api key can see, mapped here or not. The routing

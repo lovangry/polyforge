@@ -14,7 +14,8 @@ one resident watcher per chat for progress and human-decision wake-ups.
 ```
 pf watch <id> --once [--json] [--after N] [--events N]    # one snapshot
 pf watch subscribe <id> | unsubscribe <id> | list          # this chat's subscriptions
-pf watch --chat <chat> [--wait-decision]                   # resident watcher (default chat: $PF_CHAT_ID)
+pf watch --chat <chat> [--wait-decision] [--poll D] [--no-parent-check]
+                                                           # resident watcher (default chat: $PF_CHAT_ID)
 pf watch --chat <chat> --statusline                        # print the progress file
 pf watch --statusline --harness-session <id|->             # same, chat resolved from the harness session
 ```
@@ -54,7 +55,8 @@ in only when no slug is known. Quote a slug when you pass it back
 |---|---|---|
 | (no code) `watch: no chat id` | None of `--chat`, `--harness-session` or `PF_CHAT_ID` is set | The session has no chat id — see the Chat identity section of `SKILL.md`. |
 | (no code) `watch: --chat and --harness-session are both explicit chat-id sources` | Both flags were passed | Pass exactly one of them. |
-| `DAEMON-400` | Bad cursor or chat id | Fix the invocation. |
+| (no code) `watch: chat id "…" must be 1-64 characters of [A-Za-z0-9_-]` | A malformed chat id (refused locally, nothing sent) | Fix the chat id. |
+| `DAEMON-400` | Bad cursor | Fix the invocation. |
 | `dial unix …` | Daemon not running | Nothing is executing here — run `pf daemon ensure`, then retry once (or check `--socket`). The resident watcher prints `daemon unreachable; progress paused` and keeps retrying. |
 
 Progress is never a second authority: the step fields are a live direct read of

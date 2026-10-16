@@ -413,7 +413,7 @@ the installer scenarios, which write `/usr/local/bin/pf` (disposable hosts only)
 ## `pf` commands
 
 `pf [--json] [--config PATH] [--server URL] [--api-key KEY] [--socket PATH]
-[--user ID] <verb> ...` (global flags before the verb; env `PF_SERVER`,
+[--user ID] <verb> ...` (or `pf --version`) (global flags before the verb; env `PF_SERVER`,
 `PF_API_KEY`, `PF_DAEMON_SOCKET`, `PF_USER_ID`; `PF_CHAT_ID` is the
 notification label a harness adapter sets for the chat). `pf help` prints the
 registry; `pf help <verb>` one verb's usage line. Exit codes: 0 success; 1
@@ -422,12 +422,13 @@ flag/argument mistake); 2 server-class (5xx), an unknown verb, or a flag
 error caught by the global / verb-level flag parse. The routing skill's fragments
 (`skills/polyforge/verbs/`) carry each verb's success and failure shapes.
 
-| Face | Verbs |
+| `pf help` group | Verbs |
 | --- | --- |
-| aihub (data plane, direct) | `file`, `queue`, `cancel`, `recall`, `remember`, `memory` |
-| daemon (UDS) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`), `answer`, `pause`, `resume`, `wrap`, `ops` (`status`, `auto`, `max`, `shutdown`, and `end-session` — aihub-direct, admin/maintainer), `chat init` |
-| management | `users`, `api-keys`, `projects`, `machines`, `backup` (DB-only snapshot, see below) |
-| local | `daemon` (run the work machine), `doctor` |
+| Data-plane verbs (direct to aihub) | `file`, `queue`, `cancel`, `recall`, `remember`, `memory` |
+| Execution-plane verbs (local daemon UDS face) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`), `answer`, `pause`, `resume`, `wrap`, `ops` (`status`, `auto`, `max`, `shutdown`, and `end-session` — aihub-direct, admin/maintainer), `chat init` |
+| Management face (M1–M5) | `users`, `api-keys`, `projects`, `machines`, `backup` (DB-only snapshot, see below) |
+| Diagnostics | `doctor` |
+| Process | `daemon` (run the work machine; `pf daemon ensure` starts it) |
 
 `pf backup` writes a consistent DB-only snapshot (`VACUUM INTO`) under the
 server's data dir `backups/`, on the same disk. It does NOT include memory
@@ -559,7 +560,7 @@ Minimal external dependencies: pure-Go SQLite (modernc.org/sqlite), yaml.v3, gol
 Searches a project's memories on the aihub memory face (trigram-indexed
 full-text search):
 
-    pf recall [--project P] <query> [--type T] [--tags a,b] [--limit N]
+    pf recall --project P <query> [--type T] [--tags a,b] [--limit N]
 
 `<query>` is required (positional or `--q`); so is `--project` — there
 is no default project anymore (polyforge#113), and the value is
@@ -585,9 +586,9 @@ loudly). Flags:
 
 Examples:
 
-    pf recall flaky build
-    pf recall flaky build --type experience.* --limit 50
-    pf recall "retry ladder" --type fact.note --tags postgres,backoff
+    pf recall --project polyforge flaky build
+    pf recall --project polyforge --type 'experience.*' --limit 50 flaky build
+    pf recall --project polyforge --type fact.note --tags postgres,backoff "retry ladder"
 
 ## Contributing & filing work items
 

@@ -252,8 +252,9 @@ pf [global flags] <verb> [verb flags] [positional args]
 ```
 
 - **Global flags come before the verb**: `--json`, `--config PATH`,
-  `--server URL`, `--api-key KEY`, `--socket PATH`, `--user ID`. Verb flags
-  come after the verb word.
+  `--server URL`, `--api-key KEY`, `--socket PATH`, `--user ID`, and
+  `--version` (print the build version and exit). Verb flags come after
+  the verb word.
 - **Config precedence**, strictest wins: command-line flag > environment
   (`PF_SERVER`, `PF_API_KEY`, `PF_DAEMON_SOCKET`, `PF_USER_ID`)
   > config file > built-in defaults (`http://localhost:8420`,

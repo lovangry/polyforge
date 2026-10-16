@@ -14,19 +14,19 @@ live on sub-actions — and exits 2).
 | Verb | Fragment | Command |
 |---|---|---|
 | file | `verbs/file.md` | `pf file create` / `pf file edit <id>` / `pf file show <id>` / `pf file dep add` / `rm` / `list` — create, edit or show a work item; its `blocks` dependencies |
-| queue | `verbs/queue.md` | `pf queue` — the merged list over all mapped projects; `pf queue -project P` — one project; `pf queue -ready` — the ready queue (`-status`, `-limit` filters) |
+| queue | `verbs/queue.md` | `pf queue` — the merged list over all mapped projects; `pf queue --project P` — one project; `pf queue --ready` — the ready queue (`--status`, `--limit` filters) |
 | cancel | `verbs/cancel.md` | `pf cancel <id>` — cancel (abandon) a queued/paused/blocked work item |
-| recall | `verbs/recall.md` | `pf recall -project P <query>` — search project memories (`-type`, `-tags`, `-limit`) |
-| remember | `verbs/remember.md` | `pf remember -project P -type <T> <content>` — store a memory (`-title`, `-tags`, `-visibility`, `-work-item`) |
-| memory | `verbs/memory.md` | `pf memory show <id>` — one memory's metadata header + full body (`-max-bytes N`, `0` = unlimited; `--json` = metadata verbatim + CLI-added `content`) |
+| recall | `verbs/recall.md` | `pf recall --project P <query>` — search project memories (`--q`, `--type`, `--tags`, `--limit`) |
+| remember | `verbs/remember.md` | `pf remember --project P --type <T> <content>` — store a memory (`--title`, `--tags`, `--visibility`, `--work-item`) |
+| memory | `verbs/memory.md` | `pf memory show <id>` — one memory's metadata header + full body (`--max-bytes N`, `0` = unlimited; `--json` = metadata verbatim + CLI-added `content`) |
 
 ## Execution-plane verbs (local daemon unix socket)
 
 | Verb | Fragment | Command |
 |---|---|---|
-| submit | `verbs/submit.md` | `pf submit <id>` — submit for execution (`-priority`) |
-| watch | `verbs/watch.md` | `pf watch <id> --once` — one snapshot (status, step, pending question, events); `pf watch --chat "$PF_CHAT_ID" --wait-decision` — the resident watcher; `pf watch subscribe\|unsubscribe\|list` |
-| answer | `verbs/answer.md` | `pf answer <id> -text "..."` — reply to a pending question (`-question`, `-by`) |
+| submit | `verbs/submit.md` | `pf submit <id>` — submit for execution (`--priority`, `--models`) |
+| watch | `verbs/watch.md` | `pf watch <id> --once` — one snapshot (status, step, pending question, events); `pf watch --chat "$PF_CHAT_ID" --wait-decision` — the resident watcher; `pf watch subscribe\|unsubscribe\|list` (resident flags `--poll`, `--no-parent-check`) |
+| answer | `verbs/answer.md` | `pf answer <id> --text "..."` — reply to a pending question (`--question`, `--by`) |
 | pause | `verbs/pause.md` | `pf pause <id>` — operator pause at the next safe boundary |
 | resume | `verbs/resume.md` | `pf resume <id>` — continue a paused or blocked work item |
 | wrap | `verbs/wrap.md` | `pf wrap <id>` — terminal success; `pf wrap <id> --fail` — the owner's failed verdict |

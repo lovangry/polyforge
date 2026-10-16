@@ -32,8 +32,8 @@ priority-first.
 ## Success
 
 `--json`: the server body raw. Human mode: `N work item(s)` + a table
-(SLUG, STATUS, PRIORITY, BUNDLE, GOAL). When a queued row waits for an
-unfinished blocker, a WAITING-FOR column names it (`polyforge#164
+(SLUG, PROJECT, STATUS, SESSION, PRIORITY, BUNDLE, GOAL). When a queued row waits for an
+unfinished blocker, a WAITING-FOR column (before GOAL) names it (`polyforge#164
 (running)`; a failed or canceled blocker keeps it waiting until the edge
 is removed — `verbs/file.md`, Dependencies). Waiting rows never appear
 under `--ready`.

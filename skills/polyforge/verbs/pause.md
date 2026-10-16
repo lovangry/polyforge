@@ -20,14 +20,13 @@ down attaches on its next start).
 pf pause <id>
 ```
 
-No flags. The daemon holds the generation credential and performs the close
-itself: the final commit, the push of the capsule's revision history, and
-the end-generation call.
+No flags. The daemon holds the session and performs the close itself: the
+final commit and the push of the capsule's revision history. The session is
+NOT ended — a paused WI keeps it for the resume.
 
 ## Success
 
-`pause requested for <slug>` plus the daemon's raw answer (`--json`: the raw
-answer alone). The local run stops but the session is kept; the sealed capsule stays on
+`pause requested for <slug>` (`--json`: the daemon's raw answer instead). The local run stops but the session is kept; the sealed capsule stays on
 disk as the read-only scene a later resume continues from.
 
 ## Failure branches
