@@ -552,7 +552,9 @@ section. `pf doctor` warns (never fails, never moves anything) about root
 entries outside the layout — dot-entries such as `.gitignore`, `.pi`,
 `.claude` and `.mcp.json` are tolerated, `.polyforge.yaml.*` backups are
 not — and about non-generated entries under `.polyforge/`, naming each
-one's destination; it reports `scratch/` entries whose newest change
+one's destination, and about a CLAUDE.md whose `polyforge:managed` block
+lacks the layout section (run `pf init <ws>`; a workspace with no
+CLAUDE.md is not flagged); it reports `scratch/` entries whose newest change
 (mtime or ctime, of the entry and everything under it) is older than 14
 days — a `scratch` that is a symlink is never scanned or pruned — and `pf doctor --prune-scratch`
 removes them, listing each. Step agents are unaffected: they work inside
