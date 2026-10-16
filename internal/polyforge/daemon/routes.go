@@ -453,6 +453,11 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, resumeBlockedResponse{Resumed: true, WorkItemID: canonical, Deferred: true})
 			return
 		}
+		if errors.Is(err, runtime.ErrClaimClosed) {
+			// a pf wrap/pause landed while this claim was materializing
+			writeErr(w, api.ErrDaemonConflict, err.Error())
+			return
+		}
 		writeErrOf(w, err)
 		return
 	}
@@ -534,7 +539,7 @@ func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi string) bool {
 		return false
 	}
 	writeErr(w, api.ErrDaemonConflict,
-		"the workflow is parked blocked (incomplete result) — the owner's moves are `pf resume <id>` to continue or `pf cancel <id>` to abandon; there is no completed run to wrap or fail")
+		"the work item is parked blocked (an incomplete result, or a pause that landed while its claim was still materializing — see its claim_paused_ended_blocked event) — the owner's moves are `pf resume <id>` to continue or `pf cancel <id>` to abandon; there is no completed run to wrap or fail")
 	return true
 }
 

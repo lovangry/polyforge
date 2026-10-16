@@ -7,6 +7,7 @@ package gitops
 // carrier back for the claim-time restore.
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -204,7 +205,7 @@ func TestFetchTaskRefRoundTrip(t *testing.T) {
 	// No carrier for a repo that was never published: quiet absence.
 	emptyDir := filepath.Join(base, "fresh-empty")
 	mustRun(t, "git", "clone", "-q", origin, emptyDir)
-	sha, err := FetchTaskRef(o, emptyDir, "demo-src-nothing")
+	sha, err := FetchTaskRef(context.Background(), o, emptyDir, "demo-src-nothing")
 	if err != nil || sha != "" {
 		t.Fatalf("absent carrier: sha %q err %v, want \"\" nil", sha, err)
 	}
@@ -213,7 +214,7 @@ func TestFetchTaskRefRoundTrip(t *testing.T) {
 	// session gone.
 	fresh := filepath.Join(base, "fresh-clone")
 	mustRun(t, "git", "clone", "-q", origin, fresh)
-	sha, err = FetchTaskRef(o, fresh, "demo-src")
+	sha, err = FetchTaskRef(context.Background(), o, fresh, "demo-src")
 	if err != nil {
 		t.Fatalf("FetchTaskRef: %v", err)
 	}
@@ -368,7 +369,7 @@ func TestIsNonFastForwardOnRealGitOutput(t *testing.T) {
 	}
 	// The carrier-absent answer is the ls-remote exit code, locale-free.
 	o := Opts{WorkItemID: "wi_loc", RemoteURL: bare, Username: "u", Secret: "s"}
-	if sha, err := FetchTaskRef(o, b, "nothing"); err != nil || sha != "" {
+	if sha, err := FetchTaskRef(context.Background(), o, b, "nothing"); err != nil || sha != "" {
 		t.Fatalf("absent carrier under a foreign locale: %q, %v", sha, err)
 	}
 }
@@ -965,5 +966,51 @@ func TestSweepCarrierTemps(t *testing.T) {
 	}
 	if err := SweepCarrierTemps(filepath.Join(root, "absent")); err != nil {
 		t.Fatalf("an absent root must be a no-op: %v", err)
+	}
+}
+
+// repo review 2026-10-16 B-8: the claim lane's carrier fetch dies with
+// its context (a stop or a shutdown during the claim), not after the
+// 10-minute chain timeout.
+func TestFetchTaskRefHonoursContext(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conns []net.Conn
+	var mu sync.Mutex
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		mu.Lock()
+		for _, c := range conns {
+			c.Close()
+		}
+		mu.Unlock()
+	})
+	dir := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", dir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	o := Opts{WorkItemID: "wi_ctx", RemoteURL: "http://" + ln.Addr().String() + "/wi_ctx.git", Username: "wi_ctx", Secret: "s"}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(300*time.Millisecond, cancel)
+	t0 := time.Now()
+	_, ferr := FetchTaskRef(ctx, o, dir, "app")
+	if ferr == nil {
+		t.Fatal("a cancelled fetch against a silent remote must fail")
+	}
+	if d := time.Since(t0); d > 15*time.Second {
+		t.Fatalf("the cancelled fetch took %s", d)
 	}
 }

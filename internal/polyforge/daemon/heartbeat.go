@@ -107,7 +107,8 @@ func cappedBackoff(base time.Duration, failStreak, capMult int) time.Duration {
 }
 
 // liveWIIDs projects the runtime's job table to the WI ids the daemon
-// currently holds live: running, recovering or sealing. Paused jobs are
+// currently holds live: claiming (B-8: the claim landed, the clone is
+// under way), running, recovering or sealing. Paused jobs are
 // retained records whose session is closed server-side — not held live.
 // Never nil: an idle daemon states an empty list (see the client type's
 // live_wi_ids contract).
@@ -115,7 +116,7 @@ func liveWIIDs(jobs []runtime.JobInfo) []string {
 	out := []string{}
 	for _, j := range jobs {
 		switch j.State {
-		case runtime.StateRunning, runtime.StateRecovering, runtime.StateSealing:
+		case runtime.StateClaiming, runtime.StateRunning, runtime.StateRecovering, runtime.StateSealing:
 			out = append(out, j.WorkItem)
 		}
 	}

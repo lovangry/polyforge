@@ -40,5 +40,13 @@ disk as the read-only scene a later resume continues from.
 | `DAEMON-500` | The close failed on the daemon side | The job is left mid-seal, recorded as such; the next daemon start finishes the close. Check the daemon log before retrying. |
 | `dial unix …` | Daemon not running | Nothing is executing here — run `pf daemon ensure`, then retry once (or check `--socket`). |
 
+**Pause while the work item is still being claimed** (`pf status` shows
+`claiming`: the capsule and task repos are still cloning, no agent ran
+yet): there is no scene to keep a paused record for, so the daemon
+cancels the clone, quarantines the partial capsule and ends the session
+**blocked** (event `claim_paused_ended_blocked`). Continue it with
+`pf resume <id>` — the blocked door (owner/maintainer/admin) re-claims
+it from the start; `pf cancel <id>` abandons it.
+
 A paused work item is still visible through `pf file show`; its live
 execution view is gone (the local job is sealed).

@@ -161,6 +161,19 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 	// Step 1: the latch, before any other action.
 	d.modes.SetShuttingDown()
 
+	// Step 1b (repo review 2026-10-16 B-8): claims under way run outside
+	// the Run loop and outside the runtime's lock. Stop them before the
+	// live-job snapshot: no new claim starts, every capsule/task-repo
+	// clone is cancelled, and each in-flight claim is DEFERRED — its
+	// claiming-journal entry (and its queue entry) stay for the next
+	// start, the work item is never turned blocked — and none can
+	// install an agent behind the teardown below. Only claims already
+	// CLAIMING are waited for, and at most claimAbortWait — the WIP
+	// snapshots below need the rest of the budget.
+	actx, acancel := context.WithTimeout(ctx, claimAbortWait(ctx))
+	d.rt.AbortClaims(actx)
+	acancel()
+
 	// Steps 2-3 run against the snapshot of live jobs taken here; the
 	// set only shrinks from this moment (no source may add a job).
 	live := d.liveJobs()
@@ -266,6 +279,20 @@ func wipSlice(ctx context.Context, jobsLeft int) time.Duration {
 		return wipSliceMax
 	}
 	return slice
+}
+
+// claimAbortWait bounds the shutdown's wait for in-flight claims to
+// settle (B-8): min(30s, a quarter of what is left of the budget).
+func claimAbortWait(ctx context.Context) time.Duration {
+	const maxWait = 30 * time.Second
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return maxWait
+	}
+	if q := time.Until(dl) / 4; q < maxWait {
+		return q
+	}
+	return maxWait
 }
 
 // wipSliceMax caps one job's WIP snapshot at shutdown.

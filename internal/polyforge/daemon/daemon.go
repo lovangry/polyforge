@@ -906,44 +906,67 @@ func (d *Daemon) occupiedSlots() map[string]bool {
 }
 
 // dispatch starts pending jobs into free slots, priority-desc then FIFO.
+// Each claim runs in its own goroutine (repo review 2026-10-16 B-8): a
+// slow capsule or task-repo clone no longer holds the Run loop, so the
+// loop keeps serving shutdown, drain and the next dispatch ticks. The
+// queue counts a Take()n entry against the slots until it settles, so
+// the concurrency cap holds across the goroutines.
 func (d *Daemon) dispatch() {
-	if d.modes.ShuttingDown() {
-		return
-	}
-	for {
+	for !d.modes.ShuttingDown() {
 		e := d.q.Take()
 		if e == nil {
 			return
 		}
-		d.rt.NoteOrigin(e.WorkItemID, e.Origin)
-		d.rt.NoteModels(e.WorkItemID, e.Models)
-		err := d.rt.Start(d.runCtx, e.WorkItemID)
-		var ae *api.Error
-		if errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable {
-			// The hub could not be reached, or the claim's answer was
-			// lost: the accepted submit stays queued and is retried with
-			// backoff (never dropped on a transient blip, never blocking
-			// the other entries). A claim that may have landed keeps its
-			// claiming-journal entry, so the retry replays the SAME claim
-			// and adopts the session (repo review 2026-10-16 B-1). One
-			// log line per episode.
-			if e.Deferrals == 0 {
-				fmt.Fprintf(os.Stderr, "daemon: start %s (%s) deferred, will retry with backoff: %v\n", e.WorkItemID, e.Intent, err)
-			}
-			if rerr := d.q.Requeue(e.WorkItemID); rerr != nil {
-				fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, rerr)
-			}
-			continue
-		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "daemon: start %s (%s) failed: %v\n", e.WorkItemID, e.Intent, err)
-			// The submit was answered `accepted`: record the refusal as a
-			// durable event on the WI so watchers can surface it (v2 §5).
-			d.recordSubmitRejected(*e, err)
-		}
+		// A claim that races the shutdown latch defers itself in the
+		// runtime (AbortClaims); nothing here waits for it.
+		go d.startEntry(*e)
+	}
+}
+
+// startEntry runs one Take()n queue entry's claim to its verdict and
+// settles the entry.
+func (d *Daemon) startEntry(e qEntry) {
+	d.rt.NoteOrigin(e.WorkItemID, e.Origin)
+	d.rt.NoteModels(e.WorkItemID, e.Models)
+	err := d.rt.Start(d.runCtx, e.WorkItemID)
+	if runtime.IsClaimDeferred(err) {
+		// the shutdown stopped the claim: the entry stays in flight on
+		// disk (the queue file keeps it) and a claim that landed stays
+		// in the claiming journal — the next start replays them.
+		return
+	}
+	if errors.Is(err, runtime.ErrClaimClosed) {
+		// an operator close settled the claim (Stop during CLAIMING)
 		if serr := d.q.Settle(e.WorkItemID); serr != nil {
 			fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, serr)
 		}
+		return
+	}
+	var ae *api.Error
+	if errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable {
+		// The hub could not be reached, or the claim's answer was
+		// lost: the accepted submit stays queued and is retried with
+		// backoff (never dropped on a transient blip, never blocking
+		// the other entries). A claim that may have landed keeps its
+		// claiming-journal entry, so the retry replays the SAME claim
+		// and adopts the session (repo review 2026-10-16 B-1). One
+		// log line per episode.
+		if e.Deferrals == 0 {
+			fmt.Fprintf(os.Stderr, "daemon: start %s (%s) deferred, will retry with backoff: %v\n", e.WorkItemID, e.Intent, err)
+		}
+		if rerr := d.q.Requeue(e.WorkItemID); rerr != nil {
+			fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, rerr)
+		}
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: start %s (%s) failed: %v\n", e.WorkItemID, e.Intent, err)
+		// The submit was answered `accepted`: record the refusal as a
+		// durable event on the WI so watchers can surface it (v2 §5).
+		d.recordSubmitRejected(e, err)
+	}
+	if serr := d.q.Settle(e.WorkItemID); serr != nil {
+		fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, serr)
 	}
 }
 

@@ -349,6 +349,9 @@ func (q *jobQueue) IsPending(wi string) bool {
 func (q *jobQueue) IsRunning(wi string) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if _, inflight := q.inflight[wi]; inflight {
+		return true // its claim is under way (B-8)
+	}
 	return q.occupied()[wi]
 }
 
@@ -358,14 +361,27 @@ func (q *jobQueue) LenPending() int {
 	return len(q.pending)
 }
 
+// busyLocked counts the occupied slots: the runtime's live jobs plus the
+// in-flight claims not yet among them. Caller holds mu.
+func (q *jobQueue) busyLocked() int {
+	busy := q.occupied()
+	n := len(busy)
+	for wi := range q.inflight {
+		if !busy[wi] {
+			n++
+		}
+	}
+	return n
+}
+
 // FreeSlots reports how many spawn slots are open right now (the wave
 // budget fetchAutoWave spends per enqueued entry, audit B3a). It counts
-// only RUNNING work; the wave budget subtracts the already-queued
+// only RUNNING work and claims under way; the wave budget subtracts the already-queued
 // entries itself (wi_seWTgHeKtaa8) — Take() is the start-side gate.
 func (q *jobQueue) FreeSlots() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	n := q.maxConc - len(q.occupied())
+	n := q.maxConc - q.busyLocked()
 	if n < 0 {
 		n = 0
 	}
@@ -375,17 +391,24 @@ func (q *jobQueue) FreeSlots() int {
 // Take pops the next DUE pending entry IF a slot is free (04 §6.1d
 // backfill: strictly priority desc, then FIFO; an entry still inside its
 // DAEMON-503 backoff is skipped). A started job occupies its slot by
-// appearing in the runtime's live list.
+// appearing in the runtime's live list; a Take()n entry whose claim is
+// still under way occupies one too (repo review 2026-10-16 B-8: the
+// dispatcher runs each claim in its own goroutine, so the live list
+// learns of it only once the claim landed). An entry whose work item is
+// already in flight waits for that claim to settle.
 func (q *jobQueue) Take() *qEntry {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if len(q.pending) == 0 || len(q.occupied()) >= q.maxConc {
+	if len(q.pending) == 0 || q.busyLocked() >= q.maxConc {
 		return nil
 	}
 	now := q.clock()
 	best := -1
 	for i := range q.pending {
 		if q.pending[i].NotBefore.After(now) {
+			continue
+		}
+		if _, inflight := q.inflight[q.pending[i].WorkItemID]; inflight {
 			continue
 		}
 		if best < 0 {
