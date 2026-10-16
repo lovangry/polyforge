@@ -450,10 +450,7 @@ func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job, rec
 				r.cfg.EventTap(rec.WorkItemID, "interrupted_seal", map[string]any{"note": note})
 			}
 		}
-		j.mu.Lock()
-		sealed := j.sealedPush
-		j.mu.Unlock()
-		return r.stopOp(ctx, j, reason, true, sealed, note)
+		return r.stopOp(ctx, j, reason, true, note)
 	}
 	if state == StateDone {
 		r.forgetRecord(rec)
@@ -574,10 +571,7 @@ func (r *Runtime) restartVerified(ctx context.Context, rec *jobRecord, v *api.Se
 						r.blockUnrecoverable(ctx, rec, err)
 						return nil
 					}
-					j.mu.Lock()
-					sealed := j.sealedPush
-					j.mu.Unlock()
-					if err := r.stopOp(ctx, j, rec.StopReason, true, sealed, ""); err != nil {
+					if err := r.stopOp(ctx, j, rec.StopReason, true, ""); err != nil {
 						fmt.Fprintf(os.Stderr, "runtime: %s: pending close replay failed, record kept: %v\n", rec.WorkItemID, err)
 					}
 					return nil

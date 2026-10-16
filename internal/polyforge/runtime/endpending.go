@@ -247,9 +247,9 @@ func (r *Runtime) sealAttempt(j *job, note string) bool {
 		return true
 	}
 	j.mu.Lock()
-	reason, pushed := j.stopReason, j.sealedPush
+	reason := j.stopReason
 	j.mu.Unlock()
-	err := r.stopOp(context.Background(), j, reason, true, pushed, note)
+	err := r.stopOp(context.Background(), j, reason, true, note)
 	if err == nil {
 		return true
 	}

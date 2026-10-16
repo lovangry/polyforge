@@ -246,12 +246,10 @@ type job struct {
 	sessionFingerprint string
 	state              JobState
 	stopReason         string // sealed-in reason while SEALING (restart can finish the stop)
-	// sealedPush records that the final capsule state was ALREADY
-	// committed and pushed by the driver's own publish (the terminal
-	// close of recover.go): stopOp then skips its own seal push. It is
-	// set when the SEALING transition records the reason and persisted
-	// with it, so a crash between that push and SessionEnd keeps the
-	// restart's stop finisher from re-pushing either.
+	// sealedPush records that the close's seal push already reached the
+	// hub: a seal retry or the restart's stop finisher then skips the
+	// push (after a STALE_SESSION the credential is dead). Persisted
+	// with the record.
 	sealedPush bool
 	capsuleDir string
 	git        gitops.Opts // Username=wi, Secret=session_id (v1.5 §“gitops call sites”)
@@ -1476,7 +1474,7 @@ func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 	if j == nil {
 		return fmt.Errorf("runtime: %s: no active job", wi)
 	}
-	return r.stopOp(ctx, j, reason, false, false, "")
+	return r.stopOp(ctx, j, reason, false, "")
 }
 
 // supersedeOp is the OBSuperseded response (v1.5 M4 + m3): the periodic
@@ -1530,7 +1528,7 @@ func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
 // is the human-facing elaboration the SessionEnd carries ("" for the
 // ordinary closes — the interrupted-seal finisher names its
 // cause-unknown close here).
-func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySealing bool, alreadyPushed bool, note string) error {
+func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySealing bool, note string) error {
 	// Finding 2 (v1.5 review, MAJOR): the operator pause is its own close.
 	// It does NOT pass through SEALING (no terminal verdict follows), it
 	// retains the record (the secret must survive locally for the M3
@@ -1539,7 +1537,16 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	// job — a repeat pause is answered by the daemon's already-paused
 	// graceful path before it ever gets here.
 	if reason == protocol.FinishPaused && !alreadySealing {
-		return r.pauseOp(ctx, j, alreadyPushed)
+		return r.pauseOp(ctx, j)
+	}
+	// alreadyPushed: a resumed close (seal retry, restart finisher,
+	// pending-close replay) whose seal push already reached the hub. A
+	// fresh close always pushes.
+	alreadyPushed := false
+	if alreadySealing {
+		j.mu.Lock()
+		alreadyPushed = j.sealedPush
+		j.mu.Unlock()
 	}
 	if !alreadySealing {
 		// Closing a RETAINED paused record (wrap/fail after an operator
@@ -1553,7 +1560,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 		if fromPaused {
 			j.mu.Lock()
 			j.stopReason = reason
-			j.sealedPush = alreadyPushed
+			j.sealedPush = false
 			j.mu.Unlock()
 			r.persist()
 		} else {
@@ -1562,10 +1569,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 			}
 			j.mu.Lock()
 			j.stopReason = reason
-			// Persisted with the reason: a daemon crash between the earlier
-			// push and SessionEnd must not make the restart's stop finisher
-			// re-push either.
-			j.sealedPush = alreadyPushed
+			j.sealedPush = false
 			j.mu.Unlock()
 			r.persist()
 		}
@@ -1573,11 +1577,10 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	// Six-layer teardown: no writer survives into the sealed scene.
 	r.killAgentTree(j)
 
-	// Final push (§五) — UNLESS the final state was already committed
-	// and pushed (alreadyPushed: the terminal close of recover.go, the
-	// C3 engine published the terminal execution.json): a second push
-	// can only race it or fail against the revoked attempt credential.
-	// Only the read-only seal and the terminal close remain.
+	// Final push (§五) — UNLESS this close's seal push already reached
+	// the hub (alreadyPushed: a seal retry or the restart finisher after
+	// a successful push): a second push could only fail against a
+	// revoked credential. Only the read-only seal and the close remain.
 	finalReason := reason
 	chainOK := true
 	if !alreadyPushed {
@@ -1706,13 +1709,13 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 // that shape (verify matches + running + a local Paused record →
 // resume through the recovery engine), so the error is loud but never
 // a dangling half-close.
-func (r *Runtime) pauseOp(ctx context.Context, j *job, alreadyPushed bool) error {
+func (r *Runtime) pauseOp(ctx context.Context, j *job) error {
 	if err := j.transition(StatePaused); err != nil {
 		return err
 	}
 	j.mu.Lock()
 	j.stopReason = protocol.FinishPaused
-	j.sealedPush = alreadyPushed
+	j.sealedPush = false
 	j.cleanPause = true
 	j.mu.Unlock()
 	r.persist()
@@ -1729,27 +1732,25 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job, alreadyPushed bool) error
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
-	if !alreadyPushed {
-		r.syncLiveTranscript(j.capsuleDir)
-		_, _, _, perr := gitops.CommitPush(j.git, "seal: "+protocol.FinishPaused)
-		for i := 0; i < 2 && perr != nil; i++ {
-			_, perr = gitops.Push(j.git)
-		}
-		if perr != nil {
-			fmt.Fprintf(os.Stderr, "runtime: %s: pause seal push failed after retries (local commit stands): %v\n", j.wi, perr)
-			// Log-only (never a blocked degrade — see the doc comment). The
-			// durable trace rides the same push_failed event face stopOp uses.
-			if r.cfg.EventTap != nil {
-				r.cfg.EventTap(j.wi, "push_failed", map[string]any{
-					"phase": "pause-seal", "reason": protocol.FinishPaused, "error": perr.Error(),
-				})
-			}
-		}
-		// The task repos' uncommitted work rides refs/pf-wip
-		// (polyforge#167): an attach resumes in place, but a later
-		// re-claim restores from the carrier.
-		r.saveTaskWIP(j, true, perr == nil)
+	r.syncLiveTranscript(j.capsuleDir)
+	_, _, _, perr := gitops.CommitPush(j.git, "seal: "+protocol.FinishPaused)
+	for i := 0; i < 2 && perr != nil; i++ {
+		_, perr = gitops.Push(j.git)
 	}
+	if perr != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: pause seal push failed after retries (local commit stands): %v\n", j.wi, perr)
+		// Log-only (never a blocked degrade — see the doc comment). The
+		// durable trace rides the same push_failed event face stopOp uses.
+		if r.cfg.EventTap != nil {
+			r.cfg.EventTap(j.wi, "push_failed", map[string]any{
+				"phase": "pause-seal", "reason": protocol.FinishPaused, "error": perr.Error(),
+			})
+		}
+	}
+	// The task repos' uncommitted work rides refs/pf-wip
+	// (polyforge#167): an attach resumes in place, but a later
+	// re-claim restores from the carrier.
+	r.saveTaskWIP(j, true, perr == nil)
 	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
 		SessionID: j.sessionID,
 		Status:    api.StatusPaused,
