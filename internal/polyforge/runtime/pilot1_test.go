@@ -418,7 +418,7 @@ func TestLiveTranscriptTailSyncedBeforeCommit(t *testing.T) {
 			return r.Stop(context.Background(), j.wi, protocol.FinishPaused)
 		}},
 		{"bounded-fail", func(r *Runtime, j *job) error {
-			r.boundedFail(context.Background(), j, "test bounded fail")
+			underOpMu(r, func() { r.boundedFail(context.Background(), j, "test bounded fail") })
 			return nil
 		}},
 	} {

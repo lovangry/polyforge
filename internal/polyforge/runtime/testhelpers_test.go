@@ -75,6 +75,9 @@ type fakeHub struct {
 	// endBlock, when non-nil, parks every SessionEnd until it is closed
 	// (a hung hub).
 	endBlock chan struct{}
+	// endBlockFor parks the SessionEnds of one work item (canonical id)
+	// until its channel is closed.
+	endBlockFor map[string]chan struct{}
 }
 
 type claimFault struct {
@@ -240,9 +243,13 @@ func (h *fakeHub) SessionVerify(wi, sessionID string) (*api.SessionVerifyRespons
 func (h *fakeHub) SessionEnd(wi string, req api.SessionEndRequest) error {
 	h.mu.Lock()
 	block := h.endBlock
+	blockWI := h.endBlockFor[h.canonicalID(wi)]
 	h.mu.Unlock()
 	if block != nil {
 		<-block
+	}
+	if blockWI != nil {
+		<-blockWI
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -458,10 +465,11 @@ func fakeSession(wi string) string {
 // shape the daemon tests' fake engine uses).
 func scriptedEngineStarter(sp Spawner) AgentStartFunc {
 	return func(ctx context.Context, in AgentStartInput) (AgentHandle, error) {
+		handle := capsuleSessionHandle(in.CapsuleDir)
 		p := SpawnParams{
 			WorkItemID:    in.WI,
 			CapsuleDir:    in.CapsuleDir,
-			SessionHandle: in.SessionHandle,
+			SessionHandle: handle,
 			SpawnN:        int(in.SpawnN),
 			InitialPrompt: "engine",
 		}
@@ -471,7 +479,7 @@ func scriptedEngineStarter(sp Spawner) AgentStartFunc {
 		}
 		// Like the real engine, journal the derivation: the capsule spawn
 		// journal is the B2 fence ledger every derivation appends to.
-		token := fmt.Sprintf("%s#%d", in.SessionHandle, in.SpawnN-1)
+		token := fmt.Sprintf("%s#%d", handle, in.SpawnN-1)
 		if jerr := writeSpawnJournal(p, h.PID(), h.StartedAt(), token); jerr != nil {
 			fmt.Fprintf(os.Stderr, "runtime: %s: scripted engine journal: %v\n", in.WI, jerr)
 		}
@@ -553,11 +561,13 @@ func initGitCapsule(t *testing.T, j *job) string {
 	j.git.RemoteURL = bare
 	j.git.Username = j.wi
 	j.git.Secret = "push-secret"
-	if out, err := exec.Command("git", "init", j.git.CapsuleDir).CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v: %s", err, out)
+	if err := os.MkdirAll(filepath.Dir(j.git.GitDir), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if err := gitops.ExternalizeGitDir(j.git); err != nil {
-		t.Fatalf("gitops.ExternalizeGitDir: %v", err)
+	// the production layout (gitops.Clone's): external git-dir, .git
+	// pointer, working branch main
+	if out, err := exec.Command("git", "init", "--initial-branch=main", "--separate-git-dir="+j.git.GitDir, j.git.CapsuleDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
 	}
 	// one initial commit so rev-list/push have a HEAD to stand on
 	if err := os.WriteFile(filepath.Join(j.capsuleDir, "seed.txt"), []byte("seed\n"), 0o644); err != nil {
@@ -836,4 +846,37 @@ func writeSpawnJournal(p SpawnParams, pid int, startedAt string, spawnToken stri
 
 func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...func(string)) *proc {
 	return newProcOpts(cmd, stdin, stdout, procOpts{taps: taps})
+}
+
+// underOpMu runs fn holding opMu, as the runtime's own doors call the
+// locked operations (offLock releases and retakes it around the network
+// steps).
+func underOpMu(r *Runtime, fn func()) {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	fn()
+}
+
+// replayClaims runs the claiming-journal replay as Restart does —
+// resumeClaiming under opMu, then the replays' clones outside it — and
+// waits for every replay to settle.
+func replayClaims(r *Runtime) {
+	var rs []claimReplay
+	underOpMu(r, func() { rs = r.resumeClaiming(context.Background()) })
+	r.runReplays(context.Background(), rs)
+	r.replays.Wait()
+}
+
+// capsuleSessionHandle answers the session handle the capsule's
+// session.json carries — where the real driver reads it ("" when absent).
+func capsuleSessionHandle(capsuleDir string) string {
+	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.SessionJSON))
+	if err != nil {
+		return ""
+	}
+	var s capsule.Session
+	if json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return s.SessionID
 }

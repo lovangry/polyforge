@@ -121,13 +121,8 @@ func writeErr(w http.ResponseWriter, err error) {
 	case *api.Error:
 		writeJSON(w, e.HTTPStatus(), e)
 	case *memory.APIError:
-		detail := e.Detail
-		if e.Reason != "" {
-			detail = e.Reason + ": " + e.Detail
-		}
-		writeJSON(w, (&api.Error{Code: e.Code, Detail: detail}).HTTPStatus(),
-			&api.Error{Code: e.Code, Detail: e.Detail,
-				Extra: reasonExtra(e.Reason)})
+		ae := &api.Error{Code: e.Code, Detail: e.Detail, Extra: reasonExtra(e.Reason)}
+		writeJSON(w, ae.HTTPStatus(), ae)
 	default:
 		writeJSON(w, http.StatusInternalServerError, &api.Error{Code: api.ErrCoreInternal, Detail: err.Error()})
 	}
@@ -741,7 +736,7 @@ func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *i
 // Dependencies
 
 func (s *Server) hAddDep(w http.ResponseWriter, r *http.Request, idn *identity) {
-	_, projectID, err := s.wiProject(idn, r.PathValue("id"))
+	blocked, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -754,11 +749,6 @@ func (s *Server) hAddDep(w http.ResponseWriter, r *http.Request, idn *identity) 
 		Kind         string `json:"kind,omitempty"`
 	}
 	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
-	}
-	blocked, err := s.WIs.Resolve(r.PathValue("id"))
-	if err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -805,17 +795,12 @@ func (s *Server) depsView(w http.ResponseWriter, wiID string) *core.Deps {
 }
 
 func (s *Server) hDelDep(w http.ResponseWriter, r *http.Request, idn *identity) {
-	_, projectID, err := s.wiProject(idn, r.PathValue("id"))
+	blocked, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	if !s.requireWrite(w, idn, projectID) {
-		return
-	}
-	blocked, err := s.WIs.Resolve(r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
 		return
 	}
 	blocking, err := s.visibleWI(idn, r.PathValue("blocking"))
@@ -866,23 +851,13 @@ const defaultMachinesStaleAfter = 5 * time.Minute
 // global admin or a maintainer of a configured project (the heartbeat body
 // carries no project context, so any project_members row with the
 // maintainer role qualifies). Refresh of an EXISTING machine row stays
-// open to any authenticated key: the gate fires only when the row is
-// absent, before core performs any write. This mirrors the admin-or-
-// project-maintainer convention of hPatchProject, but conditionally.
-func (s *Server) authorizeMachineRegistration(idn *identity, machineID string) error {
-	if strings.TrimSpace(machineID) == "" {
-		return nil // core rejects the empty id with bad input; nothing to gate
-	}
+// open to any authenticated key: core runs this gate only when the row is
+// absent, before it performs any write (HeartbeatAuthorized). This
+// mirrors the admin-or-project-maintainer convention of hPatchProject,
+// but conditionally.
+func (s *Server) authorizeMachineRegistration(idn *identity) error {
 	if idn.Role == "admin" {
 		return nil
-	}
-	var exists int
-	err := s.DB.QueryRow(`SELECT 1 FROM machines WHERE id=?1`, machineID).Scan(&exists)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	if exists == 1 {
-		return nil // refresh path: open to any authenticated key, unchanged
 	}
 	var maintainer int
 	if err := s.DB.QueryRow(`SELECT 1 FROM project_members WHERE user_id=?1 AND role='maintainer' LIMIT 1`,
@@ -901,11 +876,7 @@ func (s *Server) hHeartbeat(w http.ResponseWriter, r *http.Request, idn *identit
 		writeErr(w, err)
 		return
 	}
-	if err := s.authorizeMachineRegistration(idn, req.MachineID); err != nil {
-		writeErr(w, err)
-		return
-	}
-	res, err := s.Admin.Heartbeat(req)
+	res, err := s.Admin.HeartbeatAuthorized(req, func() error { return s.authorizeMachineRegistration(idn) })
 	if err != nil {
 		writeErr(w, err)
 		return

@@ -191,6 +191,16 @@ type jobRecord struct {
 	// sealing daemon pushed (the cross-daemon continue check, §7).
 	EndNote string `json:"end_note,omitempty"`
 	EndHead string `json:"end_head,omitempty"`
+	// EndPushGaveUp persists job.endPushGaveUp: the end_pending chain push
+	// met a PERMANENT rejection, so the blocked-close retry — after a
+	// restart too — closes without pushing again. Absent (older records)
+	// = false: the retry tries the push.
+	EndPushGaveUp bool `json:"end_push_gave_up,omitempty"`
+	// AwaitingHub persists job.awaitingHub: the restart-time session
+	// verify could not reach aihub and is being retried. The next start
+	// verifies afresh and re-derives it (cleared once the hub answers).
+	// Absent (older records) = false.
+	AwaitingHub bool `json:"awaiting_hub,omitempty"`
 	// StepCandidates is the claim-time per-step candidate snapshot a
 	// recovery re-derivation dispatches under; kept here (daemon-private)
 	// rather than read back from the agent-writable capsule.json. Each
@@ -239,6 +249,8 @@ func (j *job) record() *jobRecord {
 		Origin:             j.origin,
 		EndNote:            j.endNote,
 		EndHead:            j.endHead,
+		EndPushGaveUp:      j.endPushGaveUp,
+		AwaitingHub:        j.awaitingHub,
 		StepCandidates:     j.stepCandidates,
 	}
 }
@@ -278,6 +290,8 @@ func jobFromRecord(rec *jobRecord) *job {
 		origin:               rec.Origin,
 		endNote:              rec.EndNote,
 		endHead:              rec.EndHead,
+		endPushGaveUp:        rec.EndPushGaveUp,
+		awaitingHub:          rec.AwaitingHub,
 		stepCandidates:       rec.StepCandidates,
 	}
 }

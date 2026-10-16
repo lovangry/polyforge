@@ -155,14 +155,11 @@ func (m *AdminManager) CreateAPIKey(userID, name, projectScope string) (*IssuedK
 		return nil, err
 	}
 	if projectScope != "" {
-		if err := m.db.QueryRow(`SELECT 1 FROM projects WHERE id=?1 OR name=?1`, projectScope).Scan(&one); err != nil {
+		var scopeID string
+		if err := m.db.QueryRow(`SELECT id FROM projects WHERE id=?1 OR name=?1`, projectScope).Scan(&scopeID); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return nil, Fail(api.ErrCoreNotFound, "", "project %q", projectScope)
 			}
-			return nil, err
-		}
-		var scopeID string
-		if err := m.db.QueryRow(`SELECT id FROM projects WHERE id=?1 OR name=?1`, projectScope).Scan(&scopeID); err != nil {
 			return nil, err
 		}
 		projectScope = scopeID
@@ -261,10 +258,11 @@ func (m *AdminManager) ListAPIKeys() ([]APIKeyInfo, error) {
 // (creates the machine user + issues its key, plaintext once); repeats
 // only refresh the timestamp and the liveness projection. Authorization
 // lives at the server face, not here: first registration is a privileged
-// act (global admin or a project maintainer — the hHeartbeat handler gates
-// it before calling this), while refresh of an existing machines row stays
-// open to any authenticated key. Core sees no caller identity, so direct
-// core calls register freely by design. There is no
+// act (global admin or a project maintainer — the hHeartbeat handler
+// passes that gate to HeartbeatAuthorized, which runs it on the register
+// branch only), while refresh of an existing machines row stays open to
+// any authenticated key. Core sees no caller identity, so direct core
+// calls (Heartbeat) register freely by design. There is no
 // client timestamp field: last_heartbeat_at is stamped by the SERVER
 // (core.Now, RFC3339Nano, single-writer SQLite) — client clocks are not
 // trusted for liveness. Mode/liveWIIDs are the M3 daemon liveness
@@ -287,6 +285,12 @@ type HeartbeatResult struct {
 }
 
 func (m *AdminManager) Heartbeat(req MachineHeartbeat) (*HeartbeatResult, error) {
+	return m.HeartbeatAuthorized(req, nil)
+}
+
+// HeartbeatAuthorized is Heartbeat whose FIRST registration must first
+// pass authorizeRegister (nil = no gate); a refresh never calls it.
+func (m *AdminManager) HeartbeatAuthorized(req MachineHeartbeat, authorizeRegister func() error) (*HeartbeatResult, error) {
 	if strings.TrimSpace(req.MachineID) == "" {
 		return nil, Fail(api.ErrCoreBadInput, "", "machine_id required")
 	}
@@ -311,6 +315,11 @@ func (m *AdminManager) Heartbeat(req MachineHeartbeat) (*HeartbeatResult, error)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
+	}
+	if authorizeRegister != nil {
+		if err := authorizeRegister(); err != nil {
+			return nil, err
+		}
 	}
 	// Register: machine user + machines row + first key, one transaction.
 	tx, err := m.db.Begin()

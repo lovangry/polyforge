@@ -44,7 +44,7 @@ func TestFirstBlockedCloseWaitsForTheChainPush(t *testing.T) {
 	j.git.RemoteURL = filepath.Join(t.TempDir(), "unreachable.git")
 	j.mu.Unlock()
 
-	r.boundedFail(context.Background(), j, "boom")
+	underOpMu(r, func() { r.boundedFail(context.Background(), j, "boom") })
 	if n := hub.endCount(); n != 0 {
 		t.Fatalf("SessionEnd(blocked) landed with the chain unpushed (%d ends)", n)
 	}
@@ -287,7 +287,7 @@ func TestRestartRefusedReplayOfOpenSessionEndsIt(t *testing.T) {
 	hub.hold(wi, session, api.StatusRunning)
 	hub.claimFaults = []claimFault{{err: &api.Error{Code: api.ErrCoreConflict, Detail: "NOT_CLAIMABLE"}}}
 
-	r.resumeClaiming(context.Background())
+	replayClaims(r)
 	if hub.endCount() != 1 || hub.lastEnd().SessionID != session || hub.lastEnd().Status != api.StatusBlocked {
 		t.Fatalf("the open session must be ended blocked with our secret, got %d ends (%+v)", hub.endCount(), hub.lastEnd())
 	}

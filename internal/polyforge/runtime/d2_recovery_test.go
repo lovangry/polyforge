@@ -111,7 +111,7 @@ func TestBoundedFailSessionEndFailureKeepsRecordAndRetries(t *testing.T) {
 	r, j, toOB := endPendingRuntime(t, hub)
 	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
 
-	r.boundedFail(context.Background(), j, "boom")
+	underOpMu(r, func() { r.boundedFail(context.Background(), j, "boom") })
 	if msg := recvRT(t, toOB); msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked {
 		t.Fatalf("observe must be released blocked, got %+v", msg)
 	}
@@ -143,7 +143,7 @@ func TestRestartRetriesEndPendingRecord(t *testing.T) {
 	hub := newFakeHub()
 	r, j, _ := endPendingRuntime(t, hub)
 	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
-	r.boundedFail(context.Background(), j, "boom")
+	underOpMu(r, func() { r.boundedFail(context.Background(), j, "boom") })
 	r.Close()
 
 	// fresh daemon over the same DataDir, hub reachable again
@@ -181,7 +181,7 @@ func TestEndPendingSettlesWhenSessionNoLongerHoldsWI(t *testing.T) {
 	hub.held[j.wi] = "" // the close landed server-side
 	hub.status[j.wi] = api.StatusBlocked
 	hub.mu.Unlock()
-	r.boundedFail(context.Background(), j, "boom")
+	underOpMu(r, func() { r.boundedFail(context.Background(), j, "boom") })
 	if r.jobOf(j.wi) != nil {
 		t.Fatal("a session that no longer holds the WI settles the close")
 	}
@@ -197,7 +197,9 @@ func TestAbandonClaimRetriesSessionEnd(t *testing.T) {
 	}
 	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
 	orig := fmt.Errorf("capsule clone failed")
-	if got := r.abandonClaim(j, j.wi, orig, "clone"); got != orig {
+	var got error
+	underOpMu(r, func() { got = r.abandonClaim(j, j.wi, orig, "clone") })
+	if got != orig {
 		t.Fatalf("the original error must be returned, got %v", got)
 	}
 	if _, ok := r.loadClaiming()[j.wi]; !ok {
@@ -314,7 +316,7 @@ func TestEndPendingWithGoneCapsuleStillRetries(t *testing.T) {
 	hub := newFakeHub()
 	r, j, _ := endPendingRuntime(t, hub)
 	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
-	r.boundedFail(context.Background(), j, "boom")
+	underOpMu(r, func() { r.boundedFail(context.Background(), j, "boom") })
 	r.Close()
 	if j.capsuleDir != "" {
 		_ = os.RemoveAll(j.capsuleDir)
