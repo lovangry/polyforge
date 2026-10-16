@@ -1187,7 +1187,14 @@ max_concurrent_jobs = 6               # integer >= 1
   shutdown). **Migration:** a `max_concurrent_jobs` already in an existing
   `daemon-state.json` is read as explicit, so the cap stays what it was;
   run `pf ops max --reset` once to let the table (or the default 4)
-  govern.
+  govern. Since practically every machine carries such a cap, the daemon
+  logs one line at boot when the persisted cap differs from the
+  configured one, naming `pf ops max --reset`.
+- **Downgrade:** binaries older than this version refuse a `[daemon]`
+  table (`unknown section`) — every `pf` command and the daemon fail to
+  load the config. Remove the `[daemon]` table from `cli.toml` **before**
+  downgrading below this version, including a `deploy.sh --force`
+  rollback or an `install.sh` run pinned to an older release.
 - **Removed environment fallbacks**: `POLYFORGE_MACHINE_ID`,
   `POLYFORGE_DISPLAY_NAME`, `POLYFORGE_HARNESS_ROOT`,
   `POLYFORGE_OPERATOR_AGENT_DIR`, `POLYFORGE_RECALL_TOPK`. They only
@@ -1195,8 +1202,14 @@ max_concurrent_jobs = 6               # integer >= 1
   that relied on `POLYFORGE_HARNESS_ROOT` or
   `POLYFORGE_OPERATOR_AGENT_DIR` must move the value into the table
   **before** restarting the daemon, or the daemon falls back to
-  `<data-dir>` / `~/.pi/agent`. `POLYFORGE_DATA_DIR` stays (ensure and the
-  daemon both read it).
+  `<data-dir>` / `~/.pi/agent`. So that this never happens silently, the
+  daemon warns at boot when `POLYFORGE_HARNESS_ROOT` or
+  `POLYFORGE_OPERATOR_AGENT_DIR` is set to a value differing from what it
+  resolved (stderr in `daemon.log`, a machine-level
+  `retired_env_ignored` event, and `env_warnings` in `GET /status`), and
+  `pf doctor`'s `retired env` row warns about the daemon's report and
+  about either variable set in your own shell. `POLYFORGE_DATA_DIR` stays
+  (ensure and the daemon both read it).
 - The other daemon flags (`--silence-window`, `--tool-window`,
   `--model-error-grace`, `--revalidate-every`, `--heartbeat-every`,
   `--pi-bin`, `--git-remote-base`, `--recall-topk`, `--display-name`,

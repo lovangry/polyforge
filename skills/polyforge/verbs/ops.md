@@ -57,7 +57,7 @@ daemon reads itself; a change applies at the next daemon start
 (`pf ops shutdown`, then `pf daemon ensure`). Job cap: `pf ops max N` is
 an explicit cap — immediate, persisted, and it wins over the table's
 `max_concurrent_jobs` until `pf ops max --reset` returns to the
-configured cap. Bare `pf ops max` says `(set by pf ops max …)` while an
+configured cap. Bare `pf ops max` says `(persisted cap — pf ops max --reset …)` while an
 explicit cap is in force.
 
 `pf ops auto off` is more than the switch: the queue's not-yet-started

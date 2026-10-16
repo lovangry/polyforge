@@ -189,6 +189,9 @@ type StatusResponse struct {
 	// WorkflowsDir is the absolute workflows dir the daemon runs bundles
 	// from (pf doctor judges the workspace yaml's step-id keys by it).
 	WorkflowsDir string `json:"workflows_dir,omitempty"`
+	// EnvWarnings: retired POLYFORGE_* variables the daemon found set to
+	// a differing value at boot (decision 2026-10-16 G2).
+	EnvWarnings []string `json:"env_warnings,omitempty"`
 	// Harnesses is the daemon's view of the step harness binaries, only
 	// on GET /status?harnesses=1 (polyforge#159).
 	Harnesses    map[string]HarnessStatus `json:"harnesses,omitempty"`

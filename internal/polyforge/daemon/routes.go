@@ -106,8 +106,11 @@ type statusResponse struct {
 	// `claude --version`); pf doctor judges the claude harness by it.
 	Harnesses    map[string]harnessStatus `json:"harnesses,omitempty"`
 	ShuttingDown bool                     `json:"shutting_down"`
-	Jobs         []statusJob              `json:"jobs"`
-	Queue        queueStats               `json:"queue"`
+	// EnvWarnings: retired POLYFORGE_* variables the daemon found set to
+	// a differing value at boot (no longer read; pf doctor relays them).
+	EnvWarnings []string    `json:"env_warnings,omitempty"`
+	Jobs        []statusJob `json:"jobs"`
+	Queue       queueStats  `json:"queue"`
 }
 
 type opsConfigResponse struct {
@@ -713,6 +716,7 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 	// rt.List() reports). F15c rides the same loop: the per-job progress
 	// staleness for the LAST-PROGRESS column.
 	jobs, running := d.statusJobs()
+	maxN, maxSrc := d.q.MaxState()
 	var harnesses map[string]harnessStatus
 	if r.URL.Query().Get("harnesses") == "1" {
 		harnesses = d.harnessStatuses()
@@ -725,12 +729,13 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 		Workspaces:   d.cfg.Mapping.Workspaces(),
 		WorkflowsDir: d.cfg.WorkflowsDir,
 		ShuttingDown: d.modes.ShuttingDown(),
+		EnvWarnings:  d.cfg.EnvWarnings,
 		Jobs:         jobs,
 		Queue: queueStats{
 			Pending:       d.q.LenPending(),
 			Running:       running,
-			MaxConcurrent: d.q.MaxConcurrent(),
-			MaxSource:     d.q.MaxSource(),
+			MaxConcurrent: maxN,
+			MaxSource:     maxSrc,
 		},
 	})
 }
@@ -783,7 +788,8 @@ func (d *Daemon) opsConfigRoute(w http.ResponseWriter, r *http.Request) {
 		d.q.ResetMax(d.cfg.MaxConcurrent)
 	}
 	d.persistModeQuietly()
-	writeJSON(w, http.StatusOK, opsConfigResponse{Auto: d.modes.Auto(), Max: d.q.MaxConcurrent(), MaxSource: d.q.MaxSource()})
+	maxN, maxSrc := d.q.MaxState()
+	writeJSON(w, http.StatusOK, opsConfigResponse{Auto: d.modes.Auto(), Max: maxN, MaxSource: maxSrc})
 }
 
 func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {

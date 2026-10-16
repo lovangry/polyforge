@@ -19,6 +19,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
+	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/testenv"
 )
 
@@ -112,5 +113,36 @@ func TestApplyDaemonTablePrecedence(t *testing.T) {
 	applyDaemonTable(fs, cli.DaemonSettings{}, st0, sw0, hr0, op0, mx0)
 	if *st0 != 0 || *sw0 != 0 || *hr0 != "" || *op0 != "" || *mx0 != 0 {
 		t.Fatal("an empty table must leave the built-in defaults")
+	}
+}
+
+// TestRetiredEnvWarnings (decision 2026-10-16 G2): a retired harness
+// variable set to a value differing from the resolved one is named, with
+// the [daemon] key that replaces it; unset or equal values are silent.
+func TestRetiredEnvWarnings(t *testing.T) {
+	env := map[string]string{"POLYFORGE_HARNESS_ROOT": "/old/root", "POLYFORGE_OPERATOR_AGENT_DIR": "/same/op/"}
+	got := retiredEnvWarnings(func(k string) string { return env[k] }, "", "/data", "/same/op")
+	if len(got) != 1 || !strings.Contains(got[0], "POLYFORGE_HARNESS_ROOT=/old/root") ||
+		!strings.Contains(got[0], "the daemon uses /data") || !strings.Contains(got[0], `[daemon] harness_root = "/old/root"`) {
+		t.Fatalf("warnings = %q", got)
+	}
+	if got := retiredEnvWarnings(func(string) string { return "" }, "", "/data", ""); len(got) != 0 {
+		t.Fatalf("no env, no warning: %q", got)
+	}
+	if got := retiredEnvWarnings(func(k string) string { return env[k] }, "/old/root", "/data", "/same/op"); len(got) != 0 {
+		t.Fatalf("an env value equal to the resolved one is silent: %q", got)
+	}
+}
+
+// TestRetiredEnvWarningsReachEventsAndStatus: the boot warnings land a
+// machine-level retired_env_ignored event and ride GET /status.
+func TestRetiredEnvWarningsReachEventsAndStatus(t *testing.T) {
+	td := newTestDaemon(t, func(c *Config) { c.EnvWarnings = []string{"POLYFORGE_HARNESS_ROOT=/x is set but no longer read"} })
+	if !hasKind(eventKinds(td.Daemon, ""), observe.EvRetiredEnvIgnored) {
+		t.Fatalf("no retired_env_ignored event: %v", eventKinds(td.Daemon, ""))
+	}
+	raw, err := td.client.Status()
+	if err != nil || !strings.Contains(string(raw), "POLYFORGE_HARNESS_ROOT=/x") {
+		t.Fatalf("status lacks the warning: %s %v", raw, err)
 	}
 }

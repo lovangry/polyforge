@@ -38,6 +38,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
+	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
 // Main executes `pf daemon <flags>` and returns the process exit code.
@@ -150,6 +151,10 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *gitRemoteBase == "" {
 		*gitRemoteBase = strings.TrimSuffix(*server, "/") + "/git"
 	}
+	envWarnings := retiredEnvWarnings(os.Getenv, *harnessRoot, *dataDir, *operatorAgentDir)
+	for _, w := range envWarnings {
+		fmt.Fprintln(stderr, "pf daemon: WARNING: "+w)
+	}
 
 	cfg := Config{
 		MachineID:     *machineID,
@@ -172,6 +177,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		RecallTopK:               *recallTopK,
 		Auto:                     autoCfg,
 		HeartbeatEvery:           *heartbeatEvery,
+		EnvWarnings:              envWarnings,
 		Hub:                      aihubclient.New(*server, *apiKey),
 		// Zero fields fall through to the documented defaults.
 		Supervision: SupervisionConfig{
@@ -233,6 +239,33 @@ type needsOperatorError struct{ err error }
 
 func (e *needsOperatorError) Error() string { return e.err.Error() }
 func (e *needsOperatorError) Unwrap() error { return e.err }
+
+// retiredEnvWarnings names each retired harness variable (decision
+// 2026-10-16 G2: no longer read) that is set to a value differing from
+// what the daemon resolved. polyforge#171 ruled out harness state moving
+// silently; an operator who relied on the variable must move it into the
+// [daemon] table. harnessRoot/operatorAgentDir are the resolved flag or
+// table values ("" = the defaults <data-dir> and ~/.pi/agent).
+func retiredEnvWarnings(getenv func(string) string, harnessRoot, dataDir, operatorAgentDir string) []string {
+	if harnessRoot == "" {
+		harnessRoot = dataDir
+	}
+	if operatorAgentDir == "" {
+		operatorAgentDir = runtime.OperatorAgentDirDefault()
+	}
+	var out []string
+	for _, v := range []struct{ env, key, resolved string }{
+		{"POLYFORGE_HARNESS_ROOT", "harness_root", harnessRoot},
+		{"POLYFORGE_OPERATOR_AGENT_DIR", "operator_agent_dir", operatorAgentDir},
+	} {
+		val := getenv(v.env)
+		if val == "" || filepath.Clean(val) == filepath.Clean(v.resolved) {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s=%s is set but no longer read (decision 2026-10-16 G2); the daemon uses %s — if the harness state lives at %s, set [daemon] %s = %q in cli.toml and restart the daemon", v.env, val, v.resolved, val, v.key, val))
+	}
+	return out
+}
 
 // applyDaemonTable fills each knob the command line did not set
 // explicitly from the config's [daemon] table (already validated by

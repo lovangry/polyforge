@@ -41,6 +41,7 @@ fails, 2 usage errors. `--json` emits one machine document:
 | Check | What it proves | On fail |
 |---|---|---|
 | `config` | the config loads (including the `[daemon]` table: every value validated) | the load error verbatim (an old-shape flat `project` key, a malformed mapping or a bad `[daemon]` value — `line N: [daemon] <key>: …` — names itself) plus migration guidance; every config-dependent check is then `skip` — never a faked green |
+| `retired env` | no retired `POLYFORGE_HARNESS_ROOT` / `POLYFORGE_OPERATOR_AGENT_DIR` is in effect (this shell, or the daemon's `env_warnings`) | `warn` naming the variable and the `[daemon]` key (`harness_root` / `operator_agent_dir`) to set instead — the variable is no longer read, so harness state would move |
 | `workspace mapping` | at least one `[workspace."<path>"]` section exists | guidance to add the shape (a zero-section config is the fresh-install template) |
 | `workspace dirs` | every mapped workspace pre-exists as a directory | the missing path(s), named |
 | `workspace yaml` | every mapped `.polyforge.yaml` loads and every candidate (yaml and installed bundles) is `<harness>:<model>` (see below) | the refusal a claim would meet (DAEMON-414), file and key named |

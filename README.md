@@ -517,10 +517,13 @@ the file, the line and the key (`config …: line N: [daemon] step_timeout:
 
 Job cap: an explicit `pf ops max N` applies at once and is persisted in
 `<data-dir>/daemon-state.json`; it wins over `max_concurrent_jobs` until
-`pf ops max --reset`, which returns to the configured cap (the table,
-else `--max-concurrent-jobs`, else 4) and clears the persisted value.
-Nothing else persists the cap. `pf ops max` shows `(set by pf ops max …)`
-when an explicit cap is in force.
+`pf ops max --reset`, which returns to the configured cap (an explicit
+`--max-concurrent-jobs`, else the table, else 4) and clears the persisted
+value. Nothing else persists the cap. A cap an older daemon persisted (it
+wrote one at every graceful shutdown) counts as persisted too: the daemon
+logs once at boot when a persisted cap overrides a different configured
+one, and `pf ops max` shows `(persisted cap — pf ops max --reset …)`
+while one is in force.
 
 Every other flag is test/dev-only: nothing in production sets it, and it
 is listed for running `pf daemon` by hand. The only environment variable
@@ -528,7 +531,11 @@ the daemon reads besides the `PF_*` CLI ones is `POLYFORGE_DATA_DIR` (the
 `--data-dir` default; ensure reads it too). The former
 `POLYFORGE_MACHINE_ID`, `POLYFORGE_DISPLAY_NAME`, `POLYFORGE_HARNESS_ROOT`,
 `POLYFORGE_OPERATOR_AGENT_DIR` and `POLYFORGE_RECALL_TOPK` fallbacks are
-gone; a value in the environment is ignored.
+gone; a value in the environment is ignored. Because harness state must
+never move silently (polyforge#171), the daemon warns at boot when one of
+the two harness variables is set to a value differing from what it
+resolved (stderr, a `retired_env_ignored` event, `env_warnings` in
+`GET /status`), and `pf doctor`'s `retired env` row warns too.
 
 | Flag | Production source | Default | Controls |
 | --- | --- | --- | --- |

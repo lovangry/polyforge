@@ -103,7 +103,36 @@ const (
 	docChSocket   = "daemon socket"
 	docChAuth     = "auth"
 	docChClaude   = "harness claude"
+	docChEnv      = "retired env"
 )
+
+// retiredHarnessEnv are the POLYFORGE_* variables decision 2026-10-16 G2
+// stopped reading, with the [daemon] key that replaces each.
+var retiredHarnessEnv = []struct{ env, key string }{
+	{"POLYFORGE_HARNESS_ROOT", "harness_root"},
+	{"POLYFORGE_OPERATOR_AGENT_DIR", "operator_agent_dir"},
+}
+
+// retiredEnvCheck warns when a retired harness variable is set in this
+// shell, or the daemon reported one set in ITS environment to a value
+// differing from what it resolved: the variable is no longer read, so
+// harness state would move silently (ruled out by polyforge#171).
+func retiredEnvCheck(getenv func(string) string, daemonWarnings []string) doctorCheck {
+	c := doctorCheck{Name: docChEnv, Status: "pass", Detail: "no retired POLYFORGE_* harness variable in effect"}
+	var notes []string
+	for _, v := range retiredHarnessEnv {
+		if val := getenv(v.env); val != "" {
+			notes = append(notes, fmt.Sprintf("%s=%s is set in this shell but no longer read — set [daemon] %s = %q in cli.toml instead and unset it", v.env, val, v.key, val))
+		}
+	}
+	for _, w := range daemonWarnings {
+		notes = append(notes, "daemon: "+w)
+	}
+	if len(notes) > 0 {
+		c.Status, c.Detail = "warn", strings.Join(notes, "; ")
+	}
+	return c
+}
 
 var cmdDoctor = &Command{
 	Name:         "doctor",
@@ -173,7 +202,7 @@ func runDoctorChecks(ctx *Context, pruneScratch bool) doctorReport {
 	cfg, err := LoadConfig(ctx.ConfigPath)
 	if err != nil {
 		add(docChConfig, "fail", err.Error()+" — see the install docs for the migration steps")
-		for _, name := range []string{docChMapping, docChDirs, docChLayout, docChScratch, docChYaml, docChClaude, docChProjects, docChServer, docChSocket, docChSupervision, docChAuth} {
+		for _, name := range []string{docChMapping, docChDirs, docChLayout, docChScratch, docChYaml, docChClaude, docChProjects, docChServer, docChSocket, docChSupervision, docChEnv, docChAuth} {
 			add(name, "skip", "config-dependent check not run: the config could not be loaded")
 		}
 		checks = append(checks, harnessDisplayChecks()...)
@@ -232,6 +261,7 @@ func runDoctorChecks(ctx *Context, pruneScratch bool) doctorReport {
 	add(docChSocket, passOrFail(sockOK), sockDetail)
 	// polyforge#174: a live daemon should run under the restart loop.
 	checks = append(checks, supervisionCheck(sockOK))
+	checks = append(checks, retiredEnvCheck(os.Getenv, status.EnvWarnings))
 
 	if cfg.Mapping.Empty() {
 		add(docChYaml, "skip", "not run: the mapping is absent")

@@ -356,3 +356,21 @@ func TestDoctorWorkspaceYamlReportsUnknownStepKeys(t *testing.T) {
 		t.Fatalf("daemon unreachable: %s %q, want warn naming it", st, detail)
 	}
 }
+
+// TestRetiredEnvCheck (decision 2026-10-16 G2): doctor warns about a
+// retired harness variable in its own shell and relays the daemon's.
+func TestRetiredEnvCheck(t *testing.T) {
+	none := func(string) string { return "" }
+	if c := retiredEnvCheck(none, nil); c.Status != "pass" {
+		t.Fatalf("clean env: %+v", c)
+	}
+	c := retiredEnvCheck(func(k string) string {
+		if k == "POLYFORGE_OPERATOR_AGENT_DIR" {
+			return "/op"
+		}
+		return ""
+	}, []string{"POLYFORGE_HARNESS_ROOT=/x is set but no longer read"})
+	if c.Status != "warn" || !strings.Contains(c.Detail, `[daemon] operator_agent_dir = "/op"`) || !strings.Contains(c.Detail, "daemon: POLYFORGE_HARNESS_ROOT=/x") {
+		t.Fatalf("retired env check = %+v", c)
+	}
+}

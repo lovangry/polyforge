@@ -98,6 +98,11 @@ type Config struct {
 	OperatorAgentDirExplicit bool
 	APIKey                   string // machine credential; NEVER reaches an agent env
 	MaxConcurrent            int    // cross-mode concurrency cap (default 4)
+	// EnvWarnings are the boot warnings for retired POLYFORGE_* variables
+	// still set to a differing value (main.go retiredEnvWarnings): each
+	// lands one machine-level retired_env_ignored event and rides
+	// GET /status for pf doctor.
+	EnvWarnings []string
 	// RecallTopK is the F6-A claim-time memory snapshot's hit count
 	// (0 = the runtime default, 10; bounded at 50 there).
 	RecallTopK int
@@ -446,6 +451,9 @@ func New(cfg Config) (*Daemon, error) {
 	}
 	d.rt = rt
 	d.obs = obs
+	for _, w := range cfg.EnvWarnings {
+		_ = obs.Events().Append("", observe.EvRetiredEnvIgnored, map[string]any{"warning": w})
+	}
 	d.q.persist = d.persistQueue
 
 	// The persisted mode/concurrency bookkeeping (the daemon's OWN state
@@ -453,6 +461,9 @@ func New(cfg Config) (*Daemon, error) {
 	// never duplicated here).
 	if err := d.loadDaemonState(); err != nil {
 		return nil, err
+	}
+	if note := capOverrideNotice(d.q.ExplicitMax(), cfg.MaxConcurrent); note != "" {
+		fmt.Fprintln(os.Stderr, note)
 	}
 	// cfg.Auto is an EXPLICIT flag override only (#18): nil keeps the
 	// persisted switch — an auto daemon restarting stays auto — and

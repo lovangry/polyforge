@@ -168,6 +168,9 @@ func parseDaemonTable(file string, kvs []daemonKV) (DaemonSettings, error) {
 			}
 			s.MaxConcurrentJobs = n
 		default:
+			if coreFlatKeys[kv.key] {
+				return s, refuse("a top-level key: move it above the [daemon] header (every key below the header belongs to the table)")
+			}
 			return s, refuse("unknown key (the [daemon] table carries only " + strings.Join(daemonTableKeys, ", ") + ")")
 		}
 	}

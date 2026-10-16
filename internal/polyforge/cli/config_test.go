@@ -383,6 +383,9 @@ func TestConfigDaemonTable(t *testing.T) {
 			t.Fatalf("%s: message %q does not name the key", tc.name, err)
 		}
 	}
+	if _, err := LoadConfig(writeTempConfig(t, base+"\n[daemon]\nclaude_bin = \"/x\"\n")); err == nil || !strings.Contains(err.Error(), "move it above the [daemon] header") {
+		t.Fatalf("a flat key under [daemon] needs the move-it-up hint: %v", err)
+	}
 	if _, err := LoadConfig(writeTempConfig(t, base+"\n[daemon]\n[daemon]\n")); err == nil || !strings.Contains(err.Error(), "duplicate [daemon]") {
 		t.Fatalf("a second [daemon] table must refuse: %v", err)
 	}

@@ -211,12 +211,12 @@ func (q *jobQueue) SetMaxConcurrent(n int) error {
 // SetExplicitMax is `pf ops max N`: the cap that is persisted and wins
 // over the configured one until ResetMax.
 func (q *jobQueue) SetExplicitMax(n int) error {
-	if err := q.SetMaxConcurrent(n); err != nil {
-		return err
+	if n < 1 {
+		return fmt.Errorf("max_concurrent_jobs must be >= 1 (DAEMON-400)")
 	}
 	q.mu.Lock()
-	q.maxExplicit = true
-	q.mu.Unlock()
+	defer q.mu.Unlock()
+	q.maxConc, q.maxExplicit = n, true
 	return nil
 }
 
@@ -237,13 +237,33 @@ func (q *jobQueue) ExplicitMax() int {
 	return q.maxConc
 }
 
-// MaxSource answers where the effective cap comes from: "ops" (an
-// explicit `pf ops max`) or "config".
-func (q *jobQueue) MaxSource() string {
-	if q.ExplicitMax() > 0 {
-		return "ops"
+// MaxState answers the effective cap and where it comes from, read under
+// one lock: "ops" (a persisted explicit `pf ops max`) or "config".
+func (q *jobQueue) MaxState() (int, string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.maxExplicit {
+		return q.maxConc, "ops"
 	}
-	return "config"
+	return q.maxConc, "config"
+}
+
+// MaxSource answers the source half of MaxState.
+func (q *jobQueue) MaxSource() string {
+	_, src := q.MaxState()
+	return src
+}
+
+// capOverrideNotice is the boot line for a persisted cap that overrides
+// a DIFFERENT configured one ("" otherwise). After the G2 upgrade nearly
+// every machine carries such a cap — older daemons persisted the cap on
+// every graceful shutdown — so the configured max_concurrent_jobs would
+// otherwise do nothing without a word.
+func capOverrideNotice(persisted, configured int) string {
+	if persisted <= 0 || persisted == configured {
+		return ""
+	}
+	return fmt.Sprintf("daemon: job cap %d comes from %s (an explicit pf ops max, or a cap an older daemon persisted at shutdown); it overrides the configured cap %d (cli.toml [daemon] max_concurrent_jobs / --max-concurrent-jobs / default 4) — run `pf ops max --reset` to use the configured cap", persisted, daemonStateFile, configured)
 }
 
 func (q *jobQueue) MaxConcurrent() int {

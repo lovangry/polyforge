@@ -488,3 +488,17 @@ func TestOpsMaxResetRoute(t *testing.T) {
 		t.Fatal("max together with max_reset must be refused")
 	}
 }
+
+// TestCapOverrideNotice: a persisted cap that differs from the configured
+// one is announced once at boot, naming pf ops max --reset; an equal or
+// absent one is silent.
+func TestCapOverrideNotice(t *testing.T) {
+	if n := capOverrideNotice(3, 6); !strings.Contains(n, "job cap 3") || !strings.Contains(n, "configured cap 6") || !strings.Contains(n, "pf ops max --reset") {
+		t.Fatalf("notice = %q", n)
+	}
+	for _, c := range [][2]int{{0, 6}, {6, 6}} {
+		if n := capOverrideNotice(c[0], c[1]); n != "" {
+			t.Fatalf("persisted %d / configured %d must be silent, got %q", c[0], c[1], n)
+		}
+	}
+}

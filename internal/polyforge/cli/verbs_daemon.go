@@ -491,7 +491,7 @@ func opsMax(ctx *Context, d *DaemonClient, args []string) error {
 	case 0:
 		return opsShow(ctx, d, func(s *StatusResponse) string {
 			if s.Queue.MaxSource == "ops" {
-				return fmt.Sprintf("max: %d (set by pf ops max; pf ops max --reset returns to the configured cap)", s.Queue.MaxConcurrent)
+				return fmt.Sprintf("max: %d (persisted cap — pf ops max --reset returns to the configured cap)", s.Queue.MaxConcurrent)
 			}
 			return fmt.Sprintf("max: %d", s.Queue.MaxConcurrent)
 		})
