@@ -47,19 +47,19 @@ aihub 启动后在后台运行 `Store.RebuildIndex`（`cmd/aihub/main.go`；先�
 
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
-| POST | `/api/v1/memories` | 项目 writer/maintainer 或 admin，否则 `MEM-403` | body `{project, type, title, visibility, content, tags, related, work_item_id, idempotency_key}`；`work_item_id` 接受 id 或 `<project>#<seq>`，须同项目；同一 `idempotency_key`（同 owner、同项目）重放返回原条目，键属于他人或他项目 → `MEM-409 IDEMPOTENCY_KEY_REUSED` |
-| GET | `/api/v1/memories/search` | 任意 key；结果按可见性过滤 | `q`（必填）、`type`（精确值，或 `X.*` 前缀匹配 `X.`）、`tags`（逗号）、`limit`（≤200，缺省 50）、`project`（先过读权限再作过滤）、`excerpt`（>0 时每条带 `content_excerpt`，上限 8192 字符）；只返回 `status='active'` |
+| POST | `/api/v1/memories` | 项目 writer/maintainer 或 admin，否则 `MEM-403`；key 限定在其他项目 → `AUTH-403`；项目不存在 → `CORE-404` | body `{project, type, title, visibility, content, tags, related, work_item_id, idempotency_key}`；`work_item_id` 接受 id 或 `<project>#<seq>`，须同项目；同一 `idempotency_key`（同 owner、同项目）重放返回原条目，键属于他人或他项目 → `MEM-409 IDEMPOTENCY_KEY_REUSED` |
+| GET | `/api/v1/memories/search` | 任意 key；结果按可见性过滤 | `q`（必填）、`type`（精确值，或 `X.*` 前缀匹配 `X.`）、`tags`（逗号）、`limit`（缺省 50；≤0 或 >200 时取 50）、`project`（先过读权限再作过滤）、`excerpt`（>0 时每条带 `content_excerpt`，上限 8192 字符）；只返回 `status='active'` |
 | GET | `/api/v1/memories/{id}` | 读权限；无权与不存在同为 `MEM-404` | 元数据；`?format=content` 返回原始 Markdown 正文 |
-| POST | `/api/v1/memories/{id}/redact` | owner 或 admin，否则 `MEM-403` | 软删除；非 active → `MEM-409` |
+| POST | `/api/v1/memories/{id}/redact` | 先过读门（`memRead`）：无读权限 → `MEM-404`；能读但非 owner 且非 admin → `MEM-403` | 软删除；非 active → `MEM-409` |
 
 检索：≥3 字符的词走 FTS5 trigram，更短的词走子串扩展（`Store.Search`；中文短词常见）。
 
 ### 5.2 错误码 <!-- §5.2 -->
 
-`MEM-400` 输入不合法（缺 `q`/`type`/`content`、可见性越界、frontmatter 不合法）；`MEM-403` 无写权限 / 非 owner
-redact；`MEM-404` 不存在或无权读；`MEM-409` 幂等键复用、redact 非 active 条目；`MEM-413` 正文超 1 MiB；
-`MEM-500` 文件系统/事务失败；`MEM-502` 对账遍历/清扫失败；`MEM-503` FTS 查询/扫描失败。注：memory 包以字符串
-字面量抛出 `MEM-400/409/413/500`，`api.ErrMem*` 中这四个常量无引用（`reference.md#§5`）。
+`MEM-400` 输入不合法（缺 `q`/`type`/`content`、可见性越界、frontmatter 不合法）；`MEM-403` 无写权限 / 能读但非 owner
+的 redact；`MEM-404` 不存在或无权读（含 redact 时无读权限）；`MEM-409` 幂等键复用、redact 非 active 条目；`MEM-413` 正文超 1 MiB；
+`MEM-500` 文件系统/事务失败；`MEM-502` 对账遍历/清扫失败；`MEM-503` FTS 查询/扫描失败（常量见 `internal/common/api/errors.go` `ErrMem*`）。另：key 限定在其他项目 → `AUTH-403`；
+创建时项目不存在 → `CORE-404`。
 
 ## 6. 可见性 <!-- §6 -->
 
@@ -78,8 +78,9 @@ redact；`MEM-404` 不存在或无权读；`MEM-409` 幂等键复用、redact �
   `[workspace]` 映射中；以 `excerpt=120` 调 search。`pf remember --project P --type T [--title] [--visibility project]
   [--tags] [--work-item] <content|-|@file>`。`pf memory show <id> [--max-bytes 262144] [--json]`。
   （`cli/verbs_aihub.go`；fragment：`skills/polyforge/verbs/{recall,remember,memory}.md`。）
-- 领取时 daemon 以 WI 的 goal + content 为查询、限定该 WI 的项目，取前 10 条（`-recall-topk`，上限 50）写入
+- 领取时 daemon 以 WI 的 goal + content 作为查询、限定该 WI 的项目，取前 10 条（`-recall-topk`，上限 50）写入
   capsule `runtime-state/recalled-memories.json`（`{work_item_id, query, top_k, items[{id,type,title,excerpt}], notice,
   created_at}`，摘录 1200 字符）；出错或无命中时写空列表 + notice，从不让领取失败（`runtime/recall.go`、
-  `daemon/memface.go`）。driver 把它作为「非约束性历史」注入每个 step 的 prompt（`v2-converge.md#§1`）。
+  `daemon/memface.go`）。driver 把它作为「非约束性历史」注入每个 step 的 prompt（`v2-converge.md#§1`）——只在有条目时
+  渲染该节，每条摘录至多 400 字符、整节至多 6000 字节（`driver/spawn.go`）。
   daemon 的 UDS 上没有 recall/remember 通道。

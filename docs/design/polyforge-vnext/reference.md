@@ -54,7 +54,7 @@ PATCH never sets status (`patchableFields`). Every transition is one guarded UPD
 | — → queued | `POST /work-items` → `WIManager.Create` | writer on the project; `repo_inventory` frozen at create (names only, must be project repos — `core/inventory.go`) |
 | queued → running | `POST …/claim` → `core/session.go` `Claim` | §3.2 |
 | running → paused | `POST …/session-end` `status=paused` → `Pause` | must be running (`NOT_RUNNING`); session kept; `clean_pause` set atomically; event `session_paused` |
-| paused → running | `POST …/session-attach` → `Attach` | hash mismatch → `CORE-403 STALE_SESSION`; not paused or `clean_pause=true` → `CORE-409 NOT_ATTACHABLE`; operator unpause = PATCH `clean_pause:false` |
+| paused → running | `POST …/session-attach` → `Attach` | hash mismatch → `CORE-403 STALE_SESSION`; not paused or `clean_pause=true` → `CORE-409 NOT_ATTACHABLE`; event `session_attached`; operator unpause = PATCH `clean_pause:false` |
 | running/paused → wrapped/failed/blocked | `POST …/session-end` → `End` | hash-fenced; clears the whole session row; wrapped/failed set `closed_at`; blocked sets `waiting_on='owner'` and, with `head_sha`, `attrs.blocked_seal` (§3.5); event `session_ended` |
 | running/paused → queued | `POST …/force-end-session` → `ForceEnd` | admin or project maintainer; reason required; terminal → `CORE-410`, no session → `CORE-409 NOT_HELD`; clears session + seal; event `session_superseded` (old fingerprint). CLI: `pf ops end-session <wi> --reason …` |
 | blocked → queued | `POST …/resume-blocked` → `ResumeBlocked` | reporter/maintainer/admin; terminal → `CORE-410`; status blocked (`NOT_BLOCKED`) ∧ no session (`SESSION_HELD`); event `wi_resumed` |
@@ -69,6 +69,15 @@ The blocked WI has exactly two exits: `pf resume` (continue = resume-blocked + a
 - Edge kinds `blocks` (default), `supersedes`, `related` (`core/workitem.go` `AddDependency`); same project only; no self-edge; a `blocks` blocker must be an execution ticket (`CORE-400 BLOCKER_NOT_EXECUTABLE`); non-`related` edges refuse cycles (`CORE-409 DEPENDENCY_CYCLE`). Only a **wrapped** blocker releases a `blocks` edge (`core/owner.go`, #161).
 - Parent/child and bundle binding rules: `wi-kind-contract.md#§2` (one nesting level, `PARENT_NOT_REGISTRY`, `HAS_CHILDREN_NO_BUNDLE`, bundle frozen at first claim).
 - Ready queue `GET /projects/{p}/ready-queue` (`core/queue.go`): `{project, items, running, paused, pending_bundles}`; `items` = queued ∧ `waiting_on` empty ∧ no unfinished `blocks` edge ∧ has a bundle ∧ inventory repos still exist; ordered priority (`urgent high normal low`) then `created_at`. No `blocked` segment.
+
+### 2.3 attrs: no execution state <!-- §2.3 -->
+
+`attrs` is a free JSON object written at create; aihub never stores workflow execution state in it.
+Create refuses these keys (at any nesting depth) with `CORE-400 EXECUTION_STATE_REJECTED` (`core/workitem.go`
+`executionStateKeys`): `current_step step_id step_attempt_id attempt review_round review_rounds
+review_verdict progress workflow_status steps rewind_stats budget_consumed command_count
+step_start_refs pending_question`. Execution state lives only in the capsule's `execution.json`
+(§7.3). The one daemon-written key is `blocked_seal` (§3.5).
 
 ## 3. Sessions and fencing <!-- §3 -->
 
@@ -158,7 +167,8 @@ health route. All paths under `/api/v1` except `/git/`.
 `-git-janitor-period` (1h, gc/repack of grown bare repos, `git/janitor.go`), `-machines-stale-after`
 (5m), `-version`. A fresh DB seeds admin `usr_root` and writes its key to a 0600 file in the data dir
 (`bootstrapAdmin`). A second process on the same data dir exits `CORE-508` (`service.lock`). SIGTERM
-drains for 10s. No startup schema migration: SQL moves only through `.polyforge/deploy.sh` with
+drains for 10s. SQLite (`core/store.go` `Open`): WAL, `foreign_keys(1)`, `busy_timeout(5000)`,
+`synchronous(FULL)`, one open connection (single writer). No startup schema migration: SQL moves only through `.polyforge/deploy.sh` with
 `deploy/sql/<tag>/` (`docs/upgrade.md`). Data dir: `aihub.db`, `memory/<project>/<mem>/memory.md`
 (+ `_redacted/`), `git/<wi>.git` (bare chain repos with the pre-receive hook, `git/repo.go`), `backups/`.
 Startup runs the memory reconcile in the background (§9). In production aihub runs as a docker
@@ -186,6 +196,7 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 | `CORE-409` | State conflict: `ALREADY_HELD NOT_CLAIMABLE DEPENDENCY_BLOCKED RACE_LOST IDEMPOTENCY_KEY_REUSED NOT_ATTACHABLE NOT_HELD NOT_RUNNING NOT_BLOCKED SESSION_HELD DEPENDENCY_CYCLE INVENTORY_REPO_GONE`; without a reason: cancel of a running WI, project already exists, state changed concurrently |
 | `CORE-410` | `TERMINAL_STATE` |
 | `CORE-500` | Untyped server error (default mapping) |
+| `CORE-507` | Admin backup `VACUUM INTO` failed |
 | `CORE-508` | Another aihub holds `service.lock` |
 | `MEM-400` | Bad memory input (empty `q`, bad frontmatter, client-supplied id) |
 | `MEM-403` | No write role; redact by a non-owner |
@@ -216,9 +227,7 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 | `DAEMON-516` | Re-claim capsule clone failed for a WI with published progress; local init refused |
 | `DAEMON-518` | Blocked WI continued on another daemon and the aihub head ≠ the sealed head |
 
-Registry hygiene (known, not fixed here): the memory package raises `MEM-400/409/413/500` as string
-literals and those constants have zero uses; `core/admin.go` raises the unregistered `CORE-507` when
-`VACUUM INTO` fails.
+`CORE-507` (`ErrCoreStorage`): the admin backup's `VACUUM INTO` failed (`core/admin.go`).
 
 ## 6. Daemon <!-- §6 -->
 
@@ -253,7 +262,7 @@ Socket: `--socket` > `PF_DAEMON_SOCKET` > cli.toml `daemon_socket` > `/run/polyf
 ### 6.2 Lifecycle <!-- §6.2 -->
 
 - **Start = `pf daemon ensure` only** (`daemon/ensure.go`). Called by `tools/install.sh`, the Claude SessionStart hook (`--timeout 15s`) and the pi `pf-chat` extension. Socket answers → exit 0. Refuses inside a step (`PF_WI_ID` set). `<data-dir>/ensure.lock` (flock) serializes callers; losers wait and answer by the socket. Canonical argv: `--config`, `-machine-id`, `-data-dir`, `-socket`, `-workflows-dir <data-dir>/release/current/workflows`.
-- **tmux loop** (`internal/polyforge/supervisor`): session `polyforge-daemon`; loop runs `nohup pf daemon …`, appends to `<data-dir>/daemon.log` (rotated at 10 MiB); exit 0 → loop ends; **exit 78** → loop ends ("needs an operator fix"); anything else → restart after 5s. No tmux → one unsupervised start with a warning. `pf doctor` also accepts a self-managed `polyforge-daemon.service`.
+- **tmux loop** (loop script in `daemon/ensure.go`; `internal/polyforge/supervisor` only names the session and the systemd unit): session `polyforge-daemon`; loop runs `nohup pf daemon …`, appends to `<data-dir>/daemon.log` (rotated at 10 MiB); exit 0 → loop ends; **exit 78** → loop ends ("needs an operator fix"); anything else → restart after 5s. No tmux → one unsupervised start with a warning. `pf doctor` also accepts a self-managed `polyforge-daemon.service`.
 - **Exit 78** = `ExitNeedsOperator` (`daemon/main.go`): startup failure only an operator can fix — config, identity mismatch, no `[workspace]` mapping, workspace dirs, on-disk state, failed restart reconciliation. Fix, then `pf daemon ensure`. After a machine/container reboot the daemon is down until the next
   interactive harness session runs ensure (auto-pull idles meanwhile); the skill retries an
   execution-plane verb once after `pf daemon ensure` when the daemon is unreachable.
@@ -322,13 +331,15 @@ read — injected into the prompt and checked record-only (`driver/outputschema.
 - `gate_failed` → bounded rewind (`driver/transition.go` `applyGateFailLocked`): no `on_fail` → `failed_gate`; a bound hit → `failed_rewind_exhausted`; else `[target, gate)` archived as `gate_fail_rewind` and reset, the verdict text delivered to the target as `pending_rewind_input`, candidate pointers reset.
 - `needs_input` → question stored in `execution.json`; a human answers with `pf answer` → daemon `/jobs/{wi}/answer` → driver bridge (`applyAnswerLocked`). Never answered by an agent (UDS step-origin refusal).
 - `incomplete` → workflow `blocked`. Workflow statuses: `running completed failed_gate failed_rewind_exhausted blocked`; step statuses `pending in_progress done` (`common/capsule/capsule.go`). A terminal workflow closes the WI (completed → `wrapped`, failed → `failed`, blocked → hub `blocked`) after a final seal push; if that push fails the close degrades to blocked (`v2-converge.md#§D`).
+- `execution.json` (`capsule.Execution`, the driver is its single writer): `capsule_id`, `work_item_id`, `current_step`, `workflow_status`, `steps` (per id: `status`, `model`, `effort`, `output`, `step_started_at`, `budget_consumed`, `attempts[]` with `cause` `accepted`/`gate_fail_rewind`/`infra_failure` and `failure_cause`, `pending_question`, `answers`, `answer_base`, `pending_rewind_input`, `supervision` counters and relaxed bounds, `next_dispatch`), `review_rounds`, `rewind_stats`, `budget_consumed`, `updated_at`, `version` (bumped on every write; the push loop keys on it), `blocked_reason` (set when the driver blocks on its own authority: host-class fault, failure bound, `result_invalid`).
 
 ### 7.4 Context between steps <!-- §7.4 -->
 
 `inherit` steps get the body of the nearest earlier `handoff: true` step's `artifacts/handoff-<id>.md`
 (producer must be done; a missing file only omits the section); `fresh` steps get none
 (`driver/spawn.go`). The claim-time memory snapshot `runtime-state/recalled-memories.json` is rendered
-into every step prompt as non-binding history (§9). Retry shape: first retry resumes the transcript,
+into every step prompt as non-binding history (§9) — only when it has items; at most 400 runes per
+excerpt and 6000 bytes per section (`driver/spawn.go`). Retry shape: first retry resumes the transcript,
 later retries start fresh with the old transcript as read-only reference (`v2-converge.md#§2.3`).
 
 ### 7.5 Model candidates <!-- §7.5 -->
@@ -344,6 +355,8 @@ later retries start fresh with the old transcript as read-only reference (`v2-co
 | argv | `pi --mode rpc --no-skills --no-context-files --no-prompt-templates [--session <transcript>] [--model] [--thinking]` | `claude -p --bare --output-format stream-json --verbose --include-partial-messages --session-id <uuid>`/`--resume <uuid> [--model] [--effort] --tools/--allowedTools Bash,Read,Edit,Write,Glob,Grep,TodoWrite,Agent --permission-mode dontAsk --strict-mcp-config --disable-slash-commands …`; prompt on stdin |
 | env | `PF_WI_ID`, `PF_DAEMON_ID`, `PI_CODING_AGENT_DIR=<harness-root>/step-agent`, `PI_CODING_AGENT_SESSION_DIR=<harness-root>/step-agent-sessions`; all other `PF_*` stripped | `CLAUDE_CONFIG_DIR=<harness-root>/claude-config`, `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, `DISABLE_AUTOUPDATER=1`, …; no credential injected |
 | transcript | live file located in the session store, copied verbatim to `session/session-<token>.jsonl` at commit boundaries (`runtime/pitranscript.go`) | `<claude-config>/projects/<dashed cwd>/<uuid>.jsonl`; resume only if it exists |
+
+Provider errors (pi, `supervise/pi.go`): a `message_end`/`turn_end` whose message has `stopReason=="error"` is an error signal; an `agent_end` whose last assistant message ended in error and `willRetry=false` ends the turn as failed (rule ① / D7 classification in `v2-converge.md#§2.3`); `willRetry=true` means pi retries itself and the turn is not judged.
 
 `<harness-root>` = `[daemon] harness_root`, default the data dir. The pi step-agent dir is a minimal
 copy of the operator agent dir (`auth.json`, `models.json`, `agents/`, `extensions/subagent/`; never
@@ -373,8 +386,8 @@ index (`memory_fts`). Write = temp file + fsync → one transaction (row + FTS) 
 background reconcile (`RebuildIndex`) makes rows/index match files (file wins). Search needs `q`;
 tokens of ≥3 runes use FTS, shorter ones a substring scan (`Store.Search`). CLI (`cli/verbs_aihub.go`): `pf recall --project P <query>` (project must
 be mapped), `pf remember --project P --type T <content|-|@file>`, `pf memory show <id>`. At claim the
-daemon writes `runtime-state/recalled-memories.json` (WI goal+content query, top 10, 1200-rune
-excerpts; empty list + notice on error; never fails the claim — `runtime/recall.go`,
+daemon writes `runtime-state/recalled-memories.json` (the WI's goal+content is the query, top 10,
+1200-rune excerpts; empty list + notice on error or no hits; never fails the claim — `runtime/recall.go`,
 `daemon/memface.go`). `pf backup` is a SQLite-only snapshot (§4.1).
 
 ## 10. Install, release, deploy <!-- §10 -->
