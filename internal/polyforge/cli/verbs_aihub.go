@@ -735,8 +735,7 @@ func recallTypeFilter(memType string) (string, error) {
 
 // ---------------------------------------------------------------------------
 // remember — memory write face (the v1 CLI's read verb is `recall`; this
-// is its missing write counterpart — the hole the F6 lane closes on the
-// human side too).
+// is its write counterpart on the human side).
 // ---------------------------------------------------------------------------
 
 var cmdRemember = &Command{

@@ -1,7 +1,7 @@
 package driver
 
 // deliver_facts.go: the merge-rule facts the driver derives itself
-// (polyforge#166 review B1) instead of trusting the deliver step's
+// (polyforge#166) instead of trusting the deliver step's
 // self-report, which a crash or restart mid-deliver can make wrong (a
 // re-dispatch sees "Already up to date" and no longer knows that an
 // earlier dispatch merged — or hand-resolved — anything).

@@ -1,6 +1,6 @@
 package core
 
-// session.go — the v1.5 session-id ownership model (Lane A):
+// session.go — the v1.5 session-id ownership model:
 // docs/design/polyforge-vnext/reference.md §3 (the archived
 // v1.5-api-contract.md / v1.5-session-model.md hold the original rulings;
 // B1 pre-claim journal is client-side; B3 identity/credential split and
@@ -25,8 +25,7 @@ package core
 //     cleared session, excluded from the claim gate).
 //   - Pause: the M3 pause transition for session-held WIs (session KEPT,
 //     status=paused, clean_pause set), reached as session-end's 4th
-//     verdict ("paused", the merge amend) — the deleted legacy
-//     /end-generation route no longer carries it.
+//     verdict ("paused").
 //
 // The git push credential's session path (fencing-on-use, §1.6) lives in
 // owner.go's CheckSessionCredential and validates against the SAME stored
@@ -821,7 +820,7 @@ func (m *SessionManager) End(wiID string, req api.SessionEndRequest, callerIdent
 	switch req.Status {
 	case api.StatusWrapped, api.StatusFailed, api.StatusBlocked:
 	case api.StatusPaused:
-		// Merge amend (Lane B/C complaint): "paused" routes to the M3
+		// "paused" routes to the M3
 		// pause transition — the session is KEPT (restart attaches), the
 		// clean_pause flag rides the same atomic fenced UPDATE. Only the
 		// three terminal verdicts clear the session row.

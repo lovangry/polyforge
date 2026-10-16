@@ -134,9 +134,8 @@ func nullable(v *string) string {
 
 // WIView is one rendered WI record: the wire work item plus the v1.5
 // session audit fields, decoded ADDITIVELY from the raw server body
-// (api.WorkItem does not carry them until Lane A's server lands; the
-// additive decode means the CLI renders them the moment they appear,
-// and "-" before that). Rendering uses the session fingerprint — the
+// (api.WorkItem does not carry them; an absent field renders "-").
+// Rendering uses the session fingerprint — the
 // PUBLIC handle — never the secret or its hash.
 type WIView struct {
 	api.WorkItem
