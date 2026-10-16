@@ -626,7 +626,8 @@ derive from one root.
   transcript sync, so the flag was renamed instead: the new daemon
   refuses the old value with the unknown-flag error.
 
-- `--harness-root` (env `POLYFORGE_HARNESS_ROOT`, default
+- `--harness-root` (env `POLYFORGE_HARNESS_ROOT` — removed since, see
+  "Daemon knobs move into cli.toml" at the end; default
   `<data-dir>`, higher than DataDir) is now the PARENT root of the
   three harness dirs:
 
@@ -1154,3 +1155,46 @@ before polyforge#175 or #144 fails it loudly instead of converting it:
 - capsules materialized by older daemons keep their (now unused)
   `agents/` directory and the marker's `adapters` key; both are ignored
   (decision 2026-10-16 G4).
+
+## Daemon knobs move into cli.toml (decision 2026-10-16 G2)
+
+The daemon is started only by `pf daemon ensure`, whose argv used to be
+fixed, so the daemon's tuning flags and `POLYFORGE_*` variables never
+reached a production daemon. Five knobs now live in a `[daemon]` table of
+`cli.toml`, and ensure passes each key that is set to the daemon argv
+verbatim:
+
+```toml
+[daemon]                              # after the flat keys
+step_timeout = "45m"                  # --step-timeout (T), Go duration > 0
+stall_window = "10m"                  # --stall-window (N), non-zero; negative disables
+harness_root = "/srv/polyforge/h"     # --harness-root, absolute path
+operator_agent_dir = "/home/u/.pi/agent"  # --operator-agent-dir, absolute path
+max_concurrent_jobs = 6               # --max-concurrent-jobs, integer >= 1
+```
+
+- Every `pf` command validates the table on load: a bad value, an unknown
+  key or a duplicate refuses with `config <file>: line N: [daemon] <key>:
+  <reason>`, and `pf doctor`'s `config` row shows it. Nothing else in
+  the file changed.
+- A change applies at the next daemon start: `pf ops shutdown`, wait
+  until `pf ops status` fails, `pf daemon ensure`.
+- **`max_concurrent_jobs` is the first-boot cap only.** The daemon
+  persists its cap in `<data-dir>/daemon-state.json` on `pf ops max N` and
+  on every graceful shutdown, and a persisted cap wins over the flag. On
+  a machine whose daemon has already run, the table value has no effect;
+  use `pf ops max N` there.
+- **Removed environment fallbacks**: `POLYFORGE_MACHINE_ID`,
+  `POLYFORGE_DISPLAY_NAME`, `POLYFORGE_HARNESS_ROOT`,
+  `POLYFORGE_OPERATOR_AGENT_DIR`, `POLYFORGE_RECALL_TOPK`. They only
+  ever worked when the tmux server happened to carry them. A machine
+  that relied on `POLYFORGE_HARNESS_ROOT` or
+  `POLYFORGE_OPERATOR_AGENT_DIR` must move the value into the table
+  **before** restarting the daemon, or the daemon falls back to
+  `<data-dir>` / `~/.pi/agent`. `POLYFORGE_DATA_DIR` stays (ensure and the
+  daemon both read it).
+- The other daemon flags (`--silence-window`, `--tool-window`,
+  `--model-error-grace`, `--revalidate-every`, `--heartbeat-every`,
+  `--pi-bin`, `--git-remote-base`, `--recall-topk`, `--display-name`,
+  `--auto`) stay, documented as test/dev-only: nothing in production
+  sets them.

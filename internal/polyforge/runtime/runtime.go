@@ -78,8 +78,8 @@ type Config struct {
 	// agent dir), <harness-root>/step-agent-sessions (the pi steps'
 	// session store) and <harness-root>/claude-config (claude's config
 	// dir: settings.json — the single credential authority layer —
-	// plus projects/ and debug/). Resolved as --harness-root >
-	// POLYFORGE_HARNESS_ROOT > DataDir; the Dir() derivations and
+	// plus projects/ and debug/). Resolved as --harness-root (cli.toml
+	// [daemon] harness_root via ensure) > DataDir; the Dir() derivations and
 	// stepagentdir.go hold the map.
 	HarnessRoot string
 	// OperatorAgentDir is the SOURCE of the dedicated step agent

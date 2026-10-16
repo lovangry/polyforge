@@ -172,7 +172,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 **禁止 step agent 使用 harness 后台任务，是 harness 适配层的责任，不是写进提示词的纪律。** 后台任务会让一个步骤在它的派生进程之外留下活动，监督面（判死、step 结束、派生计数）全部失真；靠"规则里写了不许用"约束的只是诚实的 agent。
 
-pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<harness-root>/step-agent/`（`--harness-root` / `POLYFORGE_HARNESS_ROOT`，缺省 `<data-dir>`；polyforge#171），派生每个 step 进程时注入 `PI_CODING_AGENT_DIR=<harness-root>/step-agent`（会话另置于 `PI_CODING_AGENT_SESSION_DIR=<harness-root>/step-agent-sessions/`，实时 transcript 定位器跟着同一个根走）。该目录是 operator agent 目录（`--operator-agent-dir` / `POLYFORGE_OPERATOR_AGENT_DIR`，缺省 `~/.pi/agent`；配置了却没有可读的 `auth.json` 即拒绝启动）的**最小快照**——只有 `auth.json`（模型服务凭证）、`models.json`（模型服务配置，保留源文件权限）、`agents/`（子 agent 定义）、`extensions/subagent/`（子 agent **工具**本身），**没有 `settings.json`**，而用户级 package（例如提供后台任务工具的 `npm:pi-background-tasks`）正是在 `settings.json` 里声明的：没有声明就没有加载，后台任务工具对 step agent **机械不可见**，与提示词无关。
+pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<harness-root>/step-agent/`（`--harness-root`，生产经 cli.toml `[daemon] harness_root` 由 ensure 传入，缺省 `<data-dir>`；polyforge#171；env 回退已于 2026-10-16 G2 删除），派生每个 step 进程时注入 `PI_CODING_AGENT_DIR=<harness-root>/step-agent`（会话另置于 `PI_CODING_AGENT_SESSION_DIR=<harness-root>/step-agent-sessions/`，实时 transcript 定位器跟着同一个根走）。该目录是 operator agent 目录（`--operator-agent-dir`，生产经 cli.toml `[daemon] operator_agent_dir` 传入，缺省 `~/.pi/agent`；配置了却没有可读的 `auth.json` 即拒绝启动）的**最小快照**——只有 `auth.json`（模型服务凭证）、`models.json`（模型服务配置，保留源文件权限）、`agents/`（子 agent 定义）、`extensions/subagent/`（子 agent **工具**本身），**没有 `settings.json`**，而用户级 package（例如提供后台任务工具的 `npm:pi-background-tasks`）正是在 `settings.json` 里声明的：没有声明就没有加载，后台任务工具对 step agent **机械不可见**，与提示词无关。
 
 - **子 agent 工具如何送达**：它不是 pi 内建工具，而是 operator agent 目录下的扩展 `extensions/subagent/`；pi 只从 `<agent 目录>/extensions/` 自动发现全局扩展（`resource-loader` / `package-manager` 的全局 extensions 根）。所以快照**恰好**拷贝 `extensions/subagent/` 这一个子目录，其余扩展一律不带（例如 `extensions/polyforge` 是交互会话用的），`settings.json` 与 packages 永远不带。
 - 拷贝而非链接：快照不跟随 operator 后续改动（包括全局重装），也没有任何符号链接把专用目录变成整个 operator 目录的窗口（树内符号链接跳过不拷）。**每次派生前**只刷新白名单成员（源文件大小+mtime 变化即重拷，源里没了就删）；清除白名单以外的条目**只在 daemon 启动时**做——那时本 daemon 没有存活的 step 进程，不会把文件从运行中的 step 进程脚下抽走。凭证不可读 = 大声拒绝派生，绝不降级运行。
@@ -566,7 +566,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 
 **规则 ① 与 T 的后续修订（集成分支）**：规则 ① 扩展到正常结束的轮次（`ended_without_result`，见 2.3 表）；T 取 `max(3 × wall_minutes, 全局默认)`（见 2.4）。
 
-**阈值配置名**：旗标 `--silence-window`（X）、`--tool-window`（Y）、`--step-timeout`（T）、`--stall-window`（N）、`--model-error-grace`（规则 ① 宽限）；step 级覆盖在 workflow.md 只剩 `budget.wall_minutes`（T）——polyforge#147 C5 删除了从未被 bundle 使用的 `silence_minutes` / `tool_minutes` 键，X、Y 只有全局默认。旧旗标 `--hang-window/--idle-window/--probe-timeout/--wall-window` 已删，传入即解析失败。
+**阈值配置名**：旗标 `--silence-window`（X）、`--tool-window`（Y）、`--step-timeout`（T）、`--stall-window`（N）、`--model-error-grace`（规则 ① 宽限）；step 级覆盖在 workflow.md 只剩 `budget.wall_minutes`（T）——polyforge#147 C5 删除了从未被 bundle 使用的 `silence_minutes` / `tool_minutes` 键，X、Y 只有全局默认。旧旗标 `--hang-window/--idle-window/--probe-timeout/--wall-window` 已删，传入即解析失败。生产中 daemon 只经 `pf daemon ensure` 启动：T、N 由 cli.toml `[daemon]` 表的 `step_timeout` / `stall_window` 经 ensure 原样传入（2026-10-16 G2，同表还有 `harness_root`、`operator_agent_dir`、`max_concurrent_jobs`——后者只是首次启动的初值，此后持久化的 `pf ops max` 优先）；X、Y、规则 ① 宽限及其余旗标只供测试/开发。
 
 **与正文的实现差异（均为补充，不改契约语义）**
 - 事实集合多一条 `exec_committed{version}`：事件触发推送需要"driver 提交了新 Version"的提示，否则只能回到轮询 `execution.json`。

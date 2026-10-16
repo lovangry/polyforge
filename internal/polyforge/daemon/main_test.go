@@ -3,8 +3,8 @@ package daemon
 // main_test.go: #171 additions plus the TestMain env isolation. The
 // harness-root tests pin the polyforge#171 launch surface: the former
 // --harness-sessions-root fails the boot at flag parsing (unknown flag —
-// the loud failure, never a silent path move), the --harness-root > env
-// resolution order, and the pass-through into the assembled config (the
+// the loud failure, never a silent path move) and the --harness-root
+// pass-through into the assembled config (the
 // runtime derives the three harness dirs from it; the default stays the
 // data dir).
 
@@ -37,20 +37,8 @@ func TestOldSessionsRootFlagRefuses(t *testing.T) {
 	}
 }
 
-func TestResolveHarnessRootOrder(t *testing.T) {
-	if got := resolveHarnessRoot("/flag", "/env"); got != "/flag" {
-		t.Fatalf("flag %q lost to env %q", got, "/flag")
-	}
-	if got := resolveHarnessRoot("", "/env"); got != "/env" {
-		t.Fatalf("env fallback %q, want /env", got)
-	}
-	if got := resolveHarnessRoot("", ""); got != "" {
-		t.Fatalf("no override must leave the default path, got %q", got)
-	}
-}
-
 // TestHarnessRootPassThrough: the assembled daemon config carries the
-// flag/env override (and derives the default from the data dir when no
+// --harness-root override (and derives the default from the data dir when no
 // override is set) — the runtime's three harness dirs are derived off it.
 func TestHarnessRootPassThrough(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "cli.toml")

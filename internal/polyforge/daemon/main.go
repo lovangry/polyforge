@@ -1,10 +1,16 @@
 package daemon
 
 // main.go: the `pf daemon` process entry. Assembles the daemon Config
-// from flags, environment (POLYFORGE_*), the shared CLI config chain
-// (PF_SERVER / PF_API_KEY / PF_DAEMON_SOCKET) and the documented
+// from flags, the shared CLI config chain (PF_SERVER / PF_API_KEY /
+// PF_DAEMON_SOCKET, claude_bin), POLYFORGE_DATA_DIR and the documented
 // defaults, then runs the daemon with SIGTERM/SIGINT wired to the
 // graceful shutdown sequence.
+//
+// Production starts the daemon only through `pf daemon ensure`, whose
+// argv carries the fixed launch flags plus the cli.toml [daemon] table
+// (step-timeout, stall-window, harness-root, operator-agent-dir,
+// max-concurrent-jobs; decision 2026-10-16 G2). Every other flag below is
+// test/dev-only: nothing in production sets it.
 //
 // polyforge#113: there is NO launch-time workspace and NO project scope
 // anymore. The [workspace."<path>"] mapping in the shared config (the
@@ -24,7 +30,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -47,28 +52,29 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	socket := fs.String("socket", "", "unix socket path (env PF_DAEMON_SOCKET; default /run/polyforge.sock)")
 	server := fs.String("server", "", "aihub base URL (env PF_SERVER)")
 	apiKey := fs.String("api-key", "", "machine aihub api key (env PF_API_KEY)")
-	machineID := fs.String("machine-id", "", "daemon id (env POLYFORGE_MACHINE_ID; default m-<hostname>); recorded in <data-dir>/daemon-id on first start, which then wins — a differing value refuses to start")
-	displayName := fs.String("display-name", "", "daemon display name shown by pf ops status (env POLYFORGE_DISPLAY_NAME; default hostname)")
+	machineID := fs.String("machine-id", "", "daemon id (default m-<hostname>); recorded in <data-dir>/daemon-id on first start, which then wins — a differing value refuses to start")
+	displayName := fs.String("display-name", "", "test/dev-only: daemon display name shown by pf ops status (default hostname)")
 	dataDir := fs.String("data-dir", "", "daemon data dir (env POLYFORGE_DATA_DIR)")
 	workflowsDir := fs.String("workflows-dir", "", "workflows/ checkout dir (default ./workflows)")
-	piBin := fs.String("pi-bin", "", "harness binary (default pi)")
+	piBin := fs.String("pi-bin", "", "test/dev-only: harness binary (default pi)")
 	claudeBin := fs.String("claude-bin", "", "Claude Code binary for steps whose harness is claude (config claude_bin; default claude)")
-	harnessRoot := fs.String("harness-root", "", "parent root of the step harness state dirs: <harness-root>/step-agent (dedicated step agent dir), /step-agent-sessions (pi sessions) and /claude-config (claude config dir: settings.json, projects/, debug/) (env POLYFORGE_HARNESS_ROOT; default <data-dir>). polyforge#171 unified the three dirs under one root; the former --harness-sessions-root (the pi sessions dir itself) was renamed so an old deployment fails loudly instead of silently moving its harness state")
-	operatorAgentDir := fs.String("operator-agent-dir", "", "SOURCE of the dedicated step agent directory's minimal set — model service credentials, model configuration and subagent definitions are copied from here into <harness-root>/step-agent (env POLYFORGE_OPERATOR_AGENT_DIR; default ~/.pi/agent). A configured source without a readable auth.json refuses the start")
-	gitRemoteBase := fs.String("git-remote-base", "", "aihub bare-repo base URL (default <server>/git)")
-	maxConcurrent := fs.Int("max-concurrent-jobs", 0, "max concurrent jobs (default 4)")
-	recallTopK := fs.Int("recall-topk", 0, "claim-time memory snapshot hit count (env POLYFORGE_RECALL_TOPK; default 10, max 50)")
-	auto := fs.Bool("auto", false, "auto-pull: the daemon claims ready-queue work itself (default off; unset keeps the persisted switch)")
-	// Supervision bounds (v2-converge 2.4): Go duration strings, flags
-	// only (no env fallbacks). Omitted or zero keeps the documented
-	// default; a step may override them in workflow.md.
-	silenceWindow := fs.Duration("silence-window", 0, "X: no real work signal after dispatch, or no model output while waiting for the model, before the step is judged dead (default 10m for token-level harnesses, 30m for message-level)")
-	toolWindow := fs.Duration("tool-window", 0, "Y: one tool running longer than this is judged hung (default 30m)")
-	stepTimeout := fs.Duration("step-timeout", 0, "T: cumulative step runtime bound across its dispatches (default 90m; a step's budget.wall_minutes is an estimate, not an override: that step's T = max(3 x wall_minutes, this value))")
-	stallWindow := fs.Duration("stall-window", 0, "N: the driver between steps (not waiting on a human) for longer than this is judged stalled (default 10m; negative disables)")
-	modelErrorGrace := fs.Duration("model-error-grace", 0, "grace after a turn ends on a model error before the step is judged dead (default 1m)")
-	revalidateEvery := fs.Duration("revalidate-every", 0, "M4 periodic session revalidation cadence (0 = default 5m; negative disables)")
-	heartbeatEvery := fs.Duration("heartbeat-every", 60*time.Second, "machines heartbeat cadence (0 = disabled)")
+	harnessRoot := fs.String("harness-root", "", "parent root of the step harness state dirs: <harness-root>/step-agent (dedicated step agent dir), /step-agent-sessions (pi sessions) and /claude-config (claude config dir: settings.json, projects/, debug/) (cli.toml [daemon] harness_root; default <data-dir>). polyforge#171 unified the three dirs under one root; the former --harness-sessions-root (the pi sessions dir itself) was renamed so an old deployment fails loudly instead of silently moving its harness state")
+	operatorAgentDir := fs.String("operator-agent-dir", "", "SOURCE of the dedicated step agent directory's minimal set — model service credentials, model configuration and subagent definitions are copied from here into <harness-root>/step-agent (cli.toml [daemon] operator_agent_dir; default ~/.pi/agent). A configured source without a readable auth.json refuses the start")
+	gitRemoteBase := fs.String("git-remote-base", "", "test/dev-only: aihub bare-repo base URL (default <server>/git)")
+	maxConcurrent := fs.Int("max-concurrent-jobs", 0, "job cap at first boot (cli.toml [daemon] max_concurrent_jobs; default 4); the persisted pf ops max setting wins once it exists")
+	recallTopK := fs.Int("recall-topk", 0, "test/dev-only: claim-time memory snapshot hit count (default 10, max 50)")
+	auto := fs.Bool("auto", false, "test/dev-only (production: pf ops auto on|off): auto-pull: the daemon claims ready-queue work itself (default off; unset keeps the persisted switch)")
+	// Supervision bounds (v2-converge 2.4): Go duration strings, no env
+	// fallbacks. Omitted or zero keeps the documented default. Production
+	// sets T and N through cli.toml [daemon]; X, Y, the model-error grace
+	// and the revalidation cadence are test/dev-only.
+	silenceWindow := fs.Duration("silence-window", 0, "test/dev-only: X: no real work signal after dispatch, or no model output while waiting for the model, before the step is judged dead (default 10m for token-level harnesses, 30m for message-level)")
+	toolWindow := fs.Duration("tool-window", 0, "test/dev-only: Y: one tool running longer than this is judged hung (default 30m)")
+	stepTimeout := fs.Duration("step-timeout", 0, "T: cumulative step runtime bound across its dispatches (cli.toml [daemon] step_timeout; default 90m; a step's budget.wall_minutes is an estimate, not an override: that step's T = max(3 x wall_minutes, this value))")
+	stallWindow := fs.Duration("stall-window", 0, "N: the driver between steps (not waiting on a human) for longer than this is judged stalled (cli.toml [daemon] stall_window; default 10m; negative disables)")
+	modelErrorGrace := fs.Duration("model-error-grace", 0, "test/dev-only: grace after a turn ends on a model error before the step is judged dead (default 1m)")
+	revalidateEvery := fs.Duration("revalidate-every", 0, "test/dev-only: M4 periodic session revalidation cadence (0 = default 5m; negative disables)")
+	heartbeatEvery := fs.Duration("heartbeat-every", 60*time.Second, "test/dev-only: machines heartbeat cadence (0 = disabled)")
 	if err := fs.Parse(argv); err != nil {
 		return 2
 	}
@@ -116,10 +122,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if *dataDir == "" {
 		*dataDir = base
 	}
-	if *machineID == "" {
-		*machineID = os.Getenv("POLYFORGE_MACHINE_ID")
-	}
-	// v2 identity: <data-dir>/daemon-id is THE id once written; a flag/env
+	// v2 identity: <data-dir>/daemon-id is THE id once written; a flag
 	// value that disagrees refuses to start (never silently switch).
 	explicitID := *machineID != ""
 	if *machineID == "" {
@@ -133,9 +136,6 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	*machineID = id
 	if *displayName == "" {
-		*displayName = os.Getenv("POLYFORGE_DISPLAY_NAME")
-	}
-	if *displayName == "" {
 		*displayName, _ = os.Hostname()
 	}
 	if *workflowsDir == "" {
@@ -144,19 +144,8 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if abs, err := filepath.Abs(*workflowsDir); err == nil {
 		*workflowsDir = abs // GET /status reports it; pf doctor reads by it
 	}
-	*harnessRoot = resolveHarnessRoot(*harnessRoot, os.Getenv("POLYFORGE_HARNESS_ROOT"))
-	if *operatorAgentDir == "" {
-		*operatorAgentDir = os.Getenv("POLYFORGE_OPERATOR_AGENT_DIR")
-	}
 	if *gitRemoteBase == "" {
 		*gitRemoteBase = strings.TrimSuffix(*server, "/") + "/git"
-	}
-	if *recallTopK == 0 {
-		if v := os.Getenv("POLYFORGE_RECALL_TOPK"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil {
-				*recallTopK = n
-			}
-		}
 	}
 
 	cfg := Config{
@@ -241,17 +230,6 @@ type needsOperatorError struct{ err error }
 
 func (e *needsOperatorError) Error() string { return e.err.Error() }
 func (e *needsOperatorError) Unwrap() error { return e.err }
-
-// resolveHarnessRoot is the polyforge#171 resolution order for the
-// harness-root override: the --harness-root flag wins over the
-// POLYFORGE_HARNESS_ROOT env. An empty return means the documented
-// default (<data-dir>) applies — filled by the runtime's fill().
-func resolveHarnessRoot(flagVal, envVal string) string {
-	if flagVal != "" {
-		return flagVal
-	}
-	return envVal
-}
 
 // resolveAuto maps -auto to the initial auto switch (nil = unspecified:
 // the persisted switch wins).

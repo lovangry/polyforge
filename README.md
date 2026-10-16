@@ -487,30 +487,65 @@ with every inherited `GIT_*` variable stripped. So `http.proxy`,
 is stripped too, an aihub behind an internal CA needs that CA in the system
 trust store. The capsule commit itself still reads the global config, so
 `user.name` / `user.email` must be set for the daemon user; task-repo git
-(inside `repos/<name>`) also still uses the global config. Every setting is a flag; where an environment variable is listed
-the flag wins over it, and the shared CLI config file
-(`~/.config/polyforge/cli.toml`, or `--config`) is the last fallback for
-the `PF_*` entries.
+(inside `repos/<name>`) also still uses the global config.
 
-| Flag | Env | Default | Controls |
+Production starts the daemon only through `pf daemon ensure`, so a flag
+counts in production only if ensure passes it. Ensure passes the fixed
+launch flags (`--config`, `-machine-id`, `-data-dir`, `-socket`,
+`-workflows-dir`) and, verbatim, every key set in the `[daemon]` table of
+`cli.toml` (decision 2026-10-16 G2):
+
+```toml
+# ~/.config/polyforge/cli.toml — after the flat keys (every key below a
+# [daemon] header belongs to the table)
+[daemon]
+step_timeout = "45m"                 # --step-timeout: Go duration, > 0
+stall_window = "10m"                 # --stall-window: Go duration, non-zero; negative disables
+harness_root = "/srv/polyforge/h"    # --harness-root: absolute path
+operator_agent_dir = "/home/u/.pi/agent"  # --operator-agent-dir: absolute path
+max_concurrent_jobs = 6              # --max-concurrent-jobs: unquoted integer >= 1
+```
+
+Every key is optional (absent = the daemon default). The file is
+validated on load by every `pf` command: a bad value, an unknown key or a
+duplicate is refused naming the file, the line and the key
+(`config …: line N: [daemon] step_timeout: "soon" is not a Go duration`),
+and `pf daemon ensure` starts nothing. Edit the table, then restart the
+daemon (`pf ops shutdown`, wait, `pf daemon ensure`) for it to apply.
+
+`max_concurrent_jobs` is the job cap at the daemon's FIRST boot only: the
+daemon persists its cap in `<data-dir>/daemon-state.json` (on `pf ops max N`
+and on every graceful shutdown), and a persisted cap wins over the flag
+at every later boot. To change the cap of a daemon that has run before,
+use `pf ops max N` (it applies at once and persists).
+
+Every other flag is test/dev-only: nothing in production sets it, and it
+is listed for running `pf daemon` by hand. The only environment variable
+the daemon reads besides the `PF_*` CLI ones is `POLYFORGE_DATA_DIR` (the
+`--data-dir` default; ensure reads it too). The former
+`POLYFORGE_MACHINE_ID`, `POLYFORGE_DISPLAY_NAME`, `POLYFORGE_HARNESS_ROOT`,
+`POLYFORGE_OPERATOR_AGENT_DIR` and `POLYFORGE_RECALL_TOPK` fallbacks are
+gone; a value in the environment is ignored.
+
+| Flag | Production source | Default | Controls |
 | --- | --- | --- | --- |
-| `--config PATH` | — | `~/.config/polyforge/cli.toml` | Shared CLI config file read for the `PF_*` settings. |
-| `--socket PATH` | `PF_DAEMON_SOCKET` | `/run/polyforge.sock` | Unix socket the daemon's UDS HTTP face listens on. |
-| `--server URL` | `PF_SERVER` | — | aihub base URL the daemon talks to. |
-| `--api-key KEY` | `PF_API_KEY` | — | Machine aihub credential (never reaches an agent env). |
-| `--machine-id ID` | `POLYFORGE_MACHINE_ID` | `m-<hostname>` | Machine identity claims and leases are recorded under; recorded in `<data-dir>/daemon-id` on first start, after which that file wins (a differing value refuses to start). |
-| `--display-name NAME` | `POLYFORGE_DISPLAY_NAME` | hostname | Daemon display name shown by `pf ops status`. |
-| `--data-dir DIR` | `POLYFORGE_DATA_DIR` | `~/.local/share/polyforge` | Daemon state, events log and derived data. |
-| `--workflows-dir DIR` | — | `./workflows` | Workflow-bundle checkout the in-process Go driver loads step definitions from (`pf daemon ensure` passes `<data-dir>/release/current/workflows`). |
-| `--pi-bin PATH` | — | `pi` | Harness binary the agent processes are derived from. |
-| `--claude-bin PATH` | — (config `claude_bin`) | `claude` | Claude Code binary for steps whose harness is `claude` (run as `claude -p --bare`). The daemon never manages its credentials: the `<harness-root>/claude-config/settings.json` env block is the authority layer. |
-| `--operator-agent-dir DIR` | `POLYFORGE_OPERATOR_AGENT_DIR` | `~/.pi/agent` | SOURCE of the dedicated step agent dir: the daemon copies the minimal set (`auth.json`, `models.json`, `agents/`, `extensions/subagent/`) from here into `<harness-root>/step-agent`, and every pi step runs against that copy — the operator's own packages and settings never reach a step. A configured source without a readable `auth.json` refuses the start. |
-| `--harness-root DIR` | `POLYFORGE_HARNESS_ROOT` | `<data-dir>` | Parent root of the step harness dirs: `<DIR>/step-agent` (dedicated agent dir), `/step-agent-sessions` (pi sessions) and `/claude-config` (claude config dir; its settings.json env block is the credential authority layer). The former `--harness-sessions-root` was renamed — old deployments fail loudly at startup. |
-| `--git-remote-base URL` | — | `<server>/git` | aihub bare-repo base URL for the capsule revision chain. |
-| `--max-concurrent-jobs N` | — | `4` | Cap on concurrently running jobs (also `pf ops max N`). |
-| `--recall-topk N` | `POLYFORGE_RECALL_TOPK` | `10` (max 50) | Claim-time memory snapshot hit count. |
-| `--auto` | — | off | Auto-pull: the daemon also claims ready-queue work itself; an explicit `--auto` / `--auto=false` overrides the persisted switch (also `pf ops auto on\|off`). |
-| `--heartbeat-every D` | — | `60s` | Machines heartbeat cadence (`0` disables). |
+| `--config PATH` | ensure | `~/.config/polyforge/cli.toml` | Shared CLI config file: the `PF_*` fallbacks, `claude_bin` and the `[workspace]` mapping. |
+| `--socket PATH` | ensure (`daemon_socket` / `PF_DAEMON_SOCKET`) | `/run/polyforge.sock` | Unix socket the daemon's UDS HTTP face listens on. |
+| `--server URL` | `server` / `PF_SERVER` | — | aihub base URL the daemon talks to. |
+| `--api-key KEY` | `api_key` / `PF_API_KEY` | — | Machine aihub credential (never reaches an agent env). |
+| `--machine-id ID` | ensure (recorded id, else `m-<short hostname>`) | `m-<hostname>` | Machine identity claims and leases are recorded under; recorded in `<data-dir>/daemon-id` on first start, after which that file wins (a differing value refuses to start). |
+| `--data-dir DIR` | ensure (`POLYFORGE_DATA_DIR`) | `~/.local/share/polyforge` | Daemon state, events log and derived data. |
+| `--workflows-dir DIR` | ensure | `./workflows` | Workflow-bundle checkout the in-process Go driver loads step definitions from (`pf daemon ensure` passes `<data-dir>/release/current/workflows`). |
+| `--claude-bin PATH` | `claude_bin` | `claude` | Claude Code binary for steps whose harness is `claude` (run as `claude -p --bare`). The daemon never manages its credentials: the `<harness-root>/claude-config/settings.json` env block is the authority layer. |
+| `--operator-agent-dir DIR` | `[daemon] operator_agent_dir` | `~/.pi/agent` | SOURCE of the dedicated step agent dir — a credential surface: the daemon copies the minimal set (`auth.json`, `models.json`, `agents/`, `extensions/subagent/`) from here into `<harness-root>/step-agent`, and every pi step runs against that copy — the operator's own packages and settings never reach a step. A configured source without a readable `auth.json` refuses the start. |
+| `--harness-root DIR` | `[daemon] harness_root` | `<data-dir>` | Parent root of the step harness dirs: `<DIR>/step-agent` (dedicated agent dir), `/step-agent-sessions` (pi sessions) and `/claude-config` (claude config dir; its settings.json env block is the credential authority layer). The former `--harness-sessions-root` was renamed — old deployments fail loudly at startup. |
+| `--max-concurrent-jobs N` | `[daemon] max_concurrent_jobs` | `4` | Cap on concurrently running jobs at first boot; afterwards the persisted `pf ops max N` setting wins (see above). |
+| `--display-name NAME` | test/dev-only | hostname | Daemon display name shown by `pf ops status`. |
+| `--pi-bin PATH` | test/dev-only | `pi` | Harness binary the agent processes are derived from. |
+| `--git-remote-base URL` | test/dev-only | `<server>/git` | aihub bare-repo base URL for the capsule revision chain. |
+| `--recall-topk N` | test/dev-only | `10` (max 50) | Claim-time memory snapshot hit count. |
+| `--auto` | test/dev-only (`pf ops auto on\|off`) | off | Auto-pull: the daemon also claims ready-queue work itself; an explicit `--auto` / `--auto=false` overrides the persisted switch. |
+| `--heartbeat-every D` | test/dev-only | `60s` | Machines heartbeat cadence (`0` disables). |
 
 The workspace mapping (polyforge#113) replaces the retired workspace and
 project launch surfaces: the `[workspace."<path>"]` sections of the
@@ -600,21 +635,23 @@ any claim. Upgrading from the pre-#169 shape: see
 [docs/upgrade.md](docs/upgrade.md).
 
 Supervision bounds (v2-converge 2.4) — Go duration strings (e.g. `700ms`,
-`5m`), flags only (no environment fallbacks). Omitting a flag, or passing
-`0`, keeps the default listed here. The only per-step override in
+`5m`), no environment fallbacks. Omitting a flag, or passing `0`, keeps
+the default listed here. In production only T and N are settable, through
+the `cli.toml` `[daemon]` table (see `pf daemon` flags above); the other
+four are test/dev-only. The only per-step override in
 `workflow.md` is `budget.wall_minutes` (an estimate: T becomes
 `max(3 x wall_minutes, --step-timeout)`); X and Y are global only — the
 former `silence_minutes` / `tool_minutes` keys were deleted (polyforge#147)
 and an old bundle that still carries them has them silently ignored.
 
-| Flag | Env | Default | Controls |
+| Flag | Production source | Default | Controls |
 | --- | --- | --- | --- |
-| `--silence-window D` | — | `10m` (token-level harness) / `30m` (message-level) | X: no real work signal after dispatch (`harness_silent`), or no model output while waiting for the model (`model_hung`). UI chatter never counts as work. |
-| `--tool-window D` | — | `30m` | Y: one tool running longer than this is `tool_hung`. |
-| `--step-timeout D` | — | `90m` | T: cumulative step runtime across all its dispatches (`step_timeout_long_task` / `step_timeout_slow_model`). |
-| `--stall-window D` | — | `10m` | N: the driver between steps (not waiting on a human) for longer than this is `driver_stalled`; a negative value disables it. |
-| `--model-error-grace D` | — | `1m` | Grace after a turn ENDS with no result file: ended on a model error is `model_error` (switch candidate); ended normally is `ended_without_result` (same-model retry). |
-| `--revalidate-every D` | — | `5m` | M4 periodic session-revalidation cadence for RUNNING jobs; `0`/omitted keeps the 5m default, a negative value disables revalidation. |
+| `--silence-window D` | test/dev-only | `10m` (token-level harness) / `30m` (message-level) | X: no real work signal after dispatch (`harness_silent`), or no model output while waiting for the model (`model_hung`). UI chatter never counts as work. |
+| `--tool-window D` | test/dev-only | `30m` | Y: one tool running longer than this is `tool_hung`. |
+| `--step-timeout D` | `[daemon] step_timeout` | `90m` | T: cumulative step runtime across all its dispatches (`step_timeout_long_task` / `step_timeout_slow_model`). |
+| `--stall-window D` | `[daemon] stall_window` | `10m` | N: the driver between steps (not waiting on a human) for longer than this is `driver_stalled`; a negative value disables it. |
+| `--model-error-grace D` | test/dev-only | `1m` | Grace after a turn ENDS with no result file: ended on a model error is `model_error` (switch candidate); ended normally is `ended_without_result` (same-model retry). |
+| `--revalidate-every D` | test/dev-only | `5m` | M4 periodic session-revalidation cadence for RUNNING jobs; `0`/omitted keeps the 5m default, a negative value disables revalidation. |
 
 Before starting ANY implementation or review lane: recall the v0 lessons
 ledger (`docs/design/polyforge-vnext/v0-lessons-ledger.md`, now including

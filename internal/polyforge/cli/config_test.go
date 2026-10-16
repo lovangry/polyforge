@@ -332,3 +332,57 @@ func TestConfigResidualAuthTokenRefused(t *testing.T) {
 		t.Errorf("the error must name the KEY, never its value")
 	}
 }
+
+// TestConfigDaemonTable (decision 2026-10-16 G2): the [daemon] table
+// loads its five knobs verbatim; every invalid value is a typed
+// DaemonKeyError naming the key and the line; a flat key after the
+// header belongs to the table (TOML) and is refused there.
+func TestConfigDaemonTable(t *testing.T) {
+	clearEnv(t)
+	ws := t.TempDir()
+	base := "server = \"http://hub:8420\"\n[workspace.\"" + ws + "\"]\nprojects = [\"e2e\"]\n"
+
+	cfg, err := LoadConfig(writeTempConfig(t, base+"\n[daemon]\nstep_timeout = \"45m\"\nstall_window = \"10m\"\n"+
+		"harness_root = \"/srv/h\"\noperator_agent_dir = '/srv/pi/agent'\nmax_concurrent_jobs = 6 # comment\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := DaemonSettings{StepTimeout: "45m", StallWindow: "10m", HarnessRoot: "/srv/h", OperatorAgentDir: "/srv/pi/agent", MaxConcurrentJobs: 6}
+	if cfg.Daemon != want {
+		t.Fatalf("daemon table = %+v, want %+v", cfg.Daemon, want)
+	}
+	if cfg.Server != "http://hub:8420" || cfg.Mapping.Empty() {
+		t.Fatalf("the table disturbed the rest of the config: %+v", cfg)
+	}
+	// no table: the zero value
+	if cfg, err := LoadConfig(writeTempConfig(t, base)); err != nil || cfg.Daemon != (DaemonSettings{}) {
+		t.Fatalf("no table: %+v %v", cfg.Daemon, err)
+	}
+
+	for _, tc := range []struct{ name, body, key string }{
+		{"duration unparsable", "step_timeout = \"soon\"", "step_timeout"},
+		{"duration unquoted", "step_timeout = 45m", "step_timeout"},
+		{"step timeout zero", "step_timeout = \"0s\"", "step_timeout"},
+		{"step timeout negative", "step_timeout = \"-5m\"", "step_timeout"},
+		{"stall zero", "stall_window = \"0\"", "stall_window"},
+		{"harness root relative", "harness_root = \"rel/dir\"", "harness_root"},
+		{"operator dir tilde", "operator_agent_dir = \"~/.pi/agent\"", "operator_agent_dir"},
+		{"max quoted", "max_concurrent_jobs = \"6\"", "max_concurrent_jobs"},
+		{"max zero", "max_concurrent_jobs = 0", "max_concurrent_jobs"},
+		{"unknown key", "silence_window = \"5m\"", "silence_window"},
+		{"flat key inside the table", "claude_bin = \"/x/claude\"", "claude_bin"},
+		{"duplicate key", "max_concurrent_jobs = 2\nmax_concurrent_jobs = 3", "max_concurrent_jobs"},
+	} {
+		_, err := LoadConfig(writeTempConfig(t, base+"\n[daemon]\n"+tc.body+"\n"))
+		var dk *DaemonKeyError
+		if !errors.As(err, &dk) || dk.Key != tc.key || dk.Line == 0 {
+			t.Fatalf("%s: err %v, want a DaemonKeyError for %q", tc.name, err, tc.key)
+		}
+		if !strings.Contains(err.Error(), "[daemon] "+tc.key) {
+			t.Fatalf("%s: message %q does not name the key", tc.name, err)
+		}
+	}
+	if _, err := LoadConfig(writeTempConfig(t, base+"\n[daemon]\n[daemon]\n")); err == nil || !strings.Contains(err.Error(), "duplicate [daemon]") {
+		t.Fatalf("a second [daemon] table must refuse: %v", err)
+	}
+}

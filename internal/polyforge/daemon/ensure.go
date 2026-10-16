@@ -30,9 +30,14 @@ package daemon
 // The canonical argv is the one tools/install.sh used to launch with:
 // --config, -machine-id (the recorded <data-dir>/daemon-id, else
 // m-<short hostname>), -data-dir, -socket (the config's daemon_socket)
-// and -workflows-dir <data-dir>/release/current/workflows. The harness
-// root keeps its default (<data-dir>, polyforge#171); auto and the job
-// cap stay the daemon's persisted settings (never forced on argv).
+// and -workflows-dir <data-dir>/release/current/workflows, followed by
+// one flag per key set in the config's [daemon] table (decision
+// 2026-10-16 G2), passed verbatim: step_timeout → -step-timeout,
+// stall_window → -stall-window, harness_root → -harness-root,
+// operator_agent_dir → -operator-agent-dir, max_concurrent_jobs →
+// -max-concurrent-jobs (the job cap at FIRST boot only: the daemon's
+// persisted `pf ops max` setting wins once it exists). Every other daemon
+// flag is test/dev-only. Auto stays the daemon's persisted switch.
 
 import (
 	"encoding/json"
@@ -44,6 +49,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -73,6 +79,7 @@ type ensurePlan struct {
 	socket       string
 	workflowsDir string
 	machineID    string
+	daemon       cli.DaemonSettings // the config's [daemon] table
 	home         string
 	timeout      time.Duration
 	// refuse, when set, is why no daemon may be started (checked after
@@ -80,15 +87,30 @@ type ensurePlan struct {
 	refuse error
 }
 
-// daemonArgv is the canonical `pf daemon` argv (without the binary).
+// daemonArgv is the canonical `pf daemon` argv (without the binary): the
+// fixed launch flags, then the [daemon] table's knobs that are set.
 func (p *ensurePlan) daemonArgv() []string {
-	return []string{"daemon",
+	argv := []string{"daemon",
 		"--config", p.configPath,
 		"-machine-id", p.machineID,
 		"-data-dir", p.dataDir,
 		"-socket", p.socket,
 		"-workflows-dir", p.workflowsDir,
 	}
+	for _, kv := range []struct{ flag, val string }{
+		{"-step-timeout", p.daemon.StepTimeout},
+		{"-stall-window", p.daemon.StallWindow},
+		{"-harness-root", p.daemon.HarnessRoot},
+		{"-operator-agent-dir", p.daemon.OperatorAgentDir},
+	} {
+		if kv.val != "" {
+			argv = append(argv, kv.flag, kv.val)
+		}
+	}
+	if n := p.daemon.MaxConcurrentJobs; n > 0 {
+		argv = append(argv, "-max-concurrent-jobs", strconv.Itoa(n))
+	}
+	return argv
 }
 
 func (p *ensurePlan) logPath() string { return filepath.Join(p.dataDir, daemonLogFile) }
@@ -145,6 +167,7 @@ func planEnsure(cfgPath, workflowsDir string, timeout time.Duration) (*ensurePla
 		configPath: cfgPath,
 		dataDir:    dataDir,
 		socket:     shared.DaemonSocket,
+		daemon:     shared.Daemon,
 		home:       home,
 		timeout:    timeout,
 	}

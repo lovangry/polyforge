@@ -50,6 +50,16 @@ mapping, missing release workflows, the daemon log tail) — relay it and
 run `pf doctor`. `pf ops shutdown` stops the daemon for good: its clean
 exit ends the restart loop as well; `pf daemon ensure` starts it again.
 
+The daemon's other production knobs are not ops verbs: they live in the
+`[daemon]` table of `cli.toml` (`step_timeout`, `stall_window`,
+`harness_root`, `operator_agent_dir`, `max_concurrent_jobs`), which
+`pf daemon ensure` passes to the daemon; a change applies at the next
+daemon start (`pf ops shutdown`, then `pf daemon ensure`). The table's
+`max_concurrent_jobs` is only the cap of a FIRST boot: once the daemon has
+persisted its own cap (`pf ops max N`, or any graceful shutdown), the
+persisted value wins — so to change the cap of a running machine, use
+`pf ops max N` (immediate and persistent), not the table.
+
 `pf ops auto off` is more than the switch: the queue's not-yet-started
 `origin=auto` entries are REMOVED at the same time (from memory and from
 the persisted `submit-queue.json` a restart replays — auto off = only

@@ -168,3 +168,71 @@ func TestEnsureUsageAndRefusals(t *testing.T) {
 		t.Fatalf("missing workflows: exit %d stderr %q", code, errb.String())
 	}
 }
+
+// TestEnsureArgvCarriesDaemonTable (decision 2026-10-16 G2): the
+// cli.toml [daemon] table reaches the daemon argv verbatim, one flag per
+// set key, after the fixed launch flags; without the table the argv is
+// exactly the fixed launch flags. The produced argv parses in the
+// daemon's own flag set (a typo'd flag name would exit 2 at parse).
+func TestEnsureArgvCarriesDaemonTable(t *testing.T) {
+	t.Setenv("POLYFORGE_DATA_DIR", t.TempDir())
+	dir := t.TempDir()
+	fixed := func(p *ensurePlan) []string {
+		return []string{"daemon", "--config", p.configPath, "-machine-id", p.machineID,
+			"-data-dir", p.dataDir, "-socket", p.socket, "-workflows-dir", p.workflowsDir}
+	}
+
+	// without the table: the fixed launch flags only
+	bare := filepath.Join(dir, "bare.toml")
+	if err := os.WriteFile(bare, []byte("server = \"http://127.0.0.1:1\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := planEnsure(bare, "", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(p.daemonArgv(), " "), strings.Join(fixed(p), " "); got != want {
+		t.Fatalf("argv without [daemon]:\n got %s\nwant %s", got, want)
+	}
+
+	// with the table: every key, verbatim, in the fixed order
+	withTable := filepath.Join(dir, "table.toml")
+	body := "server = \"http://127.0.0.1:1\"\n\n[daemon]\n" +
+		"max_concurrent_jobs = 6\n" +
+		"operator_agent_dir = \"/srv/pi agent\"\n" +
+		"harness_root = \"/srv/harness\"\n" +
+		"stall_window = \"-1s\"\n" +
+		"step_timeout = \"1h30m\"\n"
+	if err := os.WriteFile(withTable, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err = planEnsure(withTable, "", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append(fixed(p), "-step-timeout", "1h30m", "-stall-window", "-1s",
+		"-harness-root", "/srv/harness", "-operator-agent-dir", "/srv/pi agent",
+		"-max-concurrent-jobs", "6")
+	if got := p.daemonArgv(); strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("argv with [daemon]:\n got %q\nwant %q", got, want)
+	}
+	if script := p.loopScript(); !strings.Contains(script, "'-operator-agent-dir' '/srv/pi agent'") {
+		t.Fatalf("loop script does not quote the knob value:\n%s", script)
+	}
+	// the daemon's flag set accepts every knob: the run stops at the
+	// mapping refusal (exit 78), never at flag parsing (exit 2)
+	var out, errb bytes.Buffer
+	if code := Main(p.daemonArgv()[1:], nil, &out, &errb); code != ExitNeedsOperator {
+		t.Fatalf("daemon on the ensure argv: exit %d, want %d (mapping refusal)\n%s", code, ExitNeedsOperator, errb.String())
+	}
+
+	// an invalid table refuses ensure itself, naming the key
+	bad := filepath.Join(dir, "bad.toml")
+	if err := os.WriteFile(bad, []byte("[daemon]\nstep_timeout = \"soon\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	errb.Reset()
+	if code := Main([]string{"ensure", "--config", bad, "--timeout", "1s"}, nil, &out, &errb); code != 1 || !strings.Contains(errb.String(), "[daemon] step_timeout") {
+		t.Fatalf("invalid [daemon]: exit %d stderr %q, want 1 naming the key", code, errb.String())
+	}
+}

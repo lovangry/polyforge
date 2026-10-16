@@ -291,6 +291,54 @@ func TestW174EnsureIdempotentCanonicalArgv(t *testing.T) {
 	}
 }
 
+// TestW174EnsurePassesDaemonTable (decision 2026-10-16 G2): the
+// cli.toml [daemon] table reaches the supervised daemon's argv verbatim
+// and takes effect — the step agent dir is built under harness_root from
+// operator_agent_dir, and the job cap is the configured one.
+func TestW174EnsurePassesDaemonTable(t *testing.T) {
+	e := w174NewEnv(t, true)
+	root := filepath.Join(e.home, "harness root")
+	opDir := filepath.Join(e.home, "operator-agent")
+	if err := os.MkdirAll(opDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(opDir, "auth.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(e.cfg, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.WriteString("\n[daemon]\nstep_timeout = \"45m\"\nstall_window = \"7m\"\n" +
+		"harness_root = \"" + root + "\"\noperator_agent_dir = \"" + opDir + "\"\nmax_concurrent_jobs = 6\n")
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errOut := e.ensure(t); code != 0 {
+		t.Fatalf("ensure: exit %d\nstdout %s\nstderr %s", code, out, errOut)
+	}
+	pid := e.oneDaemon(t, 5*time.Second)
+	argv := w174Argv(pid)
+	joined := strings.Join(argv, "\x00")
+	for _, want := range [][]string{
+		{"-step-timeout", "45m"}, {"-stall-window", "7m"}, {"-harness-root", root},
+		{"-operator-agent-dir", opDir}, {"-max-concurrent-jobs", "6"},
+	} {
+		if !strings.Contains(joined, strings.Join(want, "\x00")) {
+			t.Fatalf("daemon argv %q lacks %q", argv, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "step-agent", "auth.json")); err != nil {
+		t.Fatalf("the step agent dir was not built under harness_root from operator_agent_dir: %v", err)
+	}
+	cmd := exec.Command(e.pf, "ops", "max")
+	cmd.Env = append(e.env(), "PF_DAEMON_SOCKET="+e.sock)
+	if out, err := cmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "max: 6" {
+		t.Fatalf("pf ops max does not report the configured cap: %v\n%s", err, out)
+	}
+}
+
 func TestW174EnsureConcurrentStartsOneLoopOneDaemon(t *testing.T) {
 	e := w174NewEnv(t, true)
 	const n = 6

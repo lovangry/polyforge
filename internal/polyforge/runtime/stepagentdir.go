@@ -64,7 +64,7 @@ package runtime
 //
 // polyforge#171 — the harness-root map: all three harness state dirs
 // derive from ONE root (Config.HarnessRoot, resolved as --harness-root
-// > POLYFORGE_HARNESS_ROOT > DataDir):
+// — cli.toml [daemon] harness_root via ensure — > DataDir):
 //
 // <harness-root>/step-agent           the dedicated pi step agent dir
 // <harness-root>/step-agent-sessions  the pi steps' session store
