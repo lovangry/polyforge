@@ -13,11 +13,17 @@ so creating a project fails until the upgrade SQL has run.
 - **Online backup before the window**: rsync of `memory/` and `git/`, a
   SQLite backup-API snapshot of `aihub.db` (consistent even under WAL
   writes), and an off-host copy. The service keeps running throughout.
-  Once that backup has verified, deploy.sh keeps the newest 3
+  Once that backup has verified (step 5), deploy.sh writes a `.verified`
+  marker into it on both sides, keeps the newest 3 verified
   `aihub-backup-<version>-<timestamp>` dirs (this run's included) on the
-  server and in `BACKUP_ROOT`, prunes older ones and prints what it
-  pruned; `--dry-run` prints what it would prune. Nothing else is ever
-  touched.
+  server and in `BACKUP_ROOT`, prunes older verified ones and prints what
+  it pruned; `--dry-run` prints what it would prune. A backup dir without
+  the marker — a failed run's, and **every backup made before this
+  change** — is never counted and never pruned: each run lists them as
+  "unverified, kept; remove by hand". Delete the pre-marker ones yourself
+  once a marked backup exists. Nothing else is ever touched. The backup
+  never copies `bootstrap-admin.key` (a one-time handoff file; the key is
+  stored in the DB as a hash) or a stray `.verified`.
 - **The switch window is the only service interruption**, in this order:
   1. the old aihub container exits gracefully (drain ≤ `DRAIN_SECS`);
   2. deploy.sh applies the upgrade SQL (see below), one transaction per

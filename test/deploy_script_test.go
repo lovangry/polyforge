@@ -363,14 +363,26 @@ func TestDeployUnexpectedExitAfterSwapRollsBackAndCleansUp(t *testing.T) {
 	}
 }
 
-// seedBackups creates backup-shaped dirs (and decoys) under root.
-func seedBackups(t *testing.T, root string, names ...string) {
+// seedBackups creates backup-shaped dirs (and decoys) under root; a
+// verified one carries the .verified marker a passed step 5 writes.
+func seedBackups(t *testing.T, root string, verified bool, names ...string) {
 	t.Helper()
 	for _, n := range names {
 		if err := os.MkdirAll(filepath.Join(root, n, "memory"), 0o755); err != nil {
 			t.Fatal(err)
 		}
+		if verified {
+			wf(t, filepath.Join(root, n, ".verified"), "", 0o644)
+		}
 	}
+}
+
+// newBackupDirs answers the backup dirs of this world's running version
+// (aihub-backup-v2.2.1-<TS>) under root.
+func newBackupDirs(t *testing.T, root string) []string {
+	t.Helper()
+	m, _ := filepath.Glob(filepath.Join(root, "aihub-backup-v2.2.1-*"))
+	return m
 }
 
 func dirNames(t *testing.T, root string) []string {
@@ -393,13 +405,18 @@ func retentionWorld(t *testing.T) (*deployWorld, string, string) {
 	d := newReadyWorld(t)
 	srv := filepath.Join(d.w, "srv", "data")
 	local := filepath.Join(d.w, "backups")
-	seedBackups(t, srv,
+	seedBackups(t, srv, true,
 		"aihub-backup-v2.0.0-20260101T000000Z", "aihub-backup-v2.1.0-20260201T000000Z",
 		"aihub-backup-v2.2.0-20260301T000000Z", "aihub-backup-v1.9.0-20260401T000000Z",
 		"aihub-backup-notes", "aihub-backup-v2.0.0-2026", "aihub-bin-v2.0.0-20260101T000000Z")
+	// newest of all, but unverified (a failed run, or pre-marker): never
+	// counted, never pruned, reported
+	seedBackups(t, srv, false, "aihub-backup-v2.2.5-20260501T000000Z")
 	wf(t, filepath.Join(srv, "aihub-backup-v0.1.0-20250101T000000Z"), "a file, not a backup dir\n", 0o644)
-	seedBackups(t, local, "aihub-backup-v2.0.0-20260101T000000Z", "aihub-backup-v2.1.0-20260201T000000Z",
+	seedBackups(t, local, true, "aihub-backup-v2.0.0-20260101T000000Z", "aihub-backup-v2.1.0-20260201T000000Z",
 		"aihub-backup-v2.2.0-20260301T000000Z", "keep-me")
+	// a one-time bootstrap key file in the data dir: never copied into a backup
+	wf(t, filepath.Join(srv, "aihub", "bootstrap-admin.key"), "k_secret\n", 0o600)
 	return d, srv, local
 }
 
@@ -439,6 +456,70 @@ func TestDeployBackupRetention(t *testing.T) {
 	if !strings.Contains(out, "retention: pruned locally ("+local+"): aihub-backup-v2.0.0-20260101T000000Z") {
 		t.Errorf("the local prune is not reported:\n%s", out)
 	}
+	if !strings.Contains(srvNames, "aihub-backup-v2.2.5-20260501T000000Z") ||
+		!strings.Contains(out, "unverified, kept; remove by hand: server ("+srv+"): aihub-backup-v2.2.5-20260501T000000Z") {
+		t.Errorf("the unverified server backup is not kept and reported:\n%s", out)
+	}
+	// this run's backup is marked on both sides and carries no bootstrap key
+	for _, root := range []string{srv, local} {
+		nb := newBackupDirs(t, root)
+		if len(nb) != 1 {
+			t.Fatalf("this run's backup under %s: %v", root, nb)
+		}
+		if _, err := os.Stat(filepath.Join(nb[0], ".verified")); err != nil {
+			t.Errorf("%s is not marked verified: %v", nb[0], err)
+		}
+		if _, err := os.Stat(filepath.Join(nb[0], "bootstrap-admin.key")); !os.IsNotExist(err) {
+			t.Errorf("%s carries bootstrap-admin.key (%v)", nb[0], err)
+		}
+	}
+}
+
+// TestDeployBackupRetentionFailedRunsNotCounted: backups of failed runs
+// carry no marker, so two failed runs followed by a success push no
+// verified backup out — all older verified backups stay — and the failed
+// runs' dirs are kept and reported as unverified.
+func TestDeployBackupRetentionFailedRunsNotCounted(t *testing.T) {
+	d := newReadyWorld(t)
+	srv := filepath.Join(d.w, "srv", "data")
+	seedBackups(t, srv, true, "aihub-backup-v2.0.0-20260101T000000Z", "aihub-backup-v2.1.0-20260201T000000Z")
+	orphan := filepath.Join(srv, "aihub", "memory", "p", "mem_x", "memory.md")
+	for i := 0; i < 2; i++ {
+		wf(t, orphan, "orphan\n", 0o644) // step 4 never verifies the backup
+		out, err := d.run("", "v2.3.0", "--confirm", "v2.3.0")
+		if exitCode(err) != 1 {
+			t.Fatalf("run %d: want exit 1 at step 4, got %v\n%s", i, err, out)
+		}
+		time.Sleep(1100 * time.Millisecond) // a distinct backup timestamp per run
+	}
+	failed := newBackupDirs(t, srv)
+	if len(failed) != 2 {
+		t.Fatalf("failed runs left %v, want two backup dirs", failed)
+	}
+	if err := os.Remove(orphan); err != nil {
+		t.Fatal(err)
+	}
+	out, err := d.run("", "v2.3.0", "--confirm", "v2.3.0")
+	if err != nil {
+		t.Fatalf("deploy failed: %v\n%s", err, out)
+	}
+	names := strings.Join(dirNames(t, srv), " ")
+	for _, kept := range append([]string{"aihub-backup-v2.0.0-20260101T000000Z", "aihub-backup-v2.1.0-20260201T000000Z"}, failed...) {
+		if !strings.Contains(names, filepath.Base(kept)) {
+			t.Errorf("lost %s: %s", filepath.Base(kept), names)
+		}
+	}
+	if strings.Contains(out, "retention: pruned on the server") {
+		t.Errorf("a prune ran although only 3 verified backups exist:\n%s", out)
+	}
+	if !strings.Contains(out, "unverified, kept; remove by hand: server") {
+		t.Errorf("the failed runs' backups are not reported unverified:\n%s", out)
+	}
+	for _, f := range failed {
+		if _, err := os.Stat(filepath.Join(f, ".verified")); !os.IsNotExist(err) {
+			t.Errorf("a failed run's backup %s is marked verified (%v)", f, err)
+		}
+	}
 }
 
 // TestDeployBackupRetentionDryRunAndUnverified: a dry run prints what
@@ -477,5 +558,22 @@ func TestDeployBackupRetentionDryRunAndUnverified(t *testing.T) {
 	}
 	if strings.Contains(out, "retention: pruned") {
 		t.Errorf("an unverified run reported a prune:\n%s", out)
+	}
+}
+
+// TestDeployRefusesNonPlainPaths: AIHUB_DATA / BACKUP_ROOT travel through
+// ssh's re-joined remote command line, so a blank or quote is a usage
+// error before any work.
+func TestDeployRefusesNonPlainPaths(t *testing.T) {
+	for _, kv := range []string{"AIHUB_DATA=/data/ai hub", "BACKUP_ROOT=/tmp/it's"} {
+		d := newReadyWorld(t)
+		d.env = append(d.env, kv)
+		out, err := d.run("", "v2.3.0", "--dry-run")
+		if exitCode(err) != 2 || !strings.Contains(out, "must be plain paths") {
+			t.Errorf("%s: want exit 2 + plain-path refusal, got %v\n%s", kv, err, out)
+		}
+		if strings.Contains(d.sshLog(), "rsync") {
+			t.Errorf("%s: work ran before the refusal", kv)
+		}
 	}
 }
