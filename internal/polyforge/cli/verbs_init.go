@@ -12,16 +12,18 @@ import (
 
 // verbs_init.go: `pf init [<workspace-dir>]` — the local half of
 // workspace init (polyforge#177). It gives an existing workspace its
-// runtime-artifact layout: scratch/ and the convention section of
-// CLAUDE.md's polyforge-managed block (workspace.Init: idempotent, the
-// human part of CLAUDE.md is never touched). It needs no config, no
+// runtime-artifact layout: scratch/, the convention section of
+// CLAUDE.md's polyforge-managed block and the default memory_policy
+// section of .polyforge.yaml when it has none (workspace.Init:
+// idempotent, the human part of CLAUDE.md is never touched and the yaml
+// only ever gains the appended section). It needs no config, no
 // aihub and no daemon; mapping the workspace stays the operator's
 // cli.toml edit (skills/polyforge/verbs/init.md). Machine install is
 // tools/install.sh, not this verb.
 var cmdInit = &Command{
 	Name:         "init",
 	Group:        GroupDiag,
-	Summary:      "Give a workspace its local layout: scratch/ and the layout section of CLAUDE.md",
+	Summary:      "Give a workspace its local layout: scratch/, the layout section of CLAUDE.md, the memory_policy of .polyforge.yaml",
 	Usage:        "pf init [<workspace-dir>]   (default: the current directory)",
 	NoConfigLoad: true,
 	Setup:        func(*flag.FlagSet) {},
@@ -55,6 +57,7 @@ var cmdInit = &Command{
 		fmt.Fprintf(ctx.Stdout, "workspace %s\n", res.Workspace)
 		fmt.Fprintf(ctx.Stdout, "  %s/  %s\n", workspace.ScratchDir, res.Scratch)
 		fmt.Fprintf(ctx.Stdout, "  %s  layout section %s\n", workspace.NotesFile, res.NotesFile)
+		fmt.Fprintf(ctx.Stdout, "  %s  %s section %s\n", workspace.FileName, workspace.MemoryPolicyKey, res.Yaml)
 		return nil
 	},
 }

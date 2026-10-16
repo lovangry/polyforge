@@ -27,10 +27,15 @@ import (
 //     Report-by-default keeps doctor a read-only probe anyone may run at
 //     any time without side effects; deletion is an explicit operator
 //     act.
+//   - "workspace memory policy": a .polyforge.yaml without a
+//     memory_policy section (or no file at all) — the daemon then renders
+//     the built-in default policy into the step prompts; `pf init <ws>`
+//     appends the default section. Read-only: doctor never writes it.
 
 const (
-	docChLayout  = "workspace layout"
-	docChScratch = "workspace scratch"
+	docChLayout    = "workspace layout"
+	docChScratch   = "workspace scratch"
+	docChMemPolicy = "workspace memory policy"
 )
 
 // docRowCap bounds the rows one check's detail lists.
@@ -93,6 +98,31 @@ func workspaceLayoutCheck(wss []string) doctorCheck {
 		c.Status = "pass"
 		c.Detail = fmt.Sprintf("every mapped workspace keeps the layout (root: .repo/, capsules/, scratch/, .polyforge/, CLAUDE.md, CLAUDE.local.md, AGENTS.md, go.work, go.work.sum, %s and dot-entries other than %s backups; .polyforge/: the legacy v1 repo-map/, watchers/)", workspace.FileName, workspace.FileName)
 	}
+	return c
+}
+
+// memoryPolicyCheck warns about a mapped workspace whose .polyforge.yaml
+// declares no memory_policy section. A file that is no readable YAML
+// mapping is the "workspace yaml" check's fail, not this row's.
+func memoryPolicyCheck(wss []string) doctorCheck {
+	c := doctorCheck{Name: docChMemPolicy, Status: "pass"}
+	var missing []string
+	for _, ws := range existingWorkspaces(wss) {
+		_, declared, err := workspace.MemoryPolicyDeclared(ws)
+		if err == nil && !declared {
+			missing = append(missing, ws)
+		}
+	}
+	if len(missing) == 0 {
+		c.Detail = "every mapped workspace's " + workspace.FileName + " declares " + workspace.MemoryPolicyKey
+		return c
+	}
+	c.Status = "warn"
+	var parts []string
+	for _, ws := range capRows(missing) {
+		parts = append(parts, fmt.Sprintf("%s declares no %s — the step prompts carry the built-in default policy; run `pf init %s` to append the default section, then edit it", workspace.PathFor(ws), workspace.MemoryPolicyKey, ws))
+	}
+	c.Detail = strings.Join(parts, "; ")
 	return c
 }
 

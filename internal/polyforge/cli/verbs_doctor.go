@@ -251,7 +251,7 @@ func runDoctorChecks(ctx *Context, pruneScratch bool) doctorReport {
 	cfg, err := LoadConfig(ctx.ConfigPath)
 	if err != nil {
 		add(docChConfig, "fail", err.Error()+" — see the install docs for the migration steps")
-		for _, name := range []string{docChMapping, docChDirs, docChLayout, docChScratch, docChYaml, docChClaude, docChProjects, docChServer, docChSocket, docChSupervision, docChEnv, docChAuth} {
+		for _, name := range []string{docChMapping, docChDirs, docChLayout, docChScratch, docChMemPolicy, docChYaml, docChClaude, docChProjects, docChServer, docChSocket, docChSupervision, docChEnv, docChAuth} {
 			add(name, "skip", "config-dependent check not run: the config could not be loaded")
 		}
 		checks = append(checks, harnessDisplayChecks()...)
@@ -295,9 +295,11 @@ func runDoctorChecks(ctx *Context, pruneScratch bool) doctorReport {
 	if cfg.Mapping.Empty() {
 		add(docChLayout, "skip", "not run: the mapping is absent")
 		add(docChScratch, "skip", "not run: the mapping is absent")
+		add(docChMemPolicy, "skip", "not run: the mapping is absent")
 	} else {
 		checks = append(checks, workspaceLayoutCheck(cfg.Mapping.Workspaces()),
-			scratchCheck(cfg.Mapping.Workspaces(), time.Now(), pruneScratch))
+			scratchCheck(cfg.Mapping.Workspaces(), time.Now(), pruneScratch),
+			memoryPolicyCheck(cfg.Mapping.Workspaces()))
 	}
 
 	// Server reach: ANY http answer (even an error status) proves the
@@ -458,7 +460,7 @@ func workspaceYamlCheck(m *mapping.Plan, workflowsDir string, daemonUp bool) (st
 		badBundles = append(badBundles, fmt.Sprintf("bundle %s: %v", name, err))
 	}
 	sort.Strings(badBundles)
-	present := 0
+	present, withSteps := 0, 0
 	for _, ws := range m.Workspaces() {
 		_, serr := os.Stat(workspace.PathFor(ws))
 		if serr == nil {
@@ -468,6 +470,9 @@ func workspaceYamlCheck(m *mapping.Plan, workflowsDir string, daemonUp bool) (st
 		if err != nil {
 			fails = append(fails, err.Error())
 			continue
+		}
+		if cfg != nil && len(cfg.Models) > 0 {
+			withSteps++
 		}
 		if workflowsDir == "" {
 			continue
@@ -501,6 +506,8 @@ func workspaceYamlCheck(m *mapping.Plan, workflowsDir string, daemonUp bool) (st
 		return "pass", "no mapped workspace carries a " + workspace.FileName + "; every installed bundle's candidates name their harness", claudeSteps
 	case present == 0:
 		return "pass", "no mapped workspace carries a " + workspace.FileName, claudeSteps
+	case workflowsDir == "" && withSteps == 0:
+		return "pass", fmt.Sprintf("%d %s file(s) load and declare no per-step keys", present, workspace.FileName), claudeSteps
 	case workflowsDir == "" && !daemonUp:
 		return "warn", fmt.Sprintf("%d %s file(s) parse, but the per-step keys are unchecked: the daemon is unreachable, so its workflows dir is unknown", present, workspace.FileName), claudeSteps
 	case workflowsDir == "":

@@ -239,6 +239,11 @@ Five standing rules, binding on every polyforge session:
    file refuses the claim (DAEMON-414) WITHOUT claiming — the work item
    stays queued for other machines. Schema, syntax and precedence: the
    README's "Per-project model candidates" paragraphs (via `verbs/init.md`).
+   Its second optional section, `memory_policy:` (`default` / `<project>`:
+   `{ record: [...], skip: [...] }`, a project's lists appended to
+   `default`'s), says what a step agent writes as a project memory; a
+   missing section is the built-in default policy, never a refusal, and
+   `pf init` appends the default section (see `verbs/init.md`).
    The repo inventory and clone URLs always come from the aihub project
    registry; the cli.toml `[workspace]` mapping is the only placement source.
 

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // verbs_doctor_test.go: the `pf doctor` unit pins — the report shape,
@@ -119,6 +121,10 @@ func TestDoctorHealthyMachineAllPassExit0(t *testing.T) {
 	layoutRelease(t, env["HOME"])
 	layoutClaudeLink(t, env["HOME"])
 	env["PATH"] = fakeTmuxPath(t, 0) // the restart loop is up (polyforge#174)
+	ws := filepath.Join(filepath.Dir(env["XDG_CONFIG_HOME"]), "ws-polyforge")
+	if err := os.WriteFile(workspace.PathFor(ws), []byte(workspace.DefaultMemoryPolicySection), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	code, stdout, doc := doctorStatus(t, env, "--json", "doctor")
 	if code != 0 {
 		t.Fatalf("healthy machine: exit %d, want 0 (output %s)", code, stdout)

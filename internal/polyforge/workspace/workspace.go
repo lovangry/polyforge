@@ -11,6 +11,9 @@
 //	    default: { models: [...] }       # optional: every step of this project
 //	    <step-id>: { models: [...] }     # optional: the steps with this id,
 //	                                     # in every bundle (fix, code, review, ...)
+//	memory_policy:                       # optional section (memorypolicy.go)
+//	  default: { record: [...], skip: [...] }    # optional: every project
+//	  <project-name>: { record: [...], skip: [...] }
 //
 // A step entry's one key is `models`: a list of model candidates, each
 // `<harness>:<model>` (polyforge#175 — harness ∈ pi | claude, split on
@@ -66,6 +69,10 @@ type Config struct {
 	// list): steps.<project>.<key>.models, flattened for the compose.
 	// Every candidate is in canonical `<harness>:<model>` form.
 	Models map[string]map[string][]string
+	// MemoryPolicy is the memory_policy section as declared: DefaultKey
+	// or a project name → its entry; nil when the section is absent
+	// (MemoryPolicyFor answers the effective policy either way).
+	MemoryPolicy map[string]PolicyEntry
 }
 
 // Error is the typed load failure: the file that refused and the
@@ -141,22 +148,43 @@ func parse(raw []byte, projects []string) (*Config, string) {
 		return nil, ""
 	}
 	if root.Kind != yaml.MappingNode {
-		return nil, "the file must be a mapping with one `steps:` section"
+		return nil, "the file must be a mapping with a `steps:` and/or a `" + MemoryPolicyKey + ":` section"
 	}
 	top, reason := mapping(root, "")
 	if reason != "" {
 		return nil, reason
 	}
-	var stepsNode *yaml.Node
+	var stepsNode, policyNode *yaml.Node
 	for _, kv := range top {
-		if kv.key != "steps" {
-			return nil, fmt.Sprintf("unknown top-level key %q (only `steps`)", kv.key)
+		switch kv.key {
+		case "steps":
+			stepsNode = kv.val
+		case MemoryPolicyKey:
+			policyNode = kv.val
+		default:
+			return nil, fmt.Sprintf("unknown top-level key %q (only `steps` and `%s`)", kv.key, MemoryPolicyKey)
 		}
-		stepsNode = kv.val
 	}
-	if stepsNode == nil || isNull(stepsNode) {
+	cfg := &Config{}
+	if stepsNode != nil && !isNull(stepsNode) {
+		if cfg.Models, reason = parseSteps(stepsNode, projects); reason != "" {
+			return nil, reason
+		}
+	}
+	if policyNode != nil {
+		if cfg.MemoryPolicy, reason = parseMemoryPolicy(policyNode, projects); reason != "" {
+			return nil, reason
+		}
+	}
+	if cfg.Models == nil && cfg.MemoryPolicy == nil {
 		return nil, "" // a file declaring nothing governs nothing
 	}
+	return cfg, ""
+}
+
+// parseSteps reads the `steps:` section: project → (DefaultKey or a
+// step id → candidate list).
+func parseSteps(stepsNode *yaml.Node, projects []string) (map[string]map[string][]string, string) {
 	if stepsNode.Kind != yaml.MappingNode {
 		return nil, "steps: must be a mapping of project → step entries"
 	}
@@ -164,7 +192,7 @@ func parse(raw []byte, projects []string) (*Config, string) {
 	if reason != "" {
 		return nil, reason
 	}
-	cfg := &Config{Models: make(map[string]map[string][]string, len(byProject))}
+	models := make(map[string]map[string][]string, len(byProject))
 	var unmapped []string
 	for _, pkv := range byProject {
 		project, pn := pkv.key, pkv.val
@@ -182,19 +210,28 @@ func parse(raw []byte, projects []string) (*Config, string) {
 		if reason != "" {
 			return nil, reason
 		}
-		cfg.Models[project] = make(map[string][]string, len(entries))
+		models[project] = make(map[string][]string, len(entries))
 		for _, ekv := range entries {
 			list, reason := stepEntry(ekv.val, where+"."+ekv.key)
 			if reason != "" {
 				return nil, reason
 			}
-			cfg.Models[project][ekv.key] = list
+			models[project][ekv.key] = list
 		}
 	}
-	if len(unmapped) > 0 {
-		return nil, fmt.Sprintf("project(s) %s are not mapped to this workspace in cli.toml (it maps: %s)", strings.Join(unmapped, ", "), strings.Join(projects, ", "))
+	if reason := unmappedReason(unmapped, projects); reason != "" {
+		return nil, reason
 	}
-	return cfg, ""
+	return models, ""
+}
+
+// unmappedReason is the refusal for project keys cli.toml does not map
+// to this workspace ("" when there are none).
+func unmappedReason(unmapped, projects []string) string {
+	if len(unmapped) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("project(s) %s are not mapped to this workspace in cli.toml (it maps: %s)", strings.Join(unmapped, ", "), strings.Join(projects, ", "))
 }
 
 // stepEntry reads one `{ models: [...] }` step entry at path where:

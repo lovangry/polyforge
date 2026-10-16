@@ -8,14 +8,15 @@ package workspace
 // only what is local:
 //
 //	<workspace>/
-//	  .polyforge.yaml   the human-written model candidates
+//	  .polyforge.yaml   the human-written model candidates and memory policy
 //	  CLAUDE.md         the workspace notes (polyforge-managed block + human part)
 //	  .repo/<repo>/     clones for humans and interactive agents
 //	  capsules/<wi>/    work item workspaces (daemon-managed)
 //	  .polyforge/       polyforge-generated files only (no documents)
 //	  scratch/          disposable output; entries older than 14 days are stale
 //
-// `pf init` creates scratch/ and writes the convention into CLAUDE.md
+// `pf init` creates scratch/, writes the convention into CLAUDE.md and
+// appends the default memory_policy to .polyforge.yaml when it has none
 // (Init); `pf doctor` warns about entries outside it (StrayEntries) and
 // about a CLAUDE.md without the layout section (LayoutSection), and
 // reports — or, with --prune-scratch, removes — stale scratch entries
@@ -312,15 +313,20 @@ type InitResult struct {
 	Workspace string `json:"workspace"`
 	Scratch   string `json:"scratch"`   // created | exists
 	NotesFile string `json:"claude_md"` // created | inserted | updated | unchanged
+	// Yaml is what happened to .polyforge.yaml's memory_policy section:
+	// created (a new file holding only it) | appended | unchanged.
+	Yaml string `json:"polyforge_yaml"`
 }
 
-// Init gives an existing workspace directory its local layout: scratch/
-// and the layout section of CLAUDE.md. It is idempotent and never
-// touches CLAUDE.md outside the layout section: a file without one gets
-// it inside its polyforge-managed block (or a new managed block on top);
-// a file with one gets that section replaced. CLAUDE.md is written
-// atomically (temp file + rename, mode kept); a symlinked CLAUDE.md has
-// its target written, the link stays.
+// Init gives an existing workspace directory its local layout: scratch/,
+// the layout section of CLAUDE.md and the memory_policy section of
+// .polyforge.yaml. It is idempotent and never touches CLAUDE.md outside
+// the layout section: a file without one gets it inside its
+// polyforge-managed block (or a new managed block on top); a file with
+// one gets that section replaced. CLAUDE.md is written atomically (temp
+// file + rename, mode kept); a symlinked CLAUDE.md has its target
+// written, the link stays. .polyforge.yaml only ever gains the default
+// memory_policy section, appended as text (ensureMemoryPolicy).
 func Init(root string) (InitResult, error) {
 	res := InitResult{Workspace: root}
 	st, err := os.Stat(root)
@@ -370,10 +376,13 @@ func Init(root string) (InitResult, error) {
 		return res, fmt.Errorf("%s: %w", notes, err)
 	}
 	res.NotesFile = how
-	if how == "unchanged" {
-		return res, nil
+	if how != "unchanged" {
+		if err := writeAtomic(notes, []byte(text), mode); err != nil {
+			return res, err
+		}
 	}
-	return res, writeAtomic(notes, []byte(text), mode)
+	res.Yaml, err = ensureMemoryPolicy(root)
+	return res, err
 }
 
 // writeAtomic replaces path with data through a temp file in the same
