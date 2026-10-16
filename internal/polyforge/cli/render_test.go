@@ -183,3 +183,22 @@ func TestStatusNamesJobAwaitingHub(t *testing.T) {
 		t.Fatalf("an ordinary recovery must not read as awaiting aihub:\n%s", out)
 	}
 }
+
+// polyforge#176: the ops status face shows the candidate a dispatch runs
+// on, effort included; the column only appears when some job has one.
+func TestStatusShowsCandidateEffort(t *testing.T) {
+	var b bytes.Buffer
+	renderStatus(&b, &StatusResponse{Jobs: []StatusJob{
+		{WorkItemID: "wi_a", Status: "running", Candidate: "claude:claude-opus-5-5:high"},
+		{WorkItemID: "wi_b", Status: "running"},
+	}})
+	out := b.String()
+	if !strings.Contains(out, "CANDIDATE") || !strings.Contains(out, "claude:claude-opus-5-5:high") {
+		t.Fatalf("status must show the in-flight candidate with its effort:\n%s", out)
+	}
+	b.Reset()
+	renderStatus(&b, &StatusResponse{Jobs: []StatusJob{{WorkItemID: "wi_b", Status: "running"}}})
+	if strings.Contains(b.String(), "CANDIDATE") {
+		t.Fatalf("no candidate in flight: no column:\n%s", b.String())
+	}
+}

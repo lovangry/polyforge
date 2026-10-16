@@ -17,6 +17,10 @@ type Params struct {
 	Resume         bool
 	InitialPrompt  string
 	Model          string
+	// Effort is the candidate's thinking effort (polyforge#176; "" = the
+	// harness's own default — no flag). The spawner maps it onto its
+	// harness's flag (harness.Candidate.EffortArgs).
+	Effort string
 	// Harness is the step harness this derivation runs on (polyforge#159;
 	// "" = pi). The runtime spawner dispatches on it.
 	Harness string

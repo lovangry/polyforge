@@ -153,6 +153,10 @@ func TestNormalizeModels(t *testing.T) {
 	if got, err := NormalizeModels([]string{" pi:a/x ", "claude: claude-opus-5-5"}); err != nil || !reflect.DeepEqual(got, []string{"pi:a/x", "claude:claude-opus-5-5"}) {
 		t.Fatalf("got %v, %v", got, err)
 	}
+	// polyforge#176: the same model at two efforts is two candidates
+	if got, err := NormalizeModels([]string{"pi:a/x:low", "pi:a/x : high", "pi:a/x"}); err != nil || !reflect.DeepEqual(got, []string{"pi:a/x:low", "pi:a/x:high", "pi:a/x"}) {
+		t.Fatalf("effort chain got %v, %v", got, err)
+	}
 	for name, c := range map[string]struct {
 		in   []string
 		want string
@@ -164,6 +168,8 @@ func TestNormalizeModels(t *testing.T) {
 		"no prefix":      {[]string{"sub2api-glm/glm-5.3"}, `"sub2api-glm/glm-5.3" needs a harness prefix (pi:… or claude:…)`},
 		"unknown prefix": {[]string{"codex:gpt-6"}, `unknown harness prefix "codex"`},
 		"empty model":    {[]string{"claude:"}, "names no model"},
+		"claude effort":  {[]string{"pi:a:off", "claude:m:off"}, `effort "off" is not accepted by claude`},
+		"effort dup":     {[]string{"pi:a:high", "pi: a : high"}, `repeats "pi:a:high"`},
 	} {
 		if _, err := NormalizeModels(c.in); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Fatalf("%s: err %v, want %q", name, err, c.want)

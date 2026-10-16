@@ -133,6 +133,7 @@ type Step struct {
 	// dispatched with into every step-starting execution.json write, so
 	// the observe face can render it — the daemon never derives it).
 	Model          string           `json:"model,omitempty"`
+	Effort         string           `json:"effort,omitempty"` // that candidate's thinking effort (polyforge#176; absent = the harness default)
 	Output         map[string]any   `json:"output,omitempty"`
 	StepStartedAt  string           `json:"step_started_at,omitempty"`
 	BudgetConsumed Budget           `json:"budget_consumed"`

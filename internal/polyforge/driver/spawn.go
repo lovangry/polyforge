@@ -258,6 +258,7 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		HarnessSession: hsession,
 		InitialPrompt:  assembleStepPrompt(parts),
 		Model:          sp.Model,
+		Effort:         sp.Effort,
 	}
 	if translator != nil {
 		p.OnRecord = func(line string) { translator.Feed([]byte(line)) }

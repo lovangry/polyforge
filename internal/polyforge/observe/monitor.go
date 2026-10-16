@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/common/harness"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/sessionjsonl"
@@ -130,6 +131,7 @@ type dispatchState struct {
 	spawnN    int64
 	step      string
 	startedAt time.Time
+	candidate string // the dispatch's `<harness>:<model>[:<effort>]` ("" = the harness default model)
 	tracker   *supervise.Tracker
 	verdicted bool
 }
@@ -367,6 +369,9 @@ func (m *Monitor) onStepStarted(f supervise.StepStarted) {
 	tr := m.link.Tracker(f.SpawnN)
 	tr.Begin(f)
 	d := &dispatchState{spawnN: f.SpawnN, step: f.Step, startedAt: f.StartedAt, tracker: tr}
+	if f.Model != "" {
+		d.candidate = harness.Candidate{Harness: harness.Of(f.Harness), Model: f.Model, Effort: f.Effort}.String()
+	}
 	if d.startedAt.IsZero() {
 		d.startedAt = m.now()
 	}
@@ -484,7 +489,7 @@ func (m *Monitor) activity() Activity {
 	}
 	now := m.now()
 	snap := d.tracker.Snapshot(now)
-	return Activity{Step: d.step, SpawnN: d.spawnN, StepStartedAt: d.startedAt, LastWorkAt: snap.LastWork, InDispatch: true}
+	return Activity{Step: d.step, SpawnN: d.spawnN, StepStartedAt: d.startedAt, LastWorkAt: snap.LastWork, InDispatch: true, Candidate: d.candidate}
 }
 
 // liveProgress answers the watch face's per-dispatch reading (any

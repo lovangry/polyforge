@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/harness"
 	"github.com/silgrid/polyforge/internal/common/spawn"
 )
 
@@ -194,6 +195,9 @@ func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 		// exactly the form the harness's --model pattern accepts
 		args = append(args, "--model", p.Model)
 	}
+	// polyforge#176: the candidate's effort rides --thinking (never
+	// the --model "<id>:<level>" shorthand — --model stays the id)
+	args = append(args, harness.Candidate{Harness: harness.Pi, Effort: p.Effort}.EffortArgs()...)
 	cmd := exec.Command(s.bin(), args...)
 	cmd.Dir = p.CapsuleDir // cwd = capsule root
 	additions := []string{

@@ -505,3 +505,25 @@ func TestLiveProgressFaceReadsTheCurrentDispatch(t *testing.T) {
 	m.link.Fact(supervise.StepEnded{Step: "fix", SpawnN: 1, Outcome: supervise.OutcomeResult})
 	soon(t, time.Second, "dispatch dropped", func() bool { return !m.liveProgress().InDispatch })
 }
+
+// polyforge#176: the in-flight dispatch's activity names its candidate,
+// effort included (the ops status CANDIDATE column).
+func TestActivityCarriesCandidateWithEffort(t *testing.T) {
+	h := newFakeHandle("att_1")
+	m, _ := newTestMonitor(t, h, nil)
+	th := supervise.Thresholds{Silence: time.Hour, StepTimeout: time.Hour}
+	m.link.Fact(supervise.StepStarted{
+		Step: "fix", SpawnN: 1, Model: "claude-opus-5-5", Effort: "high", Harness: "claude",
+		StartedAt: m.link.Clock(), Thresholds: th,
+	})
+	soon(t, time.Second, "dispatch 1 adopted", func() bool { return m.activity().InDispatch })
+	if got := m.activity().Candidate; got != "claude:claude-opus-5-5:high" {
+		t.Fatalf("candidate %q, want claude:claude-opus-5-5:high", got)
+	}
+	m.link.Fact(supervise.StepEnded{Step: "fix", SpawnN: 1, Outcome: supervise.OutcomeResult})
+	startDispatch(m, 2, "b", th) // model m on pi, no effort
+	soon(t, time.Second, "dispatch 2 adopted", func() bool { return m.activity().SpawnN == 2 })
+	if got := m.activity().Candidate; got != "pi:m" {
+		t.Fatalf("candidate %q, want pi:m", got)
+	}
+}

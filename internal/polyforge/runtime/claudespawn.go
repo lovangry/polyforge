@@ -85,6 +85,8 @@ func (s *claudeSpawner) buildCmd(p SpawnParams) (*exec.Cmd, error) {
 	if p.Model != "" {
 		args = append(args, "--model", p.Model)
 	}
+	// polyforge#176: the candidate's effort rides --effort
+	args = append(args, harness.Candidate{Harness: harness.Claude, Effort: p.Effort}.EffortArgs()...)
 	args = append(args,
 		"--tools", ClaudeStepTools,
 		"--allowedTools", ClaudeStepTools,

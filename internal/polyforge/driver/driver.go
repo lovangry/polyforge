@@ -320,6 +320,7 @@ func (d *Driver) Run(ctx context.Context) error {
 			Kind:   TransStepStart,
 			StepID: stepID,
 			Model:  spawn.Model,
+			Effort: spawn.Effort,
 			SpawnN: n,
 		}); err != nil {
 			return fmt.Errorf("driver: step %s start failed: %w", stepID, err)
@@ -600,7 +601,7 @@ func (d *Driver) prepareDispatch(stepID string) (*StepSpawn, int64, error) {
 	sp.Harness = harness.Pi
 	if spec := d.workflow.step(stepID); spec != nil {
 		if c, err := harness.ParseCandidate(d.modelForLocked(stepID)); err == nil {
-			sp.Harness, sp.Model = c.Harness, c.Model
+			sp.Harness, sp.Model, sp.Effort = c.Harness, c.Model, c.Effort
 		}
 	}
 	sp.SpawnN = d.spawnN + 1
@@ -759,6 +760,9 @@ type StepSpawn struct {
 	// Model is the resolved candidate ("" = the harness adapter's
 	// default; no candidate list is in effect).
 	Model string
+	// Effort is the resolved candidate's thinking effort (polyforge#176;
+	// "" = the harness's own default).
+	Effort string
 	// Harness is the step's effective harness (polyforge#159; never ""
 	// from the driver — pi when nothing chose otherwise).
 	Harness string

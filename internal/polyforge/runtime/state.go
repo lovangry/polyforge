@@ -308,6 +308,15 @@ func legacyCandidates(wi string, cands map[string][]string, stepHarness map[stri
 				conv = append(conv, c.String())
 				continue
 			}
+			// a harness-prefixed candidate the current rules refuse (an
+			// effort its harness does not take, polyforge#176) is not a
+			// bare id of the old era: it passes through unchanged, so the
+			// driver's start check refuses it by name instead of it being
+			// re-prefixed into a different candidate
+			if h0, _, ok := strings.Cut(id, ":"); ok && harness.Valid(strings.TrimSpace(h0)) {
+				conv = append(conv, id)
+				continue
+			}
 			claudeID := strings.HasPrefix(id, "claude-") && !strings.Contains(id, "/")
 			if claudeID == (h == harness.Claude) {
 				conv = append(conv, h+":"+id)

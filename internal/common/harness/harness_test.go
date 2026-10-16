@@ -98,3 +98,70 @@ func TestLocateClaudeSession(t *testing.T) {
 		t.Fatal("a glob pattern is not an id")
 	}
 }
+
+// polyforge#176: `<harness>:<model>[:<effort>]` — only a LAST segment of
+// the closed effort set is the effort; every other `:` is the model's.
+func TestParseCandidateEffort(t *testing.T) {
+	ok := []struct{ in, h, m, e, canon string }{
+		{"claude:claude-opus-5-5:high", "claude", "claude-opus-5-5", "high", "claude:claude-opus-5-5:high"},
+		{"pi:sub2api-glm/glm-5.3:low", "pi", "sub2api-glm/glm-5.3", "low", "pi:sub2api-glm/glm-5.3:low"},
+		{"pi:ollama/llama3:8b", "pi", "ollama/llama3:8b", "", "pi:ollama/llama3:8b"},
+		{"pi:ollama/llama3:8b:xhigh", "pi", "ollama/llama3:8b", "xhigh", "pi:ollama/llama3:8b:xhigh"},
+		{"pi:x/y:off", "pi", "x/y", "off", "pi:x/y:off"},
+		{"pi:x/y:minimal", "pi", "x/y", "minimal", "pi:x/y:minimal"},
+		{"claude:m:max", "claude", "m", "max", "claude:m:max"},
+		{"claude:m:medium", "claude", "m", "medium", "claude:m:medium"},
+		{" pi : x/y : high ", "pi", "x/y", "high", "pi:x/y:high"},
+		{"pi:x/y:High", "pi", "x/y:High", "", "pi:x/y:High"}, // case-sensitive: not an effort
+		{"pi:x/y:hgih", "pi", "x/y:hgih", "", "pi:x/y:hgih"}, // a typo is part of the model id
+		{"pi:high", "pi", "high", "", "pi:high"},             // no second segment: the model id
+		{"pi:high:low", "pi", "high", "low", "pi:high:low"},  // only the LAST segment is examined
+	}
+	for _, c := range ok {
+		got, err := ParseCandidate(c.in)
+		if err != nil || got.Harness != c.h || got.Model != c.m || got.Effort != c.e || got.String() != c.canon {
+			t.Errorf("ParseCandidate(%q) = %+v (%q), %v; want %s / %s / %s", c.in, got, got.String(), err, c.h, c.m, c.e)
+		}
+	}
+	bad := []struct{ in, want string }{
+		{"claude:claude-opus-5-5:off", `effort "off" is not accepted by claude (it accepts low|medium|high|xhigh|max)`},
+		{"claude:claude-opus-5-5:minimal", `effort "minimal" is not accepted by claude`},
+		{"pi:x/y:high:low", `names two efforts ("high" and "low")`},
+		{"pi::high", "names no model"},
+		{"claude: :max", "names no model"},
+	}
+	for _, c := range bad {
+		_, err := ParseCandidate(c.in)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("ParseCandidate(%q) err = %v, want %q", c.in, err, c.want)
+		}
+	}
+	for _, e := range Efforts {
+		if !ValidEffort(e) {
+			t.Fatalf("%q not valid", e)
+		}
+		if _, err := ParseCandidate("pi:m:" + e); err != nil {
+			t.Fatalf("pi refuses %q: %v", e, err)
+		}
+	}
+	if ValidEffort("") || ValidEffort("ultra") || EffortsOf("codex") != nil {
+		t.Fatal("closed effort set")
+	}
+}
+
+func TestEffortArgs(t *testing.T) {
+	cases := []struct {
+		c    Candidate
+		want string
+	}{
+		{Candidate{Harness: Pi, Model: "x/y", Effort: "high"}, "--thinking high"},
+		{Candidate{Harness: Claude, Model: "m", Effort: "xhigh"}, "--effort xhigh"},
+		{Candidate{Harness: Pi, Model: "x/y"}, ""},
+		{Candidate{Harness: Claude, Model: "m"}, ""},
+	}
+	for _, c := range cases {
+		if got := strings.Join(c.c.EffortArgs(), " "); got != c.want {
+			t.Errorf("%+v EffortArgs = %q, want %q", c.c, got, c.want)
+		}
+	}
+}

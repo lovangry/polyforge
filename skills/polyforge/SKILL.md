@@ -227,10 +227,14 @@ Five standing rules, binding on every polyforge session:
    `steps`: per project, a `default` entry and/or entries keyed by step id
    (`fix`, `code`, `review`, ... — a key must be a step id of the
    installed workflows), each `{ models: [...] }` (`models` is the only
-   key). Every candidate is `<harness>:<model>` — `pi:` or `claude:`
-   (Claude Code, run as `claude -p --bare`, logged in by a human
-   beforehand), split on the first `:` — e.g.
-   `[claude:claude-opus-5-5, pi:sub2api-glm/glm-5.3]`. The prefix is
+   key). Every candidate is `<harness>:<model>[:<effort>]` — `pi:` or
+   `claude:` (Claude Code, run as `claude -p --bare`, logged in by a
+   human beforehand), split on the first `:` — e.g.
+   `[claude:claude-opus-5-5:high, pi:sub2api-glm/glm-5.3]`. The optional
+   effort is the last segment only when it is one of `off minimal low
+   medium high xhigh max` (pi takes all, as `--thinking`; claude takes
+   `low`…`max`, as `--effort`; another is refused); omitted, the harness
+   uses its own default. The prefix is
    mandatory and is the whole truth (no inference from the id, no
    `harness` key — a leftover one refuses); the same format holds for
    the bundles' `model_candidates` and `pf submit --models`. A chain may
