@@ -1056,7 +1056,8 @@ polyforge artifacts still installed — the v1 aihub bridge as a pi package
 Claude skills (`using-polyforge`, `pf-*`) and v1 Claude plugins — and
 print one command line that first backs them up into
 `~/polyforge-v1-backup-<timestamp>/`, then removes them. Nothing is
-removed automatically. Restart the harness sessions afterwards.
+removed automatically. Restart the harness sessions afterwards. The
+check is migration hygiene and is removed at v3.0.
 
 ## Workspace runtime-artifact layout (polyforge#177)
 

@@ -87,6 +87,9 @@ no user file is ever written — the user pastes the snippet.
 | `pi install layout` | pi's settings `packages` hold the local release `<data-dir>/release/current` | a `git:…silgrid/polyforge.git@<ver>` entry (the old clone), another polyforge checkout, no entry, or no release behind it → re-run `tools/install.sh` | no pi agent dir |
 | `v1 harness leftovers` | no v1 artifact | any of: a pi package from `GMISWE/ieops-aihub`, a v1 bridge extension listed in pi's settings or present at `~/.pi/agent/extensions/polyforge`, a v1 Claude skill (`using-polyforge`, `pf-*`), a v1 Claude plugin (`polyforge@…`, the ieops-aihub marketplace) — the detail lists each and one copy-paste command line that first backs everything up into `~/polyforge-v1-backup-<timestamp>/`, then removes them (`pi remove`, `mv`, `claude plugin uninstall`) | — |
 
+The `v1 harness leftovers` check is migration hygiene and is removed at
+v3.0.
+
 v1 artifacts hook the same session events as the v2 adapters (pi loads
 `~/.pi/agent/extensions/*` and package extensions side by side), so show
 the user the command and let them run it; restart the harness sessions

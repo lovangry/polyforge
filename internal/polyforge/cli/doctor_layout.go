@@ -27,7 +27,9 @@ import (
 //     GMISWE/ieops-aihub, ~/.pi/agent/extensions/polyforge), v1 Claude
 //     skills (using-polyforge, pf-*) and v1 Claude plugins. Warn only,
 //     with copy-paste cleanup commands that back up first; nothing is
-//     ever removed by the doctor.
+//     ever removed by the doctor. Migration hygiene only: this check is
+//     removed at v3.0 (decision 2026-10-16 G18) — delete docChV1Leftovers,
+//     the v1* vars and their check then.
 //   - daemon supervision: a live daemon under the tmux restart loop (or
 //     an active systemd unit) passes; a live unsupervised daemon warns
 //     with the fix; a dead daemon is the "daemon socket" fail.
