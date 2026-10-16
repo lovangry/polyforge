@@ -40,7 +40,8 @@ with `-workflows-dir release/current/workflows` and revives it within ~5s
 after a crash; after a container/machine restart (tmux does not survive
 one) the next pi or Claude Code session runs the same ensure. An upgrade
 shuts the daemon down gracefully (the loop ends with that clean exit —
-`pf ops shutdown` always stops for good, only failures are restarted),
+`pf ops shutdown` always stops for good, only failures are restarted — except
+exit 78, below),
 swaps the binary, then ensures again; meanwhile it holds the ensure lock,
 so a harness session starting mid-upgrade starts nothing. A daemon already running with a different workflows
 dir, or without its loop, is reported, never auto-restarted. Finally it
@@ -459,7 +460,16 @@ maintainer or an admin.
 ## `pf daemon` flags
 
 `pf daemon` runs the local work machine (runtime, driver and watcher over
-the UDS face). Every setting is a flag; where an environment variable is listed
+the UDS face).
+
+Exit status 78 means the daemon refused to start for a reason only an
+operator can fix — configuration, the recorded daemon id, the workspace
+mapping or a workspace directory, unreadable on-disk state, or a failed
+restart reconciliation. The `pf daemon ensure` supervision loop then STOPS
+(it logs `the daemon refused to start (exit 78 …); the loop ends`) instead of
+restarting into the same failure every 5s; any other non-zero exit is still
+restarted after 5s. To recover: read `<data-dir>/daemon.log`, fix the cause,
+then run `pf daemon ensure` (the next harness session start also runs it). Every setting is a flag; where an environment variable is listed
 the flag wins over it, and the shared CLI config file
 (`~/.config/polyforge/cli.toml`, or `--config`) is the last fallback for
 the `PF_*` entries.

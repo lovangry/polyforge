@@ -421,7 +421,7 @@ workspace 旗标或环境变量（旧 `-workspace` / `POLYFORGE_WORKSPACE` 已�
 （polyforge#174）：
 
 1. **ensure 语义**：daemon socket 可达 ⇒ 什么都不做、退出 0；否则在 tmux 会话 `polyforge-daemon` 中
-   启动监督环 `while :; do nohup pf daemon <规范 argv>; rc=$?; [ "$rc" -eq 0 ] && break; sleep 5; done`（规范 argv：`--config`、`-machine-id`
+   启动监督环 `while :; do nohup pf daemon <规范 argv>; rc=$?; [ "$rc" -eq 0 ] && break; [ "$rc" -eq 78 ] && break; sleep 5; done`（规范 argv：`--config`、`-machine-id`
    取 `<data-dir>/daemon-id` 否则 `m-<短主机名>`、`-data-dir`、`-socket` 取配置 `daemon_socket`、
    `-workflows-dir <data-dir>/release/current/workflows`；harness 根目录取缺省 `<data-dir>`（#171）；auto 与
    并发上限沿用 daemon 自身持久设置；工作目录 `$HOME`，日志追加到 `<data-dir>/daemon.log`，超 10 MiB 轮转），
@@ -430,6 +430,9 @@ workspace 旗标或环境变量（旧 `-workspace` / `POLYFORGE_WORKSPACE` 已�
    时拒绝拉起并说明原因。tmux 不可用时退回单次无监督启动并明确告警。
 2. **崩溃**：非零退出（崩溃、panic、被杀）由监督环约 5s 内拉起新进程；干净退出（`pf ops shutdown`、
    SIGTERM——优雅停机序列）结束监督环，即 `pf ops shutdown` 仍是「真正停下」，再起用 `pf daemon ensure`。
+   **退出码 78**（repo review 2026-10-16 B-14）：daemon 因只有操作员能修的原因拒绝启动（配置、daemon-id、
+   workspace、磁盘状态、重启对账失败）——监督环同样结束，不再每 5s 重启进同一个失败；原因在
+   `<data-dir>/daemon.log`，修好后 `pf daemon ensure`（下一个 harness 会话开始时也会执行）。
 3. **容器 / 机器重启**：下一个开始或恢复的 harness 会话执行 `pf daemon ensure`——pi 的 `pf-chat` 扩展在
    `session_start` 的 `pf chat init` 失败时后台调用一次（pi-web 恢复会话会重放 `session_start`），随后沿用
    每 5s 的重试环；Claude Code 的 SessionStart 钩子（startup / resume / clear / compact 触发）先 ensure

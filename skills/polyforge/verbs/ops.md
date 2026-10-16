@@ -38,7 +38,11 @@ Starting the daemon is `pf daemon ensure` (polyforge#174) — never a bare
 `pf daemon` in the background. It is idempotent and file-locked: when a
 daemon answers it does nothing; otherwise it starts the restart loop in
 tmux session `polyforge-daemon` (a failed exit — crash, panic, kill — is
-restarted within ~5s; a clean exit ends the loop) and waits for the socket. The harness adapters already run it when a session
+restarted within ~5s; a clean exit ends the loop; exit 78 — the daemon
+refused to start for an operator-fixable reason: config, daemon id,
+workspace, on-disk state, failed restart reconciliation — also ends the
+loop, so read `<data-dir>/daemon.log`, fix the cause, then `pf daemon
+ensure` again) and waits for the socket. The harness adapters already run it when a session
 starts or resumes, so the agent runs it only as the fallback: an
 execution-plane verb answered `dial unix …` → `pf daemon ensure`, then
 retry that verb ONCE. A non-zero exit carries the reason (no `[workspace]`

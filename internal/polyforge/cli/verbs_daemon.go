@@ -530,7 +530,10 @@ starts or resumes. Idempotent: a daemon answering on the config's
 daemon_socket means nothing to do (exit 0). Otherwise it starts the
 restart loop in tmux session polyforge-daemon (pf daemon <canonical
 argv>; a failed exit — crash, panic, kill — is restarted after 5s, a
-clean exit — pf ops shutdown, SIGTERM — ends the loop; the log is
+clean exit — pf ops shutdown, SIGTERM — ends the loop, and so does exit
+78, the daemon refusing to start for an operator-fixable reason (config,
+daemon id, workspace, on-disk state, failed restart reconciliation): fix
+the cause named in the log, then run pf daemon ensure again; the log is
 <data-dir>/daemon.log) and waits up to
 --timeout (default 30s) for the socket: exit 0 when it answers, 1 when
 not. Concurrent calls are serialized by <data-dir>/ensure.lock: one

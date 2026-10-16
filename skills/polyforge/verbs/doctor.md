@@ -61,7 +61,11 @@ reported `skip` — a skip never pretends to be a pass.
 
 The loop restarts crashes within ~5s; tmux does not survive a container or
 machine restart — the next pi or Claude Code session start runs
-`pf daemon ensure` and brings it back.
+`pf daemon ensure` and brings it back. A daemon that refused to start for an
+operator-fixable reason (exit 78: config, daemon id, workspace, on-disk
+state, failed restart reconciliation) ends the loop instead: `daemon socket`
+fails and the cause is in `<data-dir>/daemon.log` — fix it, then
+`pf daemon ensure`.
 
 ## Progress display (presentation only — never `fail`, never moves the exit code)
 
