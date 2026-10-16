@@ -156,6 +156,18 @@ func TestDeployHappyPathHoldsAndReleasesLock(t *testing.T) {
 	if !d.lockFree() {
 		t.Errorf("the lock is still held after the script exited")
 	}
+	// the SIGKILL deadline outlasts aihub's own 10s drain (repo review
+	// 2026-10-16 D-15), in the compose file and in the stop itself
+	if !strings.Contains(d.composeText(), "    stop_grace_period: 15s\n") {
+		t.Errorf("compose stop_grace_period is not 15s:\n%s", d.composeText())
+	}
+	if !strings.Contains(d.logOf("log-docker"), "stop -t 15 ") {
+		t.Errorf("the switch-window stop does not wait 15s:\n%s", d.logOf("log-docker"))
+	}
+	// the repo's reference compose file says the same
+	if b, err := os.ReadFile(filepath.Join(v1Root(t), "deploy", "docker-compose.yml")); err != nil || !strings.Contains(string(b), "stop_grace_period: 15s") {
+		t.Errorf("deploy/docker-compose.yml stop_grace_period is not 15s (%v)", err)
+	}
 }
 
 func TestDeployVerificationFailureAutoRollsBack(t *testing.T) {
