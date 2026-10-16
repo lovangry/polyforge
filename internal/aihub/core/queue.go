@@ -69,7 +69,7 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 	// registration ticket (02 §5.1b: the executable segments always exclude
 	// registration tickets — they cannot be claimed, #17); the child count
 	// feeds the w140 pending-bundle segment (an epic never queues).
-	rows, err := m.db.Query(`SELECT id, COALESCE(waiting_on,''), bundle_name IS NULL,
+	rows, err := m.db.Query(`SELECT id, COALESCE(waiting_on,''), COALESCE(bundle_name,'')='',
 		(SELECT COUNT(*) FROM work_items c WHERE c.parent_id=work_items.id) FROM work_items
 		WHERE project_id=? AND status IN ('queued','running','paused')`, projectID)
 	if err != nil {
