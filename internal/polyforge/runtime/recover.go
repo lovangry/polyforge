@@ -40,8 +40,8 @@ func (r *Runtime) recoverOp(ctx context.Context, j *job, cause, detail string) {
 	defer r.unlockWI(j.wi, s)
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
-	if r.jobOf(j.wi) != j || j.isBusy() {
-		return // settled meanwhile, or a close's network step is in flight (B-8)
+	if r.jobOf(j.wi) != j || j.pendingRestart() {
+		return // settled meanwhile, or the restart reconciliation decides it
 	}
 	r.recoverCore(ctx, j, cause, detail)
 }
@@ -171,11 +171,11 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// blind to its own goal (an aihub read when the claim snapshot is
 	// gone). Best-effort, idempotent.
 	//
-	// Both run outside opMu with the job latched busy (offLock, B-8): the
+	// Both run outside opMu with its work-item lock held (offLock, B-8): the
 	// job sits RECOVERING with no agent, so no other door acts on it.
 	if !r.offLock(j, func() {
 		_, _ = commitDirty(r, j)
-		r.ensureWorkItemFile(j)
+		r.ensureWorkItemFile(ctx, j)
 	}) {
 		fmt.Fprintf(os.Stderr, "runtime: %s: the job left the job table during its recovery; nothing relaunched\n", j.wi)
 		return
@@ -384,7 +384,7 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 	// check, §7).
 	r.killAgentTree(j)
 	// The pushes and the blocked close run outside opMu with the job
-	// latched busy (offLock, B-8); the verdict is applied once the lock
+	// its work-item lock held (offLock); the verdict is applied once the lock
 	// is retaken.
 	settled := false
 	if !r.offLock(j, func() {
@@ -406,7 +406,7 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 		// When boundedFail's own push did not land, the close goes
 		// through closeBlocked's push-then-close, so a hub blip never lets
 		// SessionEnd(blocked) land with unpushed commits.
-		settled = r.closeBlocked(j, !chainPushed)
+		settled = r.closeBlocked(ctx, j, !chainPushed)
 	}) {
 		fmt.Fprintf(os.Stderr, "runtime: %s: the job left the job table during its blocked close\n", j.wi)
 		return

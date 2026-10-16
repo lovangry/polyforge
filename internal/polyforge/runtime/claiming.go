@@ -218,12 +218,12 @@ func (r *Runtime) resumeClaiming(ctx context.Context) (replays []claimReplay) {
 			return replays // shutdown: the remaining entries stay for the next start
 		}
 		if rec.Ending {
-			r.endClaimAtRestart(wi, rec)
+			r.endClaimAtRestart(ctx, wi, rec)
 			continue
 		}
 		var v *api.SessionVerifyResponse
 		var err error
-		r.laneHub(func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) })
+		r.hubCall(ctx, func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) })
 		if r.restartStopping(ctx) {
 			return replays // nothing decided: the entry stays
 		}
@@ -245,7 +245,7 @@ func (r *Runtime) resumeClaiming(ctx context.Context) (replays []claimReplay) {
 			continue
 		}
 		var resp *api.SessionClaimResponse
-		r.laneHub(func() {
+		r.hubCall(ctx, func() {
 			resp, err = r.hub.SessionClaim(api.SessionClaimRequest{
 				WorkItemID:     rec.WorkItemID,
 				SessionID:      rec.SessionID,
@@ -275,7 +275,7 @@ func (r *Runtime) resumeClaiming(ctx context.Context) (replays []claimReplay) {
 			// lands) rather than dropping the only copy.
 			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay refused, ending the open session blocked: %v\n", wi, err)
 			s := r.lockWI(rec.WorkItemID)
-			r.abandonClaim(&job{wi: rec.WorkItemID, sessionID: rec.SessionID}, wi, err,
+			r.abandonClaim(ctx, &job{wi: rec.WorkItemID, sessionID: rec.SessionID}, wi, err,
 				"the replayed claim of an open session was refused at restart: "+err.Error())
 			r.unlockWI(rec.WorkItemID, s)
 			continue
@@ -303,7 +303,7 @@ func (r *Runtime) placeReplay(ctx context.Context, key, id string, rec *claiming
 		if errors.As(werr, &ae) && ae.Detail != "" {
 			note = ae.Detail
 		}
-		r.abandonClaim(&job{wi: id, sessionID: rec.SessionID}, key, werr, note)
+		r.abandonClaim(ctx, &job{wi: id, sessionID: rec.SessionID}, key, werr, note)
 		fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay refused (session ended blocked): %v\n", key, werr)
 		return nil
 	}
@@ -342,11 +342,10 @@ func (r *Runtime) placeReplay(ctx context.Context, key, id string, rec *claiming
 // (its failed start's compensation never landed): SessionEnd(blocked)
 // under the work item's lock, the entry cleared once it settled, the
 // background retry otherwise. The claim is never replayed.
-func (r *Runtime) endClaimAtRestart(key string, rec *claimingRec) {
+func (r *Runtime) endClaimAtRestart(ctx context.Context, key string, rec *claimingRec) {
 	fmt.Fprintf(os.Stderr, "runtime: %s: claiming entry of an unfinished compensation — ending the session blocked (no claim replay)\n", key)
 	s := r.lockWI(rec.WorkItemID)
-	settled := false
-	r.laneHub(func() { settled = r.endBlockedAtHub(rec.WorkItemID, rec.SessionID, rec.EndNote, "") })
+	settled := r.endBlockedAtHub(ctx, rec.WorkItemID, rec.SessionID, rec.EndNote, "")
 	r.unlockWI(rec.WorkItemID, s)
 	if settled {
 		r.clearClaimingSession(key, rec.SessionID)

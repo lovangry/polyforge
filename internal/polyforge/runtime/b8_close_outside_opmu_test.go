@@ -11,12 +11,17 @@ import (
 	"context"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
+
+// stalledPushes counts, per stalling remote URL, the connections it
+// accepted: a push to it is under way once the count is non-zero.
+var stalledPushes sync.Map // url → *atomic.Int32
 
 // stallingRemote is hangingRemote with an explicit release: the push of
 // a job pointed at it hangs until release() closes the listener and
@@ -27,6 +32,9 @@ func stallingRemote(t *testing.T) (url string, release func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	url = "http://" + ln.Addr().String() + "/capsule.git"
+	accepted := &atomic.Int32{}
+	stalledPushes.Store(url, accepted)
 	var mu sync.Mutex
 	var conns []net.Conn
 	go func() {
@@ -38,6 +46,7 @@ func stallingRemote(t *testing.T) (url string, release func()) {
 			mu.Lock()
 			conns = append(conns, c)
 			mu.Unlock()
+			accepted.Add(1)
 		}
 	}()
 	var once sync.Once
@@ -52,7 +61,7 @@ func stallingRemote(t *testing.T) (url string, release func()) {
 		})
 	}
 	t.Cleanup(release)
-	return "http://" + ln.Addr().String() + "/capsule.git", release
+	return url, release
 }
 
 // startRunning starts wi to RUNNING (its agent is collected at cleanup).
@@ -79,12 +88,20 @@ func stallPushes(t *testing.T, r *Runtime, wi string) (release func()) {
 	return release
 }
 
-// waitBusy blocks until wi's network step runs outside opMu.
+// waitBusy blocks until wi's push to its stalling remote is under way
+// (the operation pushing holds wi's lock).
 func waitBusy(t *testing.T, r *Runtime, wi string) {
 	t.Helper()
-	waitFor(t, wi+" to reach its off-lock network step", func() bool {
+	waitFor(t, wi+" to reach its stalled push", func() bool {
 		j := r.jobOf(wi)
-		return j != nil && j.isBusy()
+		if j == nil || !r.Busy(wi) {
+			return false
+		}
+		j.mu.Lock()
+		url := j.git.RemoteURL
+		j.mu.Unlock()
+		n, ok := stalledPushes.Load(url)
+		return ok && n.(*atomic.Int32).Load() > 0
 	})
 }
 

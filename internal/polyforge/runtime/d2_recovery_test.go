@@ -198,7 +198,7 @@ func TestAbandonClaimRetriesSessionEnd(t *testing.T) {
 	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
 	orig := fmt.Errorf("capsule clone failed")
 	var got error
-	underOpMu(r, func() { got = r.abandonClaim(j, j.wi, orig, "clone") })
+	underOpMu(r, func() { got = r.abandonClaim(context.Background(), j, j.wi, orig, "clone") })
 	if got != orig {
 		t.Fatalf("the original error must be returned, got %v", got)
 	}
