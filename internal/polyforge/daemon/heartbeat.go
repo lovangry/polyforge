@@ -89,13 +89,9 @@ func (d *Daemon) sendHeartbeat() error {
 // unit test — the loop's timer arithmetic must not need a flaky sleep
 // ladder to be pinned.
 func nextHeartbeatDelay(base time.Duration, failStreak int) time.Duration {
-	shift := failStreak
-	if shift > 4 {
-		shift = 4
-	}
-	d := base << uint(shift)
-	if max := base * heartbeatBackoffCap; d > max {
-		d = max
+	d := base
+	for i := 0; i < failStreak && d < base*heartbeatBackoffCap; i++ {
+		d *= 2
 	}
 	return d
 }

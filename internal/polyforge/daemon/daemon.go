@@ -1209,9 +1209,12 @@ func acquireDataDirLock(dataDir string) (*os.File, error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		pid, _ := os.ReadFile(path)
-		_ = pid
 		f.Close()
-		return nil, fmt.Errorf("daemon: another daemon holds the data-dir lock %s", path)
+		holder := ""
+		if p := strings.TrimSpace(string(pid)); p != "" {
+			holder = " (pid " + p + ")"
+		}
+		return nil, fmt.Errorf("daemon: another daemon%s holds the data-dir lock %s", holder, path)
 	}
 	// best-effort pid stamp (diagnostics; the lock itself is the guard)
 	_ = f.Truncate(0)
