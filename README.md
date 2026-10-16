@@ -488,6 +488,7 @@ locally only:
 <workspace>/
   .polyforge.yaml   human-written model candidates
   CLAUDE.md         workspace notes (polyforge-managed block + the human part)
+  go.work(.sum)     optional Go workspace tying the .repo/ clones together
   .repo/<repo>/     clones for humans and interactive agents
   capsules/<wi>/    work item workspaces (daemon-managed)
   .polyforge/       polyforge-generated files only — no documents (legacy v1 repo-map/, watchers/ are tolerated)
