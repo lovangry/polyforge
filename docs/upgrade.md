@@ -525,26 +525,11 @@ derive from one root.
   hard-sets the step's config dir and a value there would override it.
 
 - The adapter injects ZERO credentials henceforth: no token rides the
-  environment or argv from the daemon. `ANTHROPIC_*` variables set in
-  the daemon's environment pass through to claude (an env token is
-  what the step sees when its settings carry none). The daemon-started
+  environment or argv from the daemon. The daemon-started
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` and the claude-config
   `CLAUDE_CONFIG_DIR` are added, and the operator's inherited config-dir
-  value is stripped (it is hard-set).
-
-- Where the daemon's environment comes from (repo review 2026-10-16
-  V-11): `pf daemon ensure` starts the daemon inside the
-  `polyforge-daemon` tmux session, so the daemon — and every step it
-  spawns — inherits the environment of that tmux SERVER, captured when
-  the server first started, possibly from a human's shell. Any
-  `ANTHROPIC_*` there reaches every claude step unchanged (and is
-  visible in `/proc/<pid>/environ`). The settings `env` block is the
-  intended single credential source; Claude Code's documentation
-  suggests that block overrides a same-named process variable, but that
-  is NOT verified by polyforge, and a variable set only in the process
-  env (e.g. an `ANTHROPIC_BASE_URL` absent from settings.json) certainly
-  applies. Either keep credentials out of the tmux server's environment,
-  or set every `ANTHROPIC_*` a step needs in settings.json.
+  value is stripped (it is hard-set). Every inherited `ANTHROPIC_*` is
+  stripped as well (env hygiene, below).
 
 ### The pairing table (generic wording)
 
@@ -558,8 +543,8 @@ derive from one root.
 Notes: `claude login`'s interactive credentials do not serve headless
 steps — mint a long-lived token with `claude setup-token` and put it in
 the settings env block; it is valid about a year, so re-mint before it
-expires. An `ANTHROPIC_BASE_URL` in the DAEMON environment is inherited
-(the doctor notes it); the rejection clause above is the doctor's
+expires. An `ANTHROPIC_BASE_URL` in the DAEMON environment is NOT inherited
+(env hygiene: claude steps strip every inherited `ANTHROPIC_*`); the rejection clause above is the doctor's
 pairing clause — token shape and gateway address TOGETHER, values
 never printed.
 
@@ -1106,3 +1091,28 @@ max_concurrent_jobs = 6               # integer >= 1
   `--pi-bin`, `--git-remote-base`, `--recall-topk`, `--display-name`,
   `--auto`) stay, documented as test/dev-only: nothing in production
   sets them.
+
+## Daemon environment hygiene (supersedes repo review V-11)
+
+`pf daemon ensure` used to start the daemon in the `polyforge-daemon`
+tmux session with the tmux SERVER's environment (captured when that server
+first started, often from a human's shell), so the daemon — and every step
+it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
+`ANTHROPIC_*MODEL` of an unrelated gateway or a stale API key.
+
+- The daemon's environment is now an explicit allow-list (see the README
+  daemon section; defined in `internal/polyforge/supervisor/env.go`)
+  taken from the shell that runs `pf daemon ensure`. A proxy, CA bundle or
+  locale the daemon needs must be set there; anything else (`PF_*`,
+  `ANTHROPIC_*`, retired `POLYFORGE_*`) no longer reaches the daemon.
+- Claude steps strip every inherited `ANTHROPIC_*`: put every
+  `ANTHROPIC_*` a claude step needs (token, base URL, model defaults) in
+  `<harness-root>/claude-config/settings.json`'s `env` block. A setup that
+  relied on a daemon-env token no longer authenticates — `pf doctor`'s
+  `harness claude` row warns. pi steps are unchanged (pi uses its own
+  `auth.json`).
+- A daemon started before this upgrade keeps its old environment until it
+  is restarted: `pf doctor`'s new `daemon env` row warns on any
+  `ANTHROPIC_*` or credential-looking name in it. Restart it clean:
+  `pf ops shutdown`, wait until it is gone, `pf daemon ensure`
+  (tools/install.sh restarts it when it stages a new binary).

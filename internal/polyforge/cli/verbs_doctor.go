@@ -16,6 +16,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/harness"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
+	"github.com/silgrid/polyforge/internal/polyforge/supervisor"
 	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
@@ -49,8 +50,10 @@ import (
 //     prefixed fails, naming file and step). When any resolved candidate
 //     is `claude:`, "harness claude" judges the daemon's view of the
 //     Claude Code CLI (GET /status?harnesses=1: binary found → else fail;
-//     version >= the verified minimum, credential variables set,
-//     ANTHROPIC_BASE_URL unset → else warn) and lists every such step
+//     version >= the verified minimum, the claude-config settings.json
+//     env block carrying ANTHROPIC_AUTH_TOKEN → else warn; claude steps
+//     do not inherit the daemon's ANTHROPIC_*, so those are reported
+//     only) and lists every such step
 //     with its whole candidate chain (each candidate's harness shown by
 //     its prefix) and the level it came from. Credential values are
 //     never shown — set/unset only;
@@ -94,16 +97,17 @@ type doctorReport struct {
 // specifics — the missing path, the project and its workspace, the
 // retired key).
 const (
-	docChConfig   = "config"
-	docChMapping  = "workspace mapping"
-	docChDirs     = "workspace dirs"
-	docChYaml     = "workspace yaml"
-	docChProjects = "aihub projects"
-	docChServer   = "server reach"
-	docChSocket   = "daemon socket"
-	docChAuth     = "auth"
-	docChClaude   = "harness claude"
-	docChEnv      = "retired env"
+	docChConfig    = "config"
+	docChMapping   = "workspace mapping"
+	docChDirs      = "workspace dirs"
+	docChYaml      = "workspace yaml"
+	docChProjects  = "aihub projects"
+	docChServer    = "server reach"
+	docChSocket    = "daemon socket"
+	docChAuth      = "auth"
+	docChClaude    = "harness claude"
+	docChEnv       = "retired env"
+	docChDaemonEnv = "daemon env"
 )
 
 // retiredHarnessEnv are the POLYFORGE_* variables decision 2026-10-16 G2
@@ -130,6 +134,31 @@ func retiredEnvCheck(getenv func(string) string, daemonWarnings []string) doctor
 	}
 	if len(notes) > 0 {
 		c.Status, c.Detail = "warn", strings.Join(notes, "; ")
+	}
+	return c
+}
+
+// daemonEnvCheck (env hygiene) judges the RUNNING daemon's environment
+// by the names GET /status reports (never values): any ANTHROPIC_* or
+// other credential-looking name outside the `pf daemon ensure`
+// allow-list (supervisor/env.go) means the daemon was started from a
+// polluted environment (e.g. an old ensure under a tmux server carrying
+// a human's credentials) — restart it clean.
+func daemonEnvCheck(daemonUp bool, names []string) doctorCheck {
+	c := doctorCheck{Name: docChDaemonEnv}
+	switch {
+	case !daemonUp:
+		c.Status, c.Detail = "skip", "not run: the daemon does not answer"
+	case len(names) == 0:
+		c.Status, c.Detail = "skip", "not run: the daemon reports no environment names (an older daemon?)"
+	default:
+		home, _ := os.UserHomeDir()
+		if bad := supervisor.SuspectDaemonEnv(names); len(bad) > 0 {
+			c.Status, c.Detail = "warn", "the daemon's environment carries "+strings.Join(bad, ", ")+
+				" (names only; outside the `pf daemon ensure` allow-list) — restart it clean (graceful; running jobs are checkpointed first): "+ensureFixCommand(home)
+		} else {
+			c.Status, c.Detail = "pass", "the daemon's environment carries no ANTHROPIC_* and no credential-looking name outside the ensure allow-list"
+		}
 	}
 	return c
 }
@@ -262,6 +291,7 @@ func runDoctorChecks(ctx *Context, pruneScratch bool) doctorReport {
 	// polyforge#174: a live daemon should run under the restart loop.
 	checks = append(checks, supervisionCheck(sockOK))
 	checks = append(checks, retiredEnvCheck(os.Getenv, status.EnvWarnings))
+	checks = append(checks, daemonEnvCheck(sockOK, status.EnvNames))
 
 	if cfg.Mapping.Empty() {
 		add(docChYaml, "skip", "not run: the mapping is absent")
@@ -508,21 +538,19 @@ func claudeHarnessCheck(steps []workspace.StepResolution, workflowsDir string, d
 		}
 		warn(fmt.Sprintf("version %s is older than %s or unparsable (the adapter's argv/stream contract is verified from that version on)", h.Version, min))
 	}
-	tokenSet := h.AuthTokenEnv == "set" || h.SettingsEnv["ANTHROPIC_AUTH_TOKEN"] == "set"
+	// env hygiene: claude steps strip every inherited ANTHROPIC_*
+	// (runtime/claudespawn.go), so only the claude-config settings.json
+	// env block can carry the step's credential; the daemon's own
+	// variables are reported, never counted.
 	switch {
-	case !tokenSet && h.APIKeyEnv != "set":
-		warn("no credential is visible (neither the daemon env ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY nor the claude-config settings.json env block); the settings.json env pair (ANTHROPIC_AUTH_TOKEN + optional ANTHROPIC_BASE_URL) must live under the claude-config dir" + harnessShapeNotes())
-	case tokenSet && h.APIKeyEnv == "set":
-		warn("both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY are set — which one Claude Code uses is unverified")
+	case h.SettingsEnv["ANTHROPIC_AUTH_TOKEN"] != "set":
+		warn("no credential in the claude-config settings.json env block — the steps' only credential source (claude steps do not inherit the daemon's ANTHROPIC_*); the settings.json env pair (ANTHROPIC_AUTH_TOKEN + optional ANTHROPIC_BASE_URL) must live under the claude-config dir" + harnessShapeNotes())
 	}
 	if h.SettingsWarning != "" {
 		warn(h.SettingsWarning)
 	}
-	if h.BaseURLEnv == "set" {
-		warn("ANTHROPIC_BASE_URL is set in the daemon's environment: claude steps inherit it")
-	}
-	detail := fmt.Sprintf("%s — %s %s at %s; auth token env %s, api key env %s%s; background tasks %s",
-		table, h.Bin, h.Version, h.Path, h.AuthTokenEnv, h.APIKeyEnv, settingsFacts(h), h.BackgroundTasks)
+	detail := fmt.Sprintf("%s — %s %s at %s; daemon env (claude steps do not inherit it): ANTHROPIC_AUTH_TOKEN %s, ANTHROPIC_API_KEY %s, ANTHROPIC_BASE_URL %s%s; background tasks %s",
+		table, h.Bin, h.Version, h.Path, h.AuthTokenEnv, h.APIKeyEnv, h.BaseURLEnv, settingsFacts(h), h.BackgroundTasks)
 	if len(notes) > 0 {
 		detail += " — " + strings.Join(notes, "; ")
 	}

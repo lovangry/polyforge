@@ -192,6 +192,9 @@ type StatusResponse struct {
 	// EnvWarnings: retired POLYFORGE_* variables the daemon found set to
 	// a differing value at boot (decision 2026-10-16 G2).
 	EnvWarnings []string `json:"env_warnings,omitempty"`
+	// EnvNames: the NAMES (never values) of the daemon's environment
+	// (env hygiene; pf doctor's "daemon env" check).
+	EnvNames []string `json:"env_names,omitempty"`
 	// Harnesses is the daemon's view of the step harness binaries, only
 	// on GET /status?harnesses=1 (polyforge#159).
 	Harnesses    map[string]HarnessStatus `json:"harnesses,omitempty"`

@@ -20,7 +20,8 @@ func TestClaudeHarnessCheck(t *testing.T) {
 	steps := []workspace.StepResolution{{Project: "p", Bundle: "bug-fix", Step: "review",
 		Models: []string{"claude:claude-opus-5-5", "pi:sub2api-glm/glm-5.3"}, ModelsFrom: "steps.p.review.models"}}
 	ok := HarnessStatus{Bin: "claude", Found: true, Path: "/bin/claude", Version: "2.1.296", Verified: true,
-		AuthTokenEnv: "set", APIKeyEnv: "unset", BaseURLEnv: "unset", BackgroundTasks: "disabled"}
+		AuthTokenEnv: "set", APIKeyEnv: "unset", BaseURLEnv: "unset", BackgroundTasks: "disabled",
+		SettingsEnv: map[string]string{"ANTHROPIC_AUTH_TOKEN": "set", "ANTHROPIC_BASE_URL": "unset", "CLAUDE_CONFIG_DIR": "unset"}}
 	cases := []struct {
 		name   string
 		steps  []workspace.StepResolution
@@ -39,8 +40,12 @@ func TestClaudeHarnessCheck(t *testing.T) {
 			h.Version, h.Verified, h.MinVersion = "2.1.1", false, "2.1.296"
 			return h
 		}()}, "warn", "version 2.1.1 is older than 2.1.296 or unparsable"},
-		{"no credential variable", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.AuthTokenEnv = "unset"; return h }()}, "warn", "must live under the claude-config dir"},
-		{"base url set", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.BaseURLEnv = "set"; return h }()}, "warn", "ANTHROPIC_BASE_URL is set"},
+		{"no settings credential", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.SettingsEnv = nil; return h }()}, "warn", "must live under the claude-config dir"},
+		// env hygiene: the daemon's own ANTHROPIC_* never reach a claude
+		// step — a daemon-env token is no credential, a daemon-env
+		// BASE_URL no hazard; both are reported only
+		{"daemon env token only", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.SettingsEnv = nil; h.AuthTokenEnv = "set"; return h }()}, "warn", "claude steps do not inherit the daemon's ANTHROPIC_*"},
+		{"daemon env base url", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.BaseURLEnv = "set"; return h }()}, "pass", "daemon env (claude steps do not inherit it): ANTHROPIC_AUTH_TOKEN set, ANTHROPIC_API_KEY unset, ANTHROPIC_BASE_URL set"},
 		{"settings token set", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus {
 			h := ok
 			h.AuthTokenEnv = "unset"
