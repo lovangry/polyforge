@@ -957,7 +957,16 @@ func carrierPush(o Opts, env []string, tmp, refspec string, credAdditions []stri
 		args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
 	}
 	args = append(args, o.RemoteURL, refspec)
-	return gitTimed(o.bound(carrierPushTimeout), append(env, credAdditions...), tmp, args...)
+	// The same ref-transaction CAS retry as the chain push (#46, repo
+	// review 2026-10-16 B-17): an overlapping push of the same ref is a
+	// duplicate publish, not a carrier failure worth a human decision.
+	for attempt := 1; ; attempt++ {
+		out, err := gitTimed(o.bound(carrierPushTimeout), append(env, credAdditions...), tmp, args...)
+		if err == nil || !refCasRejected(out+": "+err.Error()) || attempt >= pushRaceAttempts || o.expired() {
+			return out, err
+		}
+		time.Sleep(pushRaceBackoff)
+	}
 }
 
 // carrierFailed raises carrier_push_failed for repo — only when the

@@ -910,3 +910,30 @@ func TestChainPushIsBounded(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// repo review 2026-10-16 B-17: a carrier/WIP push that loses the same
+// ref-transaction CAS race the chain push retries is retried too, not
+// raised as carrier_push_failed.
+func TestCarrierPushRetriesRefCasRejection(t *testing.T) {
+	old := gitTimed
+	defer func() { gitTimed = old }()
+	calls := 0
+	gitTimed = func(_ time.Duration, _ []string, _ string, args ...string) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", errors.New("error: cannot lock ref 'refs/pf-task/r': is at 1 but expected 2\n ! [remote rejected] HEAD -> refs/pf-task/r (failed to update ref)")
+		}
+		return "", nil
+	}
+	if _, err := carrierPush(Opts{RemoteURL: "/x.git"}, nil, t.TempDir(), "a:refs/pf-task/r", nil); err != nil || calls != 2 {
+		t.Fatalf("carrierPush = %v after %d calls, want success on the retry", err, calls)
+	}
+	calls = 0
+	gitTimed = func(_ time.Duration, _ []string, _ string, args ...string) (string, error) {
+		calls++
+		return "", errors.New("fatal: unreachable")
+	}
+	if _, err := carrierPush(Opts{RemoteURL: "/x.git"}, nil, t.TempDir(), "a:refs/pf-task/r", nil); err == nil || calls != 1 {
+		t.Fatalf("a non-CAS failure must not be retried: err=%v calls=%d", err, calls)
+	}
+}
