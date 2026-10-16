@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -487,12 +488,24 @@ func TestVerbCancelRequestShape(t *testing.T) {
 
 func TestVerbRecallRequestShape(t *testing.T) {
 	var rec reqRecorder
+	// The fake answers the REAL search wire shape (memory.Entry rows:
+	// content_sha/content_len, never `content`), and attaches
+	// content_excerpt only when the request names an excerpt length —
+	// exactly the server's contract (repo review 2026-10-16 B-10: the old
+	// fake sent `content`, so a CONTENT column that was always empty in
+	// production passed here).
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"items":[{"id":"mem_1","type":"experience.debug","content":"first line\nmore","project":"polyforge","visibility":"project","base_strength":3,"created_at":"t","updated_at":"t","tags":["x"]}]}`)
+		row := `"id":"mem_1","project_id":"prj_1","owner_user_id":"usr_1","work_item_id":null,"type":"experience.debug","title":null,"visibility":"project","content_sha":"abc","content_len":16,"tags":["x"],"related":[],"status":"active","created_at":"t","updated_at":"t"`
+		titled := `"id":"mem_2","project_id":"prj_1","owner_user_id":"usr_1","work_item_id":null,"type":"fact.note","title":"titled lesson","visibility":"project","content_sha":"def","content_len":9,"tags":[],"related":[],"status":"active","created_at":"t","updated_at":"t2"`
+		if n, _ := strconv.Atoi(r.URL.Query().Get("excerpt")); n > 0 {
+			row += `,"content_excerpt":"first line\nmore"`
+			titled += `,"content_excerpt":"body text"`
+		}
+		io.WriteString(w, `{"items":[{`+row+`},{`+titled+`}],"total":2}`)
 	})
 	env := withMappingConfig(t)
 	env["PF_SERVER"] = srv.URL
-	code, _, stderr := runPf(t, env,
+	code, stdout, stderr := runPf(t, env,
 		"recall", "--project", "polyforge", "flaky build", "--type", "experience.debug", "--tags", "x,y", "--limit", "5")
 	if code != 0 {
 		t.Fatalf("code=%d stderr=%s", code, stderr)
@@ -504,11 +517,21 @@ func TestVerbRecallRequestShape(t *testing.T) {
 	for _, want := range []string{
 		"/api/v1/memories/search?",
 		"project=polyforge", "q=flaky+build",
-		"type=experience.debug", "tags=x%2Cy", "limit=5",
+		"type=experience.debug", "tags=x%2Cy", "limit=5", "excerpt=120",
 	} {
 		if !strings.Contains(got.Path, want) {
 			t.Errorf("path missing %s: %s", want, got.Path)
 		}
+	}
+	// The table shows the excerpt's first line for an untitled memory
+	// and the title for a titled one.
+	for _, want := range []string{"SUMMARY", "first line", "titled lesson"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("recall table missing %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "body text") || strings.Contains(stdout, "more") {
+		t.Errorf("recall table shows more than title / first excerpt line:\n%s", stdout)
 	}
 }
 

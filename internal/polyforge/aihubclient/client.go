@@ -214,12 +214,20 @@ func (c *Client) DependenciesRaw(idOrSlug string) (json.RawMessage, error) {
 	return c.raw("GET", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/dependencies", nil)
 }
 
+// SearchExcerptRunes is the content excerpt length SearchMemories asks
+// for: the search answer is memory.Entry rows (no body), and the server
+// only attaches content_excerpt when the caller names a length (repo
+// review 2026-10-16 B-10 — without it the recall table had no text).
+const SearchExcerptRunes = 120
+
 // SearchMemories runs the memory retrieval (06 §5.1). q is required;
-// memType, tags and limit are optional filters.
+// memType, tags and limit are optional filters. Each hit carries a
+// SearchExcerptRunes content_excerpt.
 func (c *Client) SearchMemories(project, q, memType string, tags []string, limit int) (json.RawMessage, error) {
 	v := url.Values{}
 	v.Set("project", project)
 	v.Set("q", q)
+	v.Set("excerpt", strconv.Itoa(SearchExcerptRunes))
 	if memType != "" {
 		v.Set("type", memType)
 	}

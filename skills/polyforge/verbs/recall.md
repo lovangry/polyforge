@@ -26,8 +26,9 @@ flow derives the value from the WI under discussion. `--type` filters one memory
 
 ## Success
 
-`--json`: the server body raw (`{items:[...]}`). Human mode: `N hit(s)` + a
-table of ID, TYPE, CONTENT, UPDATED, TAGS.
+`--json`: the server body raw (`{items:[...]}`; each hit carries a 120-rune
+`content_excerpt`). Human mode: `N hit(s)` + a table of ID, TYPE, SUMMARY
+(the title, else the excerpt's first line), UPDATED, TAGS.
 
 ## Failure branches
 

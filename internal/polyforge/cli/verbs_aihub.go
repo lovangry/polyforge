@@ -699,7 +699,7 @@ var cmdRecall = &Command{
 		}
 		ctx.finish(raw, func() {
 			var l struct {
-				Items []api.Memory `json:"items"`
+				Items []memorySearchHit `json:"items"`
 			}
 			if err := json.Unmarshal(raw, &l); err == nil {
 				fmt.Fprintf(ctx.Stdout, "%d hit(s)\n", len(l.Items))

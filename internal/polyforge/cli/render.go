@@ -305,17 +305,34 @@ func orDash(s string) string {
 	return s
 }
 
-// renderMemories renders a memory search result.
-func renderMemories(w io.Writer, items []api.Memory) {
+// memorySearchHit is the memory search answer row as the server sends it
+// (memory.Entry plus the excerpt extension): there is no `content` on the
+// wire — only content_excerpt, which SearchMemories always asks for.
+type memorySearchHit struct {
+	ID             string   `json:"id"`
+	Type           string   `json:"type"`
+	Title          *string  `json:"title"`
+	ContentExcerpt string   `json:"content_excerpt"`
+	UpdatedAt      string   `json:"updated_at"`
+	Tags           []string `json:"tags"`
+}
+
+// renderMemories renders a memory search result: the SUMMARY column is
+// the title when the memory has one, else the excerpt's first line.
+func renderMemories(w io.Writer, items []memorySearchHit) {
 	rows := make([][]string, 0, len(items))
 	for _, it := range items {
 		tags := "-"
 		if len(it.Tags) > 0 {
 			tags = strings.Join(it.Tags, ",")
 		}
-		rows = append(rows, []string{it.ID, it.Type, truncate(firstLine(it.Content), 50), it.UpdatedAt, tags})
+		summary := firstLine(it.ContentExcerpt)
+		if it.Title != nil && strings.TrimSpace(*it.Title) != "" {
+			summary = *it.Title
+		}
+		rows = append(rows, []string{it.ID, it.Type, truncate(orDash(summary), 50), it.UpdatedAt, tags})
 	}
-	printTable(w, []string{"ID", "TYPE", "CONTENT", "UPDATED", "TAGS"}, rows)
+	printTable(w, []string{"ID", "TYPE", "SUMMARY", "UPDATED", "TAGS"}, rows)
 }
 
 func firstLine(s string) string {
