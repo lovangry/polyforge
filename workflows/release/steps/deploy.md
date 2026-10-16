@@ -69,7 +69,8 @@ when it carries `.polyforge/deploy.sh` (record the scan command as evidence):
 
 ## 3. Run it
 
-In the owner repo, put the clone on the verified tree (`git fetch origin`,
+In the owner repo, put the clone on the verified tree (`git fetch --tags origin` — the procedure reads the
+LOCAL tags: the target tag, and for a downgrade the running one,
 `git checkout --detach C`, worktree clean), then run exactly:
 
 ```
