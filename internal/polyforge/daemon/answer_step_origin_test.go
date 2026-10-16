@@ -11,6 +11,9 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -126,5 +129,90 @@ func TestAnswerFromHumanSessionIsDelivered(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the human answer was never delivered")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// repo review 2026-10-16 V-1: the guard covers every mutating route, not
+// only /answer — a step told to "finish the work item" must not be able
+// to `pf wrap` it past review, shut the daemon down, flip ops config or
+// submit work. Reads stay open.
+
+// TestStepOriginHelperProcess is not a test: re-executed as a child, it
+// sends one raw request (PFSO_METHOD PFSO_PATH, body "{}") over the
+// socket named in its environment and prints the HTTP status.
+func TestStepOriginHelperProcess(t *testing.T) {
+	sock := os.Getenv("PFSO_SOCK")
+	if sock == "" {
+		t.Skip("helper process only")
+	}
+	c := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", sock)
+	}}, Timeout: 30 * time.Second}
+	req, err := http.NewRequest(os.Getenv("PFSO_METHOD"), "http://pf"+os.Getenv("PFSO_PATH"), strings.NewReader("{}"))
+	if err != nil {
+		fmt.Printf("PFSO-ERR %v\n", err)
+		return
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		fmt.Printf("PFSO-ERR %v\n", err)
+		return
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	fmt.Printf("PFSO-STATUS %d %s\n", resp.StatusCode, body)
+}
+
+func stepOriginRequest(t *testing.T, td *testDaemon, method, path string, env ...string) string {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestStepOriginHelperProcess$", "-test.count=1")
+	cmd.Env = append(os.Environ(), append([]string{"PFSO_SOCK=" + td.sock, "PFSO_METHOD=" + method, "PFSO_PATH=" + path}, env...)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("request child: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
+func TestMutatingRoutesFromStepProcessAreRefused(t *testing.T) {
+	td, _ := pf122Daemon(t)
+	marks := []string{"PF_WI_ID=wi_122", "PF_DAEMON_ID=" + td.cfg.MachineID}
+	for _, path := range []string{
+		"/jobs/wi_122/wrap",
+		"/shutdown",
+		"/ops/config",
+		"/jobs/wi_other/claim",
+		"/jobs/wi_122/pause",
+		"/chats/c1/subscribe",
+	} {
+		out := stepOriginRequest(t, td, "POST", path, marks...)
+		if !strings.Contains(out, "PFSO-STATUS 403") || !strings.Contains(out, "DAEMON-403") || !strings.Contains(out, "step process tree") {
+			t.Errorf("POST %s from a step process was not refused: %s", path, out)
+		}
+	}
+	// The daemon is still up and the job still running: nothing got through.
+	if _, live := td.rt.Info("wi_122"); !live {
+		t.Fatal("a refused wrap/shutdown still reached the job")
+	}
+	// Reads stay open to a step.
+	if out := stepOriginRequest(t, td, "GET", "/status", marks...); !strings.Contains(out, "PFSO-STATUS 200") {
+		t.Fatalf("GET /status from a step process must stay open: %s", out)
+	}
+	if out := stepOriginRequest(t, td, "GET", "/jobs/wi_122/watch", marks...); strings.Contains(out, "PFSO-STATUS 403") {
+		t.Fatalf("GET watch from a step process must stay open: %s", out)
+	}
+}
+
+// The control: the same mutating requests from a human session pass the
+// guard (whatever the route itself then answers, it is not the 403).
+func TestMutatingRoutesFromHumanSessionPassTheGuard(t *testing.T) {
+	td, _ := pf122Daemon(t)
+	for _, path := range []string{"/ops/config", "/jobs/wi_none/claim", "/jobs/wi_none/pause", "/chats/c1/heartbeat"} {
+		out := stepOriginRequest(t, td, "POST", path, "PF_WI_ID=wi_other", "PF_DAEMON_ID=another-daemon")
+		if !strings.Contains(out, "PFSO-STATUS") || strings.Contains(out, "PFSO-STATUS 403") {
+			t.Errorf("POST %s from a human session was refused by the guard: %s", path, out)
+		}
 	}
 }

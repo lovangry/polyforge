@@ -439,7 +439,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 ## 附录 C：已知缺口（集成分支，2026-10-12）
 
 - **(a) bundle digest 描述与代码不一致**：01 §4.5 描述的是 RFC 8785 canonical-JSON bundle digest，但在线的 `Digest` 实现是"路径 + sha + 长度"拼接。**以代码为准**（`internal/common/workflow`，golden 向量在活测试中），01 §4.5 待更正。
-- **(b) 人工确认保证只约束诚实的 agent，直到 #135 落地**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证，但不可信的 step agent 仍可写 capsule，从而绕过。daemon 的 answer 路由（polyforge#122，#164 并入）按 UDS 对端 SO_PEERCRED pid 拒绝来自本 daemon step 进程树的回答（DAEMON-403）：对端、其祖先或其进程组 leader 带有 `PF_WI_ID` + `PF_DAEMON_ID=<本 daemon>` 标记即拒；取不到对端凭据也拒。残余：`setsid` 脱离进程组且清空环境的进程不在此检查内。真正的隔离仍是 #135（第 9 节 8）。（曾有的 abandon-repair 路由随 repair_pending 一并删除，此实例已不存在。）
+- **(b) 人工确认保证只约束诚实的 agent，直到 #135 落地**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证，但不可信的 step agent 仍可写 capsule，从而绕过。daemon 的 UDS 面（polyforge#122 起于 answer 路由，#164 并入；repo review 2026-10-16 V-1 扩到全部变更路由）按 UDS 对端 SO_PEERCRED pid 拒绝来自本 daemon step 进程树的一切非读请求（DAEMON-403）：对端、其祖先或其进程组 leader 带有 `PF_WI_ID` + `PF_DAEMON_ID=<本 daemon>` 标记即拒；取不到对端凭据也拒（fail closed）。拒绝面是一个包住整张路由表的中间件：`/jobs/{wi}/answer|claim|resume-blocked|resume-paused|pause|wrap`、`/ops/config`、`/shutdown`、`/chat/init`、`/chats/{id}/subscribe|unsubscribe|ack|heartbeat`；开放的只有读：`GET /status`、`/jobs/{wi}/watch`、`/chats/{id}/subscriptions`、`/chats/{id}/attention`。answer 路由保留其 #122 拒绝文案。残余：`setsid` 脱离进程组且清空环境的进程不在此检查内。真正的隔离仍是 #135（第 9 节 8）。（曾有的 abandon-repair 路由随 repair_pending 一并删除，此实例已不存在。）
 - **(c) `pf watch` 进展字段**：已随监督重写合入——daemon watch 路由从 `Observe.Progress(wi)` 填充命令、命令时长、最近文件、工具调用数（见附录 D）。
 
 ## 附录 D：监督替换落地对照（第 9 节步骤 2–3，分支 `v2/a-supervision`）

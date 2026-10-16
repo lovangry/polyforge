@@ -295,6 +295,12 @@ pf [global flags] <verb> [verb flags] [positional args]
   ensure fails, relay its message and suggest `pf doctor` (or check
   `--socket`). This is the fallback: normally the harness adapter already
   ran ensure when the session started (see below).
+- A `DAEMON-403 ... belongs to the step process tree` answer on any
+  daemon-face verb that changes state (submit/claim, answer, pause,
+  resume, wrap, ops, chat init, watch subscribe/ack/heartbeat) means the
+  caller is a step agent of that daemon: a step never drives the daemon.
+  Reads (status, watch snapshot) stay open. Do not retry; the human
+  session runs the verb.
 
 ## Chat identity (PF_CHAT_ID)
 
