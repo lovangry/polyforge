@@ -93,7 +93,7 @@ end), `CORE-410` (terminal).
   (`project_unmapped`) is not listed here: the daemon sets it `blocked` at
   the hub (reason note names the cause; the event shows in `pf watch`).
   The owner's moves: fix the cause if any and `pf resume <id>`, or give up
-  with `pf cancel <id>` / `pf wrap <id> --fail`.
+  with `pf cancel <id>` (`pf wrap` / `--fail` are refused on a blocked WI).
 - `auto` / `max` bare: `auto: on|off` / `max: N`; a change answers with
   the effective `{"auto":..,"max":..}`.
 - `shutdown`: `graceful shutdown requested; the daemon quiesces and exits`

@@ -186,7 +186,8 @@ degrades to `blocked`, and the WI is not claimable again until
 `pf resume <WI_ID>` continues it, or `pf cancel <WI_ID>` abandons it (the task's
 reporter, a project maintainer or an admin; the same two moves apply to a WI the
 daemon set `blocked` at restart for a missing capsule / unmapped project — see
-below; `pf wrap <WI_ID> --fail` records the owner's failed verdict instead).
+below; `pf wrap` / `pf wrap --fail` do not apply to a blocked WI — there is no
+completed run to wrap or fail, and the daemon refuses with DAEMON-409).
 `pf pause <WI_ID>` sets a clean_pause (a daemon restart will not
 auto-resume it); `pf resume <WI_ID>` clears the flag and the holder
 daemon re-attaches on its next start — to move it elsewhere (or immediately),
@@ -244,15 +245,16 @@ CLI verbs + `pf daemon`).
 
 The routes mounted by the daemon's local Unix-socket HTTP face
 (`internal/polyforge/daemon/routes.go`). **Face** marks who calls the route:
-`user` = the operator's CLI / watch tooling. (No step process reaches the
-daemon socket by design.)
+`user` = the operator's CLI / watch tooling. Every mutating (non-GET) route
+refuses a caller that belongs to a step agent's process tree, or whose UDS peer
+credential is unavailable, with `DAEMON-403` (polyforge#122 accident guard).
 
 | Method | Path | Role | Face |
 | --- | --- | --- | --- |
 | POST | `/jobs/{wi}/answer` | Answer a pending agent question. | user |
 | POST | `/jobs/{wi}/claim` | Submit family: enqueue a claim of a queued work item (optional body `models`: the manual candidate list of `pf submit --models`). | user |
-| POST | `/jobs/{wi}/resume` | Submit family: enqueue a resume of a paused item. | user |
 | POST | `/jobs/{wi}/resume-blocked` | The claim/start half of `pf resume` on a blocked WI (the CLI lands aihub's resume-blocked door with the human's own key first). | user |
+| POST | `/jobs/{wi}/resume-paused` | The live-holder half of `pf resume` on a paused WI (the CLI clears `clean_pause` at aihub first; this makes the online holder re-attach). | user |
 | POST | `/jobs/{wi}/pause` | CLI close path: seal the job with reason `paused`. | user |
 | POST | `/jobs/{wi}/wrap` | CLI close path: seal the job with reason `wrap` or `fail`. | user |
 | GET | `/status` | Machine status: jobs (with the needs-input projection), queue stats, auto switch. | user |
@@ -285,8 +287,8 @@ nothing is parked locally, the daemon starts and every other WI recovers. Restor
 the mapping if that was the cause, then `pf resume <id>`: a fresh re-claim from
 the aihub capsule chain plus the task-repo carrier refs (`refs/pf-task/<name>`);
 the dead scene is quarantined, completed steps are not re-run, and work published
-after the last push is lost. `pf cancel <id>` / `pf wrap <id> --fail` are the
-ordinary blocked exits.
+after the last push is lost. A blocked WI has exactly two exits: `pf resume <id>`
+(continue) or `pf cancel <id>` (abandon).
 
 ### Release flow
 
@@ -432,7 +434,7 @@ consistency check, off-host copy) runs only as part of a deploy, so an ad-hoc fu
 backup is these manual steps (or a copy of the whole data dir while aihub is stopped).
 
 Human moves: continue = `pf resume <id>` (a paused or blocked
-WI), abandon = `pf cancel <id>` (queued, paused or blocked), owner's failed verdict = `pf wrap <id> --fail`. These run with the
+WI), abandon = `pf cancel <id>` (queued, paused or blocked), owner's failed verdict on a live run = `pf wrap <id> --fail` (refused on a blocked WI). These run with the
 human's own api key: aihub's door checks the WI's reporter, a project
 maintainer or an admin.
 

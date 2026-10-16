@@ -18,13 +18,14 @@ import (
 )
 
 // DaemonClient speaks the daemon's UDS HTTP face: HTTP over the local
-// unix socket (/run/polyforge.sock by default). The route family is the
-// v0 daemon surface minus publish_request
-// (docs/design/polyforge-vnext/04-local-runtime.md §5.1):
+// unix socket (/run/polyforge.sock by default). The authoritative route
+// list is the mount list in internal/polyforge/daemon/routes.go (mirrored
+// in README "Daemon UDS routes"); the core of it:
 //
-//	POST /jobs/{id}/claim|resume            body {"priority":"normal"}
-//	POST /jobs/{id}/answer                  body = the five-field relay
-//	                                        message itself (00 §3.4a)
+//	POST /jobs/{id}/claim                   body {"priority":"normal"}
+//	POST /jobs/{id}/resume-blocked|resume-paused
+//	POST /jobs/{id}/answer                  body = AnswerPayload
+//	                                        {question_id, answer_text, answered_by}
 //	POST /jobs/{id}/pause  {}               POST /jobs/{id}/wrap {"reason"}
 //	GET  /status
 //	POST /ops/config {"auto":bool,"max":N}
@@ -327,7 +328,8 @@ func (d *DaemonClient) submit(wiID, intent, priority string, models []string) (j
 
 // Answer relays an answer to a needs_input step. The relay message is
 // the request body itself; the caller identity travels in the X-PF-User
-// header and must match answered_by (00 §3.4a identity rule).
+// header (the daemon only uses it to fill an empty answered_by; it does
+// not cross-check the two).
 func (d *DaemonClient) Answer(wiID string, payload AnswerPayload) (json.RawMessage, error) {
 	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/answer", "", payload,
 		map[string]string{"X-PF-User": payload.AnsweredBy})
