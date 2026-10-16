@@ -228,14 +228,6 @@ func (s *claudeSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, 
 	return proc, nil
 }
 
-// recordTaps wires a dispatch's OnRecord callback into the stdout taps.
-func recordTaps(p SpawnParams) []func(string) {
-	if p.OnRecord == nil {
-		return nil
-	}
-	return []func(string){p.OnRecord}
-}
-
 // harnessSpawner is the production spawner: it dispatches each
 // derivation to its step harness's spawner (polyforge#159).
 type harnessSpawner struct {

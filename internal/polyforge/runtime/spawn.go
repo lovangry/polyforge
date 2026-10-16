@@ -138,10 +138,10 @@ func newPiSpawner(cfg *Config) *piSpawner {
 }
 
 // recordTaps wires the dispatch's OnRecord callback into the process's
-// stdout tap chain: the driver's harness translator hangs on it, so every
-// raw stdout record the spawner reads also reaches the supervisor's
-// per-dispatch state.
-func (s *piSpawner) recordTaps(p SpawnParams) []func(string) {
+// stdout tap chain (both harnesses): the driver's harness translator hangs
+// on it, so every raw stdout record the spawner reads also reaches the
+// supervisor's per-dispatch state.
+func recordTaps(p SpawnParams) []func(string) {
 	if p.OnRecord == nil {
 		return nil
 	}
@@ -270,7 +270,7 @@ func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, erro
 	outW.Close()
 	errW.Close()
 	proc := newProcOpts(cmd, stdin, outR, procOpts{
-		taps:   s.recordTaps(p),
+		taps:   recordTaps(p),
 		stderr: errR,
 		onExit: p.OnExit,
 	})
