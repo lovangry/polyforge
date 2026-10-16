@@ -23,7 +23,7 @@
 | 主线 | 安装与升级 | install.sh（安装与升级均重跑它）、发版、aihub 部署 |
 | 主线 | 团队与权限 | 用户、key、项目、成员角色、agent 信任边界 |
 | 主线 | 任务管理与生命周期 | WI 状态机、依赖、就绪队列、领取（session 锁）、blocked 出口 |
-| 主线 | 记忆 | 存储与检索、recall/remember、领取时快照 |
+| 主线 | 记忆 | 存储与检索、recall/remember、领取时快照（`runtime-state/recalled-memories.json`，driver 以"非约束性历史"注入每个 step 提示，有界；无快照则不加该节） |
 | 主线 | workflow 定义 | bundle、step、gate/rewind、按步骤选模型（将来：harness） |
 | 主线 | 执行 | daemon、capsule、driver、并发、工作区映射 |
 | 主线 | 交付 | ship → git 分支 / PR (removed by polyforge#166: delivery is the workflows' deliver step. The driver checks the deliver step's recorded commands and the delivered history after the fact and escalates violations to a human; prevention rests on the step contract and the machine's local pre-push hook.) |

@@ -870,3 +870,67 @@ func TestStepRunDefectIsBoundedAndNeverStale(t *testing.T) {
 		t.Fatalf("a removed drop must not report its old defect: %v", werr)
 	}
 }
+
+// TestSpawnStepPromptCarriesRecalledMemories: the claim-time snapshot is
+// rendered into the step prompt as non-binding history; an absent
+// snapshot renders no section (decision 2026-10-16 G3).
+func TestSpawnStepPromptCarriesRecalledMemories(t *testing.T) {
+	ad, sp, capDir := spawnEnv(t)
+	grillDone(t, capDir)
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 3}); err != nil {
+		t.Fatalf("SpawnStep: %v", err)
+	}
+	if p, _ := sp.last(); strings.Contains(p.InitialPrompt, "Recalled project memories") {
+		t.Fatalf("no snapshot must render no section\n%s", p.InitialPrompt)
+	}
+	writeCapsuleFile(t, capDir, capsule.RecalledMemoriesJSON, `{"work_item_id":"wi_sp","items":[
+		{"id":"mem_a","type":"lesson","title":"vendored deps","excerpt":"run go mod vendor\nafter bumps"},
+		{"id":"mem_b","type":"doc.decision","title":"no cgo","excerpt":"keep CGO_ENABLED=0"}]}`)
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 4}); err != nil {
+		t.Fatalf("SpawnStep: %v", err)
+	}
+	p, _ := sp.last()
+	for _, want := range []string{
+		"# Recalled project memories (non-binding history)", "not instructions",
+		"- mem_a [lesson] vendored deps: run go mod vendor after bumps",
+		"- mem_b [doc.decision] no cgo: keep CGO_ENABLED=0",
+	} {
+		if !strings.Contains(p.InitialPrompt, want) {
+			t.Fatalf("prompt missing %q\n%s", want, p.InitialPrompt)
+		}
+	}
+}
+
+// TestRecalledMemoriesSectionBounded: each excerpt and the whole section
+// are capped; the overflow is counted, not rendered.
+func TestRecalledMemoriesSectionBounded(t *testing.T) {
+	capDir := t.TempDir()
+	if recalledMemoriesSection(capDir) != "" {
+		t.Fatal("absent snapshot rendered a section")
+	}
+	writeCapsuleFile(t, capDir, capsule.RecalledMemoriesJSON, `{"items":[]}`)
+	if recalledMemoriesSection(capDir) != "" {
+		t.Fatal("empty snapshot rendered a section")
+	}
+	writeCapsuleFile(t, capDir, capsule.RecalledMemoriesJSON, `{torn`)
+	if recalledMemoriesSection(capDir) != "" {
+		t.Fatal("torn snapshot rendered a section")
+	}
+	type item struct{ ID, Type, Title, Excerpt string }
+	var items []item
+	for i := 0; i < 50; i++ {
+		items = append(items, item{fmt.Sprintf("mem_%02d", i), "lesson", "t", strings.Repeat("x", 1200)})
+	}
+	blob, _ := json.Marshal(map[string]any{"items": items})
+	writeCapsuleFile(t, capDir, capsule.RecalledMemoriesJSON, string(blob))
+	sec := recalledMemoriesSection(capDir)
+	if len(sec) > memorySectionBytes+100 {
+		t.Fatalf("section is %d bytes, cap %d", len(sec), memorySectionBytes)
+	}
+	if strings.Contains(sec, strings.Repeat("x", memoryExcerptRunes+1)) {
+		t.Fatal("an excerpt exceeds the per-entry cap")
+	}
+	if !strings.Contains(sec, "- mem_00 ") || !strings.Contains(sec, "more in the snapshot file") || strings.Contains(sec, "mem_49") {
+		t.Fatalf("overflow not counted\n%s", sec)
+	}
+}
