@@ -1560,8 +1560,9 @@ func TestW113PlacementVerbsValidateProject(t *testing.T) {
 		[]w113WS{{key: ws, projects: []string{"e2e"}}})
 
 	// Unmapped: every placement verb (file create, remember, recall —
-	// repo review 2026-10-16 D-5) fails naming the project and the
-	// mapping requirement, even for an aihub-known project.
+	// repo review 2026-10-16 D-5; the owner superseded the 2026-10-13
+	// C15 "not mapping-restricted" ruling on 2026-10-16) fails naming the
+	// project and the mapping requirement, even for an aihub-known project.
 	w113EnsureProject(t, inst, "w113offmap")
 	for _, argv := range [][]string{
 		{"file", "create", "--project", "w113offmap", "--goal", "w113 unmapped placement"},

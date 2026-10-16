@@ -1054,7 +1054,9 @@ func TestVerbSubmitModels(t *testing.T) {
 	}
 }
 
-// TestVerbRecallRememberMappingValidated (repo review 2026-10-16 D-5):
+// TestVerbRecallRememberMappingValidated (repo review 2026-10-16 D-5;
+// the owner superseded the 2026-10-13 C15 ruling — "recall/remember are
+// not mapping-restricted" — on 2026-10-16):
 // recall and remember validate --project against the cli.toml
 // [workspace] mapping like file create — an unmapped project, or no
 // mapping at all, is a local error naming the mapped projects and no
