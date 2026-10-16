@@ -496,7 +496,7 @@ func deliveryContract(p promptParts) string {
 	}
 	if p.RequiresHumanAnswer {
 		b.WriteString("\nHuman answer: this step requires a human answer before completion: return `needs_input` first; " +
-			"a `completed` envelope without an answer in this round is rejected.\n")
+			"a `completed` or `gate_failed` envelope without an answer in this round is rejected.\n")
 	}
 	if p.HumanAnswerIfAsked {
 		b.WriteString("\nHuman questions: every question this step raises is answered by a human only — " +

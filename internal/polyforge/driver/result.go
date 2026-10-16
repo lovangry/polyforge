@@ -184,8 +184,8 @@ type ResultSpec struct {
 	// re-bound to gate_failed, never accepted as a completed step).
 	Gate bool
 	// RequiresHumanAnswer mirrors the step's requires_human_answer: true
-	// declaration: a delivered completed result is rejected unless
-	// HumanAnswers > 0 (the human-gate guarantee, polyforge#138).
+	// declaration: a delivered completed or gate_failed result is rejected
+	// unless HumanAnswers > 0 (the human-gate guarantee, polyforge#138).
 	RequiresHumanAnswer bool
 	// HumanAnswers is the number of human answers recorded in the step's
 	// CURRENT attempt chain: st.Answers[st.AnswerBase:], where AnswerBase
@@ -338,11 +338,16 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 			res.Outcome = OutcomeGateFailed
 		}
 	}
-	// 3b'. the human-gate guarantee (#138): judged on the DELIVERED
-	// outcome so a gate-fail verdict cannot dodge the human either.
-	if delivered == OutcomeCompleted && spec.RequiresHumanAnswer && spec.HumanAnswers <= 0 {
-		return fmt.Errorf("driver: step %q requires a human answer: return needs_input first (a completed result is refused until a human has answered a question in this attempt)",
-			spec.StepID)
+	// 3b'. the human-gate guarantee (#138): a requires_human_answer step
+	// cannot finish its round — neither completed nor gate_failed (which
+	// would rewind or terminally fail the workflow) — until a human has
+	// answered a question in this attempt. Judged on the DELIVERED
+	// outcome, so a completed envelope re-bound to gate_failed above is
+	// covered too (owner ruling on repo review 2026-10-16 V-8: before,
+	// a native gate_failed envelope dodged the human entirely).
+	if (delivered == OutcomeCompleted || delivered == OutcomeGateFailed) && spec.RequiresHumanAnswer && spec.HumanAnswers <= 0 {
+		return fmt.Errorf("driver: step %q requires a human answer: return needs_input first (a %s result is refused until a human has answered a question in this attempt)",
+			spec.StepID, delivered)
 	}
 	// 3c. the release verdict binding: judged on the DELIVERED outcome
 	// (a completed envelope). A binding error is an envelope rejection

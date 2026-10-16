@@ -90,6 +90,13 @@ func TestHumanGateGuarantee(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "requires a human answer: return needs_input first") {
 		t.Fatalf("completed without a human answer must be rejected, got %v", err)
 	}
+	// V-8 (owner ruling): a native gate_failed cannot dodge the human
+	// either — no rewind or terminal fail without an answer.
+	gf := *f.res
+	gf.Outcome = OutcomeGateFailed
+	if err := ValidateStepResult(&gf, f.spec); err == nil || !strings.Contains(err.Error(), "requires a human answer: return needs_input first") {
+		t.Fatalf("gate_failed without a human answer must be rejected, got %v", err)
+	}
 	// needs_input is still allowed on a human-gate step.
 	q := *f.res
 	q.Outcome, q.QuestionID, q.Question, q.Output = OutcomeNeedsInput, "q1", "ok?", nil
@@ -254,7 +261,7 @@ func TestTolerantReparseKeepsObjectEvidence(t *testing.T) {
 
 func TestDeliveryContractStatesGuaranteesOnlyWhenTheyApply(t *testing.T) {
 	const evLine = "Command evidence: this step requires `command_evidence`"
-	const humanLine = "this step requires a human answer before completion: return `needs_input` first; a `completed` envelope without an answer in this round is rejected"
+	const humanLine = "this step requires a human answer before completion: return `needs_input` first; a `completed` or `gate_failed` envelope without an answer in this round is rejected"
 	plain := deliveryContract(promptParts{WIID: "wi", StepID: "a", SpawnN: 1})
 	for _, l := range []string{evLine, humanLine, `"command_evidence"`} {
 		if strings.Contains(plain, l) {
