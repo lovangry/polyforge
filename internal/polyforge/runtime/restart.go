@@ -83,6 +83,9 @@ type MissingCapsuleError struct {
 }
 
 func (e *MissingCapsuleError) Error() string {
+	if e.Dir == "" {
+		return fmt.Sprintf("work item %s: its state record names no capsule directory (written before records carried capsule_dir) — the daemon derives none; `pf resume %s` re-claims it from the capsule chain, or give up with `pf cancel %s`", e.WI, e.WI, e.WI)
+	}
 	return fmt.Sprintf("work item %s: mid-flight capsule missing at %s — it is NOT recoverable from the remote (unpublished local state would be lost); restore the capsule to that path manually, then `pf resume %s` (or restart the daemon); or give up with `pf cancel %s`", e.WI, e.Dir, e.WI, e.WI)
 }
 

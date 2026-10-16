@@ -1309,8 +1309,8 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	// plus a notice, never a failed spawn (see recall.go).
 	r.writeRecalledMemories(j)
 	// F7: the bundle copy is ONE atomic set with a completion marker
-	// (materialize.go): the bundle lands under workflows/<bundle> and
-	// agents/, and sync/materialized.json gates every later consumer.
+	// (materialize.go): the bundle lands under workflows/<bundle>, and
+	// sync/materialized.json gates every later consumer.
 	return r.materializeBundle(j)
 }
 

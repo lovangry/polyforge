@@ -186,3 +186,43 @@ func TestEffortRefusesBeforeClaim(t *testing.T) {
 		})
 	}
 }
+
+// Pre-#175 shapes are no longer converted (decision 2026-10-16 G5): a
+// state record's bare candidate ids — with or without the #159
+// step_harness — and a manual --models list of bare ids reach the job
+// VERBATIM, so the driver's start check refuses each by name ("<id>"
+// needs a harness prefix, naming the claim-time list; pinned by
+// driver.TestNewRefusesUnprefixedCandidates) instead of the daemon
+// re-prefixing it into a different candidate.
+func TestPre175ShapesReachTheDriverVerbatim(t *testing.T) {
+	var rec jobRecord
+	if err := json.Unmarshal([]byte(`{"work_item_id":"wi_old","state":"running",
+		"step_candidates":{"fix":["claude-opus-5-5","sub2api-glm/glm-5.3"]},
+		"step_harness":{"fix":"claude"}}`), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if got := jobFromRecord(&rec).stepCandidates["fix"]; !reflect.DeepEqual(got, []string{"claude-opus-5-5", "sub2api-glm/glm-5.3"}) {
+		t.Fatalf("a pre-#175 record was converted: %v", got)
+	}
+
+	hub := newFakeHub()
+	r, ws := newManualRuntime(t, hub)
+	writeWorkspaceYaml(t, ws, w079ValidYaml)
+	r.saveManualModels("wi_bare", []string{"m/one"})
+	if err := r.Start(context.Background(), "wi_bare"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Stop(context.Background(), "wi_bare", protocol.FinishWrapped) })
+	j := r.jobOf("wi_bare")
+	if j == nil {
+		t.Fatal("no job")
+	}
+	for step, list := range j.stepCandidates {
+		if !reflect.DeepEqual(list, []string{"m/one"}) {
+			t.Fatalf("step %s: the pre-#175 manual list was not passed verbatim: %v", step, list)
+		}
+	}
+	if got := r.loadManualModels("wi_bare"); !reflect.DeepEqual(got, []string{"m/one"}) {
+		t.Fatalf("the recorded manual list was dropped: %v", got)
+	}
+}

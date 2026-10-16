@@ -101,6 +101,9 @@ func TestRestartRecordWithoutCapsuleDirIsMissing(t *testing.T) {
 	if !errors.As(err, &me) {
 		t.Fatalf("a record without capsule_dir must be reported missing, got %v", err)
 	}
+	if msg := err.Error(); !strings.Contains(msg, "names no capsule directory") || strings.Contains(msg, "missing at  ") {
+		t.Fatalf("a record without capsule_dir needs its own message, got %q", msg)
+	}
 	if err := r.requireMidflightCapsule("wi_fb", "proj", testCapsuleDir(r, "proj-7")); err != nil {
 		t.Fatalf("the recorded directory must be found: %v", err)
 	}
