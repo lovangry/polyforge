@@ -732,16 +732,10 @@ func (d *Driver) applyStepFailedLocked(req TransitionRequest, info *appliedInfo)
 		f.Cause = FailExitModel
 	}
 	dec := d.decideFailureLocked(req.StepID, st, f)
-	seq := 0
-	for _, a := range st.Attempts {
-		if a.AttemptSeq > seq {
-			seq = a.AttemptSeq
-		}
-	}
 	st.Attempts = append(st.Attempts, capsule.Attempt{
 		Cause:         CauseInfraFailure,
 		FailureCause:  f.Cause,
-		AttemptSeq:    seq + 1,
+		AttemptSeq:    nextAttemptSeq(st),
 		StartedAt:     st.StepStartedAt,
 		InterruptedAt: d.stamp(),
 		Detail:        f.Detail,
