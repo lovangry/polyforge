@@ -274,7 +274,7 @@ func checkoutWIPTree(ctx context.Context, dir, head, wip string) error {
 	if err := os.WriteFile(index, b, 0o600); err != nil {
 		return err
 	}
-	env := append(os.Environ(), "GIT_INDEX_FILE="+index)
+	env := append(taskGitEnv(), "GIT_INDEX_FILE="+index)
 	_, err = gitTaskEnv(ctx, env, dir, "read-tree", "-m", "-u", head, wip)
 	return err
 }
@@ -289,7 +289,38 @@ const carrierFallbackBranch = "pf-carrier"
 // default credential context, ctx-bounded like the other task-repo git
 // calls of this file.
 func gitTask(ctx context.Context, dir string, args ...string) (string, error) {
-	return gitTaskEnv(ctx, os.Environ(), dir, args...)
+	return gitTaskEnv(ctx, taskGitEnv(), dir, args...)
+}
+
+// taskGitEnv is the environment of every task-repo git call: the daemon's
+// own environ (the machine's default credential context) made
+// non-interactive (repo review 2026-10-16 B-8). These calls run on the
+// claim lane under the runtime's opMu; a credential prompt on the
+// daemon's tmux tty, or a stalled transfer, would otherwise freeze every
+// other work item's stop/resume/recovery and the next claims. So: git's
+// own credential prompt is off (fail instead), and an HTTP transfer below
+// 1 KB/s for 60 s aborts. An operator's explicit setting of either
+// variable wins.
+func taskGitEnv() []string {
+	env := os.Environ()
+	for _, kv := range []string{
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_HTTP_LOW_SPEED_LIMIT=1000",
+		"GIT_HTTP_LOW_SPEED_TIME=60",
+	} {
+		key := kv[:strings.IndexByte(kv, '=')+1]
+		set := false
+		for _, e := range env {
+			if strings.HasPrefix(e, key) {
+				set = true
+				break
+			}
+		}
+		if !set {
+			env = append(env, kv)
+		}
+	}
+	return env
 }
 
 // gitTaskEnv is gitTask with an explicit environment.
@@ -332,10 +363,11 @@ func repoCloneErr(wi string, pr api.ProjectRepo, format string, args ...any) *ap
 }
 
 // gitClone runs a plain full clone with the daemon's own environment:
-// the machine's default git credential context, nothing injected.
+// the machine's default git credential context, made non-interactive
+// (taskGitEnv).
 func gitClone(ctx context.Context, url, dir string) error {
 	cmd := exec.CommandContext(ctx, "git", "clone", "--", url, dir)
-	cmd.Env = os.Environ()
+	cmd.Env = taskGitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s", strings.TrimSpace(string(out)))

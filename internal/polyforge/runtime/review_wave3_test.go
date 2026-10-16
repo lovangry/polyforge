@@ -53,3 +53,27 @@ func TestTerminalWrapSealPushesTheFinalState(t *testing.T) {
 		t.Fatalf("hub chain lacks the terminal execution.json: %v: %s", err, out)
 	}
 }
+
+// B-8 (S part): the task-repo clone runs under opMu on the claim lane;
+// it must never wait on an interactive credential prompt.
+func TestTaskRepoCloneIsNonInteractive(t *testing.T) {
+	bin := t.TempDir()
+	envOut := filepath.Join(t.TempDir(), "env.txt")
+	script := "#!/bin/sh\nenv > " + envOut + "\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GIT_TERMINAL_PROMPT", "")
+	os.Unsetenv("GIT_TERMINAL_PROMPT")
+	_ = gitClone(context.Background(), "https://example.invalid/r.git", filepath.Join(t.TempDir(), "r"))
+	raw, err := os.ReadFile(envOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"GIT_TERMINAL_PROMPT=0", "GIT_HTTP_LOW_SPEED_TIME=60"} {
+		if !strings.Contains(string(raw), want+"\n") {
+			t.Fatalf("clone env lacks %s", want)
+		}
+	}
+}
