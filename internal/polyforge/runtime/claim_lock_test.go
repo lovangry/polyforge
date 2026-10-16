@@ -264,3 +264,35 @@ func TestRestartEndsEndingJournalEntry(t *testing.T) {
 		})
 	}
 }
+
+// A start the local admission refuses — the work item already running
+// here, or the restart reconciliation still under way — answers without
+// a hub call.
+func TestStartLocalRefusalMakesNoHubCall(t *testing.T) {
+	setGitIdentity(t)
+	hub := newFakeHub()
+	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	const a = "wi_cl_local"
+	t.Cleanup(func() { r.Close(); terminateJobAgent(r, a) })
+	startRunning(t, r, a)
+	g := hub.hangCall(t, "probe", a)
+	within(t, promptly, "a Start of the running work item", func() {
+		if err := r.Start(context.Background(), a); err == nil || isTransient(err) {
+			t.Errorf("Start of a running work item = %v, want the already-active refusal", err)
+		}
+	})
+	r.mu.Lock()
+	r.restarting = true
+	r.mu.Unlock()
+	within(t, promptly, "a Start during the reconciliation", func() {
+		if err := r.Start(context.Background(), "wi_cl_local_other"); !isTransient(err) {
+			t.Errorf("Start during the reconciliation = %v, want the typed transient", err)
+		}
+	})
+	r.endRestarting()
+	select {
+	case <-g.entered:
+		t.Fatal("a locally refused start probed the hub")
+	default:
+	}
+}

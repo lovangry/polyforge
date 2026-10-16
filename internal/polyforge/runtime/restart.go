@@ -229,6 +229,7 @@ func (r *Runtime) Restart(ctx context.Context) error {
 			// lane decides nothing further — its step in flight starts no
 			// agent behind the latch, and the records it did not reach
 			// stay for the next start
+			r.serveRestart()
 			return nil
 		}
 		r.mu.Lock()
@@ -665,6 +666,11 @@ func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 		if nj := r.jobOf(id); nj == nil {
 			return ResumeClosed, nil
 		} else if st, _ := nj.snapshot(); st != StateRunning {
+			if st == StateRecovering && r.isDown() {
+				// the relaunch met the shutdown latch: nothing closed, the
+				// record is kept recovering for the next start
+				return "", &api.Error{Code: api.ErrDaemonGone, Detail: fmt.Sprintf("%s: the session was attached but the daemon is shutting down; nothing was resumed here (the next daemon start resumes it)", id)}
+			}
 			return ResumeClosed, nil
 		}
 		return ResumeAttached, nil

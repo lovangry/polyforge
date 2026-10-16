@@ -563,19 +563,9 @@ func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi string) bool {
 
 // closeJob runs one CLI-side close through Runtime.Stop.
 func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason string) {
-	if _, live := d.rt.Info(wi); !live && d.rt.Busy(wi) {
-		writeErr(w, api.ErrDaemonConflict, "a start of this work item is under way (its claim's hub calls are in flight); retry once it settles")
-		return
-	}
 	wi = d.canonWI(wi) // a slug spelling closes the canonical job (F2)
 	ji, ok := d.rt.Info(wi)
 	if !ok {
-		if d.rt.Busy(wi) {
-			// a start holds the work item's lock before its CLAIMING
-			// placeholder exists: there is no job to close yet
-			writeErr(w, api.ErrDaemonConflict, "a start of this work item is under way (its claim's hub calls are in flight); retry once it settles")
-			return
-		}
 		if d.parkedWIClose(w, wi) {
 			return
 		}
@@ -583,6 +573,13 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 			writeJSON(w, http.StatusOK, closeResponse{
 				WorkItemID: wi, Outcome: "already_terminal", Status: st,
 			})
+			return
+		}
+		if d.rt.Busy(wi) {
+			// an operation holds the work item's lock with no job in the
+			// table yet — a start on its claim's hub calls: nothing to
+			// close until its CLAIMING placeholder exists
+			writeErr(w, api.ErrDaemonConflict, "a start of this work item is under way (its claim's hub calls are in flight); retry once it settles")
 			return
 		}
 		writeErr(w, api.ErrDaemonNotFound, "no local job for "+wi+" on this daemon")

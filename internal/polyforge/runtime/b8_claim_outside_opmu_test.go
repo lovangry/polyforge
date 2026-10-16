@@ -65,8 +65,8 @@ func waitClaiming(t *testing.T, r *Runtime, wi string) {
 }
 
 // within runs fn and fails the test when it does not return in time —
-// the "promptly" of B-8 (before the fix these calls waited on a global lock
-// behind the hung clone, i.e. forever).
+// the "promptly" of B-8 (a call that waited on a global lock behind the
+// hung clone would never return).
 func within(t *testing.T, d time.Duration, what string, fn func()) {
 	t.Helper()
 	done := make(chan struct{})

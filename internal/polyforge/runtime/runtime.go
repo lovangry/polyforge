@@ -795,6 +795,13 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 	if !ok {
 		return claimInFlightError(wi)
 	}
+	// the local admission first: a start the restart reconciliation, an
+	// unfinished compensation or a live job of a known spelling refuses
+	// costs no hub call (and holds the lock no longer than the check)
+	if err := r.startAdmit(key); err != nil {
+		r.unlockWI(key, s)
+		return err
+	}
 	probe, err := r.probeWorkItem(wi)
 	if err != nil {
 		r.unlockWI(key, s)
@@ -933,7 +940,9 @@ func (r *Runtime) claimLocked(ctx context.Context, wi, id string, probe *api.Wor
 	return r.claimPlaceholder(ctx, wi, id, sessionID, resp, wcfg, manual)
 }
 
-// startAdmit is the admission check of a Start of id (id's lock held):
+// startAdmit is the admission check of a Start of id (id's lock held;
+// Start runs it under the submitted spelling's lock before the probe and
+// under the canonical id's after it):
 // no shutdown latch, no restart reconciliation still deciding which work
 // items are ours, no session end of an earlier claim pending in the
 // journal, no other job of the work item in the table — except a
@@ -1061,9 +1070,9 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, wi, journalKey, sessionI
 		// means the original start registered the job before the crash
 		// (the state.json record reconciles it), so only the journal is
 		// stale.
-		if existing.state != StatePaused {
+		if st, _ := existing.snapshot(); st != StatePaused {
 			r.clearClaiming(journalKey)
-			return nil, fmt.Errorf("runtime: %s already active (state %s)", id, existing.state)
+			return nil, fmt.Errorf("runtime: %s already active (state %s)", id, st)
 		}
 		r.dropJob(existing)
 		// the alias registered above died with the record; re-note it so
