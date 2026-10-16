@@ -295,7 +295,7 @@ func gitTask(ctx context.Context, dir string, args ...string) (string, error) {
 
 // taskGitEnv is the environment of every task-repo git call: the daemon's
 // own environ (the machine's default credential context) made
-// non-interactive (RR B-8). The claim lane runs them outside the runtime's
+// non-interactive. The claim lane runs them outside the runtime's
 // opMu, but a credential prompt on the daemon's tmux tty, or a stalled
 // transfer, would still pin the claim (and its slot) until a stop or a
 // shutdown cancels it. So: git's own credential prompt is off (fail
@@ -366,7 +366,7 @@ func repoCloneErr(wi string, pr api.ProjectRepo, format string, args ...any) *ap
 // the machine's default git credential context, made non-interactive
 // (taskGitEnv).
 //
-// A cancelled ctx (a stop or a shutdown during the claim, RR B-8) kills
+// A cancelled ctx (a stop or a shutdown during the claim) kills
 // the whole process group — git hands the transfer to a remote helper
 // that would otherwise keep running and keep the output pipe open.
 func gitClone(ctx context.Context, url, dir string) error {

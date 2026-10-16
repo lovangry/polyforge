@@ -188,7 +188,7 @@ type Runtime struct {
 	// opMu serializes the mutating operations (Start/Stop/recover/Restart):
 	// the message loop and the daemon's direct calls share it, so the state
 	// machine never sees two drivers at once. It is NOT held across the slow
-	// network steps (RR B-8): a claim's capsule clone and materialize run
+	// network steps: a claim's capsule clone and materialize run
 	// with the job CLAIMING in the table; a close's or a recovery's pushes
 	// and SessionEnd run with the job latched busy (offLock); a claim's
 	// compensation SessionEnd runs with its work item latched ending
@@ -387,7 +387,7 @@ func (j *job) isBusy() bool {
 }
 
 // offLock runs fn — one job's slow network step: a chain push, the
-// task-repo WIP push, a SessionEnd — with opMu RELEASED (RR B-8, the claim's
+// task-repo WIP push, a SessionEnd — with opMu RELEASED (the claim's
 // pattern carried to the closes and the recovery). The caller holds opMu on
 // entry and holds it again on return; in between the job is latched busy,
 // so no other door interleaves with the step and one work item's hung push
@@ -779,7 +779,7 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 		return err
 	}
 	// The claim landed and the job sits CLAIMING in the table: the clone
-	// and the materialize run WITHOUT opMu (RR B-8), so one slow or hung
+	// and the materialize run WITHOUT opMu, so one slow or hung
 	// clone no longer freezes the stops, pauses, resumes, recoveries and
 	// claims of every other work item.
 	return r.runClaim(ctx, wi, j)
@@ -789,7 +789,7 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 // journaled claim and the CLAIMING placeholder. The caller holds opMu on
 // entry and on return; the hub calls in between — the work-item probe, the
 // verify of a journaled claim and SessionClaim itself — run with opMu
-// RELEASED (RR B-8), so one hung hub call no longer freezes the doors of
+// RELEASED, so one hung hub call no longer freezes the doors of
 // every other work item. Meanwhile the work item's keys (the submitted
 // spelling, then the probe's canonical id) are latched starting — a
 // concurrent Start of it answers the typed transient, a Stop DAEMON-409 —
@@ -901,8 +901,8 @@ func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
 	//
 	// A journal entry left by an earlier attempt whose claim answer was
 	// lost (transport error, timeout, hub 5xx — see below) is REUSED
-	// rather than replaced: this start is then a replay of the same claim
-	// (RR B-1), so a claim the hub had committed is adopted instead of
+	// rather than replaced: this start is then a replay of the same claim,
+	// so a claim the hub had committed is adopted instead of
 	// orphaned.
 	sessionID, key, replay, err := r.claimIntent(wi, func() error { return r.startGate(wi, own(wi)) })
 	if err != nil {
@@ -1055,7 +1055,7 @@ func claimRefused(err error) bool {
 }
 
 // claimIntent answers the session secret and idempotency key this start
-// claims with (RR B-1). With no journal entry for wi it mints a fresh pair.
+// claims with. With no journal entry for wi it mints a fresh pair.
 // An entry left by an earlier attempt whose answer was lost is checked
 // first: SessionVerify says the journaled session holds the WI → the claim
 // landed, reuse the pair so the claim is a D4 replay that hands the same
@@ -1521,7 +1521,7 @@ func (r *Runtime) abandonClaim(j *job, submitted string, origErr error, note str
 
 // claimEndOffLock sends the SessionEnd of a claim that never got (or no
 // longer has) a job in the table — the compensation of a failed start,
-// an operator close during the claim — with opMu RELEASED (RR B-8):
+// an operator close during the claim — with opMu RELEASED:
 // the caller holds opMu on entry and again on return.
 // Meanwhile the work item's keys are latched ending, so a Start of it
 // answers the typed transient (the dispatcher retries) rather than
@@ -2187,7 +2187,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	if endErr != nil {
 		if st, _ := j.snapshot(); st == StateSealing {
 			// Persist the push outcome and retry the close in the
-			// background (RR B-4): without the retry the job would sit
+			// background: without the retry the job would sit
 			// SEALING — agent dead, every `pf wrap` answering "a close is
 			// already in progress" — until a daemon restart ran the
 			// finisher.
