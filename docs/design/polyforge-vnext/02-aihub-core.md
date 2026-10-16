@@ -72,7 +72,7 @@
 
 ### 2.5 状态机（WI 生命周期，Core 权威） <!-- §2.5 -->
 
-状态集合：`queued`、`running`、`paused`、`blocked`，以及三个终态 `wrapped`、`failed`、`cancelled`。合法迁移：
+状态集合：`queued`、`running`、`paused`、`blocked`，以及三个终态 `wrapped`、`failed`、`canceled`。合法迁移：
 
 | 迁移 | 前置状态 | 后置状态 | 对活跃 generation 的影响 |
 |---|---|---|---|
@@ -82,7 +82,7 @@
 | `block` | `running`/`paused` | `blocked` | 结束当前活跃 generation（`paused` 起点仍持有会话：`End()` 按同一 session-hash fence 校验后直接落 `blocked` 并清空会话，无需先 `resume`） |
 | `unblock` | `blocked` | `running` | 新一次 claim（开启新 generation） |
 | `wrap`/`fail` | `running`/`paused` | `wrapped`/`failed` | 结束当前活跃 generation（`paused` 起点仍持有会话：`End()` 按同一 session-hash fence 校验后直接落终态并清空会话，无需先 `resume`） |
-| `cancel` | `queued`/`paused`/`blocked` | `cancelled` | 本就没有活跃 generation（§6.5） |
+| `cancel` | `queued`/`paused`/`blocked` | `canceled` | 本就没有活跃 generation（§6.5） |
 | `force-takeover` | `running`（另一 machine 持有） | `running` | 结束旧活跃 generation，开启新 generation |
 
 `blocked` 的进入原因写入 `waiting_on` 与生命周期事件（§5.1a 枚举内的通用 `blocked` 事件，`{generation, reason?}`）；`paused` 与 `blocked` 的区别：`paused` 是人主动挂起（无外部等待对象），`blocked` 是有明确等待对象（`waiting_on` 非空）。**`paused` 直接收尾（D14 裁定，polyforge#150，以代码为准）**：`paused` 的 WI **保留其会话**（pause 不清空 session 行），因此可**直接**迁移到 `wrapped`/`failed`/`blocked`：`End()` 对 `paused` 起点与 `running` 起点走同一 session-hash fence（hash 不匹配即 `CORE-403 STALE_SESSION`），校验通过后落状态并清空会话，无需先 `resume`——上表 `wrap`/`fail`/`block` 三行的前置状态因此含 `paused`，行 9 `session-end` 对 `paused` 起点同样合法；`cancel` 亦早已允许从 `paused` 直接终止（§6.5）。workflow 侧的 `failed_gate`/`failed_rewind_exhausted` 终态（`01-workflow-skills.md#§6.5`，权威落盘在 Capsule 的 `execution.json.workflow_status`，`03-execution-capsule.md#§4.2`）在 Core 侧统一映射为业务态 `blocked`（`waiting_on=owner`），不映射为 Core 的终态——workflow 失败与 WI 失败是两层分离的概念（`00-architecture.md#§3.2` 归属判据）。**Core 只落这一层映射后的业务信号本身**：`status=blocked`、`waiting_on=owner`，不持久化「具体是哪一种 workflow 终态导致」这一区分——那是 workflow/Capsule 侧的执行态语义，只存在于 `execution.json`，Core 不复制、不新增列或事件类型来表示它（INV-2c）。终态行只读；对终态 WI 的任何写 API 一律返回 `CORE-410 TERMINAL_STATE`。
@@ -145,7 +145,7 @@ CREATE TABLE work_items (
   parent_id    TEXT REFERENCES work_items(id), -- epic-lite 父票引用；写路径约束见 §4.2a，随创建写入后不可变
   status       TEXT NOT NULL DEFAULT 'queued'
                CHECK (status IN ('queued','running','paused','blocked',
-                                 'wrapped','failed','cancelled')),
+                                 'wrapped','failed','canceled')),
   priority     TEXT NOT NULL DEFAULT 'normal'
                CHECK (priority IN ('low','normal','high','urgent')),
   milestone    TEXT,                        -- 里程碑标签，可空；列表/过滤经 idx_wi_milestone
@@ -601,7 +601,7 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 
 | event_type | payload schema（允许字段） |
 |---|---|
-| `claimed` / `paused` / `resumed` / `blocked` / `unblocked` / `wrapped` / `failed` / `cancelled` | `{generation, reason?}` |
+| `claimed` / `paused` / `resumed` / `blocked` / `unblocked` / `wrapped` / `failed` / `canceled` | `{generation, reason?}` |
 | `capsule_registered` / `capsule_takeover` | `{machine_id, generation}` |
 | `budget_incremented` | `{seq, dimension, amount}` |
 | `secret_rotated` | `{epoch}` |
@@ -684,9 +684,9 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 
 `cancel` 只适用于 `queued`/`paused`/`blocked` 三种非活跃状态（`running` 需先 `pause`/`block` 或被 `force-takeover` 后再 cancel，不在本契约范围内）。三种状态的授权与前置条件完全一致，不需要持有任何活跃 generation 令牌：
 
-1. **`queued`**：该 WI 从未发生过任何 claim，不存在 `owner_generations` 行。授权：调用方为 `reporter`、该 project 的 maintainer 或 `role='admin'`。成功后 `status → cancelled`，`closed_at` 赋值，不涉及任何 generation 行。
-2. **`paused`**：全部历史 generation 均已结束（§2.5）。授权同上。成功后 `status → cancelled`，不要求先 `resume`。
-3. **`blocked`**：同样无活跃 generation（无论进入 `blocked` 的原因是 `waiting_on=owner`、还是§6.4 提到的 workflow `failed_gate`/`failed_rewind_exhausted` 映射而来）。授权同上。成功后 `status → cancelled`，**不要求先 `unblock` 或重新执行任何 step**。
+1. **`queued`**：该 WI 从未发生过任何 claim，不存在 `owner_generations` 行。授权：调用方为 `reporter`、该 project 的 maintainer 或 `role='admin'`。成功后 `status → canceled`，`closed_at` 赋值，不涉及任何 generation 行。
+2. **`paused`**：全部历史 generation 均已结束（§2.5）。授权同上。成功后 `status → canceled`，不要求先 `resume`。
+3. **`blocked`**：同样无活跃 generation（无论进入 `blocked` 的原因是 `waiting_on=owner`、还是§6.4 提到的 workflow `failed_gate`/`failed_rewind_exhausted` 映射而来）。授权同上。成功后 `status → canceled`，**不要求先 `unblock` 或重新执行任何 step**。
 
 **workflow 失败终态的映射与可取消性**：`01-workflow-skills.md#§6.5` 定义的 `failed_gate`/`failed_rewind_exhausted` 是 Capsule 侧（`execution.json.workflow_status`，`03-execution-capsule.md#§4.2`）终态，WI Agent 检测到这两种终态后，按 §6.4 的 flush 证据协议调用 `block` 端点（`waiting_on=owner`）。Core 侧只接收并落盘这一次状态迁移本身（`status=blocked`、`waiting_on=owner`，以及 §5.1a 通用 `blocked` 事件 `{generation, reason?}`）；具体是 `failed_gate` 还是 `failed_rewind_exhausted` 这一区分不随事件或任何字段进入 Core（Core 不新增专属事件类型来承载它，INV-2c），该区分永远只能从 Capsule 的 `execution.json` 或 read-through（§5.2）读到。进入 `blocked` 之后，该 WI 就是本节定义的普通 `blocked` WI，可直接按上述第 3 条取消，**不要求先重新执行任何 step 才能取消**。 〔#111分类：删→驱动〕
 

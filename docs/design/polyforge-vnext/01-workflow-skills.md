@@ -342,7 +342,7 @@ step 单次执行尝试的消耗；workflow 级上界限制整个 WI 生命周�
    - 若状态已经是 `failed_gate` 或 `failed_rewind_exhausted`（在第 3 步的处理中已经写入）：直接退出，不得把这两种终态误判为完成，不得触发 wrap。
    - 否则（意味着执行图中全部 step 都已到达 `done`）：这才是真正跑完全部 step 的成功路径，标记 workflow 状态为 `completed`，触发一次同步发布，并进入该 WI 的 wrap 流程（Core 侧 wrap 端点权威见 `02-aihub-core.md#§5.1`）。
 
-**失败终态之后**：`failed_gate`/`failed_rewind_exhausted` 是 Capsule 侧（`execution.json`）的终态，**不直接映射为** Core 侧 WI 状态机的终态（`wrapped`/`failed`/`cancelled`，`02-aihub-core.md#§2.5`）——workflow 失败不等于 WI 失败，这是刻意的两层分离（`00-architecture.md#§3.2` 归属判据）：WI 在 Core 侧转为 `blocked`（`waiting_on=owner`，与 §6.4 的 incomplete 走同一 Core 端点），由人决定是取消该 WI，还是新建一个 WI 重新走创建流程（§4.6）；这里不要求也不允许先重新执行才能取消（该终止契约的完整授权与状态映射规则以 `02-aihub-core.md#§2.5`/`#§5.1` 为权威）。
+**失败终态之后**：`failed_gate`/`failed_rewind_exhausted` 是 Capsule 侧（`execution.json`）的终态，**不直接映射为** Core 侧 WI 状态机的终态（`wrapped`/`failed`/`canceled`，`02-aihub-core.md#§2.5`）——workflow 失败不等于 WI 失败，这是刻意的两层分离（`00-architecture.md#§3.2` 归属判据）：WI 在 Core 侧转为 `blocked`（`waiting_on=owner`，与 §6.4 的 incomplete 走同一 Core 端点），由人决定是取消该 WI，还是新建一个 WI 重新走创建流程（§4.6）；这里不要求也不允许先重新执行才能取消（该终止契约的完整授权与状态映射规则以 `02-aihub-core.md#§2.5`/`#§5.1` 为权威）。
 
 ### 6.6 预算（budget） <!-- §6.6 -->
 

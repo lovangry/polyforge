@@ -120,7 +120,7 @@ adds the dependency block. `dep add|rm|list` print the dependency view
 | `CORE-404` | Unknown or invisible work item id, unknown project; `dep rm` of an edge that does not exist | No such work item (or you cannot see it) — check the `wi_` id or slug and the project name. |
 | `CORE-409` `DEPENDENCY_CYCLE` | The new edge would close a loop (B already waits, directly or not, for the other side) | Refused — the order you asked for contradicts an existing one; `pf file dep list` shows the chain. |
 | `CORE-409` | Create-time conflict (e.g. duplicate) | The state machine refuses this write — read `detail`. |
-| `CORE-410` | PATCH of a terminal work item (wrapped/failed/cancelled) | This work item is closed and can no longer be edited — file a new one instead. |
+| `CORE-410` | PATCH of a terminal work item (wrapped/failed/canceled) | This work item is closed and can no longer be edited — file a new one instead. |
 
 A `pf:` line with no typed code means a local flag/argument mistake (exit 1
 for a sub-action's flags or arguments, e.g. `file create --bogus` or a

@@ -102,7 +102,7 @@ refused before anything else happens.
 | Code | When | What to tell the user |
 |---|---|---|
 | `CORE-404` | Unknown or invisible id (CLI precheck) | No such work item — check the `wi_` id. |
-| (no code) `submit: <slug> is terminal (<status>)` | The work item is wrapped/failed/cancelled | A finished work item cannot be resumed — file a new one. |
+| (no code) `submit: <slug> is terminal (<status>)` | The work item is wrapped/failed/canceled | A finished work item cannot be resumed — file a new one. |
 | `DAEMON-409` | The work item is already active or queued on this daemon, the `clean_pause` flag was not yet cleared at the hub, or the paused resume was blocked by a typed mid-flight failure (missing capsule / unmapped project — the detail names the remediation) | `pf watch <id> --once` shows the state; for a blocked one, fix the named cause, then `pf resume` again. |
 | `DAEMON-410` (`SHUTTING_DOWN`) | Graceful shutdown in progress | Wait for restart, then resume. |
 | `AUTH-403` (from the resume door) | The caller is not the work item's reporter, a project maintainer or an admin | Ask the task owner or a maintainer to continue it. |

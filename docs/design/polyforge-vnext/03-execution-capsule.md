@@ -63,7 +63,7 @@
 - **销毁（封存）时机**，按触发路径分两类，二者的收尾动作与顺序均不同：
   - **正常收尾（pause / wrap / fail / block——四者均按 `02-aihub-core.md#§6.4` 携带 flush 证据；cancel 不在此列，见下）**：仅在本 generation 仍是当前唯一活跃 generation 时发生。收尾顺序是**先发布、后结束 generation**：WI Agent 发起最后一次全扫描发布请求，Daemon 执行该次发布并等其落定（成功写入，或确认本次确无待发布内容）之后，该 generation 才在 Core 侧被记为已结束（对应 `02-aihub-core.md#§6.4` 的 flush 证据协议，本文不重复其判据）；发布未落定前不得结束 generation。Daemon 随后停止观察该 capsule，目录保留为只读现场。 〔#111分类：删→驱动〕
   - **stale 检测或被 force-takeover**：旧 generation 已不再被信任为可发布方，**不发起、也不重试任何发布**——不存在「先尝试发布再看结果」这一步。Daemon 一旦判定本 generation 已 stale（心跳过期）或已被接管（收到 `05-sync-revision-recovery.md#§2.9` fencing 拒绝，或另行获知新 generation 已 claim），立即终止该 capsule 的进程组，并将本机目录封存进 quarantine（协作行为，见 §2.4）；新 generation 一侧则独立地在 `capsule_create`（§6.1）时把旧目录移入 quarantine，不依赖旧侧是否已完成自己的封存动作。
-  - **cancel 的三类路径（D13 裁定；cancel 是 Core 侧把 WI 迁入 `cancelled` 终态的动作，权威契约在 `02-aihub-core.md#§6.5`，Capsule 侧按下述分类各自处理，三类之外不存在第四种混合路径）**：
+  - **cancel 的三类路径（D13 裁定；cancel 是 Core 侧把 WI 迁入 `canceled` 终态的动作，权威契约在 `02-aihub-core.md#§6.5`，Capsule 侧按下述分类各自处理，三类之外不存在第四种混合路径）**：
     1. **WI 处于 `queued`/`paused`/`blocked`（无活跃 generation）**：人工直接经 Core 的 cancel 端点取消（`02-aihub-core.md#§6.5`），不需要任何活跃 generation token，也**不存在 flush**——本就没有活跃代，没有「先发布、后结束 generation」的对象。Capsule 侧若存在本机封存目录（`paused` 场景），保持只读现场，其后按删除保护流程清理。
     2. **WI 处于 `running`（有活跃 generation）**：Core 的 cancel 端点不作用于 running WI（`02-aihub-core.md#§6.5`）；owner 必须先走上面的正常收尾路径——先 flush 落定、generation 结束、WI 转 `paused`——再由人工按第 1 类取消，即「**先 flush 后 cancel**」，不存在跳过 flush 直接取消 running WI 的路径。
     3. **generation 已 stale 或已被 takeover**：走上面的第二类路径——kill 进程组 + 本机 quarantine，**不发布**（零 flush）；WI 的最终终止由新 generation 或人工在 Core 侧另行决定，旧代的本机目录不参与任何 flush。
