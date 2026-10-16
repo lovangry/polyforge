@@ -27,6 +27,7 @@ type fakeAPI struct {
 	acks      []protocol.ChatAck
 	heartbeat int
 	snapCalls []int64
+	ackFails  int // the next ackFails Ack calls fail
 }
 
 func (f *fakeAPI) Subscriptions() (protocol.ChatSubscriptions, error) {
@@ -55,6 +56,10 @@ func (f *fakeAPI) Ack(a protocol.ChatAck) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.acks = append(f.acks, a)
+	if f.ackFails > 0 {
+		f.ackFails--
+		return errors.New("ack: daemon hiccup")
+	}
 	for i := range f.subs.Subscriptions {
 		if f.subs.Subscriptions[i].WI == a.WI {
 			s := &f.subs.Subscriptions[i]
@@ -715,5 +720,34 @@ func TestSameClassFromExecutionAndHubFiresOnce(t *testing.T) {
 		if len(res.Decisions) != 1 {
 			t.Fatalf("%s+%s: decisions = %+v, want exactly one", tc[0], tc[1], res.Decisions)
 		}
+	}
+}
+
+// repo review 2026-10-16 B-23: a failed ack leaves the daemon's cursor
+// where it was, so the next polls re-derive the same decision — it must
+// not be printed again every poll, only its ack retried.
+func TestFailedAckDoesNotReprintTheDecision(t *testing.T) {
+	snap := running("wi_1", "s1")
+	snap.Events = []protocol.EventEntry{ev(1, "step_dead")}
+	snap.LastSeq = 1
+	api := &fakeAPI{
+		subs:     protocol.ChatSubscriptions{Subscriptions: []protocol.ChatSub{sub("wi_1", 0)}},
+		snaps:    map[string]*protocol.WatchSnapshot{"wi_1": snap},
+		ackFails: 2,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	polls := 0
+	var out bytes.Buffer
+	_ = Run(ctx, api, Options{Out: &out, Sleep: func(context.Context, time.Duration) {
+		if polls++; polls >= 5 {
+			cancel()
+		}
+	}})
+	if n := strings.Count(out.String(), "step_dead"); n != 1 {
+		t.Fatalf("decision printed %d times, want once: %q", n, out.String())
+	}
+	if api.subs.Subscriptions[0].Cursor != 1 {
+		t.Fatalf("the ack must be retried until it lands: cursor = %d", api.subs.Subscriptions[0].Cursor)
 	}
 }
