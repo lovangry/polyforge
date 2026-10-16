@@ -117,6 +117,9 @@ type fakeHub struct {
 	// claim and then fail with a transport-class error (the answer lost
 	// in transit, repo review 2026-10-16 B-1).
 	claimLost int
+	// endFails, when > 0, makes the next N SessionEnd calls fail with a
+	// transport-class error and no effect (a hub blip at the close).
+	endFails int
 	// unknown lists canonical ids GetWorkItem answers CORE-404 for.
 	unknown map[string]bool
 	// bundles maps a canonical id to the bundle GetWorkItem reports
@@ -261,6 +264,10 @@ func (h *fakeHub) SessionEnd(wi string, req api.SessionEndRequest) error {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.endFails > 0 {
+		h.endFails--
+		return errors.New("connection refused")
+	}
 	id := h.canonicalID(wi)
 	h.ends = append(h.ends, endCall{WI: id, Req: req})
 	switch req.Status {

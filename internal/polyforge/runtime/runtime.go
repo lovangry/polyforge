@@ -1433,8 +1433,9 @@ func copyTree(src, dst string) error {
 // session is ended server-side (SessionEnd, fenced on our secret). For
 // a terminal reason the scene is made read-only and Observe hears
 // WIFinished; a SessionEnd failure leaves the job in SEALING (persisted
-// with its reason) so a restart finishes the close — never a silent
-// half-seal.
+// with its reason) and the close is retried in the background
+// (retrySeal) — and by a restart's finisher if the daemon stops first —
+// never a silent half-seal.
 func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
@@ -1572,6 +1573,14 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 			}
 			finalReason = protocol.FinishBlocked
 			chainOK = false
+		} else {
+			// The final state reached the server: a seal retry (below)
+			// or the restart finisher must not push again — after a
+			// STALE_SESSION the credential is dead and the push could
+			// only fail.
+			j.mu.Lock()
+			j.sealedPush = true
+			j.mu.Unlock()
 		}
 	}
 	// Task-repo uncommitted work (polyforge#167): every close but wrapped
@@ -1583,6 +1592,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	// hash. A STALE_SESSION refusal (this daemon was superseded between
 	// the seal push and here) surfaces as the error below and leaves the
 	// job SEALING, exactly like a hub outage: never a silent half-seal.
+	// The seal retry then finishes it locally (retrySeal).
 	// The status vocabulary is wrapped|failed|blocked — plus "paused",
 	// which the CLI pause path passes through (merge amend: paused routes
 	// to the M3 pause transition; the session is KEPT and clean_pause=true
@@ -1594,7 +1604,18 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 		Note:       note,
 		CleanPause: finalReason == api.StatusPaused,
 	}); err != nil {
-		return fmt.Errorf("runtime: %s: session-end failed (job left sealing): %w", j.wi, err)
+		if st, _ := j.snapshot(); st == StateSealing {
+			// Persist the push outcome and retry the close in the
+			// background (repo review 2026-10-16 B-4): without a retry
+			// lane the job sat SEALING — agent dead, every `pf wrap`
+			// answered "a close is already in progress" — until a
+			// daemon restart ran the finisher.
+			if perr := r.persist(); perr != nil {
+				fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
+			}
+			r.retrySeal(j, note)
+		}
+		return fmt.Errorf("runtime: %s: session-end failed (job left sealing, retrying): %w", j.wi, err)
 	}
 	if err := sealReadOnly(j.capsuleDir); err != nil {
 		// The generation is closed; a chmod failure is a scene-preservation

@@ -9,8 +9,12 @@ package runtime
 // longer ours). Only then is the local record dropped.
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -160,4 +164,86 @@ func (r *Runtime) finishBlocked(j *job, detail, head string) {
 		fmt.Fprintf(os.Stderr, "runtime: %s: blocked close not acknowledged by the hub — record kept end_pending, retrying\n", j.wi)
 		r.retryEndPending(j)
 	}
+}
+
+// retrySeal is the SEALING job's close retry (repo review 2026-10-16
+// B-4): the terminal SessionEnd failed after the agent was torn down, so
+// the job sits in SEALING with its verdict recorded. Each attempt takes
+// opMu, checks the job is still the current SEALING one, and runs the
+// very close the restart finisher runs — stopOp(alreadySealing) with the
+// recorded reason and push state. A typed STALE_SESSION answer (the
+// session no longer holds the work item: an earlier close landed with
+// its answer lost, or an admin ended it) stops the retry and finishes
+// the close locally. Shutdown stops the retry; the persisted SEALING
+// record is finished by the next restart.
+func (r *Runtime) retrySeal(j *job, note string) {
+	r.goRetry("seal:"+j.wi, func() bool { return r.sealAttempt(j, note) })
+}
+
+// sealAttempt is one retry of a SEALING close; true = settled.
+func (r *Runtime) sealAttempt(j *job, note string) bool {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	if r.jobOf(j.wi) != j {
+		return true // settled or replaced meanwhile
+	}
+	if st, _ := j.snapshot(); st != StateSealing {
+		return true
+	}
+	j.mu.Lock()
+	reason, pushed := j.stopReason, j.sealedPush
+	j.mu.Unlock()
+	err := r.stopOp(context.Background(), j, reason, true, pushed, note)
+	if err == nil {
+		return true
+	}
+	if isStaleSession(err) {
+		r.finishSealLocally(j, reason, err)
+		return true
+	}
+	fmt.Fprintf(os.Stderr, "runtime: %s: seal retry failed (will retry): %v\n", j.wi, err)
+	return false
+}
+
+// isStaleSession reports the hub's typed "this session no longer holds
+// the work item" refusal (CORE-403 STALE_SESSION).
+func isStaleSession(err error) bool {
+	var ae *api.Error
+	if !errors.As(err, &ae) || ae.Code != api.ErrCoreForbidden {
+		return false
+	}
+	var extra struct {
+		Reason string `json:"reason"`
+	}
+	if len(ae.Extra) > 0 && json.Unmarshal(ae.Extra, &extra) == nil && extra.Reason == "STALE_SESSION" {
+		return true
+	}
+	return strings.Contains(ae.Detail, "STALE_SESSION")
+}
+
+// finishSealLocally ends a SEALING job whose session the hub no longer
+// holds: the hub's state stands (nothing more can be sent under this
+// session), the scene is sealed read-only, the job is DONE and dropped,
+// observe is released, and an event records that the local close never
+// reached the hub under this session.
+func (r *Runtime) finishSealLocally(j *job, reason string, cause error) {
+	if err := sealReadOnly(j.capsuleDir); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: read-only seal incomplete: %v\n", j.wi, err)
+	}
+	if err := j.transition(StateDone); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: sealing job could not reach DONE: %v\n", j.wi, err)
+	}
+	r.dropJob(j)
+	if err := r.persist(); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
+	}
+	fmt.Fprintf(os.Stderr, "runtime: %s: seal finished locally — the hub no longer holds this session: %v\n", j.wi, cause)
+	if r.cfg.EventTap != nil {
+		r.cfg.EventTap(j.wi, "seal_finished_locally", map[string]any{
+			"reason": reason,
+			"note":   "the hub no longer holds this session (an earlier close landed with its answer lost, or an admin ended it): the work item's hub state is whatever was set there, not necessarily " + reason,
+			"error":  cause.Error(),
+		})
+	}
+	r.send(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: reason})
 }
