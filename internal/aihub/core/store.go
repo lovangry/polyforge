@@ -27,7 +27,8 @@ type DB struct {
 }
 
 // DDL is the Core schema. First boot installs it as-is; Open runs no
-// migrations (existing databases already carry every column). Seq is
+// column migrations (existing databases already carry every column) —
+// an index added later is created on the next Open (IF NOT EXISTS). Seq is
 // numbered per project: UNIQUE(project_id, seq). Ownership lives ON the
 // work_items row itself (the session model — session_hash/
 // session_fingerprint/clean_pause).
@@ -190,6 +191,8 @@ CREATE TABLE IF NOT EXISTS memories (
   fs_mtime_ns  INTEGER,
   fs_size      INTEGER
 );
+
+CREATE INDEX IF NOT EXISTS idx_mem_work_item ON memories(work_item_id) WHERE work_item_id IS NOT NULL;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
   mem_id UNINDEXED, body,

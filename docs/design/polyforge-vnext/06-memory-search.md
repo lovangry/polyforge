@@ -30,7 +30,10 @@ FTS5 trigram 文本检索，没有向量/语义层。
 
 frontmatter 与 `memories` 表列一一镜像，按固定顺序序列化（`authority.go` `frontmatter`）：`id`、`type`、
 `owner_user_id`、`title?`、`tags?`、`visibility`、`work_item_id?`、`project_id`、`idempotency_key?`、`related?`、
-`created_at`、`updated_at`。`id` 由服务端分配（`mem_` 前缀，与目录名一致）。`visibility` ∈
+`created_at`、`updated_at`。`id` 由服务端分配（`mem_` 前缀，与目录名一致）。行的 `title` 是文件的投影
+（`memory/title.go` `rowTitle`）：frontmatter 有非空白 `title` 时原样使用，否则从正文派生——第一个非空行，
+去掉行首 markdown 标记（`#`、`>`、`-`/`*`/`+`、`[ ]`、`1.`/`1)`），跳过代码围栏行与分隔线，按字符边界截到
+80 字符（截断时末尾为 `…`）。派生标题只写入行，不回写 frontmatter。`visibility` ∈
 `private|project|team|public|admin`。正文上限 1 MiB（`MEM-413`）。
 
 ## 4. 对账（启动期，后台） <!-- §4 -->
@@ -39,7 +42,10 @@ aihub 启动后在后台运行 `Store.RebuildIndex`（`cmd/aihub/main.go`；先�
 `memory.md.tmp` 残留；文件有、行缺 → 从 frontmatter 回填；行有、文件无 → 删行（创建在 ② 与 ③ 之间崩溃）；
 已移入 `_redacted/` 但未提交的 redact → 向前补完。按新鲜度戳增量执行（polyforge#129）：每行记录写入时
 权威文件的 mtime+size，戳一致即跳过该条目（不读、不哈希、不写索引）；戳不一致或缺失才按内容 sha 校验。
-没有在线重建端点。
+对账开始时先做标题回填（`backfillTitles`）：`title` 为空/空白的 active 行，文件内容 sha 与行一致时按
+`rowTitle` 补上标题，分批小事务写入；已补的行不再被选中，不会重复读写。仍会在每次启动被重新选中并读文件的
+只有补不上的行：权威文件缺失、内容 sha 与行不一致（交给随后的对账按文件修正，修正时同样派生标题），或正文没有
+可用的行。没有在线重建端点。
 
 ## 5. API 与错误码 <!-- §5 -->
 
@@ -47,7 +53,7 @@ aihub 启动后在后台运行 `Store.RebuildIndex`（`cmd/aihub/main.go`；先�
 
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
-| POST | `/api/v1/memories` | 项目 writer/maintainer 或 admin，否则 `MEM-403`；key 限定在其他项目 → `AUTH-403`；项目不存在 → `CORE-404` | body `{project, type, title, visibility, content, tags, related, work_item_id, idempotency_key}`；`work_item_id` 接受 id 或 `<project>#<seq>`，须同项目；同一 `idempotency_key`（同 owner、同项目）重放返回原条目，键属于他人或他项目 → `MEM-409 IDEMPOTENCY_KEY_REUSED` |
+| POST | `/api/v1/memories` | 项目 writer/maintainer 或 admin，否则 `MEM-403`；key 限定在其他项目 → `AUTH-403`；项目不存在 → `CORE-404` | body `{project, type, title, visibility, content, tags, related, work_item_id, idempotency_key}`；`work_item_id` 接受 id 或 `<project>#<seq>`，须同项目；`title` 缺省或空白时由服务端从正文派生（§3）；同一 `idempotency_key`（同 owner、同项目）重放返回原条目，键属于他人或他项目 → `MEM-409 IDEMPOTENCY_KEY_REUSED` |
 | GET | `/api/v1/memories/search` | 任意 key；结果按可见性过滤 | `q`（必填）、`match`（`all` 缺省 / `any`，其他值 → `MEM-400`）、`type`（精确值，或 `X.*` 前缀匹配 `X.`）、`tags`（逗号）、`limit`（缺省 50；≤0 或 >200 时取 50）、`project`（先过读权限再作过滤）、`excerpt`（>0 时每条带 `content_excerpt`，上限 8192 字符）；只返回 `status='active'` |
 | GET | `/api/v1/memories/{id}` | 读权限；无权与不存在同为 `MEM-404` | 元数据；`?format=content` 返回原始 Markdown 正文 |
 | POST | `/api/v1/memories/{id}/redact` | 先过读门（`memRead`）：无读权限 → `MEM-404`；能读但非 owner 且非 admin → `MEM-403` | 软删除；非 active → `MEM-409` |
@@ -59,7 +65,17 @@ aihub 启动后在后台运行 `Store.RebuildIndex`（`cmd/aihub/main.go`；先�
   - 非 CJK 段是一个词：保留 3–40 字符且不在停用词表（英文虚词 + markdown/URL 噪声）中的词。
   - CJK 段（汉字、平假名、片假名、谚文）是没有词界的分句：切成重叠的 3 字符片段（「重试阶梯」→ 重试阶、试阶梯）；不足 3 字符的段不产生任何项；40 字符上限不适用于 CJK。
   - 去重后取至多 32 项：在词池（最长优先）与 CJK 片段池（各分句轮流取）之间交替，任一池用完由另一池补满，互不挤占。
-  - 各项加引号以 OR 连接，按 FTS5 bm25 排序；只检查 bm25 顺序的前 max(100, 10×limit) 个候选，不再翻页（AND 模式翻页到底）。过滤后没有可用项 → 无命中（不报错）。用于长的描述性查询（领取时 recall）。
+  - 各项加引号以 OR 连接，按 bm25 × 新鲜度排序（见下）；只检查该顺序的前 max(100, 10×limit) 个候选，不再翻页（AND 模式翻页到底）。过滤后没有可用项 → 无命中（不报错）。用于长的描述性查询（领取时 recall）。
+
+两种模式的排序相同（`memory/freshness.go`）：`w = exp(-age_days / stability_days)`，`age_days` 按
+`memories.updated_at`（权威文档最后修订时间；没有更新端点，API 写入的条目等于 `created_at`）到查询时刻计算；
+`score = rank × (1 + 0.5 × w)`（rank 为 FTS5 bm25，越负越好），升序，平分时按 `updated_at` 降序（按解析后的时刻比较——整秒与带小数秒的 RFC3339 并存；解析不了的视为最旧）、再按 id。
+stability：`rule.*`、`doc.design`、`doc.decision` 不衰减（w = 1）；`doc.review`、`doc.audit` 及其他 `doc.*`
+（时点快照）180 天；`experience.*` 90 天；`fact.*` 与 `methodology.*` 180 天；其他类型 90 天。`updated_at`
+解析不了按完全陈旧（w = 0），未来时间按 age 0（w ≤ 1）。新鲜度最多把相关度放大 1.5 倍：相近的命中里新的在前，相关度高出 1.5 倍以上的旧条目始终排在
+较弱的新条目之前。只有短词（无 rank）的子串扫描按 w 降序。实现上（`ftsPage`）先只从 FTS 索引读出全部命中的
+rowid 与 rank，再沿 rank 顺序分批读取条目元数据，直到下界 (1+0.5)×rank 已劣于当前第 offset+limit 名，正文只读
+本页；结果与对全部命中精确排序相同。
 
 ### 5.2 错误码 <!-- §5.2 -->
 
