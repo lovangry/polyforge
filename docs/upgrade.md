@@ -14,7 +14,10 @@ so creating a project fails until the upgrade SQL has run.
   SQLite backup-API snapshot of `aihub.db` (consistent even under WAL
   writes), and an off-host copy. The service keeps running throughout.
 - **The switch window is the only service interruption**, in this order:
-  1. the old aihub container exits gracefully (drain ≤ `DRAIN_SECS`);
+  1. the old aihub container exits gracefully (drain ≤ `DRAIN_SECS`, default
+     15s — the compose file's `stop_grace_period` is also 15s, longer than
+     aihub's own 10s HTTP drain; the new default applies from the next
+     deploy);
   2. deploy.sh applies the upgrade SQL (see below), one transaction per
      script;
   3. the new container starts and HTTP is polled.
