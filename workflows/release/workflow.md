@@ -19,7 +19,7 @@ compose; it is not itself a structural schema - the frontmatter `steps` array ab
 the *only* execution order. Nothing here overrides it.
 
 This is the ONLY lane that releases or deploys. The delivery lanes (`feature-full`,
-`bug-fix`, `quick-fix`, `chore`) end at their `deliver` step (push, PR, rule-bound
+`bug-fix`, `autopilot`, `chore`) end at their `deliver` step (push, PR, rule-bound
 merge) and never release or deploy; shipping is a separate WI filed against this bundle,
 so it always acts on a verified merged origin head and is gated, evidenced and auditable on its own.
 
@@ -109,3 +109,9 @@ declare none (an estimate of 30 or less is inert under that rule) and get the 90
 - `.polyforge/deploy.sh <version> --confirm <version>` - deploys that published version
   and ends with production either on that version or rolled back to the previous one;
   a rollback must exit non-zero.
+- Both procedures run on the step's own machine, against the task-repo clone. They read
+  LOCAL git tags (the steps run `git fetch --tags origin` first), and whatever else a
+  repo's procedure needs on that machine (tools, registry and ssh access, writable
+  backup space) is the repo's precondition: the repo documents it next to its scripts,
+  and a missing one fails the step gracefully, but only after a lane was spent - check
+  them before filing a release WI.

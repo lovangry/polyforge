@@ -438,16 +438,16 @@ func TestDeliverDeliveredHead(t *testing.T) {
 	})
 }
 
-// TestDeliverQuickFixEligibility: a workflow without a review step
-// (quick-fix) auto-merges on verification's pass when the mechanical facts
+// TestDeliverAutopilotEligibility: a workflow without a review step
+// (autopilot) auto-merges on verification's pass when the mechanical facts
 // hold; a workflow with one still needs the review passed; a
 // hand-resolved conflict still asks either way.
-func TestDeliverQuickFixEligibility(t *testing.T) {
+func TestDeliverAutopilotEligibility(t *testing.T) {
 	repos := deliverCapsule(t)
 	quick := deliverSpec(repos, false, 0)
 	quick.HasReview = false
 	if err := ValidateStepResult(deliverRes(OutcomeCompleted, mergedOut, ev(goodPush)), quick); err != nil {
-		t.Fatalf("quick-fix on the verified commit refused: %v", err)
+		t.Fatalf("autopilot on the verified commit refused: %v", err)
 	}
 	withReview := deliverSpec(repos, false, 0)
 	if err := ValidateStepResult(deliverRes(OutcomeCompleted, mergedOut, ev(goodPush)), withReview); err == nil || !strings.Contains(err.Error(), "independent review") {
@@ -455,7 +455,7 @@ func TestDeliverQuickFixEligibility(t *testing.T) {
 	}
 	f := mergeFacts{hasReview: false, testsCovered: true, handResolved: "merge abc had conflicts"}
 	if ok, why := autoMergeEligible(f); ok || !strings.Contains(why, "hand-resolved") {
-		t.Fatalf("quick-fix hand-resolved conflict eligible=%v (%s)", ok, why)
+		t.Fatalf("autopilot hand-resolved conflict eligible=%v (%s)", ok, why)
 	}
 }
 

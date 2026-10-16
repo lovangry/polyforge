@@ -1,6 +1,7 @@
 # 06 — Memory / Search：Markdown 权威、HTML 派生、索引可重建与实时检索
 
-> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+> **ARCHIVED（repo review 2026-10-16 G-1）— 本文大部分描述已删除的机制：`backupBarrier` 与一致性快照（代码是 DB-only `VACUUM INTO`）、HTML 派生链、PATCH /memories、share 链接、`MEM-501`。标有 ARCHIVED 横幅的节 do not build from this；未标横幅的节也只作历史与溯源参考。现行设计权威：[v2-converge.md](v2-converge.md)、[wi-kind-contract.md](wi-kind-contract.md)、[08-capsule-base-migration.md](08-capsule-base-migration.md)；与代码冲突时一律以代码为准。**
+> Most of this document describes deleted mechanisms. Sections bannered ARCHIVED must not be built from; the live authority is v2-converge.md plus the code.
 
 | 权威项 | 值 |
 |---|---|
@@ -42,6 +43,8 @@
 
 ### 2.1 定义 <!-- §2.1 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、Revision/CAS/manifest、flush 证据）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 - **权威内容（authority）**：`memory.md`——唯一可信来源；一切展示、检索、重建以它为准。
 - **派生产物（derived）**：`memory.html`（渲染视图）与 FTS 检索索引（`02-aihub-core.md#§4.9` `memory_fts`）。
   派生物损坏/丢失一律**可由权威内容再生**，不构成数据事故。v1 不存在任何向量/语义索引层（B02 裁定，§10.3）。
@@ -71,6 +74,8 @@ frontmatter（目录名与 frontmatter `id` 始终一致是写入时的不变式
 不一致则 `MEM-400 FRONTMATTER_ID_MISMATCH`。
 
 ### 2.3 本文不变量（`00` INV-7 展开） <!-- §2.3 -->
+
+> **ARCHIVED（部分）— 本节涉及 `backupBarrier` 的不变量不成立（该机制不存在，见 §4.6 横幅）；do not build from this.**
 
 - INV-7a（修复 B5 后的写序）：create/update 的权威文件替换恒为三步——**① 新内容写入同目录
   临时文件 `memory.md.tmp` 并 fsync → ② 同一 Core 事务提交元数据 + FTS（含 `content_sha` =
@@ -158,6 +163,8 @@ frontmatter 缺必填字段 → `MEM-400 FRONTMATTER_INVALID`。
 
 ### 4.3 Markdown→HTML 派生规则与陈旧判定（权威，含 B12/B16 修复） <!-- §4.3 -->
 
+> **ARCHIVED — HTML 派生链从未建成（代码无 HTML 渲染、无 `format=html`）；do not build from this.** 现行 memory 只有 Markdown 权威文件 + FTS 索引。
+
 - 渲染器：**goldmark**（CommonMark 0.31 + GFM 扩展），确定性输出（同输入必同输出，无时间戳/
   随机 id 注入）。
 - 扩展白名单：GFM tables、task list、strikethrough、autolink；**禁用**原始 HTML 与任意脚本
@@ -225,6 +232,8 @@ INV-7c/INV-7f 覆盖「元数据与权威文件摘要不一致」的窗口（B5 
 
 ### 4.6 Memory 写路径接入备份屏障（权威，修复 B08） <!-- §4.6 -->
 
+> **ARCHIVED — `backupBarrier` 不存在；do not build from this.** 现行 `pf backup` 是任意主机持 admin key 调用的 DB-only `VACUUM INTO` 快照（`core/admin.go`），**不**含 memory 文件与 git 仓，也不与写路径互斥——本节的一致性快照承诺是虚假的数据安全声明。完整备份见 README「`pf backup`」与 `.polyforge/deploy.sh` 的在线备份。
+
 **背景（问题重述）**：`07-deployment-pilot.md#§6.2` 定义的 `backupBarrier` 是一个进程级读写锁，用于保证
 `pf backup`（M4 备份端点） 拍下的 SQLite 快照与 `<data_dir>` 下的文件快照处于同一个"无在飞写入"时间
 点。原设计只要求 Core 的 SQL 写事务在事务开始前取该锁的读锁、事务结束后释放——但 Memory 的两类
@@ -268,6 +277,8 @@ INV-7c/INV-7f 覆盖「元数据与权威文件摘要不一致」的窗口（B5 
 
 ### 5.1 Memory 管理 API（挂载于 AIHub；端点方法/路径/调用方权威一律在 `02-aihub-core.md#§5.1` 行 22–25，本节只展开写序、协议细节与权限语义） <!-- §5.1 -->
 
+> **ARCHIVED — 本表描述的面与代码不符（`PATCH /memories`、share 链接、`format=html` 不存在；代码有 `POST /memories`、`GET /memories/search`、`GET /memories/{id}`、`POST /memories/{id}/redact`，以及未记录的 `?format=content`、search 的 `project=`/`excerpt=`/`type=X.*`）；do not build from this.** 以 `internal/aihub/server/server.go` 为准。
+
 > **端点权威声明**：本节不重复定义端点清单或调用方授权——凡与 `02` canonical 行 22–25 冲突处以 `02` 为准。本节展开的是：三步写序（§5.2）、rebuild 流程（§5.3）、可见性矩阵与检索过滤顺序（§7）、匿名分享的消费语义（`GET /api/v1/share/<token>`：单条、只读、无 api_key/membership、token 不可枚举，权威定义在 `02-aihub-core.md#§5.1` 行 24）。
 
 | 端点 | 方法 | 语义 | 错误码 |
@@ -283,6 +294,8 @@ INV-7c/INV-7f 覆盖「元数据与权威文件摘要不一致」的窗口（B5 
 **分享链接（A18 裁定，权威）**：分享链接**只能由该条 Memory 的 owner 经显式动作生成**——`POST /api/v1/memories/{id}/share`，非 owner 调用返回 `MEM-403`。它是一条由 owner 显式授予的、超出该条目 `visibility` 分级的独立访问通道，**不构成第六种可见性分级取值**：`visibility` 的取值域仍只有 `private|project|team|public|admin` 五种（§4.2），分享动作不写改 frontmatter 的 `visibility` 字段。**入口文案为显式例外**：各入口（UI/CLI）呈现分享动作时，文案必须把它表述为「owner 显式授予的、对其可见性分级的一次例外」，不得表述为又一种 visibility 取值或与分级并列的常规选项——链接的生成动作即例外的全部授权依据，无默认开启、无隐式入口。
 
 ### 5.2 核心写流程（编号步骤，非可执行代码） <!-- §5.2 -->
+
+> **ARCHIVED — 本节的写流程依赖不存在的 `backupBarrier`；do not build from this.** 以 `internal/aihub/memory` 的写路径为准。
 
 **写序总则（权威，修复 B5：崩溃不得留下对外服务的半提交态）**：create 与 update 的权威
 文件替换遵循同一**三步写序**，三步在**单次 `backupBarrier` 读锁**（§4.6）内完成、不得调换
@@ -371,6 +384,8 @@ INV-7c/INV-7f 覆盖「元数据与权威文件摘要不一致」的窗口（B5 
 
 ### 5.3 重建流程（索引丢失恢复） <!-- §5.3 -->
 
+> **注意（2026-10-16）**：「FTS 重建总是运行」不成立——reconcile 跳过已按文件大小/mtime 盖章的条目（`memory/reconcile.go`）。
+
 全量重建（`RebuildIndex`，aihub 启动期后台对账执行；在线端点已删，polyforge#149）按以下编号步骤进行（覆盖两个目录：正常 `memory.md`
 与 `_redacted/` 下已软删的内容）：
 
@@ -414,6 +429,8 @@ INV-7c/INV-7f 覆盖「元数据与权威文件摘要不一致」的窗口（B5 
 7. 返回重建统计（重建条数、耗时）。
 
 ### 5.4 错误码表（前缀 MEM） <!-- §5.4 -->
+
+> **ARCHIVED — 码表与代码不符：`MEM-501` 不存在；`MEM-403` 也用于写拒绝（不只 share）；`MEM-502` 只记日志；`MEM-503` 用于 FTS/扫描失败；do not build from this.** 以 `internal/common/api/errors.go` 为准。
 
 | 码 | 语义 |
 |---|---|

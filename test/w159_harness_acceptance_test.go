@@ -141,7 +141,7 @@ func TestW159MixedHarnessWorkItem(t *testing.T) {
 	ws := t.TempDir()
 	w079Yaml(t, ws, w159Yaml)
 	d, _, root := w159HarnessRoot(t, inst, ws, "")
-	wi := w113NewWI(t, inst, "e2e", "w159 mixed harness", envelopeQuickFix())
+	wi := w113NewWI(t, inst, "e2e", "w159 mixed harness", envelopeAutopilot())
 	capDir := w079Run(t, d, inst, ws, wi)
 
 	if got := w079Model(t, capDir, "fix"); got != "claude-opus-5-5" {
@@ -438,7 +438,7 @@ func TestW159RetiredHarnessKeyRefusedAndDoctor(t *testing.T) {
 	ws := t.TempDir()
 	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [claude-opus-5-5], harness: claude }\n")
 	d, cfg, _ := w159HarnessRoot(t, inst, ws, "")
-	wi := w113NewWI(t, inst, "e2e", "w159 mismatch", envelopeQuickFix())
+	wi := w113NewWI(t, inst, "e2e", "w159 mismatch", envelopeAutopilot())
 	out, code := w113Pf(t, inst, w113Env{socket: d.sock}, "submit", wi)
 	w079Refused(t, d, inst, ws, wi, out, code, "steps.e2e.fix.harness: the `harness` key was removed (polyforge#175)")
 
@@ -464,7 +464,7 @@ func TestW159RetiredHarnessKeyRefusedAndDoctor(t *testing.T) {
 			claudeCheck = &parsed.Checks[i]
 		}
 	}
-	if claudeCheck == nil || claudeCheck.Status != "pass" || !strings.Contains(claudeCheck.Detail, "e2e/quick-fix/fix: [claude:claude-opus-5-5, claude:claude-sonnet-5] (steps.e2e.fix.models)") || !strings.Contains(claudeCheck.Detail, "2.1.296") {
+	if claudeCheck == nil || claudeCheck.Status != "pass" || !strings.Contains(claudeCheck.Detail, "e2e/autopilot/fix: [claude:claude-opus-5-5, claude:claude-sonnet-5] (steps.e2e.fix.models)") || !strings.Contains(claudeCheck.Detail, "2.1.296") {
 		t.Fatalf("harness claude check %+v", claudeCheck)
 	}
 	if strings.Contains(doc, w159Token) {

@@ -7,7 +7,7 @@ package driver
 // project's repo (.polyforge/release.sh, .polyforge/deploy.sh), so the
 // shared text must carry no polyforge-private procedure markers. And
 // releases happen ONLY through this bundle: no delivery lane (feature-full,
-// bug-fix, quick-fix, chore) may carry a release step.
+// bug-fix, autopilot, chore) may carry a release step.
 
 import (
 	"os"
@@ -115,6 +115,23 @@ func TestReleaseBundleShape(t *testing.T) {
 			t.Fatalf("release step lost its contract text %q", needle)
 		}
 	}
+	// The already-released guard (repo review 2026-10-16 V-6), before the
+	// procedure runs: a release tag (v*) already on origin_head refuses
+	// whether or not an earlier attempt left its list; with a kept list,
+	// ANY remote tag line it lacks refuses; the kept list is never
+	// overwritten; a normal first run passes.
+	guard := strings.Index(rel, "PF-RELEASE-ALREADY_RELEASED")
+	for _, needle := range []string{
+		"The head is already tagged", "whether or not any file from an earlier", "name starts with `v`", "equals `origin_head`",
+		"never overwrite it", "any tag, on any commit", "comm -13", "A normal first run passes both",
+	} {
+		if guard < 0 || !strings.Contains(rel, needle) {
+			t.Fatalf("the release step lost its already-released guard text %q (PF-RELEASE-ALREADY_RELEASED)", needle)
+		}
+	}
+	if run := strings.Index(rel, "## 4. Run the procedure"); run < 0 || guard > run {
+		t.Fatal("the already-released guard must come before the procedure runs")
+	}
 	if strings.Contains(rel, "enum: [pass, defer, fail]") || strings.Contains(rel, "enum: [defer]") {
 		t.Fatal("the release step must not admit a defer verdict: a release WI without a procedure is an error")
 	}
@@ -137,7 +154,7 @@ func TestReleaseBundleShape(t *testing.T) {
 // TestDeliveryBundlesCarryNoReleaseStep pins decision B: releases happen
 // only via workflows/release.
 func TestDeliveryBundlesCarryNoReleaseStep(t *testing.T) {
-	for _, bundle := range []string{"feature-full", "bug-fix", "quick-fix", "chore"} {
+	for _, bundle := range []string{"feature-full", "bug-fix", "autopilot", "chore"} {
 		if _, err := os.Stat(bundlePath(bundle, "steps", "release.md")); err == nil {
 			t.Fatalf("%s still ships steps/release.md - releases happen only via the release bundle", bundle)
 		}

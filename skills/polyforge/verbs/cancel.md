@@ -1,12 +1,12 @@
 # cancel — abandon a non-active work item
 
 Data-plane verb: the `pf` CLI talks HTTP direct to AIHub. Cancel only ends a
-work item that has **no active generation**; it never interrupts a running
+work item with **no active execution** (queued, paused or blocked); it never interrupts a running
 one (that is `pause` or `wrap --fail`). This is also the "abandon" of a
 **blocked** work item (the counterpart of `resume` = continue): the two
 owner moves on a parked workflow are exactly `pf resume` and this verb —
-`pf wrap --fail` on a blocked work item only prints that hint and
-changes nothing. Allowed to the task's reporter, a project
+`pf wrap --fail` on a blocked work item is refused (`DAEMON-409`, naming
+those two moves) and changes nothing. Allowed to the task's reporter, a project
 maintainer or an admin.
 
 ## Triggers
@@ -32,7 +32,7 @@ The argument is the work item id (`wi_` + random chars) or its slug.
 | Code | When | What to tell the user |
 |---|---|---|
 | `CORE-404` | Unknown or invisible id | No such work item — check the id. |
-| `CORE-409` | The work item has an active generation (running) | It is being executed — use `pause`/`wrap` on the machine that runs it, not cancel. |
+| `CORE-409` | The work item is running (an active execution) | It is being executed — use `pause`/`wrap` on the machine that runs it, not cancel. |
 | `AUTH-403` | The caller is not the reporter, a project maintainer or an admin | Ask the task owner or a maintainer. |
 | `AUTH-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / config. |
 

@@ -49,6 +49,9 @@
 #                       of aihub.db -> rsync catch-up; snapshot integrity + counts
 #   4 consistency       memories rows in the snapshot == memory.md files in the backup
 #   5 off-host          rsync backup to BACKUP_ROOT, manifests equal, integrity + counts
+#                       then mark it .verified (both sides) and keep the newest 3 verified
+#                       aihub-backup-<ver>-<TS> dirs (this one included) on the server and
+#                       locally, prune older verified ones; unmarked ones are never pruned
 #   6 load + swap       docker save | ssh docker load (service keeps running), verify
 #                       the image ID on the server == the verified local one, tag it
 #                       polyforge/aihub:<tag>, back up and edit ONLY the aihub service
@@ -124,7 +127,7 @@
 #   BACKUP_ROOT=/data/polyforge-backups (local)
 #   GH_REPO=silgrid/polyforge   GHCR_IMAGE=ghcr.io/silgrid/aihub   AIHUB_PORT=8080   WAIT_SECS=60
 #   COMPOSE_FILE=/data/aihub-app/docker-compose.yml  COMPOSE_PROJECT=aihub-app  AIHUB_SERVICE=aihub
-#   DRAIN_SECS=5 (stop_grace_period)   MAX_DOWNTIME_SECS=10 (warn)   UP_WAIT_SECS=30 (fail)
+#   DRAIN_SECS=15 (stop_grace_period; > aihub's own 10s drain)   MAX_DOWNTIME_SECS=20 (warn; > DRAIN_SECS)   UP_WAIT_SECS=30 (fail)
 #   DEPLOY_LOCK_FILE=/data/aihub-app/.deploy.lock (on the server)   LOCK_WAIT_SECS=20
 set -eu
 
@@ -182,8 +185,8 @@ GH_REPO="${GH_REPO:-silgrid/polyforge}"
 AIHUB_PORT="${AIHUB_PORT:-8080}"
 WAIT_SECS="${WAIT_SECS:-60}"
 POLL_SECS="${POLL_SECS:-2}"
-DRAIN_SECS="${DRAIN_SECS:-5}"
-MAX_DOWNTIME_SECS="${MAX_DOWNTIME_SECS:-10}"
+DRAIN_SECS="${DRAIN_SECS:-15}"
+MAX_DOWNTIME_SECS="${MAX_DOWNTIME_SECS:-20}"
 UP_WAIT_SECS="${UP_WAIT_SECS:-30}"
 DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/data/aihub-app/.deploy.lock}"
 LOCK_WAIT_SECS="${LOCK_WAIT_SECS:-20}"
@@ -194,6 +197,11 @@ IMAGE_REPO="${IMAGE_REPO:-polyforge/aihub}"
 GHCR_IMAGE="${GHCR_IMAGE:-ghcr.io/silgrid/aihub}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRV_ROOT="$(dirname "$AIHUB_DATA")"   # where the server-side backups/binaries live
+# Remote commands carry these paths through ssh's re-joined command line:
+# plain paths only (no blanks, quotes or shell metacharacters).
+case "$AIHUB_DATA$BACKUP_ROOT" in
+  *[!A-Za-z0-9._/+@:,%=-]*) echo "deploy: AIHUB_DATA ($AIHUB_DATA) and BACKUP_ROOT ($BACKUP_ROOT) must be plain paths (letters, digits, . _ / + - @ : , % =)" >&2; exit 2 ;;
+esac
 KEY_TABLES="work_items memories projects users api_keys machines"
 ASSET_AIHUB="aihub-linux-amd64"
 ASSET_PF="pf-linux-amd64"
@@ -1029,6 +1037,50 @@ done
 BIN_SAVED="$SRV_ROOT/aihub-bin-$OLDVER-$TS"
 SRV_BACKUP="$SRV_ROOT/aihub-backup-$OLDVER-$TS"
 LOCAL_BACKUP="$BACKUP_ROOT/aihub-backup-$OLDVER-$TS"
+BACKUP_NAME="aihub-backup-$OLDVER-$TS"
+
+# Backup retention: the newest KEEP_BACKUPS VERIFIED backup dirs (this
+# run's included) are kept on the server (SRV_ROOT) and locally
+# (BACKUP_ROOT); older verified ones are pruned only after this run's
+# backup passed step 5's verification. A backup is verified when it holds
+# a .verified marker, written only after step 5's checks passed; a dir
+# without it (a failed run, or one made before markers existed) is never
+# counted and never pruned - it is listed as unverified for removal by
+# hand. Only directories whose name matches the exact pattern
+# aihub-backup-<version>-<YYYYMMDDTHHMMSSZ> are ever considered; age is
+# the timestamp suffix, and this run's backup is never pruned.
+KEEP_BACKUPS=3
+BACKUP_NAME_RE='^aihub-backup-[A-Za-z0-9._+-]+-[0-9]{8}T[0-9]{6}Z$'
+# one line per backup-shaped dir: "v <name>" (verified) or "u <name>"
+# shellcheck disable=SC2016
+LIST_BACKUPS='cd "$1" 2>/dev/null || exit 0
+for d in aihub-backup-*; do
+  [ -d "$d" ] && [ ! -L "$d" ] || continue
+  if [ -f "$d/.verified" ]; then printf "v %s\n" "$d"; else printf "u %s\n" "$d"; fi
+done
+exit 0'
+srv_backups() { printf '%s\n' "$LIST_BACKUPS" | rssh sh -s -- "'$SRV_ROOT'"; }
+local_backups() { sh -c "$LIST_BACKUPS" sh "$BACKUP_ROOT"; }
+# prune_candidates: LIST_BACKUPS lines on stdin; prints the verified ones
+# beyond the newest KEEP_BACKUPS once this run's $BACKUP_NAME is counted
+# in (it may not exist yet: the plan), never $BACKUP_NAME itself.
+prune_candidates() {
+  { awk '$1 == "v" { print $2 }'; printf '%s\n' "$BACKUP_NAME"; } | grep -E "$BACKUP_NAME_RE" | LC_ALL=C sort -u \
+    | awk '{ print substr($0, length($0) - 15) " " $0 }' | LC_ALL=C sort -r \
+    | awk -v keep="$KEEP_BACKUPS" -v cur="$BACKUP_NAME" 'NR > keep && $2 != cur { print $2 }'
+}
+# unverified_backups: LIST_BACKUPS lines on stdin; the backup-shaped dirs
+# without a marker (never this run's), which retention leaves alone.
+unverified_backups() {
+  awk '$1 == "u" { print $2 }' | grep -E "$BACKUP_NAME_RE" | grep -vxF "$BACKUP_NAME" || true
+}
+words() { if [ -n "$1" ]; then printf '%s' "$1" | tr '\n' ' '; else printf 'nothing'; fi; }
+PLAN_SRV_LIST="$(srv_backups)"
+PLAN_LOCAL_LIST="$(local_backups)"
+PLAN_SRV_PRUNE="$(printf '%s\n' "$PLAN_SRV_LIST" | prune_candidates)"
+PLAN_LOCAL_PRUNE="$(printf '%s\n' "$PLAN_LOCAL_LIST" | prune_candidates)"
+PLAN_SRV_UNVER="$(printf '%s\n' "$PLAN_SRV_LIST" | unverified_backups)"
+PLAN_LOCAL_UNVER="$(printf '%s\n' "$PLAN_LOCAL_LIST" | unverified_backups)"
 OLDIMG="$IMAGE_REPO:$OLDVER"
 NEWIMG="$IMAGE_REPO:$TAG"
 COMPOSE_BAK="$COMPOSE_FILE.bak-$TS"
@@ -1051,12 +1103,16 @@ cat <<EOF
 2. save old binary   ssh $AIHUB_HOST docker cp $AIHUB_CONTAINER:/aihub $BIN_SAVED
                      rollback image $OLDIMG (if absent on the server): $OLD_PLAN; verify -version == $OLDVER
 3. online backup     (service keeps running; NO docker stop anywhere)
-                     rsync -a $AIHUB_DATA/ -> $SRV_BACKUP/   (pass 1, excluding aihub.db, -wal, -shm, service.lock)
+                     rsync -a $AIHUB_DATA/ -> $SRV_BACKUP/   (pass 1, excluding aihub.db, -wal, -shm, service.lock, bootstrap-admin.key, .verified)
                      python3 sqlite3 backup API: $AIHUB_DATA/aihub.db (ro) -> $SRV_BACKUP/aihub.db ; integrity_check + counts >= baseline
                      rsync -a again (catch-up, files at least as new as the DB)
 4. consistency       rows in the snapshot's memories == memory.md files under $SRV_BACKUP/memory (retry up to 2x; still different -> stop, nothing changed)
 5. off-host copy     rsync $AIHUB_HOST:$SRV_BACKUP/ -> $LOCAL_BACKUP/
                      server manifest == local manifest; integrity_check ok + row counts == frozen baseline on the local aihub.db
+   retention         then mark this backup .verified on both sides and keep the newest $KEEP_BACKUPS verified aihub-backup-* dirs (this one included) on each side; would prune:
+                     server $SRV_ROOT: $(words "$PLAN_SRV_PRUNE")
+                     local $BACKUP_ROOT: $(words "$PLAN_LOCAL_PRUNE")
+                     unverified, kept (remove by hand): server: $(words "$PLAN_SRV_UNVER") ; local: $(words "$PLAN_LOCAL_UNVER")
 6. load + swap       (already verified in step 0 on this machine: $GHCR_IMAGE:$TAG repo digest == $ASSET_DIGEST, -version == $TAG)
                      docker save $GHCR_IMAGE:$TAG | ssh $AIHUB_HOST docker load  (service keeps running); server image ID == $NEW_LOCAL_ID
                      docker tag on the server -> $NEWIMG ; verify git, curl in it
@@ -1134,7 +1190,11 @@ s.close()
 '
 rsync_pass() {
   check_lock
-  rssh rsync -a --exclude=/aihub.db --exclude=/aihub.db-wal --exclude=/aihub.db-shm --exclude=/service.lock "$AIHUB_DATA/" "$SRV_BACKUP/" >"$WORK/rs.log" 2>&1 \
+  # also excluded: bootstrap-admin.key (a one-time handoff file; the key
+  # lives in the DB as a hash) and .verified (a restored data dir must not
+  # hand a fresh backup a marker it never earned)
+  rssh rsync -a --exclude=/aihub.db --exclude=/aihub.db-wal --exclude=/aihub.db-shm --exclude=/service.lock \
+    --exclude=/bootstrap-admin.key --exclude=/.verified "$AIHUB_DATA/" "$SRV_BACKUP/" >"$WORK/rs.log" 2>&1 \
     || die "rsync $AIHUB_DATA -> $SRV_BACKUP failed: $(tail -5 "$WORK/rs.log")"
 }
 snapshot() {
@@ -1172,12 +1232,16 @@ note "consistent"
 # ---------------------------------------------------------------- step 5
 step 5 "off-host copy"
 check_lock
-mkdir -p "$BACKUP_ROOT" || die "cannot create $BACKUP_ROOT"
+# the off-host copy holds the whole data dir (team source in git/, memory/):
+# a new BACKUP_ROOT is created 0700, and each copy is made 0700 below
+# (rsync -a gives it the server data dir's mode)
+( umask 077; mkdir -p "$BACKUP_ROOT" ) || die "cannot create $BACKUP_ROOT"
 [ ! -e "$LOCAL_BACKUP" ] || die "$LOCAL_BACKUP already exists"
 manifest_cmd() { printf "cd '%s' && find . -type f -exec sha256sum {} + | LC_ALL=C sort -k2" "$1"; }
 rssh "$(manifest_cmd "$SRV_BACKUP")" >"$WORK/srvbak.manifest" || die "manifest of $SRV_BACKUP failed"
 rsync -a -e "ssh -o BatchMode=yes" "$AIHUB_HOST:$SRV_BACKUP/" "$LOCAL_BACKUP/" >"$WORK/rsync.log" 2>&1 \
   || die "rsync to $LOCAL_BACKUP failed: $(tail -5 "$WORK/rsync.log")"
+chmod 700 "$LOCAL_BACKUP" || die "cannot restrict $LOCAL_BACKUP to 0700"
 (cd "$LOCAL_BACKUP" && find . -type f -exec sha256sum {} + | LC_ALL=C sort -k2) >"$WORK/local.manifest" || die "local manifest failed"
 if ! cmp -s "$WORK/srvbak.manifest" "$WORK/local.manifest"; then
   diff "$WORK/srvbak.manifest" "$WORK/local.manifest" | head -20 >&2 || true
@@ -1188,6 +1252,39 @@ probe_to local "$LOCAL_BACKUP/aihub.db" copy "$WORK/local.counts"
 note "local aihub.db: integrity_check ok"
 counts_cmp "$WORK/frozen.counts" "$WORK/local.counts" eq || die "row counts of the local copy differ from the baseline"
 note "local row counts equal the frozen baseline"
+# This run's backup verified on both sides: mark it, then retention. A
+# failed marker write or prune warns and never fails the deploy (the
+# backup is good); an unmarked backup is simply never pruned.
+rssh "touch '$SRV_BACKUP/.verified'" || note "WARN: could not mark $SRV_BACKUP verified (retention will leave it alone)"
+touch "$LOCAL_BACKUP/.verified" || note "WARN: could not mark $LOCAL_BACKUP verified (retention will leave it alone)"
+SRV_LIST="$(srv_backups)" || SRV_LIST=""
+SRV_PRUNE="$(printf '%s\n' "$SRV_LIST" | prune_candidates)"
+if [ -n "$SRV_PRUNE" ]; then
+  # shellcheck disable=SC2016,SC2086 # remote script in single quotes; names match BACKUP_NAME_RE: no blanks or quotes
+  if printf '%s\n' 'cd "$1" && shift && rm -rf -- "$@"' | rssh sh -s -- "'$SRV_ROOT'" $SRV_PRUNE; then
+    note "retention: pruned on the server ($SRV_ROOT): $(words "$SRV_PRUNE")"
+  else
+    note "WARN: retention: could not prune on the server ($SRV_ROOT): $(words "$SRV_PRUNE")"
+  fi
+else
+  note "retention: nothing to prune on the server (keeping the newest $KEEP_BACKUPS verified)"
+fi
+LOCAL_LIST="$(local_backups)" || LOCAL_LIST=""
+LOCAL_PRUNE="$(printf '%s\n' "$LOCAL_LIST" | prune_candidates)"
+if [ -n "$LOCAL_PRUNE" ]; then
+  # shellcheck disable=SC2086 # names match BACKUP_NAME_RE: no blanks or quotes
+  if (cd "$BACKUP_ROOT" && rm -rf -- $LOCAL_PRUNE); then
+    note "retention: pruned locally ($BACKUP_ROOT): $(words "$LOCAL_PRUNE")"
+  else
+    note "WARN: retention: could not prune locally ($BACKUP_ROOT): $(words "$LOCAL_PRUNE")"
+  fi
+else
+  note "retention: nothing to prune locally (keeping the newest $KEEP_BACKUPS verified)"
+fi
+SRV_UNVER="$(printf '%s\n' "$SRV_LIST" | unverified_backups)"
+LOCAL_UNVER="$(printf '%s\n' "$LOCAL_LIST" | unverified_backups)"
+[ -z "$SRV_UNVER" ] || note "retention: unverified, kept; remove by hand: server ($SRV_ROOT): $(words "$SRV_UNVER")"
+[ -z "$LOCAL_UNVER" ] || note "retention: unverified, kept; remove by hand: local ($BACKUP_ROOT): $(words "$LOCAL_UNVER")"
 
 # ---------------------------------------------------------------- step 6
 step 6 "load image, edit compose, run the switch window (stop -> upgrade SQL -> up)"

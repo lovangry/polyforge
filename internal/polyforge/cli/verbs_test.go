@@ -3,11 +3,14 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 )
 
 // Direct verbs: request-shape assertions against a fake aihub (httptest).
@@ -178,6 +181,17 @@ func TestVerbFileShowAndEditRequestShape(t *testing.T) {
 		if got := rec.last(); got.Body != c.want {
 			t.Errorf("edit --bundle %q body = %s, want %s", c.val, got.Body, c.want)
 		}
+	}
+
+	// No --attr on edit: aihub's PATCH whitelist refuses attrs (CORE-400
+	// IMMUTABLE), so the flag could only ever fail on the wire. It is a
+	// local usage error now and nothing reaches aihub.
+	before := len(rec.all())
+	if code, _, _ := runPf(t, env, "file", "edit", "wi_abc", "--attr", "team=x"); code == 0 {
+		t.Errorf("edit --attr: exit 0, want a usage error")
+	}
+	if n := len(rec.all()); n != before {
+		t.Errorf("edit --attr reached aihub (%d new requests)", n-before)
 	}
 }
 
@@ -1040,12 +1054,15 @@ func TestVerbSubmitModels(t *testing.T) {
 	}
 }
 
-// TestVerbRecallRememberNotMappingRestricted (C15, audit-subtraction
-// pass B): recall and remember succeed against aihub for a project that
-// is NOT locally mapped (no [workspace] section at all), while an unset
-// --project is still a loud local error on both verbs.
-func TestVerbRecallRememberNotMappingRestricted(t *testing.T) {
-	// the recall/remember wire shapes (any project the key can see)
+// TestVerbRecallRememberMappingValidated (repo review 2026-10-16 D-5;
+// the owner superseded the 2026-10-13 C15 ruling — "recall/remember are
+// not mapping-restricted" — on 2026-10-16):
+// recall and remember validate --project against the cli.toml
+// [workspace] mapping like file create — an unmapped project, or no
+// mapping at all, is a local error naming the mapped projects and no
+// request reaches aihub; a mapped project goes on the wire; an unset
+// --project stays a loud local error.
+func TestVerbRecallRememberMappingValidated(t *testing.T) {
 	var rec reqRecorder
 	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -1057,38 +1074,61 @@ func TestVerbRecallRememberNotMappingRestricted(t *testing.T) {
 			io.WriteString(w, cannedWI)
 		}
 	})
-	// NO mapping config at all: the hermetic scratch XDG carries no
-	// [workspace] section — recall/remember must still proceed.
-	env := map[string]string{"PF_SERVER": srv.URL}
-
-	if code, _, stderr := runPf(t, env, "recall", "--project", "v4unmapped", "probe"); code != 0 {
-		t.Fatalf("unmapped recall: code=%d stderr=%s", code, stderr)
-	}
-	if last := rec.last(); !strings.Contains(last.Path, "project=v4unmapped") {
-		t.Errorf("unmapped recall request path = %s", last.Path)
-	}
-	if code, _, stderr := runPf(t, env, "remember", "--project", "v4unmapped",
-		"--type", "fact.note", "content"); code != 0 {
-		t.Fatalf("unmapped remember: code=%d stderr=%s", code, stderr)
-	}
-	last := rec.last()
-	if last.Method != "POST" || !strings.Contains(last.Path, "/api/v1/memories") {
-		t.Errorf("unmapped remember request = %s %s", last.Method, last.Path)
-	}
-	if !strings.Contains(last.Body, `"project":"v4unmapped"`) {
-		t.Errorf("unmapped remember body missing the project: %s", last.Body)
-	}
-
-	// --project stays required on both
-	for _, verb := range []string{"recall", "remember"} {
+	argsFor := func(verb, project string) []string {
 		args := []string{verb}
+		if project != "" {
+			args = append(args, "--project", project)
+		}
 		if verb == "remember" {
 			args = append(args, "--type", "fact.note")
 		}
-		args = append(args, "probe")
-		code, _, stderr := runPf(t, env, args...)
+		return append(args, "probe")
+	}
+
+	mapped := withMappingConfig(t) // maps exactly "polyforge"
+	mapped["PF_SERVER"] = srv.URL
+	unmapped := map[string]string{"PF_SERVER": srv.URL} // no [workspace] section at all
+	for _, verb := range []string{"recall", "remember"} {
+		before := len(rec.all())
+		code, _, stderr := runPf(t, mapped, argsFor(verb, "v4unmapped")...)
+		if code != 1 || !strings.Contains(stderr, `project "v4unmapped" is not mapped`) || !strings.Contains(stderr, "mapped here: polyforge") {
+			t.Errorf("%s of an unmapped project: code=%d stderr=%s", verb, code, stderr)
+		}
+		code, _, stderr = runPf(t, unmapped, argsFor(verb, "v4unmapped")...)
+		if code != 1 || !strings.Contains(stderr, "no [workspace] mapping is configured") {
+			t.Errorf("%s without any mapping: code=%d stderr=%s", verb, code, stderr)
+		}
+		code, _, stderr = runPf(t, mapped, argsFor(verb, "")...)
 		if code != 1 || !strings.Contains(stderr, "required") {
 			t.Errorf("%s without --project: code=%d stderr=%s", verb, code, stderr)
 		}
+		if n := len(rec.all()) - before; n != 0 {
+			t.Errorf("%s: refused calls still sent %d request(s) to aihub", verb, n)
+		}
+		if code, _, stderr := runPf(t, mapped, argsFor(verb, "polyforge")...); code != 0 {
+			t.Errorf("%s of the mapped project: code=%d stderr=%s", verb, code, stderr)
+		}
+		last := rec.last()
+		if !strings.Contains(last.Path+last.Body, "polyforge") {
+			t.Errorf("%s of the mapped project: request %s %s %s", verb, last.Method, last.Path, last.Body)
+		}
+	}
+}
+
+// TestRequireMappedProjectTyped: the refusal wraps the typed
+// *mapping.UnmappedError (callers can errors.As it).
+func TestRequireMappedProjectTyped(t *testing.T) {
+	plan, err := mapping.Build([]mapping.Entry{{Workspace: "/ws", Projects: []string{"alpha", "beta"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := &Context{Cfg: Config{Mapping: plan}}
+	err = requireMappedProject(ctx, "recall", "ghost")
+	var ue *mapping.UnmappedError
+	if !errors.As(err, &ue) || ue.Project != "ghost" || !strings.Contains(err.Error(), "mapped here: alpha, beta") {
+		t.Fatalf("requireMappedProject = %v, want a wrapped *mapping.UnmappedError naming alpha, beta", err)
+	}
+	if err := requireMappedProject(ctx, "recall", "beta"); err != nil {
+		t.Fatalf("mapped project refused: %v", err)
 	}
 }

@@ -5,26 +5,28 @@ dispatches no verb, performs no wi-lifecycle action and edits no file. It
 is the one-to-one index of the routing skill's verb fragments and the
 `pf` subcommand each fragment drives. Flags are spelled exactly as the
 binary's help faces print them; `pf help` lists the full registry and
-`pf <verb> -help` prints one verb's face.
+`pf help <verb>` prints one verb's usage line (`pf <verb> -help` only
+prints that verb's own registered flags — empty for verbs whose flags
+live on sub-actions — and exits 2).
 
 ## Data-plane verbs (pf CLI talks HTTP direct to AIHub)
 
 | Verb | Fragment | Command |
 |---|---|---|
 | file | `verbs/file.md` | `pf file create` / `pf file edit <id>` / `pf file show <id>` / `pf file dep add` / `rm` / `list` — create, edit or show a work item; its `blocks` dependencies |
-| queue | `verbs/queue.md` | `pf queue` — the merged list over all mapped projects; `pf queue -project P` — one project; `pf queue -ready` — the ready queue (`-status`, `-limit` filters) |
+| queue | `verbs/queue.md` | `pf queue` — the merged list over all mapped projects; `pf queue --project P` — one project; `pf queue --ready` — the ready queue (`--status`, `--limit` filters) |
 | cancel | `verbs/cancel.md` | `pf cancel <id>` — cancel (abandon) a queued/paused/blocked work item |
-| recall | `verbs/recall.md` | `pf recall -project P <query>` — search project memories (`-type`, `-tags`, `-limit`) |
-| remember | `verbs/remember.md` | `pf remember -project P -type <T> <content>` — store a memory (`-title`, `-tags`, `-visibility`, `-work-item`) |
-| memory | `verbs/memory.md` | `pf memory show <id>` — one memory's metadata header + full body (`-max-bytes N`, `0` = unlimited; `--json` = metadata verbatim + CLI-added `content`) |
+| recall | `verbs/recall.md` | `pf recall --project P <query>` — search project memories (`--q`, `--type`, `--tags`, `--limit`) |
+| remember | `verbs/remember.md` | `pf remember --project P --type <T> <content>` — store a memory (`--title`, `--tags`, `--visibility`, `--work-item`) |
+| memory | `verbs/memory.md` | `pf memory show <id>` — one memory's metadata header + full body (`--max-bytes N`, `0` = unlimited; `--json` = metadata verbatim + CLI-added `content`) |
 
 ## Execution-plane verbs (local daemon unix socket)
 
 | Verb | Fragment | Command |
 |---|---|---|
-| submit | `verbs/submit.md` | `pf submit <id>` — submit for execution (`-priority`) |
-| watch | `verbs/watch.md` | `pf watch <id> --once` — one snapshot (status, step, pending question, events); `pf watch --chat "$PF_CHAT_ID" --wait-decision` — the resident watcher; `pf watch subscribe\|unsubscribe\|list` |
-| answer | `verbs/answer.md` | `pf answer <id> -text "..."` — reply to a pending question (`-question`, `-by`) |
+| submit | `verbs/submit.md` | `pf submit <id>` — submit for execution (`--priority`, `--models`) |
+| watch | `verbs/watch.md` | `pf watch <id> --once` — one snapshot (status, step, pending question, events); `pf watch --chat "$PF_CHAT_ID" --wait-decision` — the resident watcher; `pf watch subscribe\|unsubscribe\|list` (resident flags `--poll`, `--no-parent-check`) |
+| answer | `verbs/answer.md` | `pf answer <id> --text "..."` — reply to a pending question (`--question`, `--by`) |
 | pause | `verbs/pause.md` | `pf pause <id>` — operator pause at the next safe boundary |
 | resume | `verbs/resume.md` | `pf resume <id>` — continue a paused or blocked work item |
 | wrap | `verbs/wrap.md` | `pf wrap <id>` — terminal success; `pf wrap <id> --fail` — the owner's failed verdict |
@@ -40,10 +42,10 @@ see `verbs/ship.md`.
 
 | Verb | Fragment | Command |
 |---|---|---|
-| doctor | `verbs/doctor.md` | `pf doctor` — the machine's one health face: config, `[workspace]` mapping, connectivity (`--json` for machines) |
+| doctor | `verbs/doctor.md` | `pf doctor` — the machine's one health face: config, `[workspace]` mapping, workspace layout, connectivity (`--json` for machines; `--prune-scratch` removes stale scratch entries) |
 | chat | (`SKILL.md`, Chat identity) | `pf chat init --harness claude\|pi --harness-session ID` — the chat id a harness adapter exports as `PF_CHAT_ID` |
 | help | `verbs/help.md` | `pf help` — the registry face; this fragment is its routing-side index |
-| init | the init fragment (`init.md`) | install / upgrade / machine setup — routes to the repo's `tools/install.sh` |
+| init | the init fragment (`init.md`) | install / upgrade / machine setup routes to the repo's `tools/install.sh` (not a `pf` verb); `pf init [<workspace-dir>]` gives a workspace its local layout — `scratch/` and the layout section of CLAUDE.md (polyforge#177) |
 
 ## Non-goals
 

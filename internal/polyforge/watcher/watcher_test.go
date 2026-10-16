@@ -27,6 +27,8 @@ type fakeAPI struct {
 	acks      []protocol.ChatAck
 	heartbeat int
 	snapCalls []int64
+	ackFails  int   // the next ackFails Ack calls fail
+	snapErr   error // returned (once) by the next Snapshot
 }
 
 func (f *fakeAPI) Subscriptions() (protocol.ChatSubscriptions, error) {
@@ -41,6 +43,10 @@ func (f *fakeAPI) Snapshot(wi string, after int64) (*protocol.WatchSnapshot, err
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.snapCalls = append(f.snapCalls, after)
+	if err := f.snapErr; err != nil {
+		f.snapErr = nil
+		return nil, err
+	}
 	s := *f.snaps[wi]
 	var evs []protocol.EventEntry
 	for _, e := range s.Events {
@@ -55,6 +61,10 @@ func (f *fakeAPI) Ack(a protocol.ChatAck) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.acks = append(f.acks, a)
+	if f.ackFails > 0 {
+		f.ackFails--
+		return errors.New("ack: daemon hiccup")
+	}
 	for i := range f.subs.Subscriptions {
 		if f.subs.Subscriptions[i].WI == a.WI {
 			s := &f.subs.Subscriptions[i]
@@ -700,5 +710,73 @@ func TestNeedsInputWakeLineCarriesTheQuestionID(t *testing.T) {
 	if got := (Decision{WI: "wi_1", Class: "paused", Phrase: "the work item is paused"}).Line(); got !=
 		"[polyforge] wi_1 paused — the work item is paused; this is a human decision, the agent must not answer it" {
 		t.Fatalf("non-needs_input line changed: %q", got)
+	}
+}
+
+// repo review 2026-10-16 B-9: execution.json and the hub status naming
+// the same class in one poll (the ordinary terminal close) is ONE
+// decision, not two wake-ups.
+func TestSameClassFromExecutionAndHubFiresOnce(t *testing.T) {
+	for _, tc := range [][2]string{{"completed", "wrapped"}, {"failed_gate", "failed"}, {"blocked", "blocked"}} {
+		snap := running("wi_1", "s1")
+		snap.Execution.WorkflowStatus = tc[0]
+		snap.HubStatus = tc[1]
+		res := Evaluate(sub("wi_1", 0), snap)
+		if len(res.Decisions) != 1 {
+			t.Fatalf("%s+%s: decisions = %+v, want exactly one", tc[0], tc[1], res.Decisions)
+		}
+	}
+}
+
+// repo review 2026-10-16 B-23: a failed ack leaves the daemon's cursor
+// where it was, so the next polls re-derive the same decision — it must
+// not be printed again every poll, only its ack retried.
+func TestFailedAckDoesNotReprintTheDecision(t *testing.T) {
+	snap := running("wi_1", "s1")
+	snap.Events = []protocol.EventEntry{ev(1, "step_dead")}
+	snap.LastSeq = 1
+	api := &fakeAPI{
+		subs:     protocol.ChatSubscriptions{Subscriptions: []protocol.ChatSub{sub("wi_1", 0)}},
+		snaps:    map[string]*protocol.WatchSnapshot{"wi_1": snap},
+		ackFails: 2,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	polls := 0
+	var out bytes.Buffer
+	_ = Run(ctx, api, Options{Out: &out, Sleep: func(context.Context, time.Duration) {
+		if polls++; polls >= 5 {
+			cancel()
+		}
+	}})
+	if n := strings.Count(out.String(), "step_dead"); n != 1 {
+		t.Fatalf("decision printed %d times, want once: %q", n, out.String())
+	}
+	if api.subs.Subscriptions[0].Cursor != 1 {
+		t.Fatalf("the ack must be retried until it lands: cursor = %d", api.subs.Subscriptions[0].Cursor)
+	}
+}
+
+// repo review 2026-10-16 B-25 (WA-4): the daemon marks an attention
+// notice shown when the watcher fetches it; a cycle that then loses the
+// daemon mid-way must still print the notice, not drop it for good.
+func TestAttentionSurvivesAMidCycleTransportError(t *testing.T) {
+	api := &fakeAPI{
+		subs:      protocol.ChatSubscriptions{Subscriptions: []protocol.ChatSub{sub("wi_1", 0)}},
+		snaps:     map[string]*protocol.WatchSnapshot{"wi_1": running("wi_1", "s1")},
+		attention: []protocol.ChatAttentionItem{{WI: "wi_9", Reason: "blocked"}},
+		snapErr:   errors.New("dial unix: connection refused"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	polls := 0
+	var out bytes.Buffer
+	_ = Run(ctx, api, Options{Out: &out, Sleep: func(context.Context, time.Duration) {
+		if polls++; polls >= 3 {
+			cancel()
+		}
+	}})
+	if !strings.Contains(out.String(), "wi_9") {
+		t.Fatalf("the fetched attention notice was lost: %q", out.String())
 	}
 }

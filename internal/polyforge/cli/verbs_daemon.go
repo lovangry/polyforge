@@ -20,12 +20,13 @@ var cmdSubmit = &Command{
 	Name:    "submit",
 	Group:   GroupExec,
 	Summary: "Submit a WI for execution on this machine (claim)",
-	Usage:   "pf submit <id> [--priority low|normal|high|urgent] [--models <harness>:<model>,...]",
+	Usage:   "pf submit <id> [--priority low|normal|high|urgent] [--models <harness>:<model>[:<effort>],...]",
 	Setup: func(fs *flag.FlagSet) {
 		fs.String("priority", "normal", "queue priority (low|normal|high|urgent)")
 		fs.String("models", "", "manual model candidates for EVERY step of this WI, comma-separated, in order; "+
-			"each is <harness>:<model> with harness pi or claude, e.g. claude:claude-opus-5-5,pi:sub2api-glm/glm-5.3 "+
-			"(the prefix is mandatory; a candidate on another harness than the previous one starts a fresh session) "+
+			"each is <harness>:<model>[:<effort>] with harness pi or claude, e.g. claude:claude-opus-5-5:high,pi:sub2api-glm/glm-5.3 "+
+			"(the prefix is mandatory; a candidate on another harness than the previous one starts a fresh session; "+
+			"effort is pi off|minimal|low|medium|high|xhigh|max (--thinking) or claude low|medium|high|xhigh|max (--effort), omitted = the harness default) "+
 			"(precedence: --models > workspace yaml steps.<project>.<step-id>.models > bundle step model_candidates > "+
 			"yaml steps.<project>.default.models > bundle defaults.model_candidates)")
 	},
@@ -530,7 +531,10 @@ starts or resumes. Idempotent: a daemon answering on the config's
 daemon_socket means nothing to do (exit 0). Otherwise it starts the
 restart loop in tmux session polyforge-daemon (pf daemon <canonical
 argv>; a failed exit — crash, panic, kill — is restarted after 5s, a
-clean exit — pf ops shutdown, SIGTERM — ends the loop; the log is
+clean exit — pf ops shutdown, SIGTERM — ends the loop, and so does exit
+78, the daemon refusing to start for an operator-fixable reason (config,
+daemon id, workspace, on-disk state, failed restart reconciliation): fix
+the cause named in the log, then run pf daemon ensure again; the log is
 <data-dir>/daemon.log) and waits up to
 --timeout (default 30s) for the socket: exit 0 when it answers, 1 when
 not. Concurrent calls are serialized by <data-dir>/ensure.lock: one
@@ -605,7 +609,7 @@ Launch flags (with environment variable and default, where one exists):
       SOURCE of the dedicated step agent directory: the daemon copies
       the minimal set (auth.json, models.json, agents/,
       extensions/subagent/ — the subagent tool) from here into
-      <data-dir>/step-agent and every step agent runs against THAT
+      <harness-root>/step-agent and every step agent runs against THAT
       directory, so the operator's own harness settings — user-level
       packages included — never reach a step agent
       (env POLYFORGE_OPERATOR_AGENT_DIR; default ~/.pi/agent). A
@@ -620,10 +624,12 @@ Launch flags (with environment variable and default, where one exists):
   --auto
       auto-pull: the daemon claims ready-queue work itself (default
       off; unset keeps the persisted switch; --auto=false forces off)
+  --heartbeat-every D
+      machines heartbeat cadence (default 60s; 0 disables)
 
 Supervision flags (v2-converge 2.4; Go duration strings; omitted or 0 keeps
-the default; a step overrides them in workflow.md: budget.wall_minutes = T,
-silence_minutes = X, tool_minutes = Y):
+the default; the only per-step override is workflow.md budget.wall_minutes,
+an estimate: T = max(3 x wall_minutes, --step-timeout); X and Y are global):
 
   --silence-window D
       X: no real work signal after dispatch, or no model output while

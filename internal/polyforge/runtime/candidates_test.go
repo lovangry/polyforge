@@ -43,6 +43,33 @@ func TestSpawnModelPinRidesArgv(t *testing.T) {
 	}
 }
 
+// polyforge#176: a candidate's thinking effort rides each harness's own
+// flag — pi --thinking, claude --effort — and --model stays the bare id
+// (a model id with its own `:` is passed through untouched). No effort,
+// no flag: the pre-#176 argv.
+func TestSpawnEffortRidesHarnessFlag(t *testing.T) {
+	pi := newPiSpawner(&Config{PiBin: "/nonexistent-pi"})
+	got := joinArgs(pi.buildCmd(SpawnParams{CapsuleDir: "/caps", SpawnN: 1, Model: "ollama/llama3:8b", Effort: "minimal"}).Args)
+	if !strings.Contains(got, "--model ollama/llama3:8b --thinking minimal") || strings.Contains(got, "--effort") {
+		t.Fatalf("pi effort argv: %s", got)
+	}
+	if got := joinArgs(pi.buildCmd(SpawnParams{CapsuleDir: "/caps", SpawnN: 1, Model: "p/m"}).Args); strings.Contains(got, "--thinking") {
+		t.Fatalf("no effort must pass no --thinking: %s", got)
+	}
+	cl := &claudeSpawner{cfg: &Config{ClaudeBin: "/opt/claude"}}
+	cmd, err := cl.buildCmd(SpawnParams{CapsuleDir: "/caps", Model: "claude-opus-5-5", Effort: "high", HarnessSession: testSession})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := joinArgs(cmd.Args); !strings.Contains(got, "--model claude-opus-5-5 --effort high") || strings.Contains(got, "--thinking") {
+		t.Fatalf("claude effort argv: %s", got)
+	}
+	cmd, _ = cl.buildCmd(SpawnParams{CapsuleDir: "/caps", Model: "claude-opus-5-5", HarnessSession: testSession})
+	if got := joinArgs(cmd.Args); strings.Contains(got, "--effort") {
+		t.Fatalf("no effort must pass no --effort: %s", got)
+	}
+}
+
 // A materialization failure closes the fresh generation BLOCKED — never
 // an orphaned running generation (D5) — and settles the claiming
 // journal. (The digest-divergence trigger is gone with the digest chain,

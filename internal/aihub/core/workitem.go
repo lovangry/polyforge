@@ -171,9 +171,9 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 		return nil, err
 	}
 	if req.ParentID != nil && *req.ParentID != "" {
-		var parentProject, parentBundle sql.NullString
-		err = tx.QueryRow(`SELECT project_id, bundle_name FROM work_items WHERE id=?1`, *req.ParentID).
-			Scan(&parentProject, &parentBundle)
+		var parentProject, parentBundle, grandParent sql.NullString
+		err = tx.QueryRow(`SELECT project_id, bundle_name, parent_id FROM work_items WHERE id=?1`, *req.ParentID).
+			Scan(&parentProject, &parentBundle, &grandParent)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, Fail(api.ErrCoreBadInput, "PARENT_NOT_FOUND", "parent %q", *req.ParentID)
 		}
@@ -185,6 +185,12 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 		}
 		if parentBundle.Valid && parentBundle.String != "" {
 			return nil, Fail(api.ErrCoreBadInput, "PARENT_NOT_REGISTRY", "parent is an execution ticket, not a registry ticket")
+		}
+		// Depth is one level (02 §4.2a): the parent may not itself have
+		// a parent. parent_id is immutable after create, so this create
+		// check is the whole rule.
+		if grandParent.Valid && grandParent.String != "" {
+			return nil, Fail(api.ErrCoreBadInput, "PARENT_DEPTH", "parent %q is itself a child; work items nest one level only", *req.ParentID)
 		}
 	} else {
 		req.ParentID = nil

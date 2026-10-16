@@ -337,3 +337,23 @@ func TestSearchOperatorTokensQuoted(t *testing.T) {
 		}
 	}
 }
+
+// TestSearchFillsLimitPastFilteredCandidates: the post-MATCH filters
+// (here the allowed predicate) must not shrink the answer below limit
+// while matching entries remain — candidates are paged, not cut at one
+// fixed window.
+func TestSearchFillsLimitPastFilteredCandidates(t *testing.T) {
+	e := newEnv(t)
+	for i := 0; i < 12; i++ {
+		e.create(t, "needle filler")
+	}
+	keep := e.create(t, "needle keep, a longer body so it ranks below every filler entry in the trigram index")
+	allowed := func(en *Entry) bool { return en.ID == keep.ID }
+	hits, err := e.store.Search("needle", "", nil, 1, allowed)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(hits) != 1 || hits[0].ID != keep.ID {
+		t.Fatalf("hits = %d, want the one allowed entry past the first candidate window", len(hits))
+	}
+}

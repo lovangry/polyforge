@@ -262,7 +262,7 @@ func TestWrappedCloseLeavesNoWIPRef(t *testing.T) {
 	if _, ok := g.hubRef(t, gitops.TaskWIPRefName("app")); !ok {
 		t.Fatal("setup: no stale WIP ref")
 	}
-	if err := g.r.stopOp(context.Background(), j, "wrapped", false, false, ""); err != nil {
+	if err := g.r.stopOp(context.Background(), j, "wrapped", false, ""); err != nil {
 		t.Fatalf("wrapped close: %v", err)
 	}
 	if wip, ok := g.hubRef(t, gitops.TaskWIPRefName("app")); ok {

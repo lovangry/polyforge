@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -82,10 +83,11 @@ func main() {
 	}
 	defer db.Close()
 
-	// Fresh-install bootstrap: an empty users table gets one admin and a
-	// one-time api key on stderr (plaintext never persisted).
-	if key := bootstrapAdmin(db); key != "" {
-		log.Printf("aihub: fresh install: seeded bootstrap admin usr_root — one-time api key (shown once, store it now): %s", key)
+	// Fresh-install bootstrap: an empty users table gets one admin; its
+	// one-time api key goes to a 0600 file in the data dir, never to the
+	// log (under compose the log is persisted by docker logs).
+	if keyFile := bootstrapAdmin(db, *dataDir); keyFile != "" {
+		log.Printf("aihub: fresh install: seeded bootstrap admin usr_root — its api key is in %s (0600; store it, then delete the file)", keyFile)
 	}
 
 	gitMgr, err := git.NewManager(*dataDir, core.NewOwnerManager(db))
@@ -163,9 +165,16 @@ func newServer(db *core.DB, dataDir string, gitMgr *git.Manager) (*server.Server
 	return srv, mems
 }
 
-// bootstrapAdmin seeds the first admin identity on a fresh install.
-// Returns the plaintext api key when it seeded one, "" otherwise.
-func bootstrapAdmin(db *core.DB) string {
+// bootstrapKeyFile is the data-dir file a fresh install writes the
+// bootstrap admin's plaintext api key to (0600).
+const bootstrapKeyFile = "bootstrap-admin.key"
+
+// bootstrapAdmin seeds the first admin identity on a fresh install and
+// writes its plaintext api key to <dataDir>/bootstrap-admin.key (0600).
+// The file is written before the seed commits, so a failed write seeds
+// nothing and the next start retries. Returns the key file path when it
+// seeded one, "" otherwise.
+func bootstrapAdmin(db *core.DB, dataDir string) string {
 	var n int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n); err != nil || n > 0 {
 		return ""
@@ -193,8 +202,30 @@ func bootstrapAdmin(db *core.DB) string {
 		VALUES (?1,?2,NULL,'bootstrap',?3,?4)`, keyID, uid, hex.EncodeToString(sum[:]), core.Now()); err != nil {
 		log.Fatalf("aihub: bootstrap: %v", err)
 	}
+	path := filepath.Join(dataDir, bootstrapKeyFile)
+	if err := writeKeyFile(path, plain); err != nil {
+		log.Fatalf("aihub: bootstrap: write %s: %v", path, err)
+	}
 	if err := tx.Commit(); err != nil {
+		_ = os.Remove(path)
 		log.Fatalf("aihub: bootstrap: %v", err)
 	}
-	return plain
+	return path
+}
+
+// writeKeyFile writes key to a fresh 0600 file at path (a leftover file
+// from an earlier, uncommitted bootstrap is replaced, never reused).
+func writeKeyFile(path, key string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(key + "\n"); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }

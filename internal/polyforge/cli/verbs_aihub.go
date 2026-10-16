@@ -94,17 +94,18 @@ func inferProjectFromCwd(ctx *Context) (string, error) {
 	return projects[0], nil
 }
 
-// requireMappedProject validates a placement-adjacent verb's --project
-// against the loaded mapping (polyforge#113): placement needs a home on
-// this machine. An unmapped (or unvalidatable — no mapping configured)
-// project is a loud naming error pointing at the [workspace] shape and
-// `pf doctor`; it never silently proceeds.
+// requireMappedProject validates a placement verb's --project (file
+// create, recall, remember) against the loaded mapping (polyforge#113).
+// An unmapped (or unvalidatable — no mapping configured) project is a
+// loud local error — wrapping the typed *mapping.UnmappedError, naming
+// the projects this machine does map and pointing at the [workspace]
+// shape and `pf doctor` — and nothing is sent to aihub.
 func requireMappedProject(ctx *Context, verb, project string) error {
 	if ctx.Cfg.Mapping.Empty() {
 		return fmt.Errorf("%s: project %q cannot be placed: no [workspace] mapping is configured in cli.toml — add a [workspace.\"<path>\"] section (`pf doctor` checks the mapping)", verb, project)
 	}
 	if _, err := ctx.Cfg.Mapping.WorkspaceFor(project); err != nil {
-		return fmt.Errorf("%s: %w", verb, err)
+		return fmt.Errorf("%s: %w; mapped here: %s", verb, err, strings.Join(ctx.Cfg.Mapping.Projects(), ", "))
 	}
 	return nil
 }
@@ -127,7 +128,7 @@ func fileCreate(ctx *Context, args []string) error {
 		useStdin  = f.Bool("stdin", false, "read the full create-body JSON from stdin")
 	)
 	f.Var(&repos, "repo", "project repo this work item works in (repeatable; only these are cloned at claim)")
-	f.Var(&after, "after", "execution ticket (id or slug) that must WRAP before this one is claimed (repeatable; a `blocks` edge, written atomically with the create)")
+	f.Var(&after, "after", "execution ticket (id or slug) that must WRAP before this one is claimed (repeatable; a blocks edge, written atomically with the create)")
 	f.Var(&content, "content", "markdown background; '-' reads stdin, '@file' reads a file")
 	f.Var(&labels, "label", "label (repeatable)")
 	f.Var(&milestone, "milestone", "milestone name")
@@ -325,7 +326,6 @@ func fileEdit(ctx *Context, args []string) error {
 		milestone optString
 		waitingOn optString
 		bundle    optString
-		attrs     kvList
 		useStdin  = f.Bool("stdin", false, "read the full PATCH-body JSON from stdin")
 	)
 	f.Var(&bundle, "bundle", "bundle_name (empty string unbinds); aihub accepts it only while the work item is queued and never claimed")
@@ -335,7 +335,8 @@ func fileEdit(ctx *Context, args []string) error {
 	f.Var(&priority, "priority", "low|normal|high|urgent")
 	f.Var(&milestone, "milestone", "milestone (empty string clears it)")
 	f.Var(&waitingOn, "waiting-on", "waiting_on value")
-	f.Var(&attrs, "attr", "business attr key=json-value (repeatable)")
+	// No --attr: attrs are set at create only — aihub's PATCH whitelist
+	// (core patchableFields) refuses the key with CORE-400 IMMUTABLE.
 	rest, err := parseCommandArgs(f, args)
 	if err != nil {
 		return err
@@ -394,18 +395,6 @@ func fileEdit(ctx *Context, args []string) error {
 			body["bundle_name"] = bundle.Val()
 		}
 	}
-	if len(attrs) > 0 {
-		m := map[string]any{}
-		for _, kv := range attrs {
-			v, err := parseAttrValue(kv.Value)
-			if err != nil {
-				return fmt.Errorf("--attr %s: %w", kv.Key, err)
-			}
-			m[kv.Key] = v
-		}
-		body["attrs"] = m
-	}
-
 	raw, err := ctx.aihub().PatchWorkItem(id, body)
 	if err != nil {
 		return err
@@ -659,7 +648,7 @@ var cmdRecall = &Command{
 	Summary: "Search project memories",
 	Usage:   "pf recall --project P <query> [--type T] [--tags a,b] [--limit N]",
 	Setup: func(fs *flag.FlagSet) {
-		fs.String("project", "", "project name (required)")
+		fs.String("project", "", "project name (required; validated against the [workspace] mapping)")
 		fs.String("q", "", "query text (alternative to the positional argument)")
 		fs.String("type", "", "memory type filter: exact (experience.debug), prefix (experience.*), or * (all types)")
 		fs.String("tags", "", "comma-separated tags")
@@ -688,6 +677,9 @@ var cmdRecall = &Command{
 		proj := stringFlag(fs, "project")
 		if proj == "" {
 			return fmt.Errorf("recall: --project is required — there is no default project (polyforge#113); the routing skill derives it from the WI under discussion")
+		}
+		if err := requireMappedProject(ctx, "recall", proj); err != nil {
+			return err
 		}
 		var tagList []string
 		if tags := stringFlag(fs, "tags"); tags != "" {
@@ -749,7 +741,7 @@ var cmdRemember = &Command{
 	Usage: "pf remember --project P --type T [--title S] [--visibility V] [--tags a,b] " +
 		"[--work-item ID] <content | - (stdin) | @file>",
 	Setup: func(fs *flag.FlagSet) {
-		fs.String("project", "", "project name (required)")
+		fs.String("project", "", "project name (required; validated against the [workspace] mapping)")
 		fs.String("type", "", "memory type (required, e.g. experience.debug, fact.note)")
 		fs.String("title", "", "memory title")
 		fs.String("visibility", "project", "admin|private|project|team|public")
@@ -764,6 +756,9 @@ var cmdRemember = &Command{
 		proj := stringFlag(fs, "project")
 		if proj == "" {
 			return fmt.Errorf("remember: --project is required — there is no default project (polyforge#113)")
+		}
+		if err := requireMappedProject(ctx, "remember", proj); err != nil {
+			return err
 		}
 		// The content: positional text, '-' for stdin, '@file' for a file.
 		var content string

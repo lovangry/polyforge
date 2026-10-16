@@ -288,10 +288,10 @@ func TestDoctorUsageErrorExit2(t *testing.T) {
 // keys are unjudged (warn, never a faked pass).
 func TestDoctorWorkspaceYamlReportsUnknownStepKeys(t *testing.T) {
 	wf := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(wf, "quick-fix"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(wf, "autopilot"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(wf, "quick-fix", "workflow.md"), []byte("---\nsteps:\n  - { id: fix }\n---\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(wf, "autopilot", "workflow.md"), []byte("---\nsteps:\n  - { id: fix }\n---\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()

@@ -138,3 +138,45 @@ func TestRestartWiring(t *testing.T) {
 		t.Fatalf("restarted job = %+v (live %v)", ji, ok)
 	}
 }
+
+// slowSweepAgent is a fake agent whose SECOND Terminate — the shutdown's
+// final sweep, after the face is closed — takes a while.
+type slowSweepAgent struct {
+	fakeAgent
+	n int
+}
+
+func (a *slowSweepAgent) Terminate(d time.Duration) error {
+	a.mu.Lock()
+	a.n++
+	n := a.n
+	a.mu.Unlock()
+	if n >= 2 {
+		time.Sleep(500 * time.Millisecond)
+	}
+	return a.fakeAgent.Terminate(d)
+}
+
+// repo review 2026-10-16 B-16: closing the face (shutdown step 5) makes
+// Serve return ErrServerClosed; Run must still wait for the rest of the
+// sequence (runtime drain, final sweep) before it returns and the
+// process exits.
+func TestRunReturnsOnlyAfterTheShutdownSequence(t *testing.T) {
+	td := newTestDaemon(t, func(c *Config) {
+		c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
+			return &slowSweepAgent{}, nil
+		}
+	})
+	td.submitClaim(t, "wi_sweep")
+	go func() { _ = td.Shutdown(context.Background(), DirectShutdownCause()) }()
+	select {
+	case <-td.runDone:
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run did not return")
+	}
+	select {
+	case <-td.shutDone:
+	default:
+		t.Fatal("Run returned before the shutdown sequence finished")
+	}
+}

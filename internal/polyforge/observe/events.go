@@ -347,6 +347,24 @@ func (l *EventLog) SinceAfter(wi string, after int64) []protocol.EventEntry {
 	return l.History(wi, after)
 }
 
+// LastSeq is the highest seq ever appended for wi (0 = none) — the
+// monotonic counter itself, so it stays exact past HistoryCap and never
+// touches the durable files (repo review 2026-10-16 B-5).
+func (l *EventLog) LastSeq(wi string) int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.totals[wi]
+}
+
+// Recent returns a copy of wi's in-memory ring (the newest <= RingCap
+// entries, oldest first; rebuilt from the files at open). It never reads
+// the durable files — the face for hot-path "what happened last" polls.
+func (l *EventLog) Recent(wi string) []protocol.EventEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]protocol.EventEntry(nil), l.rings[wi]...)
+}
+
 // History reads the durable files for wi's entries with seq > after
 // (oldest first, at most HistoryCap). It is read-only and runs outside
 // the append lock; a concurrent rotation can only make it see a

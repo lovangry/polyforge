@@ -191,7 +191,7 @@ func TestV1S03PauseResume(t *testing.T) {
 	}
 
 	// The continuation's faces: grill done with its archived answer, the
-	// whole quick-fix chain done, the spawn journal carrying the pause
+	// whole autopilot chain done, the spawn journal carrying the pause
 	// interruption (derivation 1 pre-pause, the answer's resume
 	// dispatch of the re-posed question after the whole cycle, then the
 	// fresh dispatches of fix and verification — neither the in-place

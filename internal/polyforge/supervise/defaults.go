@@ -3,8 +3,9 @@ package supervise
 import "time"
 
 // Defaults are the global supervision bounds (daemon config / flags,
-// v2-converge 2.4). Every step may override them in workflow.md
-// (budget.wall_minutes = T, silence_minutes = X, tool_minutes = Y).
+// v2-converge 2.4). The only per-step override is workflow.md
+// budget.wall_minutes (an estimate: T = max(3 x wall_minutes, StepTimeout));
+// X and Y are global (polyforge#147 deleted silence_minutes/tool_minutes).
 // Zero fields take the documented default in Fill.
 type Defaults struct {
 	// Silence is X. Zero = by the harness's declared output granularity

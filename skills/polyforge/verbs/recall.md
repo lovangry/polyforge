@@ -13,14 +13,20 @@ memories) are not part of this verb — retrieval only.
 ## Command
 
 ```
-pf recall [--project P] <query> [--type T] [--tags a,b] [--limit N]
+pf recall --project P <query> [--type T] [--tags a,b] [--limit N]
 ```
 
-The query is the positional argument; `--project` is REQUIRED
-(polyforge#113 — no default project exists) but NOT restricted to the
-machine's `[workspace]` mapping: memory lives in AIHub, so recall works
-for any project the api key can see, mapped here or not. The routing
-flow derives the value from the WI under discussion. `--type` filters one memory type (e.g. `experience.debug`);
+The query is the positional argument (or `--q`); `--project` is REQUIRED
+(polyforge#113 — no default project exists) and must be a project of this
+machine's cli.toml `[workspace]` mapping (owner ruling 2026-10-16,
+superseding the 2026-10-13 C15 "not mapping-restricted" ruling): an
+unmapped project — or no mapping at all — is refused locally, naming the
+mapped projects, and nothing is sent. aihub then gates memory by project membership on its own: a search
+answers only memories of projects the caller can read; `project=` naming an
+unknown project or one the caller cannot read answers the same non-leaking
+`CORE-404`; reading a memory needs read access to its project (else `MEM-404`);
+writing needs the writer (or maintainer) role (else `MEM-403`); admins pass. The routing flow derives
+the value from the WI under discussion. `--type` filters one memory type (e.g. `experience.debug`);
 `--tags` is comma-separated and an entry must contain all of them;
 `--limit` caps results.
 
@@ -36,7 +42,8 @@ flow derives the value from the WI under discussion. `--type` filters one memory
 |---|---|---|
 | `AUTH-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / config. |
 | `MEM-400` | Blank query | Give the search words — an empty query is refused. |
-| `CORE-404` | Unknown project, or you are not a member of it | The project does not exist (or you cannot see it) — check `--project`; `pf doctor` checks the `[workspace]` mapping. |
+| `CORE-404` | Unknown project, or one you cannot read (same answer, by design) | The project does not exist or you are not a member — check `--project`, or ask a maintainer for membership. |
+| (no code) `recall: … mapped here: …` | `--project` is not in this machine's `[workspace]` mapping (or there is no mapping) — local refusal, exit 1, nothing sent | Use one of the listed projects, or add the project to a `[workspace."<path>"]` section of cli.toml (`pf doctor` checks the mapping). |
 
 Zero hits are **not** an error: the table simply says `0 hit(s)`. Try
 different wording or drop a tag filter before concluding nothing is stored.

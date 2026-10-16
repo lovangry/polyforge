@@ -24,6 +24,7 @@ package driver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -319,6 +320,7 @@ func (d *Driver) Run(ctx context.Context) error {
 			Kind:   TransStepStart,
 			StepID: stepID,
 			Model:  spawn.Model,
+			Effort: spawn.Effort,
 			SpawnN: n,
 		}); err != nil {
 			return fmt.Errorf("driver: step %s start failed: %w", stepID, err)
@@ -347,6 +349,14 @@ func (d *Driver) Run(ctx context.Context) error {
 		if verdict != nil {
 			// The supervisor judged the dispatch dead. The process is
 			// already torn down; this is the dispatch's one failure record.
+			var ed *EnvelopeDefectError
+			if errors.As(werr, &ed) {
+				// the step DID write an envelope (B-12): the retry prompt
+				// names the defect instead of "you wrote no envelope"
+				d.mu.Lock()
+				d.priorRejection[stepID] = fmt.Sprintf("dispatch %d: %v", n, ed.Defect)
+				d.mu.Unlock()
+			}
 			d.emit("step_dead", map[string]any{
 				"step": stepID, "spawn_n": n, "cause": verdict.Cause, "evidence": verdict.Evidence,
 			})
@@ -581,7 +591,7 @@ func (d *Driver) prepareDispatch(stepID string) (*StepSpawn, int64, error) {
 	// the in-process rejection retry lane: the prior dispatch's
 	// validation error rides the prompt as visible feedback
 	sp.PriorRejection = d.priorRejection[stepID]
-	if st != nil && len(st.Attempts) > 0 && st.Attempts[len(st.Attempts)-1].FailureCause == FailEndedWithoutResult {
+	if sp.PriorRejection == "" && st != nil && len(st.Attempts) > 0 && st.Attempts[len(st.Attempts)-1].FailureCause == FailEndedWithoutResult {
 		sp.PriorEndedWithoutResult = true
 	}
 	// the candidate names the harness its dispatch runs on (polyforge#175);
@@ -591,7 +601,7 @@ func (d *Driver) prepareDispatch(stepID string) (*StepSpawn, int64, error) {
 	sp.Harness = harness.Pi
 	if spec := d.workflow.step(stepID); spec != nil {
 		if c, err := harness.ParseCandidate(d.modelForLocked(stepID)); err == nil {
-			sp.Harness, sp.Model = c.Harness, c.Model
+			sp.Harness, sp.Model, sp.Effort = c.Harness, c.Model, c.Effort
 		}
 	}
 	sp.SpawnN = d.spawnN + 1
@@ -750,6 +760,9 @@ type StepSpawn struct {
 	// Model is the resolved candidate ("" = the harness adapter's
 	// default; no candidate list is in effect).
 	Model string
+	// Effort is the resolved candidate's thinking effort (polyforge#176;
+	// "" = the harness's own default).
+	Effort string
 	// Harness is the step's effective harness (polyforge#159; never ""
 	// from the driver — pi when nothing chose otherwise).
 	Harness string

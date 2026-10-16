@@ -30,7 +30,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
@@ -117,6 +116,7 @@ type TransitionRequest struct {
 	Gate       *GateVerdict    // gate_fail
 	Budget     *capsule.Budget // budget_update: the ADDITIVE delta
 	Model      string          // step_start: the pinned candidate this dispatch runs under
+	Effort     string          // step_start: that candidate's thinking effort (polyforge#176)
 	Status     string          // terminal: the target workflow_status
 	Reason     string          // terminal/rewind reason; answer: the answer text
 	QuestionID string          // answer: the question id being answered
@@ -190,6 +190,13 @@ func (d *Driver) transition(req TransitionRequest) error {
 			ErrStaleFence, req.Kind, req.SpawnN, d.spawnN)
 	}
 
+	if d.degraded {
+		// checked BEFORE anything is applied or written: a latched driver
+		// must not keep mutating memory and disk while reporting the
+		// transition blocked (repo review 2026-10-16 B-18)
+		return fmt.Errorf("driver: degraded (post-rename fsync previously failed); transitions blocked until restart")
+	}
+
 	snap := cloneExec(d.exec)
 	info := &appliedInfo{}
 	if err := d.applyLocked(req, info); err != nil {
@@ -213,9 +220,6 @@ func (d *Driver) transition(req TransitionRequest) error {
 		}
 		d.exec = snap
 		return fmt.Errorf("driver: execution.json persist failed (state reverted, dependent action blocked): %w", err)
-	}
-	if d.degraded {
-		return fmt.Errorf("driver: degraded (post-rename fsync previously failed); transitions blocked until restart")
 	}
 	d.initialized = true
 	if req.Kind == TransStepStart {
@@ -312,6 +316,7 @@ func (d *Driver) applyStepStartLocked(req TransitionRequest, info *appliedInfo) 
 		st.Supervision.NextDispatch = "" // this dispatch consumed the shape the last failure ordered
 	}
 	st.Model = req.Model
+	st.Effort = req.Effort
 	st.StepStartedAt = d.stamp() // refreshes on every re-entry (03 §4.2 D8)
 	d.exec.WorkflowStatus = StatusRunning
 	d.exec.CurrentStep = req.StepID
@@ -442,10 +447,13 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 		st.Output = out
 		// Commit point: archive the accepted attempt (the step's attempt
 		// ledger; the candidate pointer recomputes over it).
+		// (repo review 2026-10-16 B-25: the injected clock and the
+		// max-seq rule every other ledger entry uses)
 		st.Attempts = append(st.Attempts, capsule.Attempt{
 			Cause:      "accepted",
-			AttemptSeq: len(st.Attempts) + 1,
-			StartedAt:  time.Now().UTC().Format(time.RFC3339),
+			AttemptSeq: nextAttemptSeq(st),
+			StartedAt:  st.StepStartedAt,
+			ArchivedAt: d.stamp(),
 		})
 	case OutcomeGateFailed:
 		out, err := parseOutput(res.Output)
@@ -568,17 +576,11 @@ func (d *Driver) applyRewindRangeLocked(from, to int, target, rewindGate string,
 			d.exec.Steps[sid] = &capsule.Step{Status: capsule.StepPending}
 			continue
 		}
-		seq := 0
-		for _, a := range st.Attempts {
-			if a.AttemptSeq > seq {
-				seq = a.AttemptSeq
-			}
-		}
 		raw, _ := json.Marshal(st.Output)
 		consumed := st.BudgetConsumed
 		st.Attempts = append(st.Attempts, capsule.Attempt{
 			Cause:          CauseGateFailRewind,
-			AttemptSeq:     seq + 1,
+			AttemptSeq:     nextAttemptSeq(st),
 			StartedAt:      st.StepStartedAt,
 			ArchivedAt:     d.stamp(),
 			RewindGate:     rewindGate,
@@ -712,24 +714,18 @@ func (d *Driver) applyInterruptedLocked(req TransitionRequest) error {
 	if st == nil || st.Status != capsule.StepInProgress || st.PendingQuestion != nil {
 		return nil
 	}
-	seq := 0
-	for _, a := range st.Attempts {
-		if a.AttemptSeq > seq {
-			seq = a.AttemptSeq
-		}
-	}
 	// The interruption is audit only: it is NOT a counted failure (the
 	// per-step failure counter is untouched — a daemon restart or driver
 	// relaunch must not push a step towards blocked) and its cause is not
 	// model-class, so it never advances the candidate pointer.
-	cause := "driver_relaunch"
-	if req.Reason == "daemon_restart" {
-		cause = "daemon_restart"
+	cause := FailDriverRelaunch
+	if req.Reason == FailDaemonRestart {
+		cause = FailDaemonRestart
 	}
 	st.Attempts = append(st.Attempts, capsule.Attempt{
 		Cause:         CauseInfraFailure,
 		FailureCause:  cause,
-		AttemptSeq:    seq + 1,
+		AttemptSeq:    nextAttemptSeq(st),
 		StartedAt:     st.StepStartedAt,
 		InterruptedAt: d.stamp(),
 		Detail:        req.Reason,
@@ -785,6 +781,9 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 		kind = "step_started"
 		body["step"] = req.StepID
 		body["model"] = req.Model
+		if req.Effort != "" {
+			body["effort"] = req.Effort
+		}
 		body["resume"] = info.resume
 	case TransStepResult:
 		if req.Result == nil {
@@ -942,4 +941,16 @@ func stepStatusOf(st *capsule.Step) string {
 		return "absent"
 	}
 	return st.Status
+}
+
+// nextAttemptSeq is the ledger's next ordinal: one past the highest
+// recorded AttemptSeq (never len+1 — the ledger may hold gaps).
+func nextAttemptSeq(st *capsule.Step) int {
+	seq := 0
+	for _, a := range st.Attempts {
+		if a.AttemptSeq > seq {
+			seq = a.AttemptSeq
+		}
+	}
+	return seq + 1
 }

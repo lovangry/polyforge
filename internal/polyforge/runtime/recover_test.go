@@ -362,6 +362,8 @@ func TestRecoverTerminalWorkflowCloses(t *testing.T) {
 			r, toOB, _ := newTestRuntime(t, hub, sp)
 			wi := "wi_term_" + strings.ReplaceAll(tc.status, "_", "")
 			j := seedJob(r, wi)
+			// the terminal closes seal-push the capsule (B-7): give it a chain
+			initGitCapsule(t, j)
 			execDir := filepath.Join(j.capsuleDir, "runtime-state")
 			if err := os.MkdirAll(execDir, 0o755); err != nil {
 				t.Fatal(err)

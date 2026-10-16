@@ -37,7 +37,7 @@ The lane exists for bugs whose cause is NOT already known. Its contract with the
 the system is the evidence chain: a failure is captured as a reproducing artifact BEFORE
 anyone theorizes about it, the theory is proven against that artifact BEFORE anyone
 writes a fix, and the fix is validated by the same artifact that originally failed. A bug
-whose root cause is already obvious from the WI text belongs on `quick-fix` instead; a
+whose root cause is already obvious from the WI text belongs on `autopilot` instead; a
 bug that turns out to need design decisions belongs on `feature-full`.
 
 ## Why `root-cause` is a gate (`gate: true`)

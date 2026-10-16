@@ -13,9 +13,10 @@ package test
 //
 // Pinned: the old layout (pi git package entry, copied Claude skill dir)
 // migrates to the new one (pi local package naming release/current,
-// Claude skill symlink); a second run changes nothing; an upgrade stops
-// the restart loop FIRST, then shuts the daemon down gracefully, then
-// starts the new daemon through `pf daemon ensure`; pi is never invoked.
+// Claude skill symlink); a second run changes nothing; an upgrade shuts
+// the daemon down gracefully (its restart loop ends with that clean exit
+// — install kills no tmux session), swaps the binary, then starts the new
+// daemon through `pf daemon ensure`; pi is never invoked.
 // Repo review 2026-10-16 V-3: the binary swap is one rename of an
 // executable file staged next to $BIN; a prepare-phase failure (release
 // clone) changes nothing; running jobs refuse the upgrade unless
@@ -242,9 +243,11 @@ func TestW174InstallMigratesOldLayoutThenIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldPi := `{"defaultModel":"x","packages":["npm:other-pkg",{"source":"git:git@github.com:silgrid/polyforge.git@v2.7.0","prompts":[]},{"source":"git:github.com/someone/else"},"` + devClone + `"]}`
-	if err := os.WriteFile(piSettings, []byte(oldPi), 0o644); err != nil {
+	if err := os.WriteFile(piSettings, []byte(oldPi), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// ~/.claude/settings.json is absent: install creates it (it may later
+	// carry env.ANTHROPIC_* — created 0600, never the umask default)
 	oldSkill := filepath.Join(in.home, ".claude", "skills", "polyforge")
 	if err := os.MkdirAll(oldSkill, 0o755); err != nil {
 		t.Fatal(err)
@@ -293,6 +296,13 @@ func TestW174InstallMigratesOldLayoutThenIsIdempotent(t *testing.T) {
 	hook := filepath.Join(oldSkill, "hooks", "claude-session-start.sh")
 	if !strings.Contains(w174ReadFile(t, filepath.Join(in.home, ".claude", "settings.json")), hook) {
 		t.Fatal("the SessionStart hook is not registered on the stable skill path")
+	}
+	// settings rewrites keep 0600 (repo review 2026-10-16 V-4): the pi
+	// file was 0600 before the rewrite, the claude file is new
+	for _, p := range []string{piSettings, filepath.Join(in.home, ".claude", "settings.json")} {
+		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode after install = %v (%v), want 0600", p, fi.Mode().Perm(), err)
+		}
 	}
 	// daemon: started by ensure under the loop
 	lines := in.journalLines()

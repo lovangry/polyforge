@@ -83,6 +83,18 @@ func TestReproB5MemorySearchHonorsProjectFilter(t *testing.T) {
 			t.Fatalf("B5: non-member search with project=%s returned %d (%s), want 404", p, code, raw)
 		}
 	}
+	// ... and an unscoped search by the same non-member answers none of
+	// alpha's (or beta's) project-visibility memories. This server-side
+	// gate is what the CLI's local mapping check on recall/remember (repo
+	// review 2026-10-16 D-5) sits in front of, never instead of.
+	var unscoped struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	if code, raw := e.do(t, "GET", "/api/v1/memories/search?q=unicorn", okey.Plain, nil, &unscoped); code != http.StatusOK || len(unscoped.Items) != 0 {
+		t.Fatalf("non-member unscoped search: %d, %d hit(s) (%s), want 200 with none", code, len(unscoped.Items), raw)
+	}
 }
 
 // B11: a non-member reading a memory must get 404, not 403 — the object

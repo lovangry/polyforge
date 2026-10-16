@@ -123,12 +123,12 @@ type v1Install struct {
 	pfPath      string
 	fakepiPath  string
 
-	// gateQuickFixGrill makes daemons run a copy of the shipped bundles
-	// whose quick-fix grill additionally declares requires_human_answer
-	// (no shipped quick-fix step carries the flag: its grill allows zero
+	// gateAutopilotGrill makes daemons run a copy of the shipped bundles
+	// whose autopilot grill additionally declares requires_human_answer
+	// (no shipped autopilot step carries the flag: its grill allows zero
 	// questions); by default workflowsPath hands out a copy with every
 	// human gate flag stripped so unattended plans run.
-	gateQuickFixGrill bool
+	gateAutopilotGrill bool
 	// keepDeliver keeps the delivery bundles' `deliver` step in the
 	// daemons' workflows copy (stripped by default: see workflowsPath).
 	keepDeliver bool
@@ -229,7 +229,7 @@ func newV1InstallRepos(t *testing.T, repos []api.ProjectRepo) *v1Install {
 	cmd.Stdout, cmd.Stderr = logf, logf
 	inst.startAihubProc(t, cmd, logf)
 	inst.waitHTTP(t)
-	inst.adminKey = v1HarvestBootstrapKey(t, inst.aihubLog)
+	inst.adminKey = v1HarvestBootstrapKey(t, inst.dataDir, inst.aihubLog)
 	inst.client = aihubclient.New(inst.url, inst.adminKey)
 	if _, err := inst.client.CreateProject(aihubclient.ProjectCreateRequest{
 		Name: v1Project, Description: "v1 e2e scratch project", Repos: repos,
@@ -278,29 +278,42 @@ func (u *v1Install) waitHTTP(t *testing.T) {
 	}
 }
 
-// v1HarvestBootstrapKey reads the one-time bootstrap admin key the aihub
-// prints on the first boot of an empty deployment.
-func v1HarvestBootstrapKey(t *testing.T, logPath string) string {
+// v1HarvestBootstrapKey reads the bootstrap admin key the aihub writes
+// to <data-dir>/bootstrap-admin.key (0600) on the first boot of an empty
+// deployment, and pins that the key never reaches the log (repo review
+// 2026-10-16 V-10).
+func v1HarvestBootstrapKey(t *testing.T, dataDir, logPath string) string {
 	t.Helper()
-	marker := "one-time api key (shown once, store it now): "
+	keyPath := filepath.Join(dataDir, "bootstrap-admin.key")
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		raw, err := os.ReadFile(logPath)
-		if err == nil {
-			for _, line := range strings.Split(string(raw), "\n") {
-				if i := strings.Index(line, marker); i >= 0 {
-					key := strings.TrimSpace(line[i+len(marker):])
-					if key != "" {
-						return key
-					}
-				}
+		raw, err := os.ReadFile(keyPath)
+		if key := strings.TrimSpace(string(raw)); err == nil && key != "" {
+			if fi, err := os.Stat(keyPath); err != nil || fi.Mode().Perm() != 0o600 {
+				t.Fatalf("bootstrap key file mode = %v (%v), want 0600", fi.Mode().Perm(), err)
 			}
+			// the log line naming the file is written right after it
+			for !strings.Contains(v1ReadString(logPath), "bootstrap-admin.key") && time.Now().Before(deadline) {
+				time.Sleep(20 * time.Millisecond)
+			}
+			if log := v1ReadString(logPath); strings.Contains(log, key) {
+				t.Fatalf("the bootstrap admin key leaked into the aihub log:\n%s", log)
+			} else if !strings.Contains(log, keyPath) {
+				t.Fatalf("the aihub log does not name the bootstrap key file %s:\n%s", keyPath, log)
+			}
+			return key
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("no bootstrap admin key in the aihub log:\n%s", raw)
+			t.Fatalf("no bootstrap admin key at %s; aihub log:\n%s", keyPath, v1ReadString(logPath))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// v1ReadString answers a file's content ("" when unreadable).
+func v1ReadString(p string) string {
+	raw, _ := os.ReadFile(p)
+	return string(raw)
 }
 
 // stopAihub terminates the REAL aihub process: SIGTERM (the server's
@@ -408,7 +421,7 @@ func (u *v1Install) pfExit(t *testing.T, wantExit int, sock string, args ...stri
 	return stdout.String()
 }
 
-// newWI files one execution ticket (bundle quick-fix, no human session
+// newWI files one execution ticket (bundle autopilot, no human session
 // required) and scripts its agent with the given plan actions.
 // resumeActions, when non-nil, script the crash-continuation derivation
 // (the recovery engine's resume spawn).
@@ -417,7 +430,7 @@ func (u *v1Install) newWI(t *testing.T, goal string, actions, resumeActions []ma
 	raw, err := u.client.CreateWorkItem(aihubclient.CreateWorkItemRequest{
 		Project:    v1Project,
 		Goal:       goal,
-		BundleName: strPtr("quick-fix"),
+		BundleName: strPtr("autopilot"),
 		Attrs:      nil,
 	})
 	if err != nil {
@@ -1419,6 +1432,7 @@ func httpStatusOf(method, url, user, secret string) (int, http.Header, string) {
 type execStepView struct {
 	Status             string           `json:"status"`
 	Model              string           `json:"model"`
+	Effort             string           `json:"effort"`
 	StepStartedAt      string           `json:"step_started_at"`
 	Output             map[string]any   `json:"output"`
 	Attempts           []map[string]any `json:"attempts"`
@@ -1661,11 +1675,11 @@ func latestSpawnPID(t *testing.T, d *v1Daemon, wi string) int {
 	return int(pid)
 }
 
-// envelopeQuickFix is the canonical driver-era quick-fix plan: four
+// envelopeAutopilot is the canonical driver-era autopilot plan: four
 // envelope actions, one per workflow step in declaration order, with the
 // handoff chain (grill, fix) the inherit policy needs. The Nth envelope
 // action fires for spawn ordinal N.
-func envelopeQuickFix() []map[string]any {
+func envelopeAutopilot() []map[string]any {
 	return []map[string]any{
 		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
 		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},

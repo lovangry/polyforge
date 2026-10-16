@@ -1,13 +1,19 @@
 // Package harness names the step harnesses a workflow step can run on
-// (polyforge#159) and the one model-candidate format (polyforge#175).
+// (polyforge#159) and the one model-candidate format (polyforge#175,
+// thinking effort polyforge#176).
 //
-// A model candidate is `<harness>:<model>`: the harness of the closed set
-// (pi | claude) and the model id that harness's --model takes, split on
-// the FIRST `:` (a model id may contain `/` and further `:`). The prefix
-// is mandatory and is the whole truth of where a candidate runs — there
-// is no inference from the model id's shape and no per-step harness
-// setting. One candidate chain may therefore mix harnesses
-// (`[claude:claude-opus-5-5, pi:sub2api-glm/glm-5.3]`).
+// A model candidate is `<harness>:<model>[:<effort>]`: the harness of the
+// closed set (pi | claude), the model id that harness's --model takes,
+// and optionally a thinking effort of the closed effort set. The harness
+// is split off at the FIRST `:`; of the rest, only a LAST `:` segment
+// that is an effort-set word is the effort — every other `:` belongs to
+// the model id (`pi:ollama/llama3:8b` is the model `ollama/llama3:8b`;
+// `pi:ollama/llama3:8b:high` adds effort high). The prefix is mandatory
+// and is the whole truth of where a candidate runs — there is no
+// inference from the model id's shape and no per-step harness setting.
+// One candidate chain may therefore mix harnesses and efforts
+// (`[claude:claude-opus-5-5:high, pi:sub2api-glm/glm-5.3:low]`). No
+// effort keeps the harness's own default (no flag is passed).
 package harness
 
 import (
@@ -37,24 +43,95 @@ func Of(name string) string {
 	return name
 }
 
-// Candidate is one parsed model candidate: the harness it runs on and
-// the model id handed to that harness.
+// The closed thinking-effort set (polyforge#176): the union of the
+// levels the two harnesses accept. Verified 2026-10-16 against the
+// installed binaries' --help: pi `--thinking <level>  Set thinking
+// level: off, minimal, low, medium, high, xhigh, max`; claude `--effort
+// <level>  Effort level for the current session (low, medium, high,
+// xhigh, max)`.
+var Efforts = []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+// harnessEfforts is the subset of Efforts each harness accepts.
+var harnessEfforts = map[string][]string{
+	Pi:     Efforts,
+	Claude: {"low", "medium", "high", "xhigh", "max"},
+}
+
+// ValidEffort reports whether e is a word of the closed effort set.
+func ValidEffort(e string) bool {
+	for _, x := range Efforts {
+		if x == e {
+			return true
+		}
+	}
+	return false
+}
+
+// EffortsOf answers the effort levels harness h accepts (nil for a
+// harness outside the closed set).
+func EffortsOf(h string) []string { return harnessEfforts[h] }
+
+func accepts(h, e string) bool {
+	for _, x := range harnessEfforts[h] {
+		if x == e {
+			return true
+		}
+	}
+	return false
+}
+
+// Candidate is one parsed model candidate: the harness it runs on, the
+// model id handed to that harness, and the thinking effort ("" = none
+// given: the harness's own default, no flag passed).
 type Candidate struct {
 	Harness string
 	Model   string
+	Effort  string
 }
 
-// String answers the canonical `<harness>:<model>` form.
-func (c Candidate) String() string { return c.Harness + ":" + c.Model }
+// String answers the canonical `<harness>:<model>[:<effort>]` form.
+func (c Candidate) String() string {
+	s := c.Harness + ":" + c.Model
+	if c.Effort != "" {
+		s += ":" + c.Effort
+	}
+	return s
+}
+
+// EffortArgs answers the argv that hands the effort to the candidate's
+// harness: pi `--thinking <level>`, claude `--effort <level>`; nil when
+// no effort was given (exactly the pre-#176 argv). Pi takes the flag,
+// not its `--model <id>:<level>` shorthand, so --model stays exactly
+// the model id (a model id may itself end in `:<word>`, which pi's own
+// shorthand parse would then have to disambiguate again) and both
+// harnesses get the same shape: one dedicated flag.
+func (c Candidate) EffortArgs() []string {
+	if c.Effort == "" {
+		return nil
+	}
+	switch c.Harness {
+	case Claude:
+		return []string{"--effort", c.Effort}
+	case Pi:
+		return []string{"--thinking", c.Effort}
+	}
+	return nil
+}
 
 // PrefixHint is the shape every refusal of an unprefixed candidate names.
 const PrefixHint = "pi:… or claude:…"
 
-// ParseCandidate parses one `<harness>:<model>` candidate (surrounding
-// whitespace of the whole string and of each half is ignored). A
-// candidate without a `:`, with a harness outside the closed set, or
-// with an empty model is refused; the error text quotes the candidate
-// and is meant to be prefixed with its location by the caller.
+// ParseCandidate parses one `<harness>:<model>[:<effort>]` candidate
+// (surrounding whitespace of the whole string and of each part is
+// ignored). A candidate without a `:`, with a harness outside the closed
+// set, with an empty model, with an effort its harness does not accept,
+// or with two trailing effort words (`…:high:low` — which one would
+// win is a harness detail, so it is refused) is refused; the error text
+// quotes the candidate and is meant to be prefixed with its location by
+// the caller. A last segment outside the effort set (`:8b`, a typo such
+// as `:hgih`) is part of the model id: the closed set is the only
+// way to tell an effort from a model name, so a misspelt effort
+// reaches the harness as a model id and fails there, loudly.
 func ParseCandidate(s string) (Candidate, error) {
 	raw := strings.TrimSpace(s)
 	h, m, ok := strings.Cut(raw, ":")
@@ -65,10 +142,24 @@ func ParseCandidate(s string) (Candidate, error) {
 	if !Valid(h) {
 		return Candidate{}, fmt.Errorf("%q has an unknown harness prefix %q (want %s)", raw, h, PrefixHint)
 	}
+	effort := ""
+	if i := strings.LastIndex(m, ":"); i >= 0 {
+		if e := strings.TrimSpace(m[i+1:]); ValidEffort(e) {
+			effort, m = e, strings.TrimSpace(m[:i])
+		}
+	}
 	if m == "" {
 		return Candidate{}, fmt.Errorf("%q names no model after the harness prefix (want %s)", raw, PrefixHint)
 	}
-	return Candidate{Harness: h, Model: m}, nil
+	if effort != "" {
+		if i := strings.LastIndex(m, ":"); i >= 0 && ValidEffort(strings.TrimSpace(m[i+1:])) {
+			return Candidate{}, fmt.Errorf("%q names two efforts (%q and %q); give one: <harness>:<model>[:<effort>]", raw, strings.TrimSpace(m[i+1:]), effort)
+		}
+		if !accepts(h, effort) {
+			return Candidate{}, fmt.Errorf("%q: effort %q is not accepted by %s (it accepts %s)", raw, effort, h, strings.Join(harnessEfforts[h], "|"))
+		}
+	}
+	return Candidate{Harness: h, Model: m, Effort: effort}, nil
 }
 
 // Normalize answers the canonical form of one candidate, or the

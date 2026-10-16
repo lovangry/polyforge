@@ -89,6 +89,7 @@ type StepStarted struct {
 	Step    string `json:"step"`
 	SpawnN  int64  `json:"spawn_n"`
 	Model   string `json:"model,omitempty"`
+	Effort  string `json:"effort,omitempty"` // the candidate's thinking effort (polyforge#176; "" = the harness default)
 	Harness string `json:"harness"`
 	// HarnessSession is the harness-native session id of the dispatch
 	// (polyforge#159: claude's --session-id/--resume uuid; "" for pi).

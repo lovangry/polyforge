@@ -330,7 +330,9 @@ if [ -f "$CFG" ] && grep -q "api_key" "$CFG"; then
 MIGEOF
   fi
 else
-  cat > "$CFG" <<CFGEOF
+  # umask 077 in a subshell: the api key never sits in a world-readable
+  # file, not even until the chmod below
+  ( umask 077; cat > "$CFG" ) <<CFGEOF
 server = "$API"
 api_key = "$KEY"
 daemon_socket = "$DAEMON_SOCKET"
@@ -407,9 +409,16 @@ else:
     if existed:
         shutil.copy2(path, "%s.bak-polyforge-%s" % (path, time.strftime("%Y%m%d%H%M%S")))
     ss.append({"hooks": [{"type": "command", "command": hook}]})
-    with open(path + ".tmp", "w") as f:
+    # the file may hold credentials (env.ANTHROPIC_*): the rewrite keeps
+    # its mode, a new file is 0600 — never the umask default
+    tmp = path + ".tmp"
+    if os.path.lexists(tmp):
+        os.unlink(tmp)
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
         json.dump(cfg, f, indent=2); f.write("\n")
-    os.replace(path + ".tmp", path)
+    if existed:
+        shutil.copymode(path, tmp)
+    os.replace(tmp, path)
     print("   claude SessionStart hook registered")
 PYEOF
 fi
@@ -465,9 +474,15 @@ cfg["packages"] = new
 os.makedirs(base, exist_ok=True)
 if existed:
     shutil.copy2(path, "%s.bak-polyforge-%s" % (path, time.strftime("%Y%m%d%H%M%S")))
-with open(path + ".tmp", "w") as f:
+# the rewrite keeps the file's mode, a new file is 0600 (never the umask default)
+tmp = path + ".tmp"
+if os.path.lexists(tmp):
+    os.unlink(tmp)
+with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as f:
     json.dump(cfg, f, indent=2); f.write("\n")
-os.replace(path + ".tmp", path)
+if existed:
+    shutil.copymode(path, tmp)
+os.replace(tmp, path)
 print("   pi package -> %s%s (restart pi sessions to load)" % (rel, (" (replaced: " + ", ".join(was) + ")") if was else ""))
 PYEOF
 fi

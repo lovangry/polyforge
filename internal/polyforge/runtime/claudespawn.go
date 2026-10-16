@@ -85,6 +85,8 @@ func (s *claudeSpawner) buildCmd(p SpawnParams) (*exec.Cmd, error) {
 	if p.Model != "" {
 		args = append(args, "--model", p.Model)
 	}
+	// polyforge#176: the candidate's effort rides --effort
+	args = append(args, harness.Candidate{Harness: harness.Claude, Effort: p.Effort}.EffortArgs()...)
 	args = append(args,
 		"--tools", ClaudeStepTools,
 		"--allowedTools", ClaudeStepTools,
@@ -124,6 +126,25 @@ func (s *claudeSpawner) buildCmd(p SpawnParams) (*exec.Cmd, error) {
 	// is hard-set by the adapter (an operator env value would hijack the
 	// step's config dir and would duplicate the env entry); ANTHROPIC_*
 	// pass through.
+	//
+	// ANTHROPIC_* precedence (repo review 2026-10-16 V-11, owner ruling:
+	// document, do not strip). Two sources can reach a claude step:
+	//   1. the process environment — whatever the daemon inherited from
+	//      the tmux server of `pf daemon ensure` (captured when that
+	//      server first started, possibly from a human's shell), passed
+	//      through unchanged and visible in /proc/<pid>/environ;
+	//   2. the `env` block of <claude-config>/settings.json, the one
+	//      credential authority (#171), applied by claude itself.
+	// Verified in this code: the adapter injects no credential and
+	// strips none of ANTHROPIC_*; source 1 reaches every step process.
+	// NOT verified here (needs a real claude run): that claude lets the
+	// settings.json env block override a same-named process variable —
+	// Claude Code documents settings `env` as applied to every session,
+	// which suggests it wins, but a variable set only in the process env
+	// (e.g. an ANTHROPIC_BASE_URL absent from settings.json) certainly
+	// still applies. Keep credentials out of the tmux server's
+	// environment, or set every ANTHROPIC_* the step needs in
+	// settings.json.
 	inherited := newEnvSanitizer(s.cfg.EnvSecrets...).childEnv()
 	env := make([]string, 0, len(inherited)+len(additions))
 	for _, kv := range inherited {

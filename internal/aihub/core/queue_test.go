@@ -215,3 +215,24 @@ func TestReadyQueueWaitingOnRetainedValueExclusion(t *testing.T) {
 		t.Fatalf("still-waiting ticket %s leaked into a segment", wd)
 	}
 }
+
+// TestReadyQueueEmptyBundleIsRegistration: a legacy row carrying
+// an empty-string bundle_name is a registration ticket like NULL — the claim gate
+// refuses it NOT_CLAIMABLE, so the executable segment must not list it
+// (else every auto-pull wave offers an unclaimable head).
+func TestReadyQueueEmptyBundleIsRegistration(t *testing.T) {
+	env := newEnv(t)
+	id := mustCreateExecWI(t, env, "legacy empty bundle", nil, "")
+	if _, err := env.DB.Exec(`UPDATE work_items SET bundle_name='' WHERE id=?1`, id); err != nil {
+		t.Fatal(err)
+	}
+	q, err := env.WIs.ReadyQueue("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range q.Items {
+		if it.ID == id {
+			t.Fatalf("bundle_name='' ticket listed as executable")
+		}
+	}
+}

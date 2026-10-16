@@ -80,6 +80,34 @@ func TestCandidatePrefixPicksHarness(t *testing.T) {
 	}
 }
 
+// polyforge#176: the candidate's effort reaches the dispatch (and its
+// step_start record) separately from the model id; switching walks
+// whole candidates, so the effort changes with the candidate.
+func TestCandidateEffortReachesDispatch(t *testing.T) {
+	chain := []string{"claude:claude-opus-5-5:high", "pi:ollama/llama3:8b:low", "pi:ollama/llama3:8b"}
+	for i, want := range []struct{ h, m, e string }{
+		{"claude", "claude-opus-5-5", "high"},
+		{"pi", "ollama/llama3:8b", "low"},
+		{"pi", "ollama/llama3:8b", ""},
+	} {
+		var attempts []capsule.Attempt
+		for n := 0; n < i; n++ {
+			attempts = append(attempts, infraAttempt(n+1, FailExitModel))
+		}
+		d := harnessDriver(t, chain, attempts)
+		sp, _, err := d.prepareDispatch("review")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sp.Harness != want.h || sp.Model != want.m || sp.Effort != want.e {
+			t.Fatalf("candidate %d: dispatch %q %q %q, want %+v", i, sp.Harness, sp.Model, sp.Effort, want)
+		}
+	}
+	if _, err := harnessDriverErr(t, []string{"pi:ok/x", "claude:m:minimal"}, nil); err == nil || !strings.Contains(err.Error(), `step review: models[1] (the claim-time list: yaml, bundle or pf submit --models): "claude:m:minimal": effort "minimal" is not accepted by claude`) {
+		t.Fatalf("claude minimal: %v", err)
+	}
+}
+
 // The switch decision walks the whole chain: a claude candidate's
 // model-class failure switches onto the next candidate even when it is
 // a pi one, and the switch starts a fresh session (the spawn adapter

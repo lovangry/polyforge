@@ -18,7 +18,7 @@ import (
 )
 
 // TestNoMappingRefusesAtMain: a config with zero [workspace] sections —
-// the fresh-install template shape — refuses startup (exit 1) naming the
+// the fresh-install template shape — refuses startup (ExitNeedsOperator) naming the
 // [workspace] shape and `pf doctor`, before any socket is created.
 func TestNoMappingRefusesAtMain(t *testing.T) {
 	cfgDir := t.TempDir()
@@ -33,8 +33,8 @@ func TestNoMappingRefusesAtMain(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 	code := Main([]string{"--socket", filepath.Join(t.TempDir(), "d.sock")}, nil, &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1 (no-mapping refusal), stderr: %q", code, stderr.String())
+	if code != ExitNeedsOperator {
+		t.Fatalf("exit = %d, want %d (no-mapping refusal), stderr: %q", code, ExitNeedsOperator, stderr.String())
 	}
 	for _, tok := range []string{"[workspace", "doctor"} {
 		if !strings.Contains(stderr.String(), tok) {
@@ -61,8 +61,8 @@ func TestMappingConfiguredBootReachesWorkspaceValidation(t *testing.T) {
 	}
 	var stderr bytes.Buffer
 	code := Main([]string{"--socket", filepath.Join(t.TempDir(), "d.sock")}, nil, &bytes.Buffer{}, &stderr)
-	if code != 1 {
-		t.Fatalf("exit = %d, want 1 (workspace validation failure), stderr: %q", code, stderr.String())
+	if code != ExitNeedsOperator {
+		t.Fatalf("exit = %d, want %d (workspace validation failure), stderr: %q", code, ExitNeedsOperator, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "no-such-ws") {
 		t.Fatalf("validation failure %q does not name the mapped workspace", stderr.String())

@@ -17,6 +17,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -47,13 +48,13 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	server := fs.String("server", "", "aihub base URL (env PF_SERVER)")
 	apiKey := fs.String("api-key", "", "machine aihub api key (env PF_API_KEY)")
 	machineID := fs.String("machine-id", "", "daemon id (env POLYFORGE_MACHINE_ID; default m-<hostname>); recorded in <data-dir>/daemon-id on first start, which then wins — a differing value refuses to start")
-	displayName := fs.String("display-name", "", "daemon display name shown by `pf ops status` (env POLYFORGE_DISPLAY_NAME; default hostname)")
+	displayName := fs.String("display-name", "", "daemon display name shown by pf ops status (env POLYFORGE_DISPLAY_NAME; default hostname)")
 	dataDir := fs.String("data-dir", "", "daemon data dir (env POLYFORGE_DATA_DIR)")
 	workflowsDir := fs.String("workflows-dir", "", "workflows/ checkout dir (default ./workflows)")
 	piBin := fs.String("pi-bin", "", "harness binary (default pi)")
 	claudeBin := fs.String("claude-bin", "", "Claude Code binary for steps whose harness is claude (config claude_bin; default claude)")
 	harnessRoot := fs.String("harness-root", "", "parent root of the step harness state dirs: <harness-root>/step-agent (dedicated step agent dir), /step-agent-sessions (pi sessions) and /claude-config (claude config dir: settings.json, projects/, debug/) (env POLYFORGE_HARNESS_ROOT; default <data-dir>). polyforge#171 unified the three dirs under one root; the former --harness-sessions-root (the pi sessions dir itself) was renamed so an old deployment fails loudly instead of silently moving its harness state")
-	operatorAgentDir := fs.String("operator-agent-dir", "", "SOURCE of the dedicated step agent directory's minimal set — model service credentials, model configuration and subagent definitions are copied from here into <data-dir>/step-agent (env POLYFORGE_OPERATOR_AGENT_DIR; default ~/.pi/agent). A configured source without a readable auth.json refuses the start")
+	operatorAgentDir := fs.String("operator-agent-dir", "", "SOURCE of the dedicated step agent directory's minimal set — model service credentials, model configuration and subagent definitions are copied from here into <harness-root>/step-agent (env POLYFORGE_OPERATOR_AGENT_DIR; default ~/.pi/agent). A configured source without a readable auth.json refuses the start")
 	gitRemoteBase := fs.String("git-remote-base", "", "aihub bare-repo base URL (default <server>/git)")
 	maxConcurrent := fs.Int("max-concurrent-jobs", 0, "max concurrent jobs (default 4)")
 	recallTopK := fs.Int("recall-topk", 0, "claim-time memory snapshot hit count (env POLYFORGE_RECALL_TOPK; default 10, max 50)")
@@ -63,7 +64,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// default; a step may override them in workflow.md.
 	silenceWindow := fs.Duration("silence-window", 0, "X: no real work signal after dispatch, or no model output while waiting for the model, before the step is judged dead (default 10m for token-level harnesses, 30m for message-level)")
 	toolWindow := fs.Duration("tool-window", 0, "Y: one tool running longer than this is judged hung (default 30m)")
-	stepTimeout := fs.Duration("step-timeout", 0, "T: cumulative step runtime bound across its dispatches (default 90m; a step's budget.wall_minutes overrides it)")
+	stepTimeout := fs.Duration("step-timeout", 0, "T: cumulative step runtime bound across its dispatches (default 90m; a step's budget.wall_minutes is an estimate, not an override: that step's T = max(3 x wall_minutes, this value))")
 	stallWindow := fs.Duration("stall-window", 0, "N: the driver between steps (not waiting on a human) for longer than this is judged stalled (default 10m; negative disables)")
 	modelErrorGrace := fs.Duration("model-error-grace", 0, "grace after a turn ends on a model error before the step is judged dead (default 1m)")
 	revalidateEvery := fs.Duration("revalidate-every", 0, "M4 periodic session revalidation cadence (0 = default 5m; negative disables)")
@@ -79,7 +80,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	shared, err := cli.LoadConfig(*cfgPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "pf daemon: %v\n", err)
-		return 1
+		return ExitNeedsOperator
 	}
 	if *socket == "" {
 		*socket = shared.DaemonSocket
@@ -104,7 +105,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			where = cli.DefaultConfigPath()
 		}
 		fmt.Fprintf(stderr, "pf daemon: refusing to start: no workspace mapping is configured — add at least one [workspace.\"<path>\"] section with a projects = [\"...\"] list to %s; the daemon places capsules at <workspace>/capsules/<project>-<seq> per the claim's project (`pf doctor` checks the mapping)\n", where)
-		return 1
+		return ExitNeedsOperator
 	}
 
 	home, _ := os.UserHomeDir()
@@ -128,7 +129,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	id, err := ResolveDaemonID(*dataDir, *machineID, explicitID)
 	if err != nil {
 		fmt.Fprintf(stderr, "pf daemon: refusing to start: %v\n", err)
-		return 1
+		return ExitNeedsOperator
 	}
 	*machineID = id
 	if *displayName == "" {
@@ -192,8 +193,10 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	d, err := New(cfg)
 	if err != nil {
+		// every New failure is configuration or on-disk state (a missing
+		// workspace, an unreadable state file, a missing agent dir)
 		fmt.Fprintf(stderr, "pf daemon: %v\n", err)
-		return 1
+		return ExitNeedsOperator
 	}
 
 	// SIGTERM/SIGINT run the same bounded graceful sequence the
@@ -216,10 +219,28 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	if err := d.Run(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "pf daemon: %v\n", err)
+		var no *needsOperatorError
+		if errors.As(err, &no) {
+			return ExitNeedsOperator
+		}
 		return 1
 	}
 	return 0
 }
+
+// ExitNeedsOperator is the daemon's exit status for a startup failure
+// only an operator can fix — configuration, identity, workspace, on-disk
+// state, a failed restart reconciliation (EX_CONFIG). The ensure
+// supervision loop ends on it instead of restarting into the same
+// failure every few seconds (repo review 2026-10-16 B-14); the next
+// `pf daemon ensure` starts a fresh loop once the cause is fixed.
+const ExitNeedsOperator = 78
+
+// needsOperatorError marks a Run error as ExitNeedsOperator-class.
+type needsOperatorError struct{ err error }
+
+func (e *needsOperatorError) Error() string { return e.err.Error() }
+func (e *needsOperatorError) Unwrap() error { return e.err }
 
 // resolveHarnessRoot is the polyforge#171 resolution order for the
 // harness-root override: the --harness-root flag wins over the

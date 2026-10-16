@@ -28,7 +28,7 @@ output:
 
 # grill
 
-You are the one and only interactive checkpoint of the quick-fix lane. feature-full
+You are the one and only interactive checkpoint of the autopilot lane. feature-full
 splits clarification into `grill` -> `spec` -> `grill-review`; this lane collapses all
 three into you: ask until the ask is unambiguous, then WRITE the micro-spec yourself.
 The work item's task definition (`runtime-state/work-item.json`: `goal` plus `content`) is
@@ -66,7 +66,7 @@ requester, so whatever `fix` needs to know must end up in your memo.
 6. BEHAVIOR-FACE ESCALATION (change-coverage rules, discipline ① — hard rule): if
    the goal's change alters OBSERVABLE BEHAVIOR — a new endpoint or verb, a
    protocol/contract/semantics change, an ownership or fence rule change, any
-   externally visible capability — then a quick-fix graph cannot carry it: it
+   externally visible capability — then an autopilot graph cannot carry it: it
    authors no acceptance scenarios. You MUST raise a needs_input question asking
    the owner to either re-file on an e2e-carrying graph (feature-full) or supply
    an explicit waiver (recorded in the memo's `## Behavior-face waiver` section

@@ -13,8 +13,22 @@ so creating a project fails until the upgrade SQL has run.
 - **Online backup before the window**: rsync of `memory/` and `git/`, a
   SQLite backup-API snapshot of `aihub.db` (consistent even under WAL
   writes), and an off-host copy. The service keeps running throughout.
+  Once that backup has verified (step 5), deploy.sh writes a `.verified`
+  marker into it on both sides, keeps the newest 3 verified
+  `aihub-backup-<version>-<timestamp>` dirs (this run's included) on the
+  server and in `BACKUP_ROOT`, prunes older verified ones and prints what
+  it pruned; `--dry-run` prints what it would prune. A backup dir without
+  the marker — a failed run's, and **every backup made before this
+  change** — is never counted and never pruned: each run lists them as
+  "unverified, kept; remove by hand". Delete the pre-marker ones yourself
+  once a marked backup exists. Nothing else is ever touched. The backup
+  never copies `bootstrap-admin.key` (a one-time handoff file; the key is
+  stored in the DB as a hash) or a stray `.verified`.
 - **The switch window is the only service interruption**, in this order:
-  1. the old aihub container exits gracefully (drain ≤ `DRAIN_SECS`);
+  1. the old aihub container exits gracefully (drain ≤ `DRAIN_SECS`, default
+     15s — the compose file's `stop_grace_period` is also 15s, longer than
+     aihub's own 10s HTTP drain; the new default applies from the next
+     deploy);
   2. deploy.sh applies the upgrade SQL (see below), one transaction per
      script;
   3. the new container starts and HTTP is polled.
@@ -81,6 +95,18 @@ checks this in preflight, before the window, and refuses the deploy with
 nothing changed when the linked library is older. SQL execution itself uses
 the deployer's ssh + `python3` stdlib-sqlite3 path; the `sqlite3` CLI is
 neither used nor required.
+
+**Minimum database baseline.** The `deploy/sql/` chain starts at v2.4.0
+and assumes the columns that the old in-process Go migrations added:
+`machines.mode` / `machines.live_wi_ids` (heartbeat face, first in v0.4.2)
+and `memories.fs_mtime_ns` / `memories.fs_size` (memory freshness stamp,
+polyforge#129, first in v1.12.0). Those migrations were deleted in v2.2.0
+(3d7a857) and `Open` runs none, so a database must either have been
+created by v2.2.0 or later, or have been opened at least once by a server
+between v1.12.0 and v2.1.x. A database last served by anything older is
+not upgradable by deploy.sh: its first heartbeat or memory write fails
+with `no such column`. Bring it through a v2.1.x server first (or add the
+four columns by hand) before deploying a current version.
 
 ## First instance: v2.4.0 (polyforge#149, audit subtraction C)
 
@@ -243,11 +269,11 @@ manually; otherwise delete it once it is no longer needed.
 The daemon no longer pushes deliveries: the `pf ship` verb, the daemon's
 `POST /jobs/{wi}/ship` route and the `DAEMON-512` push-preflight code are
 gone (`pf ship` now answers "unknown command"). The delivery lanes
-(`feature-full`, `bug-fix`, `quick-fix`, `chore`) instead end with a
+(`feature-full`, `bug-fix`, `autopilot`, `chore`) instead end with a
 `deliver` workflow step that merges the latest origin default branch,
 pushes only the feature branch `polyforge/<project>-<seq>`, opens or reuses
 its PR, and auto-merges it (`gh pr merge --merge`) when review and tests
-passed with no LLM-resolved conflict (quick-fix, which has no review step,
+passed with no LLM-resolved conflict (autopilot, which has no review step,
 on verification's pass) — otherwise it asks a human-only
 question answered via `pf answer`. The section above describes the
 pre-#166 `pf ship`; a closed work item that was never shipped before the
@@ -311,9 +337,10 @@ steps:
 ```
 
 A step-id key governs the step with that id in every bundle that has one
-(`fix` covers bug-fix's and quick-fix's `fix`). A step entry's keys are
-`models` and — since polyforge#159, see the next section — `harness`;
-any other key is refused, naming it. YAML anchors and aliases work as usual
+(`fix` covers bug-fix's and autopilot's `fix`). A step entry's only key is
+`models` (polyforge#159 briefly added `harness`; polyforge#175 removed it
+again — a residual `harness` key is refused with the retired-harness hint,
+see "Per-step harness" below); any other key is refused, naming it. YAML anchors and aliases work as usual
 (`models: &x [...]`, `{ models: *x }`).
 
 **No backward compatibility — edit all three workspace files together
@@ -363,14 +390,14 @@ yaml).
 | old kind | step ids it covered |
 |---|---|
 | `qa` | `grill` (feature-full), `grill-review` (feature-full), `root-cause` (bug-fix) |
-| `spec` | `spec` (feature-full), `grill` (quick-fix) |
+| `spec` | `spec` (feature-full), `grill` (autopilot) |
 | `author` | `plan` (feature-full, chore), `e2e-author` (feature-full) |
-| `code` | `code` (feature-full, chore), `repro` (bug-fix), `fix` (bug-fix, quick-fix), `deliver` (feature-full, bug-fix, chore, quick-fix), `release`, `deploy` (release) |
-| `gate` | `verification` (feature-full, bug-fix, chore, quick-fix), `verify` (release) |
+| `code` | `code` (feature-full, chore), `repro` (bug-fix), `fix` (bug-fix, autopilot), `deliver` (feature-full, bug-fix, chore, autopilot), `release`, `deploy` (release) |
+| `gate` | `verification` (feature-full, bug-fix, chore, autopilot), `verify` (release) |
 | `review` | `review` (feature-full, bug-fix, chore) |
 
 `grill` is one key for both lanes (it was `qa` in feature-full and `spec`
-in quick-fix).
+in autopilot).
 
 ### The three workspaces
 
@@ -643,6 +670,20 @@ derive from one root.
   `CLAUDE_CONFIG_DIR` are added, and the operator's inherited config-dir
   value is stripped (it is hard-set).
 
+- Where the daemon's environment comes from (repo review 2026-10-16
+  V-11): `pf daemon ensure` starts the daemon inside the
+  `polyforge-daemon` tmux session, so the daemon — and every step it
+  spawns — inherits the environment of that tmux SERVER, captured when
+  the server first started, possibly from a human's shell. Any
+  `ANTHROPIC_*` there reaches every claude step unchanged (and is
+  visible in `/proc/<pid>/environ`). The settings `env` block is the
+  intended single credential source; Claude Code's documentation
+  suggests that block overrides a same-named process variable, but that
+  is NOT verified by polyforge, and a variable set only in the process
+  env (e.g. an `ANTHROPIC_BASE_URL` absent from settings.json) certainly
+  applies. Either keep credentials out of the tmux server's environment,
+  or set every `ANTHROPIC_*` a step needs in settings.json.
+
 ### The pairing table (generic wording)
 
 | what the settings env block carries | what a claude step does |
@@ -868,6 +909,78 @@ steps:
 Run `pf doctor` after the edit: `workspace yaml` must pass, and
 `harness claude` must pass wherever a `claude:` candidate remains.
 
+## Thinking effort per candidate: `<harness>:<model>[:<effort>]` (polyforge#176)
+
+Until now polyforge passed no thinking level to a step's harness: each
+ran at its own default. A candidate may now end in a thinking effort:
+
+```
+<harness>:<model>[:<effort>]       e.g. claude:claude-opus-5-5:high, pi:sub2api-glm/glm-5.3:low
+```
+
+- `effort` is one word of a closed set — `off`, `minimal`, `low`,
+  `medium`, `high`, `xhigh`, `max` (lowercase; the union of what the two
+  harnesses accept, checked against `pi --help` and `claude --help`).
+- **Only the last segment, and only when it is one of those words, is
+  the effort.** Every other `:` stays in the model id:
+  `pi:ollama/llama3:8b` is the model `ollama/llama3:8b` with no effort,
+  `pi:ollama/llama3:8b:high` is that model at `high`. A misspelt effort
+  (`:hgih`, `:High`) is therefore part of the model id and fails at the
+  harness as an unknown model, not at load. Two trailing effort words
+  (`…:high:low`) are refused.
+- Mapping (the model id goes to `--model` unchanged either way):
+
+  | harness | accepts | argv |
+  |---|---|---|
+  | `pi` | `off minimal low medium high xhigh max` | `--thinking <effort>` |
+  | `claude` | `low medium high xhigh max` | `--effort <effort>` |
+
+  pi gets the `--thinking` flag rather than its `--model <id>:<level>`
+  shorthand, so `--model` stays exactly the model id and both harnesses
+  get the same shape (one dedicated flag).
+- **No effort = exactly the previous behaviour**: no flag is passed and
+  the harness uses its own default.
+- The same model at two efforts is two distinct candidates, so a chain
+  can escalate: `[pi:sub2api-glm/glm-5.3:medium, pi:sub2api-glm/glm-5.3:xhigh]`.
+  Switching walks whole candidates, effort included.
+
+The format holds in every place a candidate is written (`.polyforge.yaml`
+`steps.<project>.<default|step-id>.models`, bundle `model_candidates`,
+`pf submit --models`), with the #175 refusal surfaces: an effort the
+candidate's harness does not accept is refused naming the path —
+
+| where | message (example) |
+|---|---|
+| `.polyforge.yaml` (DAEMON-414 before the claim; `pf doctor` `workspace yaml` fails) | `steps.polyforge.fix.models[0]: "claude:claude-opus-5-5:off": effort "off" is not accepted by claude (it accepts low\|medium\|high\|xhigh\|max)` |
+| bundle `model_candidates` (the bundle fails to load) | `step fix: model_candidates[1]: "claude:claude-opus-5-5:minimal": effort "minimal" is not accepted by claude (…)` |
+| `pf submit --models` (the CLI, before any request) | `submit: --models: "claude:claude-opus-5-5:minimal": effort "minimal" is not accepted by claude (…)` |
+
+Where the effort shows: the claim-time candidate snapshot keeps the
+canonical string (`claude:claude-opus-5-5:high`); `pf doctor`'s
+`harness claude` resolution table lists the chains with their efforts;
+`pf ops status` gains a CANDIDATE column (shown when a job has a
+dispatch in flight on a pinned candidate) naming
+`<harness>:<model>[:<effort>]`; the step record in `execution.json`
+carries `effort` next to `model`, and the `step_started` event an
+`effort` field.
+
+**Upgrade check.** Nothing needs editing: a list without efforts behaves
+as before. Look only for a candidate that already ends in one of the
+seven words — it now means an effort. `pi:<id>:high` hands pi
+`--model <id> --thinking high`, the same as pi's own shorthand did
+(unless a model with that full id, `<id>:high`, exists — that id can no
+longer be named, see below); a
+`claude:<id>:<word>` that used to reach claude as a (non-existent) model
+id now runs `<id>` with `--effort <word>`, and with `off` or `minimal`
+it is refused (above). An in-flight work item whose snapshot holds such
+a refused candidate fails its driver start with an error naming the
+step and the candidate (it is not re-read as a pre-#175 bare id).
+
+**Known limit.** A model id that literally ends in an effort word (e.g.
+a model named `foo:max`) cannot be named: the last segment is always
+taken as the effort (`pi:foo:max` is `foo` at `max`), and
+`pi:foo:max:high` is refused as two efforts.
+
 ## Work machines: harnesses reference the release; the daemon is supervised (polyforge#174)
 
 Re-running `tools/install.sh` on a machine installed before this change
@@ -943,3 +1056,85 @@ Claude skills (`using-polyforge`, `pf-*`) and v1 Claude plugins — and
 print one command line that first backs them up into
 `~/polyforge-v1-backup-<timestamp>/`, then removes them. Nothing is
 removed automatically. Restart the harness sessions afterwards.
+
+## Workspace runtime-artifact layout (polyforge#177)
+
+Shared content — designs, reviews, decision sheets, audits, experience —
+belongs in aihub; a workspace keeps locally only `.repo/`, `capsules/`,
+`.polyforge/` (polyforge-generated only) and
+`scratch/` (disposable). The README's "Workspace layout" paragraph has
+the full convention. Per existing workspace, after upgrading `pf`:
+
+1. `pf init <workspace>` — creates `scratch/` and adds the layout
+   section to CLAUDE.md (inside the existing `polyforge:managed` block;
+   the human part is untouched; safe to re-run).
+2. `pf doctor` — the `workspace layout` row lists every root entry and
+   every `.polyforge/` entry outside the convention, with its
+   destination. Nothing is moved for you.
+3. Move each document listed into aihub. A design whose work item is
+   still open goes into its content; anything else becomes a memory
+   (memories cannot be edited later — only re-stored or redacted):
+
+   ```
+   pf file edit polyforge#160 --content @.polyforge/160-design.md            # open work item
+   pf remember --project polyforge --type doc.design   --work-item polyforge#159 --title "#159 design" @.polyforge/159-design.md
+   pf remember --project polyforge --type doc.review   --work-item polyforge#160 --title "#160 review" @.polyforge/160-review.md
+   pf remember --project polyforge --type doc.decision --title "owner decisions 2026-10" @.polyforge/decisions.md
+   pf remember --project polyforge --type doc.audit    --title "invented-logic audit" @.polyforge/audit.md
+   ```
+
+   A terminal work item refuses the content edit (`CORE-410`) — use the
+   `doc.design` memory with `--work-item` instead. Check with `pf recall
+   --project <p> --type doc.design "<title words>"` (or `doc.review`,
+   …), then delete the local file.
+4. Move logs, briefs, downloads and `.polyforge.yaml.bak-*` backups into
+   `scratch/`. `.polyforge/repo-map/` and `.polyforge/watchers/` are
+   legacy v1 artifacts — nothing in v2 generates or reads them; doctor
+   tolerates them, and you may delete them (CLAUDE.md lines pointing at
+   `repo-map/*.md` then dangle — drop them too). `pf doctor` reports scratch entries older than 14 days;
+   `pf doctor --prune-scratch` deletes them and lists what it deleted.
+
+## Hub git calls ignore the operator's git config (repo review 2026-10-16 V-5)
+
+The daemon's git calls
+that talk to aihub with the session credential — the capsule chain push, the
+capsule clone and the carrier ls-remote/fetch/push — run with no system or
+global git config (`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`) and
+with every inherited `GIT_*` variable stripped. So `http.proxy`,
+`http.sslCAInfo`, `url.*.insteadOf` and `credential.helper` from
+`~/.gitconfig` do NOT apply to them: give the daemon a proxy through
+`https_proxy` / `HTTPS_PROXY` in its environment, and since `GIT_SSL_CAINFO`
+is stripped too, an aihub behind an internal CA needs that CA in the system
+trust store. The capsule commit itself still reads the global config, so
+`user.name` / `user.email` must be set for the daemon user; task-repo git
+(inside `repos/<name>`) also still uses the global config.
+
+Before this change an operator's `~/.gitconfig` could reroute the
+credentialed push (`url.*.insteadOf`) or hand the session secret to a
+storing `credential.helper`. Check before upgrading a work machine whose
+aihub access depends on a git-config proxy or CA setting: move it to
+`https_proxy` / the system trust store first, or the chain push and
+re-claim clone will fail.
+
+## Bundle `quick-fix` renamed to `autopilot` (repo review 2026-10-16 V-7)
+
+The light remediation bundle is now `workflows/autopilot/` (frontmatter
+`name: autopilot`). Behaviour is unchanged — the new name says what the
+old one hid: with no grill question asked and its gates passing, its
+`deliver` step merges without any human. Step ids are unchanged (`grill`,
+`fix`, `verification`, `deliver`), so `.polyforge.yaml` entries keyed
+`steps.<project>.fix` (and the other step ids) resolve exactly as before;
+nothing in the workspace yaml names a bundle.
+
+The daemon resolves a work item's bundle by name in its workflows
+checkout, and the old name no longer exists there. Before deploying:
+
+- **Queued, never-claimed work items bound to `quick-fix`**: re-bind them,
+  `pf file edit <wi> --bundle autopilot`. aihub accepts a `bundle_name`
+  PATCH exactly while the work item is queued and has never been claimed
+  (the R2 window); list them with `pf queue`.
+- **Work items that were already claimed** (running, paused, blocked, or
+  queued again after a claim) cannot be re-bound — `bundle_name` froze at
+  the first claim. Let them finish before the upgrade, or cancel them and
+  file again with `--bundle autopilot`.
+

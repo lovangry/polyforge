@@ -574,7 +574,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// a single request: a client that reaches the daemon must see a
 	// reconciled runtime, never a seeded record's pre-reconciliation
 	// snapshot (stale agent pids, superseded lineages).
-	prevShutdown := d.takeLastShutdown()
+	// The previous run's shutdown record is consumed only once the
+	// reconciliation succeeded: an aborted start must not make every
+	// later start report "the previous process crashed".
+	prevShutdown := d.peekLastShutdown()
 	if err := d.rt.Restart(d.runCtx); err != nil {
 		// Startup abort: the runtime could not be reconciled as a whole
 		// (a missing capsule or an unmapped project is NOT such a case —
@@ -595,8 +598,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 				_ = ji.Agent.Terminate(10 * time.Second)
 			}
 		}
-		return fmt.Errorf("restart reconciliation failed: %w", err)
+		return &needsOperatorError{fmt.Errorf("restart reconciliation failed: %w", err)}
 	}
+	d.consumeLastShutdown()
 	d.reattachRecovered()
 	// v2 §5/§6: replay the persisted submit queue (after the B1 claiming
 	// journal replay inside Restart, so a WI is never claimed twice) and
@@ -632,6 +636,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 				_ = d.Shutdown(context.Background(), ServeErrorShutdownCause(err))
 				return err
 			}
+			// Only the shutdown sequence closes the face (its step 5),
+			// and it still has the runtime drain and the final agent
+			// sweep to run: returning here let the process exit
+			// mid-sequence (repo review 2026-10-16 B-16).
+			<-d.shutDone
 			return nil
 		case <-dispatch.C:
 			d.dispatch()
@@ -1200,9 +1209,12 @@ func acquireDataDirLock(dataDir string) (*os.File, error) {
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		pid, _ := os.ReadFile(path)
-		_ = pid
 		f.Close()
-		return nil, fmt.Errorf("daemon: another daemon holds the data-dir lock %s", path)
+		holder := ""
+		if p := strings.TrimSpace(string(pid)); p != "" {
+			holder = " (pid " + p + ")"
+		}
+		return nil, fmt.Errorf("daemon: another daemon%s holds the data-dir lock %s", holder, path)
 	}
 	// best-effort pid stamp (diagnostics; the lock itself is the guard)
 	_ = f.Truncate(0)

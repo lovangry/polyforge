@@ -11,6 +11,7 @@ package driver
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -224,5 +225,55 @@ func TestD6GateFailRewindZeroesTheGateBudget(t *testing.T) {
 	}
 	if got := readExec(t, execPath).Steps["g"].BudgetConsumed.WallMs; got != 0 {
 		t.Fatalf("a gate-fail rewind must zero the gate's own T, got %dms", got)
+	}
+}
+
+// repo review 2026-10-16 B-18: once the degraded latch is set, a
+// transition is refused BEFORE it touches memory or execution.json.
+func TestDegradedLatchBlocksBeforeAnyWrite(t *testing.T) {
+	d, _, _, execPath := testEnv(t, spec("a"))
+	mustInit(t, d)
+	mustStart(t, d, "a", 1)
+	before := readExec(t, execPath).Version
+	d.mu.Lock()
+	d.degraded = true
+	memBefore := d.exec.Version
+	d.mu.Unlock()
+	if err := d.transition(TransitionRequest{
+		Kind: TransBudgetUpdate, StepID: "a", SpawnN: 1, Budget: &capsule.Budget{WallMs: 5000},
+	}); err == nil {
+		t.Fatal("a degraded driver must refuse the transition")
+	}
+	if got := readExec(t, execPath).Version; got != before {
+		t.Fatalf("execution.json written while degraded: version %d -> %d", before, got)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.exec.Version != memBefore {
+		t.Fatalf("memory mutated while degraded: version %d -> %d", memBefore, d.exec.Version)
+	}
+}
+
+// repo review 2026-10-16 B-25: the accepted attempt takes the max-seq
+// ordinal (the ledger can hold gaps) and the driver's injected clock.
+func TestAcceptedAttemptSeqAndClock(t *testing.T) {
+	d, _, _, execPath := testEnv(t, spec("a"))
+	mustInit(t, d)
+	mustStart(t, d, "a", 1)
+	d.mu.Lock()
+	d.exec.Steps["a"].Attempts = []capsule.Attempt{{Cause: CauseInfraFailure, AttemptSeq: 1}, {Cause: CauseInfraFailure, AttemptSeq: 3}}
+	d.mu.Unlock()
+	if err := d.transition(TransitionRequest{
+		Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: completedResult("a", 1, `{}`),
+	}); err != nil {
+		t.Fatalf("result: %v", err)
+	}
+	at := readExec(t, execPath).Steps["a"].Attempts
+	last := at[len(at)-1]
+	if last.Cause != "accepted" || last.AttemptSeq != 4 {
+		t.Fatalf("accepted attempt = %+v, want seq 4", last)
+	}
+	if !strings.HasPrefix(last.ArchivedAt, "2026-09-20T") {
+		t.Fatalf("accepted attempt archived at %q, want the driver's (fake) clock", last.ArchivedAt)
 	}
 }

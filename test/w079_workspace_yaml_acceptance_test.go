@@ -34,7 +34,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 )
 
-// The quick-fix bundle's pinned heads (frontmatter at HEAD): the
+// The autopilot bundle's pinned heads (frontmatter at HEAD): the
 // defaults head and the verification step's step-level head (fix has no
 // list of its own). Kept-face guards assert these stay in effect
 // wherever the yaml layer is silent.
@@ -297,15 +297,15 @@ func TestW079AbsentAndEmptyYamlRunExactlyAsHead(t *testing.T) {
 	ws := t.TempDir()
 	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e", "w079other"}})
 
-	wiA := w113NewWI(t, inst, "e2e", "w079 absent-yaml run exactly as head", envelopeQuickFix())
+	wiA := w113NewWI(t, inst, "e2e", "w079 absent-yaml run exactly as head", envelopeAutopilot())
 	capA := w079Run(t, d, inst, ws, wiA)
 
 	w079Yaml(t, ws, "# w079: comments only — no sections at all.\n# a second comment line.\n")
-	wiB := w113NewWI(t, inst, "e2e", "w079 comments-only yaml is a no-op", envelopeQuickFix())
+	wiB := w113NewWI(t, inst, "e2e", "w079 comments-only yaml is a no-op", envelopeAutopilot())
 	capB := w079Run(t, d, inst, ws, wiB)
 
 	w079Yaml(t, ws, "steps:\n  w079other:\n    default: { models: [pi:w079-other-model] }\n")
-	wiC := w113NewWI(t, inst, "e2e", "w079 unlisted project keeps bundle models", envelopeQuickFix())
+	wiC := w113NewWI(t, inst, "e2e", "w079 unlisted project keeps bundle models", envelopeAutopilot())
 	capC := w079Run(t, d, inst, ws, wiC)
 
 	for name, capDir := range map[string]string{"absent yaml": capA, "comments-only yaml": capB, "project not listed": capC} {
@@ -355,9 +355,9 @@ func TestW079PerProjectModelPrecedence(t *testing.T) {
 `)
 	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e", "ieops", "w079third"}})
 
-	wiE := w113NewWI(t, inst, "e2e", "w079 e2e models", envelopeQuickFix())
-	wiI := w113NewWI(t, inst, "ieops", "w079 ieops models", envelopeQuickFix())
-	wiT := w113NewWI(t, inst, "w079third", "w079 unlisted project models", envelopeQuickFix())
+	wiE := w113NewWI(t, inst, "e2e", "w079 e2e models", envelopeAutopilot())
+	wiI := w113NewWI(t, inst, "ieops", "w079 ieops models", envelopeAutopilot())
+	wiT := w113NewWI(t, inst, "w079third", "w079 unlisted project models", envelopeAutopilot())
 	capE := w079Run(t, d, inst, ws, wiE)
 	capI := w079Run(t, d, inst, ws, wiI)
 	capT := w079Run(t, d, inst, ws, wiT)
@@ -404,7 +404,7 @@ func TestW079ProjectStepOnlyFallsThroughToBundle(t *testing.T) {
 	ws := t.TempDir()
 	w079Yaml(t, ws, "steps:\n  e2e:\n    grill: { models: [pi:w079-spec-x] }\n")
 	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
-	capDir := w079Run(t, d, inst, ws, w113NewWI(t, inst, "e2e", "w079 step-only list", envelopeQuickFix()))
+	capDir := w079Run(t, d, inst, ws, w113NewWI(t, inst, "e2e", "w079 step-only list", envelopeAutopilot()))
 	if got := w079Model(t, capDir, "grill"); got != "w079-spec-x" {
 		t.Fatalf("grill model %q, want w079-spec-x", got)
 	}
@@ -433,8 +433,8 @@ func TestW079OneDaemonTwoWorkspacesTwoYamls(t *testing.T) {
 	w079Yaml(t, wsB, "steps:\n  ieops:\n    fix: { models: [pi:w079b-code] }\n")
 	d := w079Setup(t, inst, w113WS{key: wsA, projects: []string{"e2e"}}, w113WS{key: wsB, projects: []string{"ieops"}})
 
-	wiA := w113NewWI(t, inst, "e2e", "w079 two-workspace claim A", envelopeQuickFix())
-	wiB := w113NewWI(t, inst, "ieops", "w079 two-workspace claim B", envelopeQuickFix())
+	wiA := w113NewWI(t, inst, "e2e", "w079 two-workspace claim A", envelopeAutopilot())
+	wiB := w113NewWI(t, inst, "ieops", "w079 two-workspace claim B", envelopeAutopilot())
 	capA := w079Run(t, d, inst, wsA, wiA)
 	capB := w079Run(t, d, inst, wsB, wiB)
 
@@ -469,12 +469,12 @@ func TestW079YamlEditGovernsNextClaimNoRestart(t *testing.T) {
 	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
 	pid := d.cmd.Process.Pid
 
-	capA := w079Run(t, d, inst, ws, w113NewWI(t, inst, "e2e", "w079 edit first claim", envelopeQuickFix()))
+	capA := w079Run(t, d, inst, ws, w113NewWI(t, inst, "e2e", "w079 edit first claim", envelopeAutopilot()))
 	if got := w079Model(t, capA, "grill"); got != "w079-edit-v1" {
 		t.Fatalf("claim 1 grill model %q, want w079-edit-v1", got)
 	}
 	w079Yaml(t, ws, "steps:\n  e2e:\n    default: { models: [pi:w079-edit-v2] }\n")
-	capB := w079Run(t, d, inst, ws, w113NewWI(t, inst, "e2e", "w079 edit second claim", envelopeQuickFix()))
+	capB := w079Run(t, d, inst, ws, w113NewWI(t, inst, "e2e", "w079 edit second claim", envelopeAutopilot()))
 	if got := w079Model(t, capB, "grill"); got != "w079-edit-v2" {
 		t.Fatalf("claim 2 grill model %q, want w079-edit-v2 — the edit must govern the next claim", got)
 	}
@@ -524,7 +524,7 @@ func TestW079InvalidYamlRefusesWithoutClaim(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			w079Yaml(t, ws, c.yaml)
-			wi := w113NewWI(t, inst, "e2e", "w079 invalid yaml: "+c.name, envelopeQuickFix())
+			wi := w113NewWI(t, inst, "e2e", "w079 invalid yaml: "+c.name, envelopeAutopilot())
 			out, code := d.pf(inst, "submit", wi)
 			w079Refused(t, d, inst, ws, wi, out, code, append([]string{".polyforge.yaml"}, c.needles...)...)
 		})
@@ -540,7 +540,7 @@ func TestW079FixYamlAndResubmitIsClean(t *testing.T) {
 	w079Yaml(t, ws, "steps:\n  e2e:\n    default: { models: [pi:w079-ok] }\n   BAD KEY\n")
 	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
 
-	wi := w113NewWI(t, inst, "e2e", "w079 fix-and-resubmit cycle", envelopeQuickFix())
+	wi := w113NewWI(t, inst, "e2e", "w079 fix-and-resubmit cycle", envelopeAutopilot())
 	out, code := d.pf(inst, "submit", wi)
 	w079Refused(t, d, inst, ws, wi, out, code, ".polyforge.yaml")
 	if ents, err := os.ReadDir(filepath.Join(ws, "capsules")); err == nil && len(ents) != 0 {
@@ -571,10 +571,10 @@ func TestW079InvalidYamlOfOneWorkspaceDoesNotBlockAnother(t *testing.T) {
 	}
 	w079Yaml(t, wsA, "projects: {}\n")
 	d := w079Setup(t, inst, w113WS{key: wsA, projects: []string{"e2e"}}, w113WS{key: wsB, projects: []string{"ieops"}})
-	wiA := w113NewWI(t, inst, "e2e", "w079 bad workspace", envelopeQuickFix())
+	wiA := w113NewWI(t, inst, "e2e", "w079 bad workspace", envelopeAutopilot())
 	out, code := d.pf(inst, "submit", wiA)
 	w079Refused(t, d, inst, wsA, wiA, out, code, ".polyforge.yaml")
-	w079Run(t, d, inst, wsB, w113NewWI(t, inst, "ieops", "w079 good workspace", envelopeQuickFix()))
+	w079Run(t, d, inst, wsB, w113NewWI(t, inst, "ieops", "w079 good workspace", envelopeAutopilot()))
 }
 
 // w079ProviderErr is the stderr text a crashing fake harness leaves behind:
@@ -1068,7 +1068,7 @@ func TestW079PlacementFollowsCliTomlOnly(t *testing.T) {
 	d.start()
 	defer d.stop()
 
-	wi := w113NewWI(t, inst, "e2e", "w079 placement follows cli.toml only", envelopeQuickFix())
+	wi := w113NewWI(t, inst, "e2e", "w079 placement follows cli.toml only", envelopeAutopilot())
 	d.pfWant(inst, -1, "submit", wi)
 	capDir := w079Capsule(t, inst, wsY, wi)
 	w113WaitCapsule(t, capDir, 90*time.Second)

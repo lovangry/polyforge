@@ -106,7 +106,7 @@ func TestDoctorCandidatePrefixAndClaudeTrigger(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("quick-fix", "---\ndefaults:\n  model_candidates: [pi:g/glm]\nsteps:\n  - { id: fix }\n---\n")
+	write("autopilot", "---\ndefaults:\n  model_candidates: [pi:g/glm]\nsteps:\n  - { id: fix }\n---\n")
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -137,8 +137,21 @@ func TestDoctorCandidatePrefixAndClaudeTrigger(t *testing.T) {
 	// shows the chain with each candidate's harness
 	put("steps:\n  polyforge:\n    fix: { models: [claude:claude-opus-5-5, pi:g/glm] }\n")
 	_, _, doc = doctorStatus(t, env, "--json", "doctor")
-	if st, detail := doctorFind(t, doc, "harness claude"); st != "warn" || !strings.Contains(detail, "polyforge/quick-fix/fix: [claude:claude-opus-5-5, pi:g/glm] (steps.polyforge.fix.models)") {
+	if st, detail := doctorFind(t, doc, "harness claude"); st != "warn" || !strings.Contains(detail, "polyforge/autopilot/fix: [claude:claude-opus-5-5, pi:g/glm] (steps.polyforge.fix.models)") {
 		t.Fatalf("mixed chain claude check: %s %q", st, detail)
+	}
+
+	// polyforge#176: the resolution table shows each candidate's effort;
+	// an effort its harness does not take fails the yaml check, named
+	put("steps:\n  polyforge:\n    fix: { models: [claude:claude-opus-5-5:high, pi:g/glm:low] }\n")
+	_, _, doc = doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, "harness claude"); st != "warn" || !strings.Contains(detail, "/fix: [claude:claude-opus-5-5:high, pi:g/glm:low] (steps.polyforge.fix.models)") {
+		t.Fatalf("effort chain claude check: %s %q", st, detail)
+	}
+	put("steps:\n  polyforge:\n    fix: { models: [claude:claude-opus-5-5:off] }\n")
+	_, _, doc = doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "fail" || !strings.Contains(detail, `steps.polyforge.fix.models[0]: "claude:claude-opus-5-5:off": effort "off" is not accepted by claude`) {
+		t.Fatalf("claude effort off: %s %q", st, detail)
 	}
 
 	// an unprefixed yaml candidate / a retired harness key: fail, named

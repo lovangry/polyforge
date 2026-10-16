@@ -1,7 +1,7 @@
 package driver
 
 // deliver.go: the delivery binding (polyforge#166). The `deliver` step
-// that ends feature-full, bug-fix, quick-fix and chore pushes the
+// that ends feature-full, bug-fix, autopilot and chore pushes the
 // feature branch, opens or reuses the PR and merges it. GitHub branch
 // protection is not enforced on the owner's repos, so "never push the
 // default branch" rests on three layers: the step contract, the work
@@ -499,7 +499,7 @@ func checkGHMerge(args []string) error {
 }
 
 // reviewStepID is the conventional id of the independent review gate
-// (feature-full, bug-fix, chore; quick-fix has none).
+// (feature-full, bug-fix, chore; autopilot has none).
 const reviewStepID = "review"
 
 // reviewPassed answers whether the review step is done with a pass

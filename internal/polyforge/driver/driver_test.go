@@ -27,6 +27,8 @@ type fakeEntry struct {
 	res  *StepResult
 	err  error
 	hold bool // block Wait until ctx or Terminate
+	// cancelErr is what a held Wait returns on ctx end (default ctx.Err()).
+	cancelErr error
 	// spawnErr makes SpawnStep itself fail (a harness that died at startup).
 	spawnErr error
 	// act runs inside Wait before the result is returned: the step's
@@ -46,6 +48,9 @@ func (r *fakeRun) Wait(ctx context.Context) (*StepResult, error) {
 	if r.e.hold {
 		select {
 		case <-ctx.Done():
+			if r.e.cancelErr != nil {
+				return nil, r.e.cancelErr
+			}
 			return nil, ctx.Err()
 		case <-r.rel:
 		}

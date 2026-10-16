@@ -101,7 +101,7 @@ func TestV1S20LongRunGoroutines(t *testing.T) {
 	baseline := s20MinGoroutines(s20Samples, s20SampleGap)
 	t.Logf("s20: goroutine baseline after start-up settle: %d", baseline)
 
-	// 20 strictly consecutive jobs: each is a driver-driven quick-fix run
+	// 20 strictly consecutive jobs: each is a driver-driven autopilot run
 	// (one envelope action per step; the last step completes the
 	// workflow and the terminal wiring wraps it), and the next one starts
 	// only after this one reached its terminal state AND its per-job
@@ -109,7 +109,7 @@ func TestV1S20LongRunGoroutines(t *testing.T) {
 	// engine handle and step processes — fully retired.
 	for i := 0; i < s20Jobs; i++ {
 		wi := inst.newWI(t, fmt.Sprintf("s20: long-run goroutine probe job %02d", i+1),
-			envelopeQuickFix(), nil)
+			envelopeAutopilot(), nil)
 		t.Cleanup(func() { killOrphans(wi) })
 		rig.start(wi)
 

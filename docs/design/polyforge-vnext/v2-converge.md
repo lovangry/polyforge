@@ -14,7 +14,7 @@
 - 核心三根支柱：**任务**（aihub WI）、**记忆**（项目演进与知识沉淀）、**workflow**（团队统一的任务处理规范）——目标是团队的 agent 在同一套体系下像一个 agent 一样运转。
 - 新功能冻结，先做减法；大改现有逻辑先问 owner；**心智模型越简单越好**（以"概念数减少"衡量方案）。
 - **按步骤选模型**是核心能力，保留；**按步骤选 harness**（pi / Claude Code / Codex）要做，排在减法之后。
-- **agent 不可信**：执行 WI 的 agent 不得驱动 daemon、不得读取机器凭证、不得写入任何会被人或交互 agent 信任的文件（#135）。
+- **信任模型（owner 裁定 2026-10-14，取代 2026-10-12 的"agent 不可信"）**：polyforge 只在团队内部使用；harness（pi / Claude Code）由人事先登录，daemon 只调用 CLI，**从不管理登录凭证**；不做重型隔离（独立 uid / bwrap 等）——**#135 冻结**，设计稿保留备查。仍然要防的是**事故**而非恶意：agent 推到 GitHub main（2026-10-13 #149 事故）、发布未经评审的提交、step agent 代答自己的人工 gate 问题（#122）。本文中以"agent 不可信"为理由的机制，现在一律按**事故护栏**理解：已建成并付出成本的护栏保留（#122/V-1 的 UDS step 进程拒绝、#156 的 ls-tree 检查与无 hook 推送、#158 的临时仓库 carrier 推送、V4 取证门禁、固定模板唤醒），但不再扩展为对抗性防御。step agent 按设计写 capsule 的 `runtime-state/pending-results/`，这不是缺陷。
 
 ## 1. 业务领域划分
 
@@ -140,8 +140,8 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 ### 2.4 阈值（已定）
 
-- X（⓪②）、Y（③）、T（④）、N（driver_stalled）**全局默认，step 可覆盖**。
-- **T 的 step 级覆盖复用现有 `budget.wall_minutes`**，但它是**估计值而非硬上限**（polyforge#164：≤30 分钟的估计在下式下不起作用，交付 bundle 已全部删除，只剩 release bundle 的 `release: 45` → T=135）：声明了 `wall_minutes` 的 step，总时长界 **T = max(3 × wall_minutes, 全局 `--step-timeout` 默认)**；未声明则就是全局默认。不新增键；X、Y 的 step 级覆盖在 frontmatter 新增。覆盖值随 bundle 在领取时钉住，对之后领取的 WI 生效。
+- X（⓪②）、Y（③）、T（④）、N（driver_stalled）**全局默认**；step 级只能覆盖 T（见下条）。
+- **T 的 step 级覆盖复用现有 `budget.wall_minutes`**，但它是**估计值而非硬上限**（polyforge#164：≤30 分钟的估计在下式下不起作用，交付 bundle 已全部删除，只剩 release bundle 的 `release: 45` → T=135）：声明了 `wall_minutes` 的 step，总时长界 **T = max(3 × wall_minutes, 全局 `--step-timeout` 默认)**；未声明则就是全局默认。不新增键；X、Y 没有 step 级覆盖（polyforge#147 C5 删除了 `silence_minutes` / `tool_minutes`，旧 bundle 中残留的这两个键被静默忽略）。覆盖值随 bundle 在领取时钉住，对之后领取的 WI 生效。
 - X 默认按 harness 翻译器声明的**输出粒度**取：逐字粒度（思考时也有输出）可短（例 10 分钟）；整条粒度或模型不返回思考内容时放长（例 30 分钟）。"模型不返回思考内容"在模型配置中声明。
 - Y 默认 30 分钟（#83 教训）；T 默认 60–90 分钟（#117 教训）；N 默认 10 分钟。
 - **放宽**：每次放宽翻倍（放宽后的界 = 放宽前界 × 2），写入 `execution.json`（`steps.<id>.supervision.relaxed_wall_ms` / `relaxed_tool_ms`），重启后沿用。**只有超时类死因放宽 T**（`step_timeout_slow_model` 与 `step_timeout_long_task` 每次处置都放宽一次，第二次 `step_timeout_long_task` 也先翻倍再 blocked）；换模型、人工继续、限流退避一律不放宽（polyforge#147 D6）。
@@ -162,7 +162,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 ### 2.6 结果信封、`context_policy` 与 `handoff`（polyforge#147 定稿）
 
-**结果信封 = 最小契约**：step agent 把**一个** JSON 对象写到约定位置 `runtime-state/pending-results/<spawn_n>.json`（位置与命名不变），内容只有 `outcome` + `output`，`needs_input` 时另带 `question_id` + `question`，再加上派发身份围栏（`wi_id` / `step_id` / `spawn_n`）。`protocol_version`、`result_id`、`artifacts` 哈希清单、`handoff_ref` 摘要引用**全部删除**，driver 不再校验它们，缺这些旧字段 MUST NOT 判不合格；result_id 宽容等补全层一并删除，不留兼容分支。**V4 命令取证门禁保留**（owner 裁定：agent 不可信，取证门禁留在 driver）：欠取证的 step（`requires_command_evidence: true`，或 step id 为 `verification`）的 completed 结果另带 `command_evidence: [{argv, exit_code, duration_ms}]`——至少一条、argv 非空、`duration_ms > 0`，否则信封被拒（进程内重试车道）；字符串形态条目由 `command_evidence` 的宽容重解析剔除并在拒绝原因里点名；被接受的取证由 driver 写入 `output.commands`（B10，step 自写的同名键被覆盖）。其余 step 的信封不带该字段。**已提交测试文件门禁**（polyforge#156，任意 step）：completed 结果的 `output.test_files` 非空时，每条路径必须是 repo 相对路径、至少存在于一个 task repo，且在其存在的每个 task repo 中都已提交在 HEAD，否则信封被拒（同一进程内重试车道，拒绝原因点名路径）——resume 只按 `refs/pf-task/<name>`（HEAD）恢复 task repo，未提交文件会丢。**声明输出 schema 校验**（polyforge#164 H3）：step 定义文件 frontmatter 的 `output:`（draft-07 JSON Schema，YAML 书写）既注入提示词（放在 step 正文之前，"per the schema above" 成立），也由 driver 机械校验 completed 结果的 `output`（值为 `null` 的可选属性按缺省处理）。v2.5.0 为**只记录模式**（`driver/outputschema.go` 的 `enforceOutputSchemas=false`，唯一开关）：不合格时不拒信封，只记持久事件 `output_schema_violation`（step、schema 路径、截断的校验错误）——用近期真实 result.json 回放约 64% 不合格（agent 此前从未见过 schema），后续版本翻转开关后改为信封被拒（同一进程内重试车道）。声明了却加载失败的 schema 记 `output_schema_unloadable` 事件并写 stderr。**既有失败的边界**（#164 S6）：repro 检查、作者 step 的 `test_files`、bug-fix fix 的 `regression_test` 永远不能标为 `pre_existing`（它们在 base 上失败是设计使然，未修好的 bug 会被当成既有失败放过），pre_existing 检查的 detail 必须带 base sha，且至少有一条 `<repo 相对路径>: <测试名>` 形式的 `pre_existing_failures` 条目（路径按完整路径或目录前缀的路径分段精确比对，不做子串匹配）；bug-fix 的 repro 已复现时，verification 的 pass 必须带一条名为 repro、状态 pass 的检查；违者信封被拒（同一车道）。**已写测试不可改**（polyforge#164 H4）：声明 `test_files` 的 step（e2e-author / repro）被接受时，driver 在其 `output.test_files_commit` 记下各 task repo 的 HEAD（只由 driver 写，step 自写的同名键被丢弃）；之后每个 completed 的 step 都机械比对这些文件在该提交与 HEAD 之间是否一致（等价于 `git diff <author-commit>..HEAD -- <test_files>`，以两次 `git ls-tree -r` 实现，沿用 #156 的加固 git 调用），有差异即信封被拒——除非该 step 当前尝试链里有人工回答（step 认为测试本身错了，必须用 needs_input 提出），此时改动成为新基线（driver 把新的 HEAD 写回前面作者 step 的 `test_files_commit`，故该 step 之后被 rewind 也不丢），并记持久事件 `authored_tests_rebaselined`（列出被改的文件）。**`requires_human_answer` 取值**：`true` = 完成前必须有人工回答（feature-full grill-review）；`if_asked`（polyforge#164 H11，quick-fix grill）= 提出的问题只能由人回答，零问题可直接完成，但 driver 记一条持久事件 `human_gate_unasked`，watcher 据此通知 owner。
+**结果信封 = 最小契约**：step agent 把**一个** JSON 对象写到约定位置 `runtime-state/pending-results/<spawn_n>.json`（位置与命名不变），内容只有 `outcome` + `output`，`needs_input` 时另带 `question_id` + `question`，再加上派发身份围栏（`wi_id` / `step_id` / `spawn_n`）。`protocol_version`、`result_id`、`artifacts` 哈希清单、`handoff_ref` 摘要引用**全部删除**，driver 不再校验它们，缺这些旧字段 MUST NOT 判不合格；result_id 宽容等补全层一并删除，不留兼容分支。**V4 命令取证门禁保留**（owner 裁定；按 2026-10-14 信任模型它是**事故护栏**——防 agent 漏跑或误报验证命令，取证检查留在 driver）：欠取证的 step（`requires_command_evidence: true`，或 step id 为 `verification`）的 completed 结果另带 `command_evidence: [{argv, exit_code, duration_ms}]`——至少一条、argv 非空、`duration_ms > 0`，否则信封被拒（进程内重试车道）；字符串形态条目由 `command_evidence` 的宽容重解析剔除并在拒绝原因里点名；被接受的取证由 driver 写入 `output.commands`（B10，step 自写的同名键被覆盖）。其余 step 的信封不带该字段。**已提交测试文件门禁**（polyforge#156，任意 step）：completed 结果的 `output.test_files` 非空时，每条路径必须是 repo 相对路径、至少存在于一个 task repo，且在其存在的每个 task repo 中都已提交在 HEAD，否则信封被拒（同一进程内重试车道，拒绝原因点名路径）——resume 只按 `refs/pf-task/<name>`（HEAD）恢复 task repo，未提交文件会丢。**声明输出 schema 校验**（polyforge#164 H3）：step 定义文件 frontmatter 的 `output:`（draft-07 JSON Schema，YAML 书写）既注入提示词（放在 step 正文之前，"per the schema above" 成立），也由 driver 机械校验 completed 结果的 `output`（值为 `null` 的可选属性按缺省处理）。v2.5.0 为**只记录模式**（`driver/outputschema.go` 的 `enforceOutputSchemas=false`，唯一开关）：不合格时不拒信封，只记持久事件 `output_schema_violation`（step、schema 路径、截断的校验错误）——用近期真实 result.json 回放约 64% 不合格（agent 此前从未见过 schema），后续版本翻转开关后改为信封被拒（同一进程内重试车道）。声明了却加载失败的 schema 记 `output_schema_unloadable` 事件并写 stderr。**既有失败的边界**（#164 S6）：repro 检查、作者 step 的 `test_files`、bug-fix fix 的 `regression_test` 永远不能标为 `pre_existing`（它们在 base 上失败是设计使然，未修好的 bug 会被当成既有失败放过），pre_existing 检查的 detail 必须带 base sha，且至少有一条 `<repo 相对路径>: <测试名>` 形式的 `pre_existing_failures` 条目（路径按完整路径或目录前缀的路径分段精确比对，不做子串匹配）；bug-fix 的 repro 已复现时，verification 的 pass 必须带一条名为 repro、状态 pass 的检查；违者信封被拒（同一车道）。**已写测试不可改**（polyforge#164 H4）：声明 `test_files` 的 step（e2e-author / repro）被接受时，driver 在其 `output.test_files_commit` 记下各 task repo 的 HEAD（只由 driver 写，step 自写的同名键被丢弃）；之后每个 completed 的 step 都机械比对这些文件在该提交与 HEAD 之间是否一致（等价于 `git diff <author-commit>..HEAD -- <test_files>`，以两次 `git ls-tree -r` 实现，沿用 #156 的加固 git 调用），有差异即信封被拒——除非该 step 当前尝试链里有人工回答（step 认为测试本身错了，必须用 needs_input 提出），此时改动成为新基线（driver 把新的 HEAD 写回前面作者 step 的 `test_files_commit`，故该 step 之后被 rewind 也不丢），并记持久事件 `authored_tests_rebaselined`（列出被改的文件）。**`requires_human_answer` 取值**：`true` = 完成前必须有人工回答（feature-full grill-review）；`if_asked`（polyforge#164 H11，autopilot grill）= 提出的问题只能由人回答，零问题可直接完成，但 driver 记一条持久事件 `human_gate_unasked`，watcher 据此通知 owner。
 
 **`context_policy`（step 键，`inherit`\|`fresh`，缺省 `inherit`）**：声明一个 step 与上游的上下文关系。`inherit` = 本 step 续上游的活：派发时 driver 找**最近一个已 done 且声明 `handoff: true` 的更早 step**，按路径约定 `artifacts/handoff-<step-id>.md` 读出交接正文，原样拼进派发 prompt 的「Handoff from step …」小节；`fresh` = 从零开始，不注入交接正文，要读的上游产物按产物路径约定自取。`gate: true` 的 step 强制 `fresh`——闸只凭自己的输入判，不继承有倾向性的上下文。
 
@@ -172,7 +172,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 **禁止 step agent 使用 harness 后台任务，是 harness 适配层的责任，不是写进提示词的纪律。** 后台任务会让一个步骤在它的派生进程之外留下活动，监督面（判死、step 结束、派生计数）全部失真；靠"规则里写了不许用"约束的只是诚实的 agent。
 
-pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的数据目录下维护 `<data-dir>/step-agent/`，派生每个 step 进程时注入 `PI_CODING_AGENT_DIR=<data-dir>/step-agent`（会话另置于 `PI_CODING_AGENT_SESSION_DIR=<data-dir>/step-agent-sessions/`，实时 transcript 定位器跟着同一个根走）。该目录是 operator agent 目录的**最小快照**——只有 `auth.json`（模型服务凭证）、`models.json`（模型服务配置，保留源文件权限）、`agents/`（子 agent 定义）、`extensions/subagent/`（子 agent **工具**本身），**没有 `settings.json`**，而用户级 package（例如提供后台任务工具的 `npm:pi-background-tasks`）正是在 `settings.json` 里声明的：没有声明就没有加载，后台任务工具对 step agent **机械不可见**，与提示词无关。
+pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<harness-root>/step-agent/`（`--harness-root` / `POLYFORGE_HARNESS_ROOT`，缺省 `<data-dir>`；polyforge#171），派生每个 step 进程时注入 `PI_CODING_AGENT_DIR=<harness-root>/step-agent`（会话另置于 `PI_CODING_AGENT_SESSION_DIR=<harness-root>/step-agent-sessions/`，实时 transcript 定位器跟着同一个根走）。该目录是 operator agent 目录（`--operator-agent-dir` / `POLYFORGE_OPERATOR_AGENT_DIR`，缺省 `~/.pi/agent`；配置了却没有可读的 `auth.json` 即拒绝启动）的**最小快照**——只有 `auth.json`（模型服务凭证）、`models.json`（模型服务配置，保留源文件权限）、`agents/`（子 agent 定义）、`extensions/subagent/`（子 agent **工具**本身），**没有 `settings.json`**，而用户级 package（例如提供后台任务工具的 `npm:pi-background-tasks`）正是在 `settings.json` 里声明的：没有声明就没有加载，后台任务工具对 step agent **机械不可见**，与提示词无关。
 
 - **子 agent 工具如何送达**：它不是 pi 内建工具，而是 operator agent 目录下的扩展 `extensions/subagent/`；pi 只从 `<agent 目录>/extensions/` 自动发现全局扩展（`resource-loader` / `package-manager` 的全局 extensions 根）。所以快照**恰好**拷贝 `extensions/subagent/` 这一个子目录，其余扩展一律不带（例如 `extensions/polyforge` 是交互会话用的），`settings.json` 与 packages 永远不带。
 - 拷贝而非链接：快照不跟随 operator 后续改动（包括全局重装），也没有任何符号链接把专用目录变成整个 operator 目录的窗口（树内符号链接跳过不拷）。**每次派生前**只刷新白名单成员（源文件大小+mtime 变化即重拷，源里没了就删）；清除白名单以外的条目**只在 daemon 启动时**做——那时本 daemon 没有存活的 step 进程，不会把文件从运行中的 step 进程脚下抽走。凭证不可读 = 大声拒绝派生，绝不降级运行。
@@ -180,7 +180,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 - 位置在数据目录下，**绝不在 capsule 内**：capsule 会提交并推送到 aihub，且对 agent 可写。
 - `--no-extensions` 仍然**不传**：子 agent 工具就是上面那个扩展，关掉它等于关掉整条 step-agent 派发路径；隔离由目录（只带这一个扩展）而非开关完成。
 - **任何未来的 harness 在接入前，必须提供等价的保证**（一个 harness 若无法从启动配置上关掉后台任务族，就不具备接入资格）——这是适配层的准入条件，写在这里而不是写在执行者规则里。
-- 与 #135（独立 agent 用户）方向一致：该目录届时对 step agent 用户只读，daemon 仍是唯一写入者。
+- 凭证边界（2026-10-14 裁定）：daemon 不管理凭证——`auth.json` / `models.json` 是人登录 harness 后留在 operator agent 目录里的文件，daemon 只按白名单**拷贝**进 step-agent 目录，不签发、不刷新、不轮换；claude step 的凭证同理只在 `<harness-root>/claude-config/settings.json` 的 env 块里，由人维护。（原"与 #135 独立 agent 用户方向一致"的注随 #135 冻结作废。）
 
 ## 3. 人工协同：`pf watch`（已定）
 
@@ -190,7 +190,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 - `pf watch --chat <id>`（缺省取 `PF_CHAT_ID`）**不因订阅的 WI 结束而退出**（保持常驻；D10 裁定，polyforge#150：以代码为准——只跳过已结束的 WI；仍会在父 harness 进程消失、stdout 关闭、或 `--wait-decision` 打印首批决策后退出，`watcher/engine.go`）；一个会话一个进程。
 - 只产出两种信号：
   - **进展**：当前 step、已运行时长、正在执行的命令及时长、最近修改的文件、工具调用计数（由翻译器信号机械生成，**不调用模型**）。
-  - **决策事件**：有问题要回答/gate、失败、blocked、完成、被判死并已处理、候选已用尽；以及状态/来源类事件（C13 裁定，polyforge#150，与 `watcher/decision.go` 的事件类别表对齐）：`canceled`（终态）、`paused`（非终态，可继续）、`submit_rejected`、`submit_dropped`、`daemon_restarted`；以及 `carrier_push_failed`（polyforge#158：capsule 链推送成功而某任务仓库的 carrier ref 推送失败或被拒，resume 可能丢该仓库的提交；提醒行带经字符集过滤的仓库名，不带错误文本；每个 job 每个仓库只提醒一次，直到该仓库推送再次成功）；以及 `human_gate_unasked`（polyforge#164 H11：`requires_human_answer: if_asked` 的人工关口——quick-fix grill——零问题完成，工作流照常继续，owner 收到一次提醒）。
+  - **决策事件**：有问题要回答/gate、失败、blocked、完成、被判死并已处理、候选已用尽；以及状态/来源类事件（C13 裁定，polyforge#150，与 `watcher/decision.go` 的事件类别表对齐）：`canceled`（终态）、`paused`（非终态，可继续）、`submit_rejected`、`submit_dropped`、`daemon_restarted`；以及 `carrier_push_failed`（polyforge#158：capsule 链推送成功而某任务仓库的 carrier ref 推送失败或被拒，resume 可能丢该仓库的提交；提醒行带经字符集过滤的仓库名，不带错误文本；每个 job 每个仓库只提醒一次，直到该仓库推送再次成功）；以及 `human_gate_unasked`（polyforge#164 H11：`requires_human_answer: if_asked` 的人工关口——autopilot grill——零问题完成，工作流照常继续，owner 收到一次提醒）。
 - **订阅关系与读取游标存于 daemon**（按 chat id），不存在 agent 可写的位置。
 - **重连 / daemon 重启后**：先以 `execution.json` 核对每个订阅 WI 的当前状态（权威），再按单调事件 id 补读事件——"WI 在 watch 不在时结束"也不会漏。
 - **提交后、监控尚未注册**：显示"排队 / 准备中"，不当作错误（#98/#101 注册竞态）。
@@ -205,7 +205,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 | 决策事件 | 唤醒 agent，**只给一句由 daemon 按固定模板生成的短话** | 是（少而短） |
 | 用户主动问进展 | agent 执行一次 `pf watch <wi> --once` | 仅此时 |
 
-**安全（r2 补，#135 落地前即生效）**
+**事故护栏（r2 补；#135 已冻结，这些约束就是现行机制）**
 - 唤醒语句**只用 daemon 生成的固定模板**（WI 编号、事件类型、问题 id），**不夹带任何 agent 可写的自由文本**——防止 step agent 借此对交互 agent 做提示注入。问题正文由人通过 `pf watch <wi> --once` 主动查看。
 - 唤醒语句固定附带一句："这是需要人做的决定，agent 不得代答"（#122 教训）。
 - 进展状态文件由 daemon 写在其数据目录，statusLine / 扩展通过 socket 读取，**不放在 agent 可写的路径**。
@@ -313,7 +313,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 5. **身份模型**：daemon id 存放迁移、`PF_CHAT_ID`、负责人、origin、通知路由。
 6. **恢复与重启其余 bug**（第 6 节 4、5、6、8）+ 坏任务置 blocked 后 `pf resume` 重新领取（原"待修复"原地续跑，此后已并入 blocked，见第6节） + 持久化排队队列（含重放规则）+ "继续"范围校验。
 7. **减法一、二档**（可与 2–6 并行）。
-8. 之后：权限隔离（#135）、按步骤选 harness、drain + 跨 daemon 通信（#84）。
+8. 之后：按步骤选 harness、drain + 跨 daemon 通信（#84）。（权限隔离 #135 已于 2026-10-14 冻结，不在计划内。）
 
 ## 10. 现有 WI 映射
 
@@ -322,10 +322,10 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 | #119 | 已取消（本文即其产出） |
 | #102 | 已取消（残留） |
 | #87、#88 | 被已失联的 `cli-opencode` 持有自 10-06；接管路径（`pf ops end-session <wi> --reason ...` + 任意 daemon 普通 `pf submit`）已落地，**现在可清理** |
-| #122 | 由 #137/#138/#135 与 3.2 的唤醒约束修复后复现验证关闭 |
+| #122 | 由 #137/#138 与 3.2 的唤醒约束修复后复现验证关闭 |
 | #139 | 由门禁删除分支解决（已落在集成分支） |
 | #136、#137、#138 | 归入第 9 节 1、7；集成分支已落：#137（步骤文本，`5f4fc3c`）、#138（driver 人工确认保证，`f00b398`）、#136 的 flush/stdio/`PF_AGENT_ROLE` 部分（`34fdf86`）；`agents/` 布局兼容未单独核对 |
-| #135 | 第 9 节 8；在其之前由 3.2 的安全约束兜底（见文末「已知缺口」(b)） |
+| #135 | **冻结**（owner 2026-10-14：团队内部使用，不做重型隔离）；3.2 的事故护栏与「已知缺口」(b) 的 UDS 拒绝即现行机制 |
 | #84 | 重要性上升：drain 与跨机器回答的前提；仍冻结，范围待改写 |
 | #120 | 已解冻 |
 | #130（执行 #126）、#134（执行 #133） | owner 已于 2026-10-12 暂停（paused，进度已推到 aihub）；重新领取 bug 已在集成分支修复（git-dir 隔离、克隆失败 DAEMON-516），**部署后**再 resume；#134 的 **epic/task 概念保留**（已定） |
@@ -374,6 +374,117 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 | 补登 | claim 幂等记录永不过期、无任何清理任务（缓存应答只含公开 fingerprint，永久保留无安全问题） | `02-aihub-core.md#§4.3`、`#§6.6` |
 
 其余审计条目（B*、C1–C4、C6–C10、C12、C14–C15、D3/D5–D7/D9/D11–D13/D15 等）属其他票（#144/#145/#146/#147 等），不在本票范围。
+
+---
+
+## 14. capsule 链与任务仓库保全（现行机制；2026-10-16 自 05 文档 7.5/7.6 节迁入） <!-- §14 -->
+
+`05-sync-revision-recovery.md` 的其余部分描述已删除的 Revision/CAS/SYNC 模型（已加归档横幅）；本节是 capsule 链规则、任务仓库
+carrier ref 与 WIP ref 这三项**现行**机制的唯一设计记录。§14.2、§14.3 逐字迁自原 `05-sync-revision-recovery.md#§7.5`、`05-sync-revision-recovery.md#§7.6`（仅按 2026-10-14 信任模型改写了
+理由句，交叉引用改为本节编号）；原处保留为历史副本，以本节为准。
+
+### 14.1 capsule 链规则 <!-- §14.1 -->
+
+- **一条 FF-only 链**：每个 WI 在 aihub 有一个裸仓库，capsule 的提交推到 `refs/heads/main`。aihub pre-receive hook（`internal/aihub/git/hook.go`）
+  强制：只能快进、不得删除 ref（`refs/pf-wip/*` 除外）、提交树中不得有 gitlink（`GIT-412`；daemon 在本地 commit 前预检同一规则并拒绝提交，`repos/`、`artifacts/release-*` 下的 gitlink 指引是恢复 capsule `.gitignore`，绝不删任务仓库的 `.git`）、blob ≤ 16 MiB（`capsule.MaxBlobBytes`）、
+  每个提交带 `Polyforge-Seq` trailer 且严格递增并接续旧 tip。
+- **seq 从 1 开始**：`gitops.CommitPush` 在每-WI git 锁内按 `rev-list --count HEAD + 1` 推导 trailer，**首个提交 seq = 1**（不是 0）；
+  推送失败不留下提交，重试得到同一个值。
+- **会话围栏**：推送经 aihub git 代理，Basic 口令必须是该 WI **当前活会话**的 secret（一次性 `GIT_ASKPASS` 传递，不进 argv）；被取代或已
+  结束的会话被拒（`GIT-401`）。推送另带 `--push-option=session-fingerprint=<fp>`，hook 比对代理按凭证推出的公开指纹（备份层）。
+- **异步推送的重试调度**（`observe/observe.go`、`observe/monitor.go`）：失败后每 10s 重试；连续 5 次失败或 30 分钟无成功推送发一次
+  `push_backpressure` 降级事件；同一错误连续 5 次即停止本轮重试（`reason=same_error`），直到下一个提交边界（`execution.json`
+  Version 前进）或一次成功推送重新武装。每次推送上界 60s（`protocol.PushTimeout`）。
+- **再认领 = 重新 clone**：blocked→`pf resume` 等再认领从 aihub 链 clone capsule，再按 §14.2 的 carrier ref 与 §14.3 的 WIP ref 恢复任务仓库；
+  已有发布进度的 WI clone 失败时拒绝本地初始化（`DAEMON-516`，否则会从第 1 步重跑）；由另一台 daemon 续跑 blocked WI 而 aihub 链头不等于
+  封存时记录的 head 时拒绝（`DAEMON-518`）。
+
+### 14.2 任务仓库 carrier ref（polyforge#108 / #158） <!-- §14.2 -->
+
+本节描述当前代码（v2 Go 执行驱动）。每次 capsule 发布，daemon 先推 capsule 链（`refs/heads/main`），
+再把每个任务仓库 `repos/<name>` 的本地 HEAD 推到该 WI 裸仓库的 carrier ref `refs/pf-task/<name>`（`gitops.pushTaskRefsLocked`）；
+blocked→resume 等重新认领从上游 clone 后按 carrier ref 恢复任务仓库（`runtime.restoreTaskRepoState`）。carrier 推送失败不回滚、
+不阻塞 capsule 链发布（D8）。
+
+- **blob 上限分两档**：aihub pre-receive hook 对 capsule 链沿用 16 MiB（`capsule.MaxBlobBytes`，env `GIT_PF_MAX_BLOB`），
+  对 `refs/pf-task/*` 用 100 MiB（`capsule.MaxTaskBlobBytes`，env `GIT_PF_MAX_TASK_BLOB`）。原因：任务仓库在 aihub 上最初为空，
+  首次 carrier 推送带上整个上游历史，上游历史里的大资源（例：skypilot 的 21 MB `streamlit_app.mp4`）不能让该仓库永远无法携带。
+  超过 100 MiB 的上游 blob 仍会被拒（"carrier 只存 WI 自己的提交"的根治方案未实施）。
+- **失败即决策**：carrier 推送因任何原因失败或被拒（超限、non-fast-forward 分叉、传输、下述仓库配置拒绝），除 stderr 日志外，
+  **仅当本次 capsule 链推送成功时** daemon 写 `carrier_push_failed` 事件（body：`repo`、`ref`、截断到约 2 KB 的 git 错误或拒绝原因）；
+  链推送也失败（aihub 不可达、会话被 fence）时不提醒，仍失败的 carrier 在下一次链推送成功的发布时提醒。watcher 把它归为人工决策，
+  提醒行为固定模板：
+  `[polyforge] <slug> carrier_push_failed <repo> — this task repo cannot be saved; a resume may lose its commits; this is a human decision, the agent must not answer it`。
+  仓库名经与 WI id 相同的字符集过滤；错误文本只在 `pf watch <wi> --once` 的事件里。每个 job 每个仓库只提醒一次，直到该仓库的 carrier
+  推送再次成功（状态挂在 runtime job 上的内存里：job 结束即消失，重新认领 = 新 job 会再提醒；daemon 重启后同样重新提醒一次）。
+  non-fast-forward 失败另外照旧发 `task_ref_diverged`。
+- **凭证安全：带凭证的推送从不在任务仓库里执行**（任务仓库由 agent 操作——按 2026-10-14 信任模型这是**防事故**：agent 可能在仓库里留下 credential helper、insteadOf、hook 等配置；git 没有忽略仓库本地配置的开关，
+  配置也可能在检查与推送之间变化，所以不做配置黑名单）。每个任务仓库：
+  1. 只读校验（不带凭证）：仓库必须完全自有其存储——`repos/<name>/.git` 是真实目录（Lstat：非 symlink、非 gitfile）；
+     不存在 `.git/commondir`；`.git/HEAD`、`.git/packed-refs`、`.git/refs` 及其下任何条目都不是 symlink；`.git/objects` 是真实目录，
+     其每个条目（`pack`、`info`、`??` 扇出目录）与 `objects/pack/` 的每个条目都不是 symlink；不存在 `objects/info/alternates`
+     与 `objects/info/http-alternates`。在仓库内执行 `git rev-parse --absolute-git-dir` 必须恰好等于该 `.git`；再读一次 HEAD：
+     `git rev-parse --verify -q HEAD^{commit}`（unborn = 无可携带，静默跳过）。仓库内的这两次读取另带 `-c safe.directory=<repo>`
+     （仓库属主与 daemon 不同时仍可读）。任一校验失败即拒绝并发 `carrier_push_failed`（原因写在事件里），不准备凭证。
+  2. 在任务仓库之外（WI 裸仓库目录旁，`pf-carrier-*` 临时目录）建一个 daemon 自有的临时裸仓库，`objects/info/alternates`
+     指向 `<repo>/.git/objects`，`update-ref refs/pf-carrier/tmp <sha>`；推送完即删除。
+  3. 从临时仓库推送：
+     `git --git-dir=<tmp> -c core.hooksPath=/dev/null -c core.fsmonitor=false -c credential.helper= -c http.proxy= -c protocol.allow=never -c protocol.<RemoteURL 的 scheme>.allow=always push --no-recurse-submodules [--push-option=session-fingerprint=<fp>] <RemoteURL> <sha>:refs/pf-task/<name>`。
+  carrier 通道上每一次 git 调用（校验与推送）用同一个环境：daemon 环境去掉全部 `GIT_*`，加 `GIT_CONFIG_NOSYSTEM=1`、
+  `GIT_CONFIG_GLOBAL=/dev/null`、`GIT_CEILING_DIRECTORIES=<解析 symlink 后的 repos 目录>`（校验与推送用同一个值）；推送另加一次性 askpass（`GIT_ASKPASS`、`GIT_TERMINAL_PROMPT=0`）。
+  于是任务仓库里的 `credential.helper`、`url.*.insteadOf`/`pushInsteadOf`、`remote.<url>.vcs`（remote helper）、
+  `push.recurseSubmodules`/`submodule.recurse` 与子模块自己的 origin、hooks 等都不参与推送。git 从 alternates 只读取对象数据，
+  不执行其中任何东西。carrier 通道的每次 git 调用都有超时（校验与临时仓库准备 1 分钟，推送 10 分钟，超时杀掉整个 git 进程组），
+  挂住的 hub 不会永久占住该 WI 的锁；daemon 启动时清理残留的 `pf-carrier-*` 临时仓库（与 askpass 清理相同）。
+  **残余**：上述无竞态的借用方式（commondir、symlink 的 refs/objects、alternates）一律拒绝；但对象读取与打包
+  仍以 daemon 的 uid 读 agent 可写的目录，校验到推送之间的窗口里被改写的仓库布局仍可能把别处的内容带进本 WI 的 carrier ref。
+  这只能是蓄意行为；按 2026-10-14 信任模型（团队内部使用，#135 冻结）不再追加防御——这一层是事故护栏，不是隔离边界。
+
+### 14.3 任务仓库未提交改动：WIP ref（polyforge#167） <!-- §14.3 -->
+
+carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改动。补充一条 WIP ref `refs/pf-wip/<name>`（`gitops.PushTaskWIP`）：
+
+- **何时写**：只在步骤进程已退出的关闭点——bounded-fail（blocked，SessionEnd 之前）、`stopOp` 收尾（failed / blocked 等非 wrapped）、
+  operator pause（`pauseOp`）、daemon 正常关停（杀掉 agent 树之后）。observe 的常规发布不写。
+  先按 §14.2 镜像每个仓库的 HEAD 到 `refs/pf-task/<name>`，再对每个仓库：有未提交改动（已跟踪修改、删除与未跟踪文件）→ 生成一个
+  WIP 提交（唯一父提交 = HEAD）并强推到 `refs/pf-wip/<name>`；干净或 wrapped 关闭 → 直接推 `:refs/pf-wip/<name>` 删除
+  （hub 上没有该 ref 时静默）。本次 WIP 生成/推送失败时**保留** hub 上较旧的 WIP ref：它只在父提交等于恢复后的 HEAD（即它被拍下时
+  的状态）时才会被应用，应用它总比什么都没有好；失败只记日志并发 `carrier_push_failed`（`ref` = WIP ref，`error` 注明 hub 上的
+  WIP 早于本次关闭；同样仅在链推送成功时、每 job 每 ref 一次），从不让关闭失败。
+  unborn HEAD 跳过。
+- **生成方式**：在 §14.2 的 `pf-carrier-*` 临时裸仓库里完成（alternates 借任务仓库对象），任务仓库只作 `--work-tree`，
+  index 用临时文件（`GIT_INDEX_FILE=<tmp>/pf-wip-index`）：`read-tree <HEAD>`、预扫描（见下）、`add -A --ignore-errors`、剔除、
+  `write-tree`（树与 HEAD 相同 =
+  干净）、`commit-tree <tree> -p <HEAD>`（作者/提交者 `polyforge-daemon`），再用 §14.2 同一条推送命令推 `+<wip>:refs/pf-wip/<name>`。
+  同样的 env 与 `-c` 标志、超时（`add -A` 用推送的 10 分钟）。不写任务仓库的 HEAD、分支、index、对象库，也不把它的配置当配置读——
+  git 读的是临时仓库的配置，所以仓库里定义的 clean filter、fsmonitor、hook 都不会运行。不用 `git stash create`：它在 agent
+  仓库里执行（读其配置、写其对象库），且不收未跟踪文件。
+- **快照是工作树原始字节**：不应用任何 clean/smudge filter 与属性驱动的转换（eol、`working-tree-encoding` 等）。因此属性声明
+  `filter=lfs` 或 `filter=git-crypt` 的已改动文件不进快照（其原始内容是 smudge 后的对象/明文）。
+- **忽略与属性来源**：工作树里的 `.gitignore` / `.gitattributes`（数据）照常生效；carrier env 丢掉的来源复制进临时仓库的
+  `info/exclude` / `info/attributes`：生效的 `core.excludesFile` / `core.attributesFile`（任务仓库自己配置里的值——只按文件读该键、
+  不跟 include；否则运维者的全局配置（含 `GIT_CONFIG_GLOBAL`）；否则 `$XDG_CONFIG_HOME/git/ignore|attributes`），再加仓库的
+  `.git/info/exclude` / `.git/info/attributes`。只读普通文件（非阻塞打开），每个上限 1 MiB。
+- **剔除并记录**（WIP 提交说明列出路径，并发 `task_wip_skipped` 事件：`repo`、`ref`、`skipped`），单个坏路径不再让整个快照丢失：
+  - 预扫描（`add` 之前，不读文件内容）：`ls-files -o --exclude-standard`（临时 exclude 生效，不进入被忽略目录）列出未跟踪路径——
+    嵌套 git 仓库显示为一个 `dir/` 条目（HEAD 记为子模块的不在其中；没有提交的嵌套仓库原本会让 `add -A` 整体失败）、超过 carrier
+    blob 上限（`capsule.MaxTaskBlobBytes`）的未跟踪文件、未跟踪总量超过同一上限时的最大文件，都写进 `info/exclude`；工作区大小超过
+    blob 上限的已跟踪文件设 `skip-worktree`，保持 HEAD 条目（大小与 HEAD 的 blob 不同时记录）。这些文件从不被哈希。
+  - `add -A --ignore-errors`：读不了的文件（root 拥有的构建产物、mode 000）跳过，退出码 1 视为部分成功，跳过的路径来自
+    `unable to index file` 行。
+  - `add` 之后兜底剔除：属性为 lfs/git-crypt filter 的改动文件；单个超过 blob 上限的；改动总量超过上限时先剔除最大的。
+  被剔除的已跟踪路径在快照里保持 HEAD 的内容（不会变成删除），未跟踪路径直接不收。
+- **关停**：每个 job 的快照分到剩余关停预算的一份（上限 2 分钟），作为 `gitops.Opts.Deadline`：carrier 通道每次 git 调用的超时都
+  截到该时刻，到点杀掉整个 git 进程组，不会有推送活过 daemon 进程；到点后剩下的仓库不再尝试，`carrier_push_failed` 写明
+  `deadline exceeded`（而不是误导的仓库布局拒绝原因）。
+- **hook**：`refs/pf-wip/*` 是草稿 ref，允许删除与 non-fast-forward；只检查新对象（`rev-list --objects <new> --not --all`）的
+  blob 上限，用 carrier 的 100 MiB；不做 seq / gitlink 检查。其余 ref 的规则不变（`refs/pf-task/*` 仍禁止删除与非快进）。
+- **恢复**（`runtime.restoreTaskWIP`，在 `restoreTaskRepoState` 之后，只对新 clone）：取 `refs/pf-wip/<name>`；若其唯一父提交等于
+  恢复后的 HEAD，把新 clone 的 `.git/index` 复制成临时 `GIT_INDEX_FILE`，由 git 执行 `read-tree -m -u <head> <wip>` 把改动写入
+  工作树（删除、mode、目录变 symlink 都由 git 处理，不跟随 symlink 走出工作树；没有手写的删除）——不提交、不移动 HEAD、
+  仓库 index 不变，改动以未暂存/未跟踪形式出现（原先暂存与否的区别不保留）。父提交不一致（carrier 已前进）或读取/应用失败 →
+  不应用，发 `task_wip_not_applied` 事件（`repo`、`ref`、`head`、`wip`、`wip_parent`、`reason`）。不阻塞认领。
+  应用后 WIP ref 保留，由下一个关闭点覆盖或删除；在那之前崩溃再认领会再次应用同一份（HEAD 未变时结果相同）。
 
 ---
 
@@ -441,8 +552,8 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 
 ## 附录 C：已知缺口（集成分支，2026-10-12）
 
-- **(a) bundle digest 描述与代码不一致**：01 §4.5 描述的是 RFC 8785 canonical-JSON bundle digest，但在线的 `Digest` 实现是"路径 + sha + 长度"拼接。**以代码为准**（`internal/common/workflow`，golden 向量在活测试中），01 §4.5 待更正。
-- **(b) 人工确认保证只约束诚实的 agent，直到 #135 落地**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证，但不可信的 step agent 仍可写 capsule，从而绕过。daemon 的 UDS 面（polyforge#122 起于 answer 路由，#164 并入；repo review 2026-10-16 V-1 扩到全部变更路由）按 UDS 对端 SO_PEERCRED pid 拒绝来自本 daemon step 进程树的一切非读请求（DAEMON-403）：对端、其祖先或其进程组 leader 带有 `PF_WI_ID` + `PF_DAEMON_ID=<本 daemon>` 标记即拒；取不到对端凭据也拒（fail closed）。拒绝面是一个包住整张路由表的中间件：`/jobs/{wi}/answer|claim|resume-blocked|resume-paused|pause|wrap`、`/ops/config`、`/shutdown`、`/chat/init`、`/chats/{id}/subscribe|unsubscribe|ack|heartbeat`；开放的只有读：`GET /status`、`/jobs/{wi}/watch`、`/chats/{id}/subscriptions`、`/chats/{id}/attention`。answer 路由保留其 #122 拒绝文案。残余：`setsid` 脱离进程组且清空环境的进程不在此检查内。真正的隔离仍是 #135（第 9 节 8）。（曾有的 abandon-repair 路由随 repair_pending 一并删除，此实例已不存在。）
+- **(a) bundle digest**：已不存在——digest 链随 polyforge#149 B9 删除，`internal/` 中没有 `Digest` / `FileEntry`；`internal/common/workflow` 只读 frontmatter 的模型候选字段。`01-workflow-skills.md#§4.5` 的 digest 描述已归档。
+- **(b) 人工确认保证是事故护栏，不是对抗性防御**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证；step agent 可写 capsule，蓄意绕过不在 2026-10-14 信任模型的防御范围内（#135 冻结）。daemon 的 UDS 面（polyforge#122 起于 answer 路由，#164 并入；repo review 2026-10-16 V-1 扩到全部变更路由）按 UDS 对端 SO_PEERCRED pid 拒绝来自本 daemon step 进程树的一切非读请求（DAEMON-403）：对端、其祖先或其进程组 leader 带有 `PF_WI_ID` + `PF_DAEMON_ID=<本 daemon>` 标记即拒；取不到对端凭据也拒（fail closed）。拒绝面是一个包住整张路由表的中间件：`/jobs/{wi}/answer|claim|resume-blocked|resume-paused|pause|wrap`、`/ops/config`、`/shutdown`、`/chat/init`、`/chats/{id}/subscribe|unsubscribe|ack|heartbeat`；开放的只有读：`GET /status`、`/jobs/{wi}/watch`、`/chats/{id}/subscriptions`、`/chats/{id}/attention`。answer 路由保留其 #122 拒绝文案。残余：`setsid` 脱离进程组且清空环境的进程不在此检查内——这只能是蓄意行为，按信任模型不再追加防御（#135 冻结）。（曾有的 abandon-repair 路由随 repair_pending 一并删除，此实例已不存在。）
 - **(c) `pf watch` 进展字段**：已随监督重写合入——daemon watch 路由从 `Observe.Progress(wi)` 填充命令、命令时长、最近文件、工具调用数（见附录 D）。
 
 ## 附录 D：监督替换落地对照（第 9 节步骤 2–3，分支 `v2/a-supervision`）
@@ -461,4 +572,5 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 - 事实集合多一条 `exec_committed{version}`：事件触发推送需要"driver 提交了新 Version"的提示，否则只能回到轮询 `execution.json`。
 - 事实/判定走 `supervise.Link`（进程内）；driver 与 supervisor 之外的"harness 海量输出"由翻译器直接折叠进每派发一份的 `Tracker`（只保留最新状态，不排队）。
 - `driver_stalled`：supervisor 同时向 driver 发判定，并经 `OBNeedsRecovery(reason=driver_stalled)` 交给恢复引擎——卡死的 driver 无法自己消费判定；恢复引擎杀树并重拉，计入连续恢复失败计数器。当前 driver 自身不做 git/推送（推送在 supervisor 的推送环里，受 60s 单次上界约束），所以该规则管的是"driver 在步骤之间的任何卡死"。
+- **终态关闭的封存推送**（repo review 2026-10-16 B-7）：workflow 以 completed / failed 结束时，关闭路径照常执行一次 seal 推送（`CommitPush`，干净树只是重推 HEAD），不再假设 driver 已推送（driver 不做 git，终态 `execution.json` 与 transcript 尾只经推送到达 hub）；最终推送重试后仍失败则关闭降级为 **blocked**（本地提交保留字节，hub 从未收到终态），而不是在缺终态的链上 `SessionEnd(wrapped|failed)`。
 - 前一次 transcript 作为"只读参考"仅在 capsule 里读得到时才附上（capsule 内的转录靠提交边界同步，进程刚死时可能还没有）；声明的 resume 路径不可读时，resume 退化为 fresh。

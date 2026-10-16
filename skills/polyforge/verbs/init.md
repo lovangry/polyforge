@@ -72,19 +72,19 @@ the user saying "init workspace".
    workspace's cli.toml section does not list, a step-entry key other
    than `models` — the retired `harness` key included — a top-level
    `models:` section (the pre-#169 shape), or a candidate that is not
-   `<harness>:<model>` refuses to load; YAML merge keys (`<<`) are
+   `<harness>:<model>[:<effort>]` refuses to load; YAML merge keys (`<<`) are
    refused — share a list with anchors, `models: &x [...]` /
    `{ models: *x }`):
 
    ```yaml
    # Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
-   # Every candidate is <harness>:<model>, harness pi or claude (polyforge#175)
+   # Every candidate is <harness>:<model>[:<effort>], harness pi or claude (polyforge#175, #176)
    steps:
      polyforge:                               # one entry per project of this workspace
        default: { models: ["pi:prov/model-a", "pi:prov/model-b"] }  # optional: steps without a list of their own
        fix: { models: ["pi:prov/model-c"] }   # optional: per step id (the step
                                               # with that id in every bundle)
-       review: { models: ["claude:claude-opus-5-5", "pi:prov/model-a"] }  # Claude Code first, pi as fallback
+       review: { models: ["claude:claude-opus-5-5:high", "pi:prov/model-a"] }  # Claude Code (effort high) first, pi as fallback
    ```
 
    Each candidate is `<harness>:<model>`: `pi:` or `claude:`, split on
@@ -94,6 +94,14 @@ the user saying "init workspace".
    onto a candidate of another harness starts a fresh session with the
    previous transcript as read-only reference. A step with no list (or
    an empty one) runs pi's own default model.
+
+   A candidate may end in a thinking effort (polyforge#176):
+   `<harness>:<model>:<effort>`, effort one of `off minimal low medium
+   high xhigh max`. Only a last segment that is one of those words is
+   the effort — `pi:ollama/llama3:8b` keeps `:8b` in the model id. pi
+   gets it as `--thinking <effort>` (all seven), claude as `--effort
+   <effort>` (`low`…`max`; `off`/`minimal` refuse). No effort: no flag,
+   the harness's own default.
 
    Precedence for a step of the claimed project: `pf submit --models`,
    then the yaml list keyed by its step id, then the workflow step's own
@@ -111,10 +119,23 @@ restart is involved; the daemon reads the yaml fresh before every claim.
 An invalid file refuses the claim (DAEMON-414) before it is made: the
 work item stays queued, so fix the file and resubmit.
 
+5. **Lay out the workspace**: `pf init <workspace-root>` (default: the
+   current directory) creates `scratch/` and writes the runtime-artifact
+   convention (polyforge#177) into CLAUDE.md as a layout section inside
+   the `polyforge:managed` block — appended to an existing block, or a
+   new block on top. Re-running it is safe: it only rewrites its own
+   section, never the human part. The convention: shared content goes to
+   aihub (a design → its work item's content while open, else a
+   `doc.design` memory; reviews / decisions / audits → `doc.review` /
+   `doc.decision` / `doc.audit` memories; experience → `experience.*` /
+   `fact.*`); locally only `.repo/`, `capsules/`, `.polyforge/`
+   (polyforge-generated only) and `scratch/` (disposable, reported by
+   `pf doctor` after 14 days).
+
 ## Verify
 
 ```
-pf doctor           # machine face: config + [workspace] mapping + connectivity + supervision + harness layout
+pf doctor           # machine face: config + [workspace] mapping + workspace layout + connectivity + supervision + harness layout
 cat <workspace>/.polyforge.yaml   # the model pins the daemon reads (if any)
 ```
 

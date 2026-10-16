@@ -868,3 +868,50 @@ func TestStartupDeathWithModelStderrAdvancesCandidate(t *testing.T) {
 		t.Fatalf("models %v, want a then b (a startup model fault advances the candidate)", m)
 	}
 }
+
+// repo review 2026-10-16 B-12: a pi step that wrote a MALFORMED envelope
+// and stayed alive is judged ended_without_result by the supervisor; the
+// defect must reach step_dead's evidence and the retry prompt, which must
+// not claim the agent wrote nothing.
+func TestEndedWithoutResultCarriesTheEnvelopeDefect(t *testing.T) {
+	env := newSupEnv(t, nil, chain("s", "a", "b"))
+	defect := errors.New(`driver: envelope outcome "done" is not in the closed set`)
+	env.sp.script = []fakeEntry{{hold: true, cancelErr: &EnvelopeDefectError{Defect: defect, Cause: context.Canceled}}, done(`{"ok":true}`)}
+	go func() {
+		waitForSpawns(env, 1)
+		env.link.Verdict(supervise.StepDead{Step: "s", SpawnN: 1, Cause: supervise.CauseEndedWithoutResult, Evidence: "turn ended ok"})
+	}()
+	if err := env.d.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	dead := env.log.byKind("step_dead")
+	if len(dead) != 1 || !strings.Contains(fmt.Sprint(dead[0].body["evidence"]), "closed set") {
+		t.Fatalf("step_dead evidence must name the defect: %+v", dead)
+	}
+	retry := env.sp.spawnAt(1)
+	if !strings.Contains(retry.PriorRejection, "closed set") || retry.PriorEndedWithoutResult {
+		t.Fatalf("the retry must name the defect, not claim no envelope: %+v", retry)
+	}
+}
+
+// B-12, the stepRun half: a Wait cut short while the drop path holds an
+// unusable envelope reports the defect (and still unwraps to ctx's error).
+func TestStepRunWaitCancelSurfacesEnvelopeDefect(t *testing.T) {
+	ad, _, capDir := spawnEnv(t)
+	writeCapsuleFile(t, capDir, "artifacts/fix-summary.md", "s")
+	run, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 9})
+	if err != nil {
+		t.Fatalf("SpawnStep: %v", err)
+	}
+	writeCapsuleFile(t, capDir, "runtime-state/pending-results/9.json", `{"outcome":"done"}`)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+	_, werr := run.Wait(ctx)
+	var ed *EnvelopeDefectError
+	if !errors.As(werr, &ed) || !errors.Is(werr, context.Canceled) {
+		t.Fatalf("canceled Wait over a defective drop: %v", werr)
+	}
+}

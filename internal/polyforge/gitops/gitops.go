@@ -145,6 +145,32 @@ func (o Opts) Env() []string {
 	)
 }
 
+// hubEnv is the environment of every chain-lane git call that talks to
+// the hub with the session credential (the chain push, the capsule
+// clone, the carrier ls-remote/fetch): the daemon's environment minus
+// every inherited GIT_* variable and with no system or global config —
+// the carrier lane's rule (carrierEnv). An operator's ~/.gitconfig must
+// not reroute the credentialed push (url.*.insteadOf) nor hand the
+// session secret to a credential helper that stores it (repo review
+// 2026-10-16 V-5). bindRepo adds the capsule's external git-dir binding;
+// additions (the askpass pair) come last.
+func hubEnv(o Opts, bindRepo bool, additions []string) []string {
+	env := make([]string, 0, len(os.Environ())+4+len(additions))
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GIT_") {
+			env = append(env, kv)
+		}
+	}
+	env = append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
+		// a stalled HTTP transfer (below 1 KB/s for 60 s) aborts long
+		// before chainRemoteTimeout — the task-repo lane's values
+		"GIT_HTTP_LOW_SPEED_LIMIT=1000", "GIT_HTTP_LOW_SPEED_TIME=60")
+	if bindRepo {
+		env = append(env, "GIT_DIR="+o.GitDir, "GIT_WORK_TREE="+o.CapsuleDir)
+	}
+	return append(env, additions...)
+}
+
 // CEnv returns env (nil = inherited environ) pinned to the C locale:
 // LC_ALL=C and no LANGUAGE, so git's messages are never translated and
 // the output this package pattern-matches stays stable.
@@ -271,8 +297,11 @@ func IsLocalGitlink(err error) bool {
 // the next healthy CommitPush re-stages it) and answers the typed
 // GIT-412 LOCAL_GITLINK_DETECTED refusal (an *api.Error, so observe's
 // IsLocalGitlink classification sees the code + sentinel pair): the
-// error names the polluted paths and the cleanup recipe (delete the
-// nested .git, git rm --cached) so the operator can act on it. Repos
+// error names the polluted paths and the cleanup recipe (gitlinkRemedy:
+// under repos/ restore the capsule .gitignore and never delete the task
+// repo's .git; elsewhere move the embedded repository out or ignore it,
+// deleting its .git only if its history is disposable) so the operator
+// can act on it. Repos
 // under the capsule's ignored trees (repos/, artifacts/release-*/)
 // never reach the index, so ANY staged gitlink is poison by definition.
 func checkLocalGitlink(env []string, dir string) error {
@@ -301,10 +330,26 @@ func checkLocalGitlink(env []string, dir string) error {
 	detail := localGitlinkPrefix + ": staged gitlink (mode 160000) at " +
 		strings.Join(paths, ", ") +
 		" — an embedded git repository would poison the capsule chain (aihub's pre-receive rejects mode 160000 on every push, forever). " +
-		"No commit was created. Clean it: delete the embedded repository's .git directory (" +
-		filepath.Join(paths[0], ".git") + "), then `git rm --cached " + paths[0] + "`, then retry; " +
-		"verify with `git ls-files --stage | grep ^160000` (must be empty)."
+		"No commit was created. " + gitlinkRemedy(paths[0])
 	return &api.Error{Code: api.ErrGitGitlink, Detail: detail}
+}
+
+// gitlinkRemedy is the cleanup recipe of a GIT-412 refusal for path. A
+// path under an ignored capsule tree (a task repo under repos/) only
+// reaches the index when the capsule .gitignore lost its line: the fix
+// is restoring it — deleting that repository's .git would destroy the
+// task repo's history (repo review 2026-10-16 B-25/V-13). Anywhere
+// else the embedded repository is agent residue.
+func gitlinkRemedy(path string) string {
+	if strings.HasPrefix(path, "repos/") || strings.HasPrefix(path, "artifacts/release-") {
+		return "The capsule .gitignore no longer ignores " + path + ": restore it (it must contain " +
+			strings.ReplaceAll(strings.TrimSpace(capsule.GitignoreContent), "\n", " and ") +
+			") and retry. Do NOT delete " + filepath.Join(path, ".git") + " — that destroys the task repo's history."
+	}
+	return "Clean it: move the embedded repository out of the capsule (or add " + path + " to the capsule .gitignore); " +
+		"if, and only if, its history is disposable, delete its .git directory (" + filepath.Join(path, ".git") + ") instead. " +
+		"Then `git rm --cached " + path + "` if it is still staged, and retry; " +
+		"verify with `git ls-files --stage | grep ^160000` (must be empty)."
 }
 
 // PushTimings carries the wall-clock durations of the underlying git
@@ -382,7 +427,7 @@ func CommitPush(o Opts, message string) (string, bool, PushTimings, error) {
 			_, _ = git(env, o.CapsuleDir, "reset", "-q")
 			return "", false, timings, &api.Error{
 				Code:   api.ErrGitGitlink,
-				Detail: localGitlinkPrefix + ": embedded git repository without a commit checked out — " + err.Error() + ". No commit was created. Clean it: delete the embedded repository's .git directory, then retry.",
+				Detail: localGitlinkPrefix + ": embedded git repository without a commit checked out — " + err.Error() + ". No commit was created. Clean it: move the embedded repository out of the capsule (or add it to the capsule .gitignore; under repos/ the capsule .gitignore lost its /repos/ line — restore it, never delete a task repo's .git), then retry.",
 			}
 		}
 		return "", false, timings, err
@@ -580,7 +625,7 @@ func pushLocked(o Opts) (bool, int64, error) {
 		return false, 0, err
 	}
 	defer cleanup()
-	env := append(o.Env(), additions...)
+	env := hubEnv(o, true, additions)
 	pushed, pushMS, perr := pushChainLocked(env, o.CapsuleDir, args)
 	// Task-repo durability lane: after the chain push either way, its
 	// own invocations, its own failures — never the chain's result. A
@@ -599,7 +644,7 @@ func pushLocked(o Opts) (bool, int64, error) {
 func pushChainLocked(env []string, capsuleDir string, args []string) (bool, int64, error) {
 	for attempt := 1; ; attempt++ {
 		pushStart := time.Now()
-		out, perr := git(env, capsuleDir, args...)
+		out, perr := gitTimed(chainRemoteTimeout, env, capsuleDir, args...)
 		pushMS := time.Since(pushStart).Milliseconds()
 		if perr == nil {
 			return true, pushMS, nil
@@ -758,6 +803,15 @@ var (
 	carrierCheckTimeout = time.Minute
 	carrierPushTimeout  = 10 * time.Minute
 )
+
+// chainRemoteTimeout bounds every git call of the chain lane that talks
+// to the hub — the chain push, the capsule clone, the carrier ls-remote
+// and fetch (repo review 2026-10-16 B-15). Each runs under the per-WI
+// lock; unbounded, a hung remote held the lock forever (observe abandons
+// a timed-out push goroutine that still holds it, and the shutdown's WIP
+// snapshot then blocked on Lock). On expiry the git process group is
+// killed, like the carrier lane's calls.
+var chainRemoteTimeout = 10 * time.Minute
 
 // carrierFlags lead every git call on the carrier lane: no hooks, no
 // fsmonitor (both would run programs), no credential helper (an empty
@@ -948,7 +1002,16 @@ func carrierPush(o Opts, env []string, tmp, refspec string, credAdditions []stri
 		args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
 	}
 	args = append(args, o.RemoteURL, refspec)
-	return gitTimed(o.bound(carrierPushTimeout), append(env, credAdditions...), tmp, args...)
+	// The same ref-transaction CAS retry as the chain push (#46, repo
+	// review 2026-10-16 B-17): an overlapping push of the same ref is a
+	// duplicate publish, not a carrier failure worth a human decision.
+	for attempt := 1; ; attempt++ {
+		out, err := gitTimed(o.bound(carrierPushTimeout), append(env, credAdditions...), tmp, args...)
+		if err == nil || !refCasRejected(out+": "+err.Error()) || attempt >= pushRaceAttempts || o.expired() {
+			return out, err
+		}
+		time.Sleep(pushRaceBackoff)
+	}
 }
 
 // carrierFailed raises carrier_push_failed for repo — only when the
@@ -1016,16 +1079,16 @@ func fetchCarrierRef(o Opts, dir, ref string) (string, error) {
 		return "", err
 	}
 	defer cleanup()
-	env := append(os.Environ(), additions...)
+	env := hubEnv(o, false, additions)
 	// ls-remote --exit-code answers 2 when no ref matches: the
 	// language-independent "no carrier yet" signal (never git's message).
-	if _, err := git(env, dir, "ls-remote", "--exit-code", o.RemoteURL, ref); err != nil {
+	if _, err := gitTimed(o.bound(chainRemoteTimeout), env, dir, "ls-remote", "--exit-code", o.RemoteURL, ref); err != nil {
 		if exitCode(err) == 2 {
 			return "", nil // no carrier recorded yet: first claim, nothing to restore
 		}
 		return "", err
 	}
-	if _, err := git(env, dir, "fetch", "--quiet", "--no-tags", o.RemoteURL, ref); err != nil {
+	if _, err := gitTimed(o.bound(chainRemoteTimeout), env, dir, "fetch", "--quiet", "--no-tags", o.RemoteURL, ref); err != nil {
 		return "", err
 	}
 	out, err := git(env, dir, "rev-parse", "FETCH_HEAD")
@@ -1065,8 +1128,8 @@ func Clone(o Opts) error {
 		return err
 	}
 	defer cleanup()
-	env := append(os.Environ(), additions...)
-	_, err = git(env, "", "clone", o.RemoteURL, o.CapsuleDir)
+	env := hubEnv(o, false, additions)
+	_, err = gitTimed(chainRemoteTimeout, env, "", "clone", o.RemoteURL, o.CapsuleDir)
 	return err
 }
 

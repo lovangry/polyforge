@@ -55,7 +55,7 @@ var eventRules = map[string]Rule{
 	// (polyforge#158). The daemon raises it once per repo per job until a
 	// carrier push of that repo succeeds again.
 	"carrier_push_failed": {Class: "carrier_push_failed", Phrase: "this task repo cannot be saved; a resume may lose its commits", NamesRepo: true},
-	// a requires_human_answer: if_asked checkpoint (quick-fix grill)
+	// a requires_human_answer: if_asked checkpoint (autopilot grill)
 	// completed without asking a human anything (polyforge#164 H11): the
 	// lane ran on, the owner is told the checkpoint was not exercised.
 	"human_gate_unasked": {Class: "human_gate_unasked", Phrase: "a human checkpoint passed with zero questions asked"},
@@ -188,6 +188,12 @@ func Evaluate(sub protocol.ChatSub, snap *protocol.WatchSnapshot) Result {
 	}
 	cur := map[string]bool{}
 	fire := func(key string, r Rule) {
+		if cur[key] {
+			// execution.json and the hub status can name the same class
+			// (completed+wrapped, failed_gate+failed, blocked+blocked):
+			// one decision per poll (repo review 2026-10-16 B-9).
+			return
+		}
 		cur[key] = true
 		if !have[key] {
 			res.Decisions = append(res.Decisions, Decision{WI: snap.WorkItem, Slug: snap.Slug, Class: r.Class, Phrase: r.Phrase, Key: key})

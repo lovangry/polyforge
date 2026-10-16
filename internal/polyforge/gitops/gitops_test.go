@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -858,5 +859,123 @@ func TestCrossDeviceMoveFallback(t *testing.T) {
 	}
 	if _, serr := os.Stat(filepath.Join(src, "HEAD")); !os.IsNotExist(serr) {
 		t.Fatal("the source must be gone after the move")
+	}
+}
+
+// repo review 2026-10-16 B-15: the chain push runs under the per-WI lock
+// and must be bounded — a hung remote (here: a pre-receive hook that
+// never returns) fails the push after chainRemoteTimeout, its process
+// group killed, instead of holding the lock forever.
+func TestChainPushIsBounded(t *testing.T) {
+	setIdentity(t)
+	o, barePath := testOpts(t, "wi_hang")
+	mkBare(t, barePath, false)
+	marker := filepath.Join(t.TempDir(), "hook-alive")
+	hook := "#!/bin/sh\necho $$ > " + marker + "\nexec sleep 300\n"
+	if err := os.WriteFile(filepath.Join(barePath, "hooks", "pre-receive"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mkCapsule(t, o)
+	writeDirty(t, o, "f.txt", "x\n")
+	old := chainRemoteTimeout
+	chainRemoteTimeout = time.Second
+	defer func() { chainRemoteTimeout = old }()
+	start := time.Now()
+	_, pushed, _, err := CommitPush(o, "observe: hang")
+	if err == nil || pushed {
+		t.Fatalf("a hung remote must fail the push: pushed=%v err=%v", pushed, err)
+	}
+	if took := time.Since(start); took > 20*time.Second {
+		t.Fatalf("push took %s: not bounded", took)
+	}
+	// the lock is free again
+	done := make(chan struct{})
+	go func() { Lock(o.WorkItemID)(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the per-WI lock is still held after the bounded push")
+	}
+	raw, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("the hook never ran: %v", err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	deadline := time.Now().Add(5 * time.Second)
+	for pid > 0 && syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("the hook's sleeper %d survived the push timeout", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// repo review 2026-10-16 B-17: a carrier/WIP push that loses the same
+// ref-transaction CAS race the chain push retries is retried too, not
+// raised as carrier_push_failed.
+func TestCarrierPushRetriesRefCasRejection(t *testing.T) {
+	old := gitTimed
+	defer func() { gitTimed = old }()
+	calls := 0
+	gitTimed = func(_ time.Duration, _ []string, _ string, args ...string) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", errors.New("error: cannot lock ref 'refs/pf-task/r': is at 1 but expected 2\n ! [remote rejected] HEAD -> refs/pf-task/r (failed to update ref)")
+		}
+		return "", nil
+	}
+	if _, err := carrierPush(Opts{RemoteURL: "/x.git"}, nil, t.TempDir(), "a:refs/pf-task/r", nil); err != nil || calls != 2 {
+		t.Fatalf("carrierPush = %v after %d calls, want success on the retry", err, calls)
+	}
+	calls = 0
+	gitTimed = func(_ time.Duration, _ []string, _ string, args ...string) (string, error) {
+		calls++
+		return "", errors.New("fatal: unreachable")
+	}
+	if _, err := carrierPush(Opts{RemoteURL: "/x.git"}, nil, t.TempDir(), "a:refs/pf-task/r", nil); err == nil || calls != 1 {
+		t.Fatalf("a non-CAS failure must not be retried: err=%v calls=%d", err, calls)
+	}
+}
+
+// repo review 2026-10-16 V-5: the operator's global git config must not
+// reroute the credentialed chain push (url.*.insteadOf) — it reads no
+// system/global config, like the carrier lane.
+func TestChainPushIgnoresGlobalGitConfig(t *testing.T) {
+	setIdentity(t)
+	o, barePath := testOpts(t, "wi_insteadof")
+	bare := mkBare(t, barePath, true)
+	decoy := filepath.Join(t.TempDir(), "decoy.git")
+	mkBare(t, decoy, false)
+	cfg := "[url \"" + decoy + "\"]\n\tinsteadOf = " + barePath + "\n"
+	gc := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(gc, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", gc) // the operator's global config
+	mkCapsule(t, o)
+	writeDirty(t, o, "f.txt", "x\n")
+	if _, pushed, _, err := CommitPush(o, "observe: v1"); err != nil || !pushed {
+		t.Fatalf("CommitPush: pushed=%v err=%v", pushed, err)
+	}
+	if got := bare.tipSeq(t); got < 1 {
+		t.Fatalf("the real hub repo did not receive the push (tip seq %d)", got)
+	}
+	if out, err := run("git", "--git-dir", decoy, "rev-parse", "-q", "--verify", "refs/heads/main"); err == nil {
+		t.Fatalf("the push was rerouted to the decoy by ~/.gitconfig: %s", out)
+	}
+}
+
+// hub transfers abort on a stalled HTTP transfer (review nit on V-5).
+func TestHubEnvBoundsStalledTransfers(t *testing.T) {
+	t.Setenv("GIT_HTTP_LOW_SPEED_LIMIT", "1")
+	env := strings.Join(hubEnv(Opts{}, false, nil), "\n") + "\n"
+	for _, want := range []string{"GIT_HTTP_LOW_SPEED_LIMIT=1000\n", "GIT_HTTP_LOW_SPEED_TIME=60\n", "GIT_CONFIG_GLOBAL=/dev/null\n"} {
+		if !strings.Contains(env, want) {
+			t.Fatalf("hubEnv lacks %q", want)
+		}
+	}
+	if strings.Contains(env, "GIT_HTTP_LOW_SPEED_LIMIT=1\n") {
+		t.Fatal("an inherited GIT_* value must not survive")
 	}
 }

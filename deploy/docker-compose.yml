@@ -10,8 +10,9 @@ services:
     # container recreate must not silently fall back to an older image. Production pins the literal tag
     # (polyforge/aihub:<tag>); here it comes from the environment.
     image: polyforge/aihub:${AIHUB_TAG:?set AIHUB_TAG to a built tag}
-    # drain window for in-flight HTTP on stop (aihub waits up to 10s itself)
-    stop_grace_period: 5s
+    # SIGKILL deadline on stop: longer than aihub's own drain (it waits up to
+    # 10s for in-flight HTTP after SIGTERM), so the drain always completes
+    stop_grace_period: 15s
     container_name: aihub
     ports: ["8080:8080"]
     volumes: ["/data/aihub:/data"]

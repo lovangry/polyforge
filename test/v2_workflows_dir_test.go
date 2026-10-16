@@ -7,7 +7,7 @@ package test
 // no question) can never satisfy. Scenarios that are not about the gate
 // therefore run a copy with that one frontmatter flag stripped (both its
 // `true` and its `if_asked` form); scenarios that are
-// (TestV2HumanGateGuaranteeEndToEnd) set inst.gateQuickFixGrill. The
+// (TestV2HumanGateGuaranteeEndToEnd) set inst.gateAutopilotGrill. The
 // step definitions' `output:` schemas stay: the driver validates in
 // record-only mode (polyforge#164 H3), so the fake harness's placeholder
 // outputs are recorded as output_schema_violation events, never refused.
@@ -38,7 +38,7 @@ func (u *v1Install) workflowsPath() string {
 	shipped := filepath.Join(u.root, "workflows")
 	if u.strippedWF == "" {
 		u.strippedWF = copyWorkflowsDir(u.t, shipped, !u.keepDeliver)
-		if u.gateQuickFixGrill {
+		if u.gateAutopilotGrill {
 			addGrillHumanGate(u.t, u.strippedWF)
 		}
 		if u.stripWallBudgets {
@@ -48,19 +48,19 @@ func (u *v1Install) workflowsPath() string {
 	return u.strippedWF
 }
 
-// addGrillHumanGate declares requires_human_answer on the quick-fix grill
+// addGrillHumanGate declares requires_human_answer on the autopilot grill
 // of an already-copied workflows tree (the flag the shipped bundle no
 // longer carries there), for the human-gate end-to-end scenario.
 func addGrillHumanGate(t testing.TB, dir string) {
 	t.Helper()
-	p := filepath.Join(dir, "quick-fix", "workflow.md")
+	p := filepath.Join(dir, "autopilot", "workflow.md")
 	raw, err := os.ReadFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := strings.Replace(string(raw), "{ id: grill, context_policy: fresh, handoff: true", "{ id: grill, context_policy: fresh, handoff: true, requires_human_answer: true", 1)
 	if out == string(raw) {
-		t.Fatal("quick-fix grill line not found for the human-gate copy")
+		t.Fatal("autopilot grill line not found for the human-gate copy")
 	}
 	if err := os.WriteFile(p, []byte(out), 0o644); err != nil {
 		t.Fatal(err)

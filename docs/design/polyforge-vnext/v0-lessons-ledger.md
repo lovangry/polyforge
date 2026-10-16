@@ -276,7 +276,11 @@ F22 毒链本地预检 + 同错误重试上限（PILOT-V8 否决门槛的修复�
     `git ls-files --stage`，出现 mode 160000 条目即类型化错误
     `GIT-412 LOCAL_GITLINK_DETECTED`（不产生 commit——毒链根本进不了
     本地历史，#48 事故的「毒 commit 已产生只能反复推」形状从源头消
-    除；错误信息给出污染路径与清除指引：删嵌套 .git + `git rm --cached`；
+    除；错误信息给出污染路径与清除指引〔2026-10-16 更正，repo review B-25/V-13：清除指引**绝不**让人删任务仓库的
+    .git——`repos/` 或 `artifacts/release-*` 下出现 gitlink 只说明 capsule `.gitignore` 丢了对应行，指引是恢复
+    `.gitignore` 后重试，并明言不要删该 `.git`（那会毁掉任务仓库历史，含未推送工作）；其他位置的嵌套仓库是
+    agent 残留，指引是把它移出 capsule 或写进 capsule `.gitignore`，仅当其历史可丢弃时才删其 `.git`，
+    再 `git rm --cached` 并以 `git ls-files --stage | grep ^160000` 为空验证〕；
     嵌套 .git 无 commit 时 add 直接失败的同型错误同样归类）；observe
     的 push 路径把它归类为新事件 `push_poisoned_local`（与 push_failed
     分开——本地预检拒绝的是「从未合法存在的 commit」，不是「已发生的

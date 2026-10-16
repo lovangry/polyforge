@@ -157,7 +157,7 @@ func stepAttempts(x *execSnapshot, id string) string {
 }
 
 // newWIWithBundle files one execution ticket on an arbitrary bundle
-// (newWI hardcodes quick-fix) and scripts its agent with the plan.
+// (newWI hardcodes autopilot) and scripts its agent with the plan.
 func newWIWithBundle(t *testing.T, inst *v1Install, goal, bundle string, actions []map[string]any) string {
 	t.Helper()
 	raw, err := inst.client.CreateWorkItem(aihubclient.CreateWorkItemRequest{

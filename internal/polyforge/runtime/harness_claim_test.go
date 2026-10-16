@@ -178,3 +178,77 @@ func TestLegacyClaudeStepWithoutListHasNoChain(t *testing.T) {
 		t.Fatalf("review gained a list: %v", got)
 	}
 }
+
+// polyforge#176: `<harness>:<model>[:<effort>]` on the claim path — an
+// effort chain rides the job snapshot verbatim (canonical form), and an
+// effort a harness does not accept refuses before the claim from the
+// yaml (DAEMON-414 naming the path) and from the bundle.
+func TestClaimEffortChainRidesTheJob(t *testing.T) {
+	hub := newFakeHub()
+	r, ws, _ := newWorkspaceTestRuntime(t, hub, "proj")
+	r.cfg.WorkflowsDir = frontmatterBundle(t, w079Frontmatter)
+	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [\"claude:claude-opus-5-5 : high\", pi:ollama/llama3:8b, pi:ollama/llama3:8b:low] }\n")
+	if err := r.Start(context.Background(), "wi_h176comp"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	j := r.jobOf("wi_h176comp")
+	if j == nil {
+		t.Fatal("the claim must run to a live agent")
+	}
+	j.mu.Lock()
+	got := j.stepCandidates["fix"]
+	j.mu.Unlock()
+	if want := []string{"claude:claude-opus-5-5:high", "pi:ollama/llama3:8b", "pi:ollama/llama3:8b:low"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("fix candidates %v, want %v", got, want)
+	}
+	if err := r.Stop(context.Background(), "wi_h176comp", protocol.FinishWrapped); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
+func TestEffortRefusesBeforeClaim(t *testing.T) {
+	cases := map[string]struct{ yaml, bundle, want string }{
+		"yaml claude off": {yaml: "steps:\n  proj:\n    fix: { models: [pi:prov/flash, claude:claude-opus-5-5:off] }\n",
+			want: `steps.proj.fix.models[1]: "claude:claude-opus-5-5:off": effort "off" is not accepted by claude (it accepts low|medium|high|xhigh|max)`},
+		"yaml two efforts": {yaml: "steps:\n  proj:\n    default: { models: [pi:prov/flash:high:low] }\n", want: "names two efforts"},
+		"bundle claude minimal": {bundle: strings.Replace(w079Frontmatter, "[pi:prov/flash, pi:prov/glm]", "[pi:prov/flash, claude:claude-opus-5-5:minimal]", 1),
+			want: `step fix: model_candidates[1]: "claude:claude-opus-5-5:minimal": effort "minimal" is not accepted by claude`},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			hub := newFakeHub()
+			r, ws, sp := newWorkspaceTestRuntime(t, hub, "proj")
+			fm := w079Frontmatter
+			if c.bundle != "" {
+				fm = c.bundle
+				bundle := "demo-bundle"
+				hub.items = map[string]*api.WorkItem{"wi_h176bad": {ID: "wi_h176bad", ProjectName: "proj", BundleName: &bundle}}
+			}
+			r.cfg.WorkflowsDir = frontmatterBundle(t, fm)
+			if c.yaml != "" {
+				writeWorkspaceYaml(t, ws, c.yaml)
+			}
+			err := r.Start(context.Background(), "wi_h176bad")
+			ae, ok := err.(*api.Error)
+			if !ok || ae.Code != api.ErrDaemonWorkspaceYaml || !strings.Contains(ae.Detail, c.want) {
+				t.Fatalf("expected DAEMON-414 naming %q, got %v", c.want, err)
+			}
+			if n := hub.claimCount(); n != 0 || sp.callCount() != 0 {
+				t.Fatalf("refused AFTER a claim (%d claim calls, %d agents)", n, sp.callCount())
+			}
+		})
+	}
+}
+
+// A recorded harness-prefixed candidate the current rules refuse is not
+// mistaken for a pre-#175 bare id: it rehydrates unchanged (the driver
+// then refuses it by name) rather than being re-prefixed.
+func TestLegacyRehydrateKeepsRefusedPrefixedCandidate(t *testing.T) {
+	var rec jobRecord
+	if err := json.Unmarshal([]byte(`{"work_item_id":"wi_e","step_candidates":{"fix":["claude:m:off","pi:a/b:high"]}}`), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if got := jobFromRecord(&rec).stepCandidates["fix"]; !reflect.DeepEqual(got, []string{"claude:m:off", "pi:a/b:high"}) {
+		t.Fatalf("rehydrate %v", got)
+	}
+}

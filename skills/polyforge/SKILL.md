@@ -1,6 +1,6 @@
 ---
 name: polyforge
-description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of the 13 routing verbs (file, queue, cancel, recall, remember, memory, submit, watch, answer, pause, resume, wrap, ops) plus the machine verbs doctor, init and help, each carried by a fragment under verbs/ (`pf watch` is the progress verb: snapshot, resident watcher, subscriptions; `pf chat` carries the chat identity); data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
+description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of the 13 routing verbs (file, queue, cancel, recall, remember, memory, submit, watch, answer, pause, resume, wrap, ops) plus the machine verbs doctor and help and the init fragment (install / upgrade routing to tools/install.sh, plus `pf init` for a workspace's local layout), each carried by a fragment under verbs/ (`pf watch` is the progress verb: snapshot, resident watcher, subscriptions; `pf chat` carries the chat identity); data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
 license: proprietary
 compatibility:
   harnesses: [pi, claude]
@@ -23,7 +23,7 @@ Nothing else. The split between the target faces is fixed (the architecture's ro
   domain socket** (default `/run/polyforge.sock`); the daemon translates each
   route into its Runtime (lifecycle) and Observe (supervision) modules.
 - **Delivery** is not a verb: the delivery lanes (`feature-full`, `bug-fix`,
-  `quick-fix`, `chore`) end with a `deliver` workflow step that pushes the
+  `autopilot`, `chore`) end with a `deliver` workflow step that pushes the
   feature branch and opens the PR. There is no `pf ship`; see `verbs/ship.md`.
 
 Direct connection does not bypass any permission boundary: the `pf` CLI passes
@@ -106,7 +106,7 @@ verb: delivery is the workflow's own final `deliver` step (`verbs/ship.md`) — 
 `--bundle release` (the project-agnostic release bundle: release, then an independent verify,
 then deploy). Put any bump keyword the user named (`major`/`minor`/`patch`) verbatim in `--goal`;
 otherwise name none and let the repo's procedure default. Never file a release on a delivery
-bundle (`feature-full`, `bug-fix`, `quick-fix`, `chore` have no release step), and never run a
+bundle (`feature-full`, `bug-fix`, `autopilot`, `chore` have no release step), and never run a
 release or deploy procedure from this skill directly.
 
 ## Human coordination: `pf watch` (subscription = adoption)
@@ -216,6 +216,16 @@ Five standing rules, binding on every polyforge session:
    files in a polyforge workspace. Keep memory and repo references
    separate: no memory ids in repo docs, no repo paths inside memories;
    attribute memories with the `--work-item` flag, never prose.
+   **Workspace layout (polyforge#177):** anything meant to be shared goes
+   to aihub — a design into its work item's content while the work item
+   is open (`pf file edit <wi> --content @f`), else a `doc.design`
+   memory with `--work-item`; a review / decision sheet / audit into a
+   `doc.review` / `doc.decision` / `doc.audit` memory; experience into
+   `experience.*` / `fact.*`. Locally a workspace holds only `.repo/`
+   (clones), `capsules/` (daemon-managed), `.polyforge/`
+   (polyforge-generated only) and `scratch/` (disposable output; `pf
+   doctor` reports entries older than 14 days, `--prune-scratch` removes
+   them). Never write documents into the workspace root or `.polyforge/`.
 3. **Blockers become work items.** Root-cause obstacles instead of
    routing around them; an obstacle that is a bug or unresolvable here
    is tracked as a work item via `pf file`.
@@ -227,11 +237,15 @@ Five standing rules, binding on every polyforge session:
    `steps`: per project, a `default` entry and/or entries keyed by step id
    (`fix`, `code`, `review`, ... — a key must be a step id of the
    installed workflows), each `{ models: [...] }` (`models` is the only
-   key). Every candidate is `<harness>:<model>` — `pi:` or `claude:`
-   (Claude Code, run as `claude -p --bare`, logged in by a human
-   beforehand), split on the first `:` — e.g.
-   `[claude:claude-opus-5-5, pi:sub2api-glm/glm-5.3]`. The prefix is
-   mandatory and is the whole truth (no inference from the id, no
+   key). Every candidate is `<harness>:<model>[:<effort>]` — `pi:` or
+   `claude:` (Claude Code, run as `claude -p --bare`, logged in by a
+   human beforehand), split on the first `:` — e.g.
+   `[claude:claude-opus-5-5:high, pi:sub2api-glm/glm-5.3]`. The optional
+   effort is the last segment only when it is one of `off minimal low
+   medium high xhigh max` (pi takes all, as `--thinking`; claude takes
+   `low`…`max`, as `--effort`; an effort that harness does not take is
+   refused, while a word outside the set is part of the model name);
+   omitted, the harness uses its own default. The prefix is mandatory and is the whole truth (no inference from the id, no
    `harness` key — a leftover one refuses); the same format holds for
    the bundles' `model_candidates` and `pf submit --models`. A chain may
    mix harnesses: when the next candidate runs on another harness the
@@ -252,14 +266,16 @@ pf [global flags] <verb> [verb flags] [positional args]
 ```
 
 - **Global flags come before the verb**: `--json`, `--config PATH`,
-  `--server URL`, `--api-key KEY`, `--socket PATH`, `--user ID`. Verb flags
-  come after the verb word.
+  `--server URL`, `--api-key KEY`, `--socket PATH`, `--user ID`, and
+  `--version` (print the build version and exit). Verb flags come after
+  the verb word.
 - **Config precedence**, strictest wins: command-line flag > environment
   (`PF_SERVER`, `PF_API_KEY`, `PF_DAEMON_SOCKET`, `PF_USER_ID`)
   > config file > built-in defaults (`http://localhost:8420`,
   `/run/polyforge.sock`). The config file default path is
-  `~/.config/polyforge/cli.toml`: the four flat string keys `server`,
-  `api_key`, `daemon_socket`, `user_id`, plus one `[workspace."<path>"]`
+  `~/.config/polyforge/cli.toml`: the five flat string keys `server`,
+  `api_key`, `daemon_socket`, `user_id`, `claude_bin` (the daemon's Claude
+  Code binary, default `claude`), plus one `[workspace."<path>"]`
   section per workspace, each carrying `projects = ["..."]` — the
   workspace→projects mapping (polyforge#113). There is NO default
   `project` key: a config carrying one refuses to load with migration
@@ -267,7 +283,10 @@ pf [global flags] <verb> [verb flags] [positional args]
   `pf doctor`). A missing file is not an error (defaults apply, empty
   mapping); a malformed file is. The mapping governs capsule placement:
   placement verbs (`file create`, `remember`, `recall`) REQUIRE
-  `--project` and validate it against the mapping; `queue` without
+  `--project` and refuse locally a project the mapping does not list (the
+  error names the mapped projects; owner ruling 2026-10-16) — aihub
+  additionally gates memory by project membership (read access to search
+  or read, the writer role to remember); `queue` without
   `--project` covers all mapped projects; one daemon serves every mapped
   workspace and routes capsules to `<workspace>/capsules/<project>-<seq>`
   (e.g. `capsules/polyforge-140`; no `#` in paths) by the claimed work item's
@@ -282,12 +301,16 @@ pf [global flags] <verb> [verb flags] [positional args]
   success, 1 client-class failure (4xx wire answers, local validation, and
   transport failure — an unreachable AIHub server or daemon socket is a
   retryable client-side condition, same family as 4xx), 2 server-class
-  failure (5xx) and usage errors.
+  failure (5xx), an unknown verb, and a flag error caught by the global or
+  the verb's own flag parse (`queue --bogus`). A sub-action's flag or
+  argument mistake (`file create --bogus`, a missing `--goal`, wrong
+  arity) prints a `pf:` line with no typed code and exits 1.
 - **Error code families** (the closed registry, `internal/common/api/errors.go`):
   `CORE-*` work-item/project/user business errors, `MEM-*` memory search,
   `AUTH-*` HTTP-boundary auth, `GIT-*` the git push-proxy surface
   (non-fast-forward, gitlink, blob size, sequence-trailer violations),
-  `DAEMON-*` the local daemon face, `CAP-*` capsule lifecycle.
+  `DAEMON-*` the local daemon face. There is no `CAP-*` family (the
+  prefix exists only in the archived 00 allocation table).
 - A daemon-face failure to dial (`dial unix ...`) means the daemon is not
   running on this machine; it is not a typed verdict about any work item.
   Run `pf daemon ensure` (it starts the daemon under its tmux restart loop,

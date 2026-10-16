@@ -6,9 +6,11 @@ connectivity faces (aihub server reach, local daemon socket, auth), whether
 the daemon runs under supervision, plus the harness family: whether each
 harness will display polyforge progress, whether it references the release
 the way `tools/install.sh` sets it up, and whether v1 polyforge artifacts are
-still installed. It is a pure read face: nothing is mutated, nothing is
+still installed — and whether each mapped workspace keeps the runtime-artifact
+layout (polyforge#177). It is a read face: nothing is mutated, nothing is
 auto-fixed (there is no `--fix`; remediation is always manual, the check
-detail names it). The one remediation the agent runs itself is the
+detail names it) — the one exception is `--prune-scratch`, which removes
+stale `scratch/` entries and lists them. The one remediation the agent runs itself is the
 daemon-down case: `pf daemon ensure`, then `pf doctor` again.
 
 ## Triggers
@@ -22,7 +24,7 @@ daemon-down case: `pf daemon ensure`, then `pf doctor` again.
 ## Command
 
 ```
-pf doctor [--harness] [--json]
+pf doctor [--harness] [--prune-scratch] [--json]
 ```
 
 `--harness` runs only the harness family (progress display, install
@@ -61,7 +63,11 @@ reported `skip` — a skip never pretends to be a pass.
 
 The loop restarts crashes within ~5s; tmux does not survive a container or
 machine restart — the next pi or Claude Code session start runs
-`pf daemon ensure` and brings it back.
+`pf daemon ensure` and brings it back. A daemon that refused to start for an
+operator-fixable reason (exit 78: config, daemon id, workspace, on-disk
+state, failed restart reconciliation) ends the loop instead: `daemon socket`
+fails and the cause is in `<data-dir>/daemon.log` — fix it, then
+`pf daemon ensure`.
 
 ## Progress display (presentation only — never `fail`, never moves the exit code)
 
@@ -84,7 +90,23 @@ no user file is ever written — the user pastes the snippet.
 v1 artifacts hook the same session events as the v2 adapters (pi loads
 `~/.pi/agent/extensions/*` and package extensions side by side), so show
 the user the command and let them run it; restart the harness sessions
-afterwards. The doctor never deletes anything itself.
+afterwards. The doctor never deletes these itself.
+
+## Workspace layout (polyforge#177 — `warn` at most, never moves the exit code)
+
+Per mapped workspace that exists (a missing one is the `workspace dirs`
+fail):
+
+| Check | `pass` | `warn` | `skip` |
+|---|---|---|---|
+| `workspace layout` | the root holds only `.repo/`, `capsules/`, `scratch/`, `.polyforge/`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` and dot-entries (`.polyforge.yaml`, `.gitignore`, `.pi`, `.claude`, `.mcp.json`, … — harness/tool owned), and `.polyforge/` only `repo-map/` and `watchers/` (legacy v1 artifacts nothing generates any more — tolerated, safe to delete) | each other entry, with its destination: a document (`.md`, `.txt`, `.pdf`, `.html`, …) → aihub (`pf file edit <wi> --content @f` while the work item is open, else `pf remember --type doc.design\|doc.review\|doc.decision\|doc.audit`); a `.polyforge.yaml.*` backup or other file → `scratch/`; a directory holding `.git` → `.repo/`; another directory → `scratch/`. Nothing is moved or deleted | no mapping |
+| `workspace scratch` | no `scratch/` entry older than 14 days (or `--prune-scratch` removed them — the detail lists each path) | entries whose newest change — the later of mtime and ctime, of the entry and everything under it, so a download keeping old mtimes is not stale on arrival — is older than 14 days, listed; run `pf doctor --prune-scratch` to remove them. Also a `scratch` that is a symlink or a file (never scanned or pruned), and an entry that could not be read (skipped, the rest still judged) | no mapping |
+
+Stale scratch is reported, not removed, by default: the doctor is a probe
+anyone may run at any time, so deletion stays an explicit act.
+Move legacy `.polyforge/*.md` documents into memories (docs/upgrade.md);
+`pf init` (see `init.md`) creates `scratch/` and the CLAUDE.md layout
+section.
 
 ## Workspace yaml
 
@@ -120,6 +142,14 @@ in, never calls a model and never reports a credential value.
 | `fail` | the claude binary does not resolve on the daemon's PATH | Install Claude Code and log it in (a human does this), or set `claude_bin` in cli.toml / `--claude-bin`. |
 | `warn` | unverified version; no credential visible (neither the `<harness-root>/claude-config/settings.json` `env` block's `ANTHROPIC_AUTH_TOKEN` nor the daemon env's `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`); both a token and an API key set; a rejected token / gateway pairing or a `CLAUDE_CONFIG_DIR` in that `env` block; `ANTHROPIC_BASE_URL` set in the daemon env | Relay the note. The claude-config `settings.json` `env` block is the single credential authority (polyforge#171; the daemon reports its keys as set/unset, never values): put ONE `ANTHROPIC_AUTH_TOKEN` (+ optional `ANTHROPIC_BASE_URL`) there, never `CLAUDE_CONFIG_DIR` — see docs/upgrade.md. |
 | `skip` | claude steps exist but the daemon is unreachable | Start the daemon and re-run. |
+
+Note (V-11): the daemon's environment — and so every claude step's — is the
+environment of the `polyforge-daemon` tmux server, captured when that server
+first started (possibly from a human's shell). `ANTHROPIC_*` set there pass
+through to the steps; whether the settings.json `env` block overrides a
+same-named process variable is not verified. Keep credentials out of the
+tmux server's environment, or set every needed `ANTHROPIC_*` in the
+claude-config `settings.json` (docs/upgrade.md, #171 section).
 
 ## Success
 
