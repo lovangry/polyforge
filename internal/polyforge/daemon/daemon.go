@@ -950,7 +950,7 @@ func (d *Daemon) dispatch() {
 			return
 		}
 		// A claim that races the shutdown latch defers itself in the
-		// runtime (AbortClaims); nothing here waits for it.
+		// runtime (BeginShutdown); nothing here waits for it.
 		go d.startEntry(*e)
 	}
 }

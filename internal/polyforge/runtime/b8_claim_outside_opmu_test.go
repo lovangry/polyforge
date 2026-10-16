@@ -241,7 +241,7 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 
 	actx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	within(t, 25*time.Second, "AbortClaims", func() { r.AbortClaims(actx) })
+	within(t, 25*time.Second, "BeginShutdown", func() { r.BeginShutdown(actx) })
 	if err := recvErr(t, startErr, "Start"); !IsClaimDeferred(err) {
 		t.Fatalf("Start answered %v, want the shutdown deferral", err)
 	}
@@ -255,7 +255,7 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 		t.Fatal("the deferred claim left its placeholder in the table")
 	}
 	if err := r.Start(context.Background(), "wi_b8_other"); !IsClaimDeferred(err) {
-		t.Fatalf("a start after AbortClaims answered %v, want the deferral", err)
+		t.Fatalf("a start after BeginShutdown answered %v, want the deferral", err)
 	}
 	r.Close()
 
@@ -300,11 +300,11 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 	}
 }
 
-// review nit of B-8: AbortClaims waits only for claims already CLAIMING.
+// review nit of B-8: BeginShutdown waits only for claims already CLAIMING.
 // A Start still queued on opMu (behind a long close) is never waited on —
 // it defers itself at the latch — so the shutdown keeps its budget for
 // the WIP snapshots.
-func TestB8AbortClaimsDoesNotWaitOnStartQueuedOnOpMu(t *testing.T) {
+func TestB8BeginShutdownDoesNotWaitOnStartQueuedOnOpMu(t *testing.T) {
 	hub := newFakeHub()
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	t.Cleanup(r.Close)
@@ -315,9 +315,9 @@ func TestB8AbortClaimsDoesNotWaitOnStartQueuedOnOpMu(t *testing.T) {
 	actx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	t0 := time.Now()
-	r.AbortClaims(actx)
+	r.BeginShutdown(actx)
 	if d := time.Since(t0); d > 2*time.Second {
-		t.Fatalf("AbortClaims waited %s on a Start queued on opMu", d)
+		t.Fatalf("BeginShutdown waited %s on a Start queued on opMu", d)
 	}
 	r.opMu.Unlock()
 	if err := recvErr(t, startErr, "the queued Start"); !IsClaimDeferred(err) {

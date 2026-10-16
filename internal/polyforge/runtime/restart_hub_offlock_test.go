@@ -228,7 +228,7 @@ func TestOffLockRestartHungJournalReplay(t *testing.T) {
 }
 
 // A shutdown during the restart's hung verify stops the reconciliation:
-// AbortClaims does not wait on it, and once the hub answers nothing is
+// BeginShutdown does not wait on it, and once the hub answers nothing is
 // decided — no agent, no session end, the record kept for the next start.
 func TestOffLockShutdownDuringHungRestartVerify(t *testing.T) {
 	setGitIdentity(t)
@@ -249,7 +249,7 @@ func TestOffLockShutdownDuringHungRestartVerify(t *testing.T) {
 	g.waitEntered(t, "the restart verify")
 	actx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	within(t, promptly, "AbortClaims during the hung restart verify", func() { r.AbortClaims(actx) })
+	within(t, promptly, "BeginShutdown during the hung restart verify", func() { r.BeginShutdown(actx) })
 	g.open()
 	waitFor(t, "the reconciliation lane to stop", func() bool { return !r.isRestarting() })
 	if sp.callCount() != 0 || hub.endCount() != 0 {
@@ -384,7 +384,7 @@ func TestOffLockShutdownDuringHungRestartAttach(t *testing.T) {
 	g.waitEntered(t, "the restart attach")
 	actx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	within(t, promptly, "AbortClaims during the hung attach", func() { r.AbortClaims(actx) })
+	within(t, promptly, "BeginShutdown during the hung attach", func() { r.BeginShutdown(actx) })
 	g.open()
 	waitFor(t, "the reconciliation lane to end", func() bool { return !r.isRestarting() })
 	if n := sp.callCount(); n != 0 {

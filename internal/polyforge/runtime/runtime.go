@@ -214,11 +214,17 @@ type Runtime struct {
 	persistDone uint64
 	persistErr  error
 
-	// claimsAborted latches the shutdown's AbortClaims (under mu): once
-	// latched, a new Start answers DAEMON-410 without claiming and a
-	// CLAIMING one is cancelled and deferred, leaving its claiming-journal
-	// entry for the next daemon start.
-	claimsAborted bool
+	// down latches the shutdown (BeginShutdown, under mu): once latched a
+	// new Start answers DAEMON-410 without claiming, a CLAIMING one is
+	// cancelled and deferred (its claiming-journal entry kept for the next
+	// daemon start), and no agent is started any more. installs counts the
+	// agent starts under way (admit / release): every door that brings an
+	// agent to life takes a token first, so once the latch is down and the
+	// count is back at zero the live job set is final. installsIdle, when
+	// set, is closed as the count reaches zero (BeginShutdown waits on it).
+	down         bool
+	installs     int
+	installsIdle chan struct{}
 	// endingClaims (under mu) latches the work-item keys (submitted
 	// spelling and canonical id) of a claim whose session end is on the
 	// wire outside opMu (claimEndOffLock): a Start of the same work item
@@ -252,13 +258,9 @@ type Runtime struct {
 	// daemon's startup re-attachment pass hands to observe (RestartAttach);
 	// every job the lane brings to life afterwards it announces itself.
 	restartAttached map[string]bool
-	// laneRunning / laneHubSince (under mu): the restart lane is running,
-	// and the moment its current hub call (a verify, a replayed claim, an
-	// attach) went out — zero while it runs local or git work. Restart's
-	// wait bounds only hub calls, and the shutdown joins only non-hub
-	// steps (WaitRestartStep; a hub answer meets the shutdown latch and
-	// decides nothing).
-	laneRunning  bool
+	// laneHubSince (under mu): the moment the restart lane's current hub
+	// call (a verify, a replayed claim, an attach) went out — zero while
+	// it runs local or git work. Restart's wait bounds only hub calls.
 	laneHubSince time.Time
 
 	// The durable-close retry lane (endpending.go): WIs whose
@@ -811,7 +813,7 @@ func mintSessionID() (string, error) {
 // the blocked compensation). Start still returns only once the claim
 // settled.
 func (r *Runtime) Start(ctx context.Context, wi string) error {
-	if r.abortedClaims() {
+	if r.isDown() {
 		return claimDeferredError(wi)
 	}
 	r.opMu.Lock()
@@ -1010,7 +1012,7 @@ func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
 // the new claim, and the hub's own ALREADY_HELD gate refuses a plain
 // claim of a paused-held WI).
 func (r *Runtime) startGate(key string, own *job) error {
-	if r.abortedClaims() {
+	if r.isDown() {
 		return claimDeferredError(key)
 	}
 	if r.isRestarting() {
@@ -1262,7 +1264,7 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, wi, sessionID string, re
 	j.claim = &claimLane{ctx: cctx, cancel: cancel, done: make(chan struct{}), answer: c}
 	r.mu.Lock()
 	r.jobs[id] = j
-	aborted := r.claimsAborted
+	aborted := r.down
 	r.mu.Unlock()
 	if aborted {
 		cancel() // a shutdown latched while this claim ran: do not even clone
@@ -1320,7 +1322,7 @@ func (r *Runtime) claimScene(j *job) (note string, err error) {
 
 // finishClaim settles a CLAIMING job (opMu held). In order: a close the
 // operator requested meanwhile is honoured (closeClaim); a shutdown
-// (AbortClaims, or the start's own context ending) DEFERS the claim — the
+// (BeginShutdown, or the start's own context ending) DEFERS the claim — the
 // placeholder goes, the claiming-journal entry stays, and the next daemon
 // start replays it, so a cancelled clone never turns the work item
 // blocked; a scene failure is the D5 blocked compensation; otherwise the
@@ -1345,7 +1347,7 @@ func (r *Runtime) finishClaim(ctx context.Context, wi string, j *job, sceneErr e
 		closeErr = r.closeClaim(wi, j, closeReq)
 		return fmt.Errorf("%w: %s (%s)", ErrClaimClosed, j.wi, closeReq)
 	}
-	if r.abortedClaims() || ctx.Err() != nil {
+	if r.isDown() || ctx.Err() != nil {
 		r.dropJob(j)
 		fmt.Fprintf(os.Stderr, "runtime: %s: claim deferred by the shutdown (claiming journal kept; the next start replays it)\n", j.wi)
 		return claimDeferredError(wi)
@@ -1378,6 +1380,13 @@ func (r *Runtime) installClaim(ctx context.Context, wi string, j *job) error {
 		r.dropJob(j)
 		return r.abandonClaim(j, wi, err2, err2.Error())
 	}
+	if !r.admit() {
+		// the shutdown latched since finishClaim's check: no agent starts
+		// behind it — the claim is deferred like any the shutdown caught
+		r.dropJob(j)
+		fmt.Fprintf(os.Stderr, "runtime: %s: claim deferred by the shutdown (claiming journal kept; the next start replays it)\n", j.wi)
+		return claimDeferredError(wi)
+	}
 	{
 		// The derivation IS a derivation (B2): advance the counter so the
 		// RTStarted emission carries SpawnN ≥ 1. The observe lane refuses
@@ -1402,6 +1411,7 @@ func (r *Runtime) installClaim(ctx context.Context, wi string, j *job) error {
 			StepCandidates: j.stepCandidates,
 		})
 		if err2 != nil {
+			r.release()
 			r.dropJob(j)
 			return r.abandonClaim(j, wi, err2, "driver start: "+err2.Error())
 		}
@@ -1420,6 +1430,7 @@ func (r *Runtime) installClaim(ctx context.Context, wi string, j *job) error {
 		j.agentPID = pid
 		j.agentStartedAt = h.StartedAt()
 		j.mu.Unlock()
+		r.release()
 	}
 	if err := j.transition(StateRunning); err != nil {
 		return err // unreachable: only finishClaim (opMu held) leaves CLAIMING
@@ -2033,10 +2044,34 @@ func (r *Runtime) closeClaim(wi string, j *job, reason string) error {
 	return nil
 }
 
-func (r *Runtime) abortedClaims() bool {
+// isDown reports whether the shutdown latch is down.
+func (r *Runtime) isDown() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.claimsAborted
+	return r.down
+}
+
+// admit takes an agent-start token: false once the shutdown latched (the
+// caller starts no agent). A taken token is given back with release once
+// the started agent's handle is bound to its job (or the start failed).
+func (r *Runtime) admit() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.down {
+		return false
+	}
+	r.installs++
+	return true
+}
+
+// release gives an agent-start token back.
+func (r *Runtime) release() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.installs--; r.installs == 0 && r.installsIdle != nil {
+		close(r.installsIdle)
+		r.installsIdle = nil
+	}
 }
 
 // claimDeferredError is the typed answer of a start the shutdown stopped
@@ -2063,20 +2098,20 @@ func IsClaimDeferred(err error) bool {
 	return errors.As(err, &cd)
 }
 
-// AbortClaims is the shutdown's first runtime step (B-8): latch so no new
-// Start claims, cancel every CLAIMING job's clone/materialize, and wait —
-// bounded by ctx — for those claims to settle. A cancelled claim is
-// deferred, never blocked: its journal entry stays for the next daemon
-// start. Only claims that already sit CLAIMING are waited for: a Start
-// still queued on opMu (or on a hub call before its claim) defers itself
-// at the latch check and is never waited on, so a long close holding
-// opMu cannot eat the shutdown budget. The restart's journal-replay
-// goroutines are waited for within the same bound (the reconciliation
-// lane's own step is joined later, WaitRestartStep). opMu is not taken
-// here.
-func (r *Runtime) AbortClaims(ctx context.Context) {
+// BeginShutdown is the shutdown's first runtime step: it latches down,
+// so no new Start claims and no agent starts any more, cancels every
+// CLAIMING job's clone/materialize and waits — bounded by ctx — for those
+// claims to settle and for the agent starts already under way to bind
+// their handles. A cancelled claim is deferred, never blocked: its
+// journal entry stays for the next daemon start. Nothing else is waited
+// for: a Start still on its pre-claim steps defers itself at the latch, a
+// close or recovery on a hung push or hub call starts no agent once it
+// returns, and the restart reconciliation decides nothing after the
+// latch. Once it returned the live job set only shrinks. The restart's
+// journal-replay goroutines are waited for within the same bound.
+func (r *Runtime) BeginShutdown(ctx context.Context) {
 	r.mu.Lock()
-	r.claimsAborted = true
+	r.down = true
 	var lanes []*claimLane
 	for _, j := range r.jobs {
 		j.mu.Lock()
@@ -2084,6 +2119,13 @@ func (r *Runtime) AbortClaims(ctx context.Context) {
 			lanes = append(lanes, j.claim)
 		}
 		j.mu.Unlock()
+	}
+	var idle chan struct{}
+	if r.installs > 0 {
+		if r.installsIdle == nil {
+			r.installsIdle = make(chan struct{})
+		}
+		idle = r.installsIdle
 	}
 	r.mu.Unlock()
 	for _, cl := range lanes {
@@ -2097,6 +2139,14 @@ func (r *Runtime) AbortClaims(ctx context.Context) {
 			return
 		}
 	}
+	if idle != nil {
+		select {
+		case <-idle:
+		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, "runtime: shutdown: agent start(s) still binding at the wait's end\n")
+			return
+		}
+	}
 	// the restart's journal-replay goroutines (runReplays) end with their
 	// claims: wait for them within the same bound so none outlives the
 	// shutdown
@@ -2107,33 +2157,6 @@ func (r *Runtime) AbortClaims(ctx context.Context) {
 	case <-ctx.Done():
 		fmt.Fprintf(os.Stderr, "runtime: shutdown: journal replays still settling at the wait's end\n")
 		return
-	}
-}
-
-// WaitRestartStep is the shutdown's join of the restart reconciliation
-// lane (called once the run context is cancelled, before the final agent
-// sweep): it waits — bounded by ctx — for a step in flight (a recovery's
-// push and relaunch) to finish, so no lane step outlives the shutdown; the
-// relaunch meets the cancelled run context, and whatever it still
-// installed the sweep collects. The lane starts no new step after the
-// shutdown latch, and one parked on a hub call is not waited for: its
-// answer meets the latch and decides nothing.
-func (r *Runtime) WaitRestartStep(ctx context.Context) {
-	tick := time.NewTicker(10 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		r.mu.Lock()
-		idle := !r.laneRunning || !r.laneHubSince.IsZero()
-		r.mu.Unlock()
-		if idle {
-			return
-		}
-		select {
-		case <-tick.C:
-		case <-ctx.Done():
-			fmt.Fprintf(os.Stderr, "runtime: shutdown: the restart reconciliation's step still running at the wait's end\n")
-			return
-		}
 	}
 }
 

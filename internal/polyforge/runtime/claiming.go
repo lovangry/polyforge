@@ -306,16 +306,16 @@ type claimReplay struct {
 // on its own goroutine like Start's lane: the capsule
 // clone and materialize do not run under opMu inside Restart, so a hung
 // clone holds neither the other records' reconciliation nor the
-// daemon's socket. A shutdown meanwhile defers them (AbortClaims) with
+// daemon's socket. A shutdown meanwhile defers them (BeginShutdown) with
 // their journal entries kept.
 //
 // The caller holds opMu. The shutdown latch and the WaitGroup's Add are
-// read and done under mu, so AbortClaims (which latches under mu before it
-// waits) either waits for these goroutines or they are never started: a
+// read and done under mu, so BeginShutdown (which latches under mu before
+// it waits) either waits for these goroutines or they are never started: a
 // replay the shutdown caught is deferred here and then, journal kept.
 func (r *Runtime) runReplays(ctx context.Context, replays []claimReplay) {
 	r.mu.Lock()
-	if r.claimsAborted {
+	if r.down {
 		r.mu.Unlock()
 		r.deferReplays(ctx, replays)
 		return

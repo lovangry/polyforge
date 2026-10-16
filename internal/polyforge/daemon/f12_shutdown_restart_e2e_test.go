@@ -286,9 +286,10 @@ func TestShutdownRestartFullChainPushIdempotency(t *testing.T) {
 	})
 	// ...and wi_e2e_push's commit-dirty commit stands locally: its
 	// reconciliation step (the push now parked in the hook, then the
-	// relaunch) is in flight. The shutdown below lets that step finish
-	// and starts no new one — without this wait it could latch before
-	// the lane reached wi_e2e_push at all.
+	// relaunch) is in flight. The shutdown below does not wait for that
+	// step: its push lands on its own, and its relaunch meets the latch
+	// and starts nothing — without this wait the latch could come down
+	// before the lane reached wi_e2e_push at all.
 	waitFor(t, "old daemon's commit-dirty commit of "+wiPush, 10*time.Second, func() bool {
 		h := gitHead(t, gitPush, "HEAD")
 		return h != "" && h != basePush
@@ -335,15 +336,19 @@ func TestShutdownRestartFullChainPushIdempotency(t *testing.T) {
 	}
 
 	// --- the old process's push lands (it was the only lane), and its
-	// recovery finishes; then the stop sequence is released. ---
+	// recovery relaunches nothing behind the shutdown latch (the record
+	// stays recovering for the next start); then the stop sequence is
+	// released. ---
 	waitFor(t, "old process's mid-shutdown commit-dirty push to land", 15*time.Second, func() bool {
 		return gitHead(t, gitPush, "HEAD") != "" &&
 			gitHead(t, barePush, "refs/heads/main") == gitHead(t, gitPush, "HEAD")
 	})
-	waitFor(t, "old process's second recovery spawn", 5*time.Second, func() bool {
-		return sp1.callCount() >= 2
+	waitFor(t, "old process's reconciliation lane to end", 15*time.Second, func() bool {
+		return !d1.rt.Reconciling()
 	})
-	time.Sleep(100 * time.Millisecond) // let the reconciliation unwind
+	if n := sp1.callCount(); n != 1 {
+		t.Fatalf("old process spawned %d agent(s); the relaunch behind the shutdown latch must start nothing", n)
+	}
 	close(release)
 	select {
 	case err := <-shutErr:
@@ -520,10 +525,15 @@ func TestShutdownDuringStartupReconciliationNeverServesFace(t *testing.T) {
 		t.Fatal("the face still accepts connections after a shutdown that closed it mid-reconciliation")
 	}
 
-	// The in-flight push was the only lane: it lands, and the server
-	// ref and the capsule agree — the same idempotent end state the
+	// The in-flight push was the only lane: the shutdown does not wait
+	// for it (it starts no agent behind the latch), and it lands — the
+	// server ref and the capsule agree, the same idempotent end state the
 	// full-chain test asserts.
-	if got, want := gitHead(t, bare, "refs/heads/main"), gitHead(t, gitDir, "HEAD"); got != want {
-		t.Fatalf("server main=%s disagrees with capsule HEAD=%s", got, want)
+	waitFor(t, "the in-flight push to land", 15*time.Second, func() bool {
+		return gitHead(t, bare, "refs/heads/main") == gitHead(t, gitDir, "HEAD")
+	})
+	waitFor(t, "the reconciliation lane to end", 15*time.Second, func() bool { return !d.rt.Reconciling() })
+	if n := sp.callCount(); n != 0 {
+		t.Fatalf("the reconciliation spawned %d agent(s) once its push landed behind the shutdown", n)
 	}
 }

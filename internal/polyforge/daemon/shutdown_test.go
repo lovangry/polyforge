@@ -139,27 +139,24 @@ func TestRestartWiring(t *testing.T) {
 	}
 }
 
-// slowSweepAgent is a fake agent whose SECOND Terminate — the shutdown's
-// final sweep, after the face is closed — takes a while.
+// slowSweepAgent is a fake agent whose liveness probe after its
+// teardown — the shutdown's final check, after the face is closed — takes
+// a while.
 type slowSweepAgent struct {
 	fakeAgent
-	n int
 }
 
-func (a *slowSweepAgent) Terminate(d time.Duration) error {
-	a.mu.Lock()
-	a.n++
-	n := a.n
-	a.mu.Unlock()
-	if n >= 2 {
+func (a *slowSweepAgent) Alive() bool {
+	if a.isDone() {
 		time.Sleep(500 * time.Millisecond)
+		return false
 	}
-	return a.fakeAgent.Terminate(d)
+	return true
 }
 
 // repo review 2026-10-16 B-16: closing the face (shutdown step 5) makes
 // Serve return ErrServerClosed; Run must still wait for the rest of the
-// sequence (runtime drain, final sweep) before it returns and the
+// sequence (runtime drain, final check) before it returns and the
 // process exits.
 func TestRunReturnsOnlyAfterTheShutdownSequence(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) {

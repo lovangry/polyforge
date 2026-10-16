@@ -166,9 +166,9 @@ func (r *Runtime) requireMidflightCapsule(wi, project, dir string) error {
 // (RestartAttach), and the lane finishes the rest once the hub answers,
 // announcing every job it brings back to life itself. A shutdown stops the
 // lane before its next step (the remaining records and journal entries
-// stay for the next start); the shutdown joins the step in flight
-// (WaitRestartStep), and one latched while Restart still waits makes it
-// wait for that step instead of returning — there is nothing to serve.
+// stay for the next start), and one latched while Restart still waits
+// makes it return at once — there is nothing to serve, and the step in
+// flight starts no agent behind the latch (admit).
 func (r *Runtime) Restart(ctx context.Context) error {
 	r.mu.Lock()
 	r.restarting = true
@@ -206,7 +206,6 @@ func (r *Runtime) Restart(ctx context.Context) error {
 		r.mu.Unlock()
 	}
 	r.mu.Lock()
-	r.laneRunning = true
 	r.laneHubSince = time.Time{}
 	r.restartAttached = nil
 	r.mu.Unlock()
@@ -227,9 +226,10 @@ func (r *Runtime) Restart(ctx context.Context) error {
 		}
 		if r.restartStopping(ctx) {
 			// a shutdown is under way: there is nothing to serve, and the
-			// lane stops at its next step — let the step in flight land
-			// before the daemon unwinds
-			return <-done
+			// lane decides nothing further — its step in flight starts no
+			// agent behind the latch, and the records it did not reach
+			// stay for the next start
+			return nil
 		}
 		r.mu.Lock()
 		since := r.laneHubSince
@@ -317,11 +317,6 @@ func (r *Runtime) RestartAttach(wi string) bool {
 // clones. opMu is held except around the network steps.
 func (r *Runtime) reconcile(ctx context.Context, st *stateFile) error {
 	defer r.endRestarting()
-	defer func() {
-		r.mu.Lock()
-		r.laneRunning = false
-		r.mu.Unlock()
-	}()
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	// B1 journal replay FIRST, before the state.json records: a journaled
@@ -377,7 +372,7 @@ func (r *Runtime) isRestarting() bool {
 // restartStopping reports whether a shutdown caught the reconciliation:
 // it decides nothing further.
 func (r *Runtime) restartStopping(ctx context.Context) bool {
-	return ctx.Err() != nil || r.abortedClaims()
+	return ctx.Err() != nil || r.isDown()
 }
 
 // postureUnreconciled shows every record the reconciliation has not
@@ -509,7 +504,7 @@ func (r *Runtime) attachPaused(ctx context.Context, rec *jobRecord, cause, detai
 		// defensive: a busy job leaves the table through no other door
 		return fmt.Errorf("runtime: %s: the record left the job table during its session attach", rec.WorkItemID)
 	}
-	if err == nil && r.abortedClaims() {
+	if err == nil && r.isDown() {
 		// the shutdown latched while the attach was on the wire: resume
 		// nothing behind its teardown. The hub now says running under our
 		// session, so the next daemon start recovers the record.
@@ -602,7 +597,7 @@ func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 		// defensive: a busy job's state moves through no other door
 		return "", &api.Error{Code: api.ErrDaemonConflict, Detail: fmt.Sprintf("work item turned %s during the resume's session verify; nothing was resumed", st)}
 	}
-	if r.abortedClaims() {
+	if r.isDown() {
 		// the shutdown latched while the verify was on the wire: attach
 		// nothing behind its teardown — the record stays paused, the
 		// next daemon start reconciles it
@@ -1109,7 +1104,7 @@ func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bo
 	if !r.offLock(j, func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) }) {
 		return true // defensive: a busy job leaves the table through no other door
 	}
-	if ctx.Err() != nil || r.closing() || r.abortedClaims() {
+	if ctx.Err() != nil || r.closing() || r.isDown() {
 		return true // shutting down meanwhile: the record persists, the next start verifies afresh
 	}
 	if err != nil {

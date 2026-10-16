@@ -299,7 +299,7 @@ func TestOffLockStopDuringHungAttach(t *testing.T) {
 }
 
 // A shutdown during each hung claim hub call is not held by it
-// (AbortClaims waits only on CLAIMING claims) and the start defers once
+// (BeginShutdown waits only on CLAIMING claims) and the start defers once
 // the hub answers: nothing is claimed after a probe, and the journal entry
 // a verify or a claim was working on is kept for the next start.
 func TestOffLockShutdownDuringHungClaimHubCall(t *testing.T) {
@@ -324,9 +324,9 @@ func TestOffLockShutdownDuringHungClaimHubCall(t *testing.T) {
 
 			actx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
-			within(t, promptly, "AbortClaims during the hung "+kind, func() { r.AbortClaims(actx) })
+			within(t, promptly, "BeginShutdown during the hung "+kind, func() { r.BeginShutdown(actx) })
 			if actx.Err() != nil {
-				t.Fatal("AbortClaims waited out its whole bound on a pre-claim hub call")
+				t.Fatal("BeginShutdown waited out its whole bound on a pre-claim hub call")
 			}
 			g.open()
 			if err := recvErr(t, aErr, "the hung Start"); !IsClaimDeferred(err) {
@@ -370,7 +370,7 @@ func TestOffLockShutdownDuringHungResumeVerify(t *testing.T) {
 	g.waitEntered(t, "the resume's verify")
 	actx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	within(t, promptly, "AbortClaims during the resume's verify", func() { r.AbortClaims(actx) })
+	within(t, promptly, "BeginShutdown during the resume's verify", func() { r.BeginShutdown(actx) })
 	g.open()
 	err := recvErr(t, res, "the hung resume")
 	var ae *api.Error

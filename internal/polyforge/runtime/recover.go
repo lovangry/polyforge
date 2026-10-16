@@ -225,6 +225,16 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		// used — two step processes on one drop path, the fence defeated.
 		// The journal is the one ledger every derivation appends to;
 		// seeding past its max restores the fence.
+		if !r.admit() {
+			// the shutdown latched: no agent starts behind it. The job
+			// stays RECOVERING with no agent; the next daemon start
+			// recovers the persisted record.
+			if perr := r.persist(); perr != nil {
+				fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
+			}
+			fmt.Fprintf(os.Stderr, "runtime: %s: recovery stopped by the shutdown before its relaunch (the next start recovers it)\n", j.wi)
+			return
+		}
 		j.mu.Lock()
 		if m := spawnJournalMaxN(j.capsuleDir); m > j.spawnN {
 			j.spawnN = m
@@ -260,6 +270,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 			j.agentPID = pid
 			j.agentStartedAt = h.StartedAt()
 			j.mu.Unlock()
+			r.release()
 			// persisted with the advanced counter (crash-safe)
 			if perr := r.persist(); perr != nil {
 				fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
@@ -267,6 +278,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 			r.recovered(j, h, cause)
 			return
 		}
+		r.release()
 		fmt.Fprintf(os.Stderr, "runtime: %s: engine relaunch failed: %v\n", j.wi, err)
 		j.mu.Lock()
 		j.recoverFails++
