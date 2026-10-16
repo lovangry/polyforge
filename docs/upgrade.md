@@ -904,6 +904,22 @@ migrates it in place; a second run changes nothing.
   the binary is already current, a live daemon is left alone and an
   unsupervised one is reported with the fix:
   `pf ops shutdown && while pf ops status >/dev/null 2>&1 || ! flock -n ~/.local/share/polyforge/daemon.lock true; do sleep 2; done; pf daemon ensure`.
+- **order and failure safety** (repo review 2026-10-16 V-3): everything
+  that can fail for an outside reason — download, SHA check, the release
+  clone into its own `release/<VER>` directory — runs before anything is
+  stopped or replaced; such a failure exits non-zero and says that pf,
+  `release/current` and the running daemon are unchanged. The new binary
+  is staged next to the installed one (`<bin>.new.<pid>`, already
+  executable) and swapped by one rename: `pf` is never missing, partial
+  or non-executable.
+- **running jobs refuse the upgrade**: a binary upgrade needs the
+  graceful shutdown, which terminates every live agent tree. While
+  `pf ops status` lists a job that is not `paused`, install.sh lists the
+  jobs, changes nothing (the fetched `release/<VER>` checkout is kept for
+  the next run) and exits non-zero. Wait for them, pause them
+  (`pf pause <wi>`), or override — the interrupted work items recover at
+  the next daemon start:
+  `curl ... | PF_INSTALL_FORCE=1 bash -s -- <api-key>`.
 - **after a container / machine restart** tmux is gone too: the next
   Claude Code session start (SessionStart: startup/resume/clear/compact) or
   pi session start (pi-web replays it when it resumes its sessions) runs

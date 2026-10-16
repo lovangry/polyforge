@@ -1,21 +1,27 @@
 #!/bin/sh
 # polyforge bootstrap — complete machine setup in one command.
 # Installs/updates (idempotent: a second run changes nothing):
-#   1. pf binary        — latest release, SHA-verified; on an upgrade the
-#        daemon is shut down gracefully (its restart loop, tmux session
-#        polyforge-daemon, ends with it on that clean exit), install waits
-#        until both are gone, then swaps the binary. From here until step
-#        4 the installer holds <data-dir>/ensure.lock, so a harness
-#        session's `pf daemon ensure` in that window starts nothing (no old
-#        daemon revived, no new binary against the old release)
-#   2. config           — created once, NEVER rewritten
-#   3. release + skills — own checkout of the release tag in
-#        ~/.local/share/polyforge/release/<VER> (stable symlink release/current,
-#        swapped atomically, previous version kept); the harnesses REFERENCE
-#        it, nothing is copied or cloned again (polyforge#174):
-#        Claude Code: ~/.claude/skills/polyforge is a symlink to
-#        release/current/skills/polyforge (an old copied directory is
-#        replaced) + SessionStart hook registered once in
+#   1. prepare          — side-effect free for the running machine: the
+#        latest pf binary is downloaded, SHA-verified and staged next to
+#        the installed one ($BIN.new.<pid>, executable); the release tag
+#        is cloned into its own versioned dir
+#        ~/.local/share/polyforge/release/<VER>. Any failure here exits
+#        with pf, release/current and the running daemon untouched.
+#   2. switch           — takes <data-dir>/ensure.lock (held until step 4,
+#        so a harness session's `pf daemon ensure` in that window starts
+#        nothing: no old daemon revived, no new binary against the old
+#        release). On a binary upgrade the daemon is shut down gracefully
+#        (its restart loop, tmux session polyforge-daemon, ends with it on
+#        that clean exit) — REFUSED while it runs jobs (a shutdown
+#        terminates their agent trees) unless PF_INSTALL_FORCE=1 — install
+#        waits until both are gone, then swaps the binary by one atomic
+#        rename. release/current (stable symlink) is switched atomically
+#        to the new version, the previous version kept.
+#   3. config + harnesses — config created once, NEVER rewritten; the
+#        harnesses REFERENCE release/current, nothing is copied or cloned
+#        again (polyforge#174): Claude Code: ~/.claude/skills/polyforge is
+#        a symlink to release/current/skills/polyforge (an old copied
+#        directory is replaced) + SessionStart hook registered once in
 #        ~/.claude/settings.json; pi: one local package entry naming
 #        release/current in pi's settings (replaces the old
 #        git:...silgrid/polyforge.git@<ver> entry)
@@ -30,6 +36,11 @@
 #     | bash -s -- <api-key> [server-host]
 #
 # Usage (update existing machine): same command — detects and updates.
+# While the daemon runs jobs (`pf ops status`) an upgrade is refused and
+# nothing changes: wait for them, pause them (`pf pause <wi>`), or
+# override — their agent trees are terminated and recover at the next
+# daemon start:
+#   curl ... | PF_INSTALL_FORCE=1 bash -s -- <api-key> [server-host]
 #
 # Requires: gh authenticated (repo is private).
 set -e
@@ -72,23 +83,28 @@ daemon_running() {
   return 1
 }
 
-# ─── 1. pf binary: install or update ───────────────────────────────
-echo "== 1/5 pf binary"
-# Hold the ensure lock (the flock `pf daemon ensure` takes) from here
-# through the release swap in step 3: an adapter's ensure (a pi or Claude
-# Code session starting, resuming, compacting) waits on it and then
-# answers by the socket — it never starts a loop mid-upgrade. Released
-# right before step 4's own ensure.
-mkdir -p "$DAEMON_DATA"
-if command -v flock >/dev/null 2>&1; then
-  exec 9>>"$DAEMON_DATA/ensure.lock"
-  flock -w 120 9 || echo "   WARN: another pf daemon ensure held $DAEMON_DATA/ensure.lock for 120s; continuing"
-else
-  echo "   WARN: flock not found: a harness session starting during this upgrade could start the daemon early"
-fi
-command -v gh >/dev/null 2>&1 || { echo "ERROR: gh not found"; exit 1; }
-VER=$(gh release list --repo "$REPO" --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null)
-[ -n "$VER" ] || { echo "ERROR: no release found"; exit 1; }
+# ─── 1. prepare: nothing on this machine changes yet ───────────────
+# Every step that can fail for an outside reason (gh, network, SHA, a
+# release lacking its tree) runs here, before anything is stopped or
+# replaced. A failure in this phase leaves pf, release/current and the
+# running daemon exactly as they were.
+echo "== 1/5 prepare (pf binary + release checkout; nothing is changed yet)"
+STAGED=""   # the new binary, staged next to $BIN (same filesystem)
+TMP=""
+CLONE=""
+cleanup() {
+  [ -z "$TMP" ] || rm -rf "$TMP"
+  [ -z "$STAGED" ] || rm -f "$STAGED"
+  [ -z "$CLONE" ] || rm -rf "$CLONE"
+}
+trap cleanup EXIT
+trap 'exit 1' INT TERM HUP
+UNCHANGED="nothing on this machine was changed: pf, release/current and the running daemon are as they were"
+prep_fail() { echo "ERROR: $1; $UNCHANGED"; exit 1; }
+
+command -v gh >/dev/null 2>&1 || prep_fail "gh not found"
+VER=$(gh release list --repo "$REPO" --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null) || true
+[ -n "$VER" ] || prep_fail "no release found"
 
 RUNNING="none"
 if [ -x "$BIN" ]; then
@@ -100,14 +116,85 @@ if [ "$RUNNING" = "$VER" ]; then
 else
   TMP=$(mktemp -d)
   gh release download "$VER" --repo "$REPO" --pattern "pf-linux-amd64" --dir "$TMP" 2>/dev/null \
-    || { echo "ERROR: binary not on release $VER"; rm -rf "$TMP"; exit 1; }
-  gh release download "$VER" --repo "$REPO" --pattern "SHA256SUMS" --dir "$TMP" 2>/dev/null
+    || prep_fail "binary not on release $VER"
+  gh release download "$VER" --repo "$REPO" --pattern "SHA256SUMS" --dir "$TMP" 2>/dev/null \
+    || prep_fail "SHA256SUMS not on release $VER"
   if [ -f "$TMP/SHA256SUMS" ]; then
     EXP=$(grep "pf-linux-amd64" "$TMP/SHA256SUMS" | awk '{print $1}')
     GOT=$(sha256sum "$TMP/pf-linux-amd64" | awk '{print $1}')
-    [ "$GOT" = "$EXP" ] || { echo "ERROR: SHA mismatch"; rm -rf "$TMP"; exit 1; }
+    [ "$GOT" = "$EXP" ] || prep_fail "SHA mismatch on pf-linux-amd64 of $VER"
   fi
-  mkdir -p "$(dirname "$BIN")"
+  # Stage the new binary in $BIN's own directory, already executable: the
+  # swap in step 2 is then one rename(2) — `pf` is at every instant
+  # either the complete old or the complete new binary, never a partial
+  # or non-executable file (a harness hook or pf-chat may run it then).
+  mkdir -p "$(dirname "$BIN")" || prep_fail "cannot create $(dirname "$BIN")"
+  STAGED="$BIN.new.$$"
+  { cp "$TMP/pf-linux-amd64" "$STAGED" && chmod 755 "$STAGED"; } \
+    || prep_fail "cannot stage the new binary at $STAGED (write access to $(dirname "$BIN")?)"
+  rm -rf "$TMP"; TMP=""
+  echo "   pf $VER downloaded, SHA-verified, staged"
+fi
+
+# The installer owns a checkout of the release tag, independent of any
+# harness: the daemon's workflows and every harness's skill come from it.
+# A new version gets its own directory; release/current is not touched
+# here (step 2 switches it).
+mkdir -p "$RELEASE_DIR"
+REL="$RELEASE_DIR/$VER"
+if [ -f "$REL/skills/polyforge/SKILL.md" ] && [ -d "$REL/workflows" ]; then
+  echo "   release checkout $VER present"
+else
+  CLONE="$REL.tmp.$$"
+  rm -rf "$CLONE"
+  # gh uses its own credentials (ssh or https), so a machine that only has
+  # gh auth can clone the private repo. The tag is cloned shallow.
+  gh repo clone "$REPO" "$CLONE" -- --branch "$VER" --depth 1 >/dev/null 2>&1 \
+    || prep_fail "cannot clone $REPO at $VER (gh auth?)"
+  if [ ! -f "$CLONE/skills/polyforge/SKILL.md" ] || [ ! -d "$CLONE/workflows" ]; then
+    prep_fail "$VER checkout lacks skills/polyforge or workflows"
+  fi
+  # the version's own directory: nothing references it until step 2
+  rm -rf "$REL"
+  mv "$CLONE" "$REL"
+  CLONE=""
+  echo "   release checkout $VER fetched"
+fi
+
+# ─── 2. switch: stop the daemon, swap the binary, switch release ────
+echo "== 2/5 switch"
+# Hold the ensure lock (the flock `pf daemon ensure` takes) from here
+# through the release switch: an adapter's ensure (a pi or Claude Code
+# session starting, resuming, compacting) waits on it and then answers by
+# the socket — it never starts a loop mid-upgrade (no old daemon revived,
+# no new binary against the old release). Released right before step 4's
+# own ensure.
+mkdir -p "$DAEMON_DATA"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>>"$DAEMON_DATA/ensure.lock"
+  flock -w 120 9 || echo "   WARN: another pf daemon ensure held $DAEMON_DATA/ensure.lock for 120s; continuing"
+else
+  echo "   WARN: flock not found: a harness session starting during this upgrade could start the daemon early"
+fi
+
+# busy_jobs: the daemon's jobs that a shutdown would interrupt (the
+# GET /status `pf ops status` reads), one "<work item> (<status>)" per
+# line. A paused job has no live agent tree and its record survives the
+# restart, so it does not count. Exit 2: status unreadable.
+busy_jobs() {
+  st=$(curl -s -m 5 --unix-socket "$DAEMON_SOCKET" http://localhost/status 2>/dev/null) || st=""
+  # not answering: the daemon is already quiescing (or gone) — nothing to ask
+  printf '%s' "$st" | grep -q machine_id || return 0
+  printf '%s' "$st" | python3 -c '
+import json, sys
+s = json.load(sys.stdin)
+for j in s.get("jobs") or []:
+    if j.get("status") != "paused":
+        print("%s (%s)" % (j.get("slug") or j.get("work_item_id"), j.get("status")))
+' 2>/dev/null || return 2
+}
+
+if [ -n "$STAGED" ]; then
   # Upgrade order: stop the daemon gracefully — a clean exit also ends
   # its restart loop — and wait until the daemon AND the loop are really
   # gone: the binary is never swapped under a live daemon, and no loop is
@@ -117,6 +204,22 @@ else
   # minutes), hence 330s. Step 4 starts the new daemon through
   # `pf daemon ensure`.
   if daemon_running || loop_running; then
+    # A graceful shutdown terminates every live agent tree: never behind
+    # the back of a running job unless the operator says so.
+    BRC=0
+    BUSY=$(busy_jobs) || BRC=$?
+    if [ "${PF_INSTALL_FORCE:-}" = 1 ]; then
+      [ -z "$BUSY" ] || printf '   PF_INSTALL_FORCE=1: shutting down despite running jobs:\n%s\n' "$(printf '%s\n' "$BUSY" | sed 's/^/     /')"
+    elif [ "$BRC" -ne 0 ]; then
+      echo "ERROR: the daemon answers but its job list cannot be read (pf ops status), so the upgrade to $VER is refused; $UNCHANGED (the fetched release/$VER checkout is kept for the next run)."
+      echo "   check: pf ops status. To shut it down anyway (its live agent trees are terminated), re-run with PF_INSTALL_FORCE=1."
+      exit 1
+    elif [ -n "$BUSY" ]; then
+      echo "ERROR: the daemon is running jobs; upgrading to $VER needs a graceful shutdown, which terminates their agent trees. Upgrade refused; $UNCHANGED (the fetched release/$VER checkout is kept for the next run)."
+      printf '%s\n' "$BUSY" | sed 's/^/     /'
+      echo "   proceed by one of: wait until they finish (pf ops status), pause them (pf pause <wi>), or re-run with PF_INSTALL_FORCE=1 to shut them down anyway (they recover at the next daemon start)."
+      exit 1
+    fi
     echo "   stopping daemon (graceful; its restart loop ends with it)"
     if [ -x "$BIN" ] && "$BIN" ops shutdown >/dev/null 2>&1; then
       :
@@ -131,7 +234,6 @@ else
       fi
       if [ "$WAITED" -ge 330 ]; then
         echo "ERROR: daemon did not stop within 330s (graceful shutdown budget is 300s); binary NOT replaced. Its restart loop ended with the shutdown request: once the daemon exits, this machine has NO daemon until \`pf daemon ensure\` runs (by hand, or at the next pi / Claude Code session start). Check: tail $DAEMON_DATA/daemon.log"
-        rm -rf "$TMP"
         exit 1
       fi
       sleep 1
@@ -139,13 +241,33 @@ else
     done
     echo "   daemon stopped"
   fi
-  mv "$TMP/pf-linux-amd64" "$BIN" && chmod +x "$BIN"
-  rm -rf "$TMP"
+  # atomic: a rename within one directory
+  mv -f "$STAGED" "$BIN" || {
+    echo "ERROR: cannot replace $BIN; the daemon is stopped and the old binary is in place: run \`pf daemon ensure\`"
+    exit 1
+  }
+  STAGED=""
   echo "   pf $RUNNING → $VER installed"
 fi
 
-# ─── 2. config: create or verify (NEVER rewritten) ──────────────────
-echo "== 2/5 config"
+# stable symlink, swapped atomically (relative target: the tree is relocatable)
+PREV=$(readlink "$RELEASE_DIR/current" 2>/dev/null || true)
+if [ "$PREV" = "$VER" ]; then
+  echo "   release/current -> $VER already"
+else
+  ln -sfn "$VER" "$RELEASE_DIR/.current.tmp.$$" && mv -T "$RELEASE_DIR/.current.tmp.$$" "$RELEASE_DIR/current"
+  echo "   release/current -> $VER (was ${PREV:-none})"
+  # keep the new and the previous version, prune the rest
+  for d in "$RELEASE_DIR"/*; do
+    if [ ! -d "$d" ] || [ -L "$d" ]; then continue; fi
+    n=$(basename "$d")
+    [ "$n" = "$VER" ] || [ "$n" = "$PREV" ] || { rm -rf "$d"; echo "   pruned old release $n"; }
+  done
+fi
+
+# ─── 3. config + harnesses ──────────────────────────────────────────
+echo "== 3/5 config + harnesses"
+# config: create or verify (NEVER rewritten)
 mkdir -p "$(dirname "$CFG")"
 if [ -f "$CFG" ] && grep -q "api_key" "$CFG"; then
   echo "   config exists ($(dirname "$CFG")/$(basename "$CFG"))"
@@ -196,43 +318,7 @@ CFGEOF
   chmod 600 "$CFG"
   echo "   config written (add a real [workspace] mapping before starting the daemon — see the commented template inside)"
 fi
-# ─── 3. release checkout + skills ───────────────────────────────────
-# The installer owns a checkout of the release tag, independent of any
-# harness: the daemon's workflows and every harness's skill come from it.
-echo "== 3/5 release + skills"
-mkdir -p "$RELEASE_DIR"
-REL="$RELEASE_DIR/$VER"
-if [ -f "$REL/skills/polyforge/SKILL.md" ] && [ -d "$REL/workflows" ]; then
-  echo "   release checkout $VER present"
-else
-  rm -rf "$REL.tmp.$$"
-  # gh uses its own credentials (ssh or https), so a machine that only has
-  # gh auth can clone the private repo. The tag is cloned shallow.
-  gh repo clone "$REPO" "$REL.tmp.$$" -- --branch "$VER" --depth 1 >/dev/null 2>&1 \
-    || { echo "ERROR: cannot clone $REPO at $VER (gh auth?)"; rm -rf "$REL.tmp.$$"; exit 1; }
-  if [ ! -f "$REL.tmp.$$/skills/polyforge/SKILL.md" ] || [ ! -d "$REL.tmp.$$/workflows" ]; then
-    echo "ERROR: $VER checkout lacks skills/polyforge or workflows"
-    rm -rf "$REL.tmp.$$"
-    exit 1
-  fi
-  rm -rf "$REL"
-  mv "$REL.tmp.$$" "$REL"
-  echo "   release checkout $VER fetched"
-fi
-# stable symlink, swapped atomically (relative target: the tree is relocatable)
-PREV=$(readlink "$RELEASE_DIR/current" 2>/dev/null || true)
-if [ "$PREV" = "$VER" ]; then
-  echo "   release/current -> $VER already"
-else
-  ln -sfn "$VER" "$RELEASE_DIR/.current.tmp.$$" && mv -T "$RELEASE_DIR/.current.tmp.$$" "$RELEASE_DIR/current"
-  echo "   release/current -> $VER (was ${PREV:-none})"
-  # keep the new and the previous version, prune the rest
-  for d in "$RELEASE_DIR"/*; do
-    if [ ! -d "$d" ] || [ -L "$d" ]; then continue; fi
-    n=$(basename "$d")
-    [ "$n" = "$VER" ] || [ "$n" = "$PREV" ] || { rm -rf "$d"; echo "   pruned old release $n"; }
-  done
-fi
+# --- skills: the harnesses reference release/current ---
 SRC_SKILL="$RELEASE_DIR/current/skills/polyforge"
 
 # --- Claude Code (independent of pi) ---
