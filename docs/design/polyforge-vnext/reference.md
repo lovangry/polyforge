@@ -394,7 +394,8 @@ background reconcile (`RebuildIndex`) makes rows/index match files (file wins). 
 examines at most max(100, 10×limit) candidates (rules in `06-memory-search.md#§5.1`); filters, limit
 and the in-SQL `project=` narrowing are the same in both modes (single entry `Store.SearchMode`).
 Both modes order by bm25 weighted by per-type freshness: `rank × (1 + 0.5 × exp(-age_days/stability))`,
-age from `updated_at`, stability experience.* 90d, fact.*/methodology.* 180d, rule.*/doc.* none, else 90d
+age from `updated_at`, stability rule.*/doc.design/doc.decision none, other doc.* (review, audit) 180d,
+experience.* 90d, fact.*/methodology.* 180d, else 90d
 (`memory/freshness.go`). A memory written without a title gets one derived from its body's first line
 (row only; a startup backfill fills older rows). CLI (`cli/verbs_aihub.go`): `pf recall --project P <query> [--any]` (project must
 be mapped; `--any` = `match=any`), `pf remember --project P --type T <content|-|@file>`, `pf memory show <id>`. At claim the

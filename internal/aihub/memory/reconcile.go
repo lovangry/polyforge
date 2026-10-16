@@ -818,7 +818,12 @@ func (s *Store) bindingsExist(fm *frontmatter) bool {
 // the row unstamped — the next pass re-verifies and re-queues it — never
 // stamped with no index row.
 func (s *Store) backfillRow(fm *frontmatter, raw []byte, dirProject, memID, status string) error {
-	_, body, _ := splitFrontmatter(string(raw))
+	// Only active rows are served, so only they get a derived title.
+	title := fm.Title
+	if status == "active" {
+		_, body, _ := splitFrontmatter(string(raw))
+		title = rowTitle(fm.Title, body)
+	}
 	rel := "memory/" + dirProject + "/" + memID
 	if status == "redacted" {
 		rel = "memory/" + dirProject + "/_redacted/" + memID
@@ -835,7 +840,7 @@ func (s *Store) backfillRow(fm *frontmatter, raw []byte, dirProject, memID, stat
 	if _, err := tx.Exec(`INSERT INTO memories(id, project_id, owner_user_id, work_item_id, type, title,
 		visibility, authority_path, content_sha, content_len, tags, related, idempotency_key, status, created_at, updated_at)
 		VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)`,
-		memID, fm.ProjectID, fm.OwnerUserID, anyPtr(fm.WorkItemID), fm.Type, anyPtr(rowTitle(fm.Title, body)),
+		memID, fm.ProjectID, fm.OwnerUserID, anyPtr(fm.WorkItemID), fm.Type, anyPtr(title),
 		fm.Visibility, rel, shaHex(raw), len(raw), jsonOrEmpty(fm.Tags), jsonOrEmpty(fm.Related),
 		idem, status, fm.CreatedAt, fm.UpdatedAt); err != nil {
 		return err

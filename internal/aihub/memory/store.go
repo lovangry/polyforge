@@ -6,11 +6,14 @@ package memory
 // redact.
 
 import (
+	"container/heap"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -373,7 +376,7 @@ func (s *Store) SearchMode(match, project, q, memType string, tags []string, lim
 		limit = 50
 	}
 	f := searchFilter{project: project, memType: memType, tags: tags, limit: limit, allowed: allowed,
-		now: s.now().UTC().Format(time.RFC3339Nano)}
+		now: s.now()}
 	if match == MatchAny {
 		return s.searchAny(q, f)
 	}
@@ -399,7 +402,7 @@ type searchFilter struct {
 	tags    []string
 	limit   int
 	allowed func(*Entry) bool
-	now     string // the query time the freshness term ages against
+	now     time.Time // the query time the freshness term ages against
 }
 
 // collect answers the filtered hits for one search. match is the FTS5
@@ -491,29 +494,193 @@ func (s *Store) collect(match string, short []string, maxCands int, f searchFilt
 // ftsPage reads one page of FTS candidates in freshness-weighted rank
 // order (freshness.go; now is the query time). project, when non-empty,
 // keeps only that project's rows.
-func (s *Store) ftsPage(match, project, now string, limit, offset int) ([]candRow, error) {
-	rows, err := s.db.Query(`SELECT f.mem_id, f.body FROM memories m
-		JOIN memory_fts f ON f.mem_id = m.id
-		WHERE memory_fts MATCH ?1 AND m.status='active'
-		AND (?4 = '' OR m.project_id = ?4)
-		ORDER BY f.rank * (1 + `+ftoa(freshnessBoost)+` * `+freshnessSQL("?5")+`),
-		m.updated_at DESC, m.id
-		LIMIT ?2 OFFSET ?3`, match, limit, offset, project, now)
+//
+// Cost shape: FTS5 answers every match's rowid and bm25 rank from its
+// index alone, but reaching an entry's mem_id — and so its memories row
+// — reads the entry's stored FTS row, and re-reading rank costs a second
+// bm25 evaluation. So the ranks are read once for every match, and
+// stored rows are read only down the rank order as far as the page can
+// still change: the weighted score is bounded below by
+// (1+freshnessBoost) × rank, so once offset+limit candidates are held
+// and the next match's bound is worse than the worst of them, no later
+// match can enter the page. Bodies are read for the page alone. The
+// answer is the exact weighted order.
+func (s *Store) ftsPage(match, project string, now time.Time, limit, offset int) ([]candRow, error) {
+	type ranked struct {
+		rowid int64
+		rank  float64
+	}
+	rows, err := s.db.Query(`SELECT rowid, rank FROM memory_fts WHERE memory_fts MATCH ?1`, match)
 	if err != nil {
 		// A typed refusal, never a degrade to a full scan: answering
 		// every memory for a query FTS could not parse is a leak.
 		return nil, errf(api.ErrMemUnavailable, "", "fts: %v", err)
 	}
-	defer rows.Close()
-	var out []candRow
+	var matches []ranked
 	for rows.Next() {
-		var c candRow
-		if err := rows.Scan(&c.id, &c.body); err != nil {
+		var r ranked
+		if err := rows.Scan(&r.rowid, &r.rank); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		out = append(out, c)
+		matches = append(matches, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].rank != matches[j].rank {
+			return matches[i].rank < matches[j].rank
+		}
+		return matches[i].rowid < matches[j].rowid
+	})
+	want := offset + limit
+	var all []scoredCand
+	best := &worstFirst{} // the want best scores so far, worst on top
+	bounded := func(rank float64) bool {
+		return best.Len() == want && (1+freshnessBoost)*rank > (*best)[0]
+	}
+	// The first batch is the page's own size; later ones are smaller so
+	// the stop overshoots the bound by few stored-row reads.
+	step := want
+	for i := 0; i < len(matches) && !bounded(matches[i].rank); step = max(16, want/4) {
+		batch := matches[i:min(i+step, len(matches))]
+		i += len(batch)
+		keys := make([]int64, len(batch))
+		for k, r := range batch {
+			keys[k] = r.rowid
+		}
+		meta, err := s.ftsMeta(keys, project)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range batch {
+			if bounded(r.rank) {
+				break
+			}
+			c, ok := meta[r.rowid]
+			if !ok {
+				continue // inactive or another project's
+			}
+			c.score = r.rank * (1 + freshnessBoost*freshness(c.typ, c.updatedAt, now))
+			all = append(all, c)
+			if best.Len() < want {
+				heap.Push(best, c.score)
+			} else if c.score < (*best)[0] {
+				(*best)[0] = c.score
+				heap.Fix(best, 0)
+			}
+		}
+	}
+	sortScored(all)
+	if offset >= len(all) {
+		return nil, nil
+	}
+	all = all[offset:min(want, len(all))]
+	keys := make([]int64, len(all))
+	for i, c := range all {
+		keys[i] = c.rowid
+	}
+	bodies, err := s.ftsBodies(keys)
+	if err != nil {
+		return nil, err
+	}
+	// An entry redacted since its meta was read keeps its slot with an
+	// empty body (the page length is collect's end-of-matches signal);
+	// collect's status check drops it.
+	out := make([]candRow, len(all))
+	for i, c := range all {
+		out[i] = candRow{c.id, bodies[c.rowid]}
+	}
+	return out, nil
+}
+
+// ftsMeta answers, per FTS rowid, the active entry's id, type and
+// updated_at (project, when non-empty, keeps only that project's rows).
+func (s *Store) ftsMeta(keys []int64, project string) (map[int64]scoredCand, error) {
+	rows, err := s.db.Query(`SELECT f.rowid, m.id, m.type, m.updated_at
+		FROM memory_fts f JOIN memories m ON m.id = f.mem_id
+		WHERE f.rowid IN (`+rowidList(keys)+`) AND m.status='active'
+		AND (?1 = '' OR m.project_id = ?1)`, project)
+	if err != nil {
+		return nil, errf(api.ErrMemUnavailable, "", "fts: %v", err)
+	}
+	defer rows.Close()
+	out := make(map[int64]scoredCand, len(keys))
+	for rows.Next() {
+		var c scoredCand
+		if err := rows.Scan(&c.rowid, &c.id, &c.typ, &c.updatedAt); err != nil {
+			return nil, err
+		}
+		out[c.rowid] = c
 	}
 	return out, rows.Err()
+}
+
+// ftsBodies answers the indexed body per FTS rowid.
+func (s *Store) ftsBodies(keys []int64) (map[int64]string, error) {
+	rows, err := s.db.Query(`SELECT rowid, body FROM memory_fts WHERE rowid IN (` + rowidList(keys) + `)`)
+	if err != nil {
+		return nil, errf(api.ErrMemUnavailable, "", "fts: %v", err)
+	}
+	defer rows.Close()
+	out := make(map[int64]string, len(keys))
+	for rows.Next() {
+		var k int64
+		var body string
+		if err := rows.Scan(&k, &body); err != nil {
+			return nil, err
+		}
+		out[k] = body
+	}
+	return out, rows.Err()
+}
+
+// rowidList renders integer keys as an SQL IN list.
+func rowidList(keys []int64) string {
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = strconv.FormatInt(k, 10)
+	}
+	return strings.Join(parts, ",")
+}
+
+// scoredCand is one candidate with its score (lower is better).
+type scoredCand struct {
+	candRow
+	rowid     int64 // FTS rowid (ftsPage)
+	typ       string
+	updatedAt string
+	score     float64
+}
+
+// sortScored orders candidates by score, then updated_at DESC, then id.
+func sortScored(all []scoredCand) {
+	sort.Slice(all, func(i, j int) bool {
+		a, b := all[i], all[j]
+		if a.score != b.score {
+			return a.score < b.score
+		}
+		if a.updatedAt != b.updatedAt {
+			return a.updatedAt > b.updatedAt
+		}
+		return a.id < b.id
+	})
+}
+
+// worstFirst is a max-heap of scores: the worst (largest) on top.
+type worstFirst []float64
+
+func (h worstFirst) Len() int           { return len(h) }
+func (h worstFirst) Less(i, j int) bool { return h[i] > h[j] }
+func (h worstFirst) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *worstFirst) Push(x any)        { *h = append(*h, x.(float64)) }
+func (h *worstFirst) Pop() any {
+	old := *h
+	x := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return x
 }
 
 // typeMatches answers the type filter for one entry. An empty filter
@@ -538,24 +705,30 @@ type candRow struct{ id, body string }
 // scanBodies returns every active entry's indexed body for substring
 // filtering (the short-token path), freshest first (no rank exists here;
 // freshness.go); project, when non-empty, keeps only that project's rows.
-func (s *Store) scanBodies(project, now string) ([]candRow, error) {
-	rows, err := s.db.Query(`SELECT f.mem_id, f.body FROM memories m
+func (s *Store) scanBodies(project string, now time.Time) ([]candRow, error) {
+	rows, err := s.db.Query(`SELECT f.mem_id, f.body, m.updated_at, m.type FROM memories m
 		JOIN memory_fts f ON f.mem_id = m.id WHERE m.status='active'
-		AND (?1 = '' OR m.project_id = ?1)
-		ORDER BY `+freshnessSQL("?2")+` DESC, m.updated_at DESC, m.id`, project, now)
+		AND (?1 = '' OR m.project_id = ?1)`, project)
 	if err != nil {
 		return nil, errf(api.ErrMemUnavailable, "", "scan: %v", err)
 	}
-	var out []candRow
+	var all []scoredCand
 	for rows.Next() {
-		var id, body string
-		if err := rows.Scan(&id, &body); err != nil {
+		var c scoredCand
+		var typ string
+		if err := rows.Scan(&c.id, &c.body, &c.updatedAt, &typ); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		out = append(out, candRow{id, body})
+		c.score = -freshness(typ, c.updatedAt, now)
+		all = append(all, c)
 	}
 	rows.Close()
+	sortScored(all)
+	out := make([]candRow, len(all))
+	for i, c := range all {
+		out[i] = c.candRow
+	}
 	return out, nil
 }
 

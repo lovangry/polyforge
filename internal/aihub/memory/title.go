@@ -66,16 +66,21 @@ func stripLineMarkers(line string) string {
 			}
 		case strings.HasPrefix(t, ">"):
 			t = t[1:]
-		case t == "-" || t == "*" || t == "+":
+		case t == "-" || t == "*" || t == "+" || t == "[ ]" || t == "[x]" || t == "[X]":
 			t = ""
 		case len(t) >= 2 && strings.ContainsRune("-*+", rune(t[0])) && (t[1] == ' ' || t[1] == '\t'):
 			t = t[2:]
 		case strings.HasPrefix(t, "[ ] ") || strings.HasPrefix(t, "[x] ") || strings.HasPrefix(t, "[X] "):
 			t = t[4:]
 		default:
-			if n := len(t) - len(strings.TrimLeft(t, "0123456789")); n > 0 && n <= 9 && n+1 < len(t) &&
-				(t[n] == '.' || t[n] == ')') && (t[n+1] == ' ' || t[n+1] == '\t') {
-				t = t[n+2:]
+			n := len(t) - len(strings.TrimLeft(t, "0123456789"))
+			if n > 0 && n <= 9 && n < len(t) && (t[n] == '.' || t[n] == ')') {
+				switch {
+				case n+1 == len(t): // a bare marker ("1.")
+					t = ""
+				case t[n+1] == ' ' || t[n+1] == '\t':
+					t = t[n+2:]
+				}
 			}
 		}
 		t = strings.TrimSpace(t)

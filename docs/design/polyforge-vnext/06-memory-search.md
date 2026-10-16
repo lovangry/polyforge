@@ -43,7 +43,9 @@ aihub 启动后在后台运行 `Store.RebuildIndex`（`cmd/aihub/main.go`；先�
 已移入 `_redacted/` 但未提交的 redact → 向前补完。按新鲜度戳增量执行（polyforge#129）：每行记录写入时
 权威文件的 mtime+size，戳一致即跳过该条目（不读、不哈希、不写索引）；戳不一致或缺失才按内容 sha 校验。
 对账开始时先做标题回填（`backfillTitles`）：`title` 为空/空白的 active 行，文件内容 sha 与行一致时按
-`rowTitle` 补上标题，分批小事务写入；已补的行不再被选中，所以重复执行不读文件、不写库。没有在线重建端点。
+`rowTitle` 补上标题，分批小事务写入；已补的行不再被选中，不会重复读写。仍会在每次启动被重新选中并读文件的
+只有补不上的行：权威文件缺失、内容 sha 与行不一致（交给随后的对账按文件修正，修正时同样派生标题），或正文没有
+可用的行。没有在线重建端点。
 
 ## 5. API 与错误码 <!-- §5 -->
 
@@ -68,9 +70,12 @@ aihub 启动后在后台运行 `Store.RebuildIndex`（`cmd/aihub/main.go`；先�
 两种模式的排序相同（`memory/freshness.go`）：`w = exp(-age_days / stability_days)`，`age_days` 按
 `memories.updated_at`（权威文档最后修订时间；没有更新端点，API 写入的条目等于 `created_at`）到查询时刻计算；
 `score = rank × (1 + 0.5 × w)`（rank 为 FTS5 bm25，越负越好），升序，平分时按 `updated_at` 降序、再按 id。
-stability：`experience.*` 90 天，`fact.*` 与 `methodology.*` 180 天，`rule.*` 与 `doc.*` 不衰减（w = 1），
-其他类型 90 天。新鲜度最多把相关度放大 1.5 倍：相近的命中里新的在前，相关度高出 1.5 倍以上的旧条目始终排在
-较弱的新条目之前。只有短词（无 rank）的子串扫描按 w 降序。
+stability：`rule.*`、`doc.design`、`doc.decision` 不衰减（w = 1）；`doc.review`、`doc.audit` 及其他 `doc.*`
+（时点快照）180 天；`experience.*` 90 天；`fact.*` 与 `methodology.*` 180 天；其他类型 90 天。`updated_at`
+解析不了按完全陈旧（w = 0），未来时间按 age 0（w ≤ 1）。新鲜度最多把相关度放大 1.5 倍：相近的命中里新的在前，相关度高出 1.5 倍以上的旧条目始终排在
+较弱的新条目之前。只有短词（无 rank）的子串扫描按 w 降序。实现上（`ftsPage`）先只从 FTS 索引读出全部命中的
+rowid 与 rank，再沿 rank 顺序分批读取条目元数据，直到下界 (1+0.5)×rank 已劣于当前第 offset+limit 名，正文只读
+本页；结果与对全部命中精确排序相同。
 
 ### 5.2 错误码 <!-- §5.2 -->
 

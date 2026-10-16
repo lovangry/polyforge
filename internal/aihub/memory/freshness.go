@@ -10,7 +10,7 @@ package memory
 // since — memories have no update endpoint, so for API-written entries
 // it equals created_at):
 //
-//	w     = exp(-age_days / stability_days)       ∈ (0, 1]; 1 for a non-decaying type
+//	w     = exp(-age_days / stability_days)       ∈ [0, 1]; 1 for a non-decaying type
 //	score = rank × (1 + freshnessBoost × w)       (rank: FTS5 bm25, negative = better)
 //
 // ordered ascending (most negative first). The factor lies in
@@ -20,51 +20,63 @@ package memory
 // multiplicative form is independent of bm25's absolute scale, which
 // varies with corpus size and query length. Exact ties fall back to
 // updated_at DESC, then id. The substring-scan path (short tokens only,
-// no rank) orders by w alone.
+// no rank) orders by w alone. ftsPage evaluates the order without
+// reading every match's stored row; see there.
 
 import (
-	"strconv"
+	"math"
 	"strings"
+	"time"
 )
 
 // freshnessBoost is the largest relative lift freshness gives a match.
 const freshnessBoost = 0.5
 
-// typeStability maps a type prefix to its stability in days (0 = never
-// decays). experience.* is tied to circumstances that change; fact.* and
-// methodology.* hold longer; rule.* and doc.* are standing references
-// and do not decay. Any other type uses defaultStabilityDays.
+// typeStability maps a type family to its stability in days (0 = never
+// decays); the first entry naming the type or one of its dotted
+// ancestors wins. rule.* and the standing doc kinds (doc.design,
+// doc.decision) are references that stay current until redacted;
+// doc.review, doc.audit and other doc.* are point-in-time snapshots;
+// experience.* is tied to circumstances that change; fact.* and
+// methodology.* hold longer. Any other type uses defaultStabilityDays.
 var typeStability = []struct {
-	prefix string
+	family string
 	days   float64
 }{
-	{"experience.", 90},
-	{"fact.", 180},
-	{"methodology.", 180},
-	{"rule.", 0},
-	{"doc.", 0},
+	{"rule", 0},
+	{"doc.design", 0},
+	{"doc.decision", 0},
+	{"doc", 180},
+	{"experience", 90},
+	{"fact", 180},
+	{"methodology", 180},
 }
 
 const defaultStabilityDays = 90
 
-// freshnessSQL is the SQL expression of w for the memories row aliased m;
-// nowParam is the placeholder (e.g. "?5") bound to the query time as an
-// RFC3339 UTC string. An unparseable updated_at counts as fully stale
-// (w = 0).
-func freshnessSQL(nowParam string) string {
-	var sb strings.Builder
-	age := "max(0, julianday(" + nowParam + ") - julianday(m.updated_at))"
-	sb.WriteString("COALESCE(CASE")
+// stabilityDays answers a type's stability (0 = never decays).
+func stabilityDays(typ string) float64 {
 	for _, ts := range typeStability {
-		sb.WriteString(" WHEN m.type GLOB '" + ts.prefix + "*' THEN ")
-		if ts.days == 0 {
-			sb.WriteString("1.0")
-		} else {
-			sb.WriteString("exp(-" + age + " / " + ftoa(ts.days) + ")")
+		if typ == ts.family || strings.HasPrefix(typ, ts.family+".") {
+			return ts.days
 		}
 	}
-	sb.WriteString(" ELSE exp(-" + age + " / " + ftoa(defaultStabilityDays) + ") END, 0.0)")
-	return sb.String()
+	return defaultStabilityDays
 }
 
-func ftoa(f float64) string { return strconv.FormatFloat(f, 'f', 1, 64) }
+// freshness answers w for one entry at query time now. updated_at is
+// written RFC3339 (core.Now, or a frontmatter timestamp); one that does
+// not parse counts as fully stale (w = 0). A future timestamp counts as
+// age 0, so w never exceeds 1.
+func freshness(typ, updatedAt string, now time.Time) float64 {
+	days := stabilityDays(typ)
+	if days == 0 {
+		return 1
+	}
+	t, err := time.Parse(time.RFC3339Nano, updatedAt)
+	if err != nil {
+		return 0
+	}
+	age := max(0, now.Sub(t).Hours()/24)
+	return math.Exp(-age / days)
+}

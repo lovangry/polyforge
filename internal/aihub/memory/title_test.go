@@ -6,6 +6,9 @@ package memory
 // reconcile afterwards).
 
 import (
+	"database/sql"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -37,6 +40,8 @@ func TestDeriveTitle(t *testing.T) {
 		{"empty", "", nil},
 		{"blank", " \n\t\n", nil},
 		{"markers only", "#\n- \n---", nil},
+		{"bare numbered marker", "1.\n2)\n- [ ]\nthe real step", sp("the real step")},
+		{"decimal kept", "3.14 is pi", sp("3.14 is pi")},
 	}
 	for _, c := range cases {
 		got := deriveTitle(c.body)
@@ -152,6 +157,34 @@ func TestBackfillTitlesIdempotent(t *testing.T) {
 	}
 	if second := titles(); second[a.ID] != first[a.ID] || second[b.ID] != first[b.ID] {
 		t.Fatalf("second pass changed titles: %v → %v", first, second)
+	}
+}
+
+func TestBackfillRowRedactedKeepsNoTitle(t *testing.T) {
+	e := newEnv(t)
+	var alphaID string
+	if err := e.db.QueryRow(`SELECT id FROM projects WHERE name='alpha'`).Scan(&alphaID); err != nil {
+		t.Fatal(err)
+	}
+	placeAuthority(t, e, alphaID, "mem_redactedtitle", "# would be a title")
+	src := filepath.Join(e.store.dataDir, "memory", alphaID, "mem_redactedtitle")
+	dst := filepath.Join(e.store.dataDir, "memory", alphaID, "_redacted", "mem_redactedtitle")
+	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.store.RebuildIndex(); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var title sql.NullString
+	if err := e.db.QueryRow(`SELECT status, title FROM memories WHERE id='mem_redactedtitle'`).Scan(&status, &title); err != nil {
+		t.Fatal(err)
+	}
+	if status != "redacted" || title.Valid {
+		t.Fatalf("redacted backfill: status %q title %v, want redacted with no title", status, title)
 	}
 }
 
