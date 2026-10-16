@@ -250,21 +250,46 @@ func TestAnyTermsCJKShingles(t *testing.T) {
 }
 
 // Particle-heavy shingles do not take term slots; content shingles that
-// touch one particle stay, and Latin words are unaffected.
+// touch one particle stay, content characters that also serve as
+// function words (中 上 下 对 将 一 等) are not particles, a run the
+// filter would empty keeps its shingles, and Latin words are unaffected.
 func TestAnyTermsCJKParticles(t *testing.T) {
-	got := anyTerms("修复守护进程中的重试阶梯问题")
-	want := []string{"修复守", "复守护", "守护进", "护进程", "进程中", "的重试", "重试阶", "试阶梯", "阶梯问", "梯问题"}
-	if strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Fatalf("anyTerms = %v, want %v (程中的 / 中的重 dropped)", got, want)
+	join := func(ts []string) string { return strings.Join(ts, " ") }
+	got := anyTerms("修复的是在重试时的问题")
+	want := []string{"修复的", "在重试", "重试时", "试时的", "时的问", "的问题"}
+	if join(got) != join(want) {
+		t.Fatalf("anyTerms = %v, want %v (复的是 / 的是在 / 是在重 dropped)", got, want)
 	}
 	// A multi-rune function word counts as particles: 进行 + 了.
-	got = anyTerms("进行了重试")
-	if strings.Join(got, " ") != "了重试" {
+	if got := anyTerms("进行了重试"); join(got) != "了重试" {
 		t.Fatalf("function word: %v, want [了重试]", got)
+	}
+	// Real terms built on 中 上 下 对 将 一 等 survive.
+	for q, keys := range map[string][]string{
+		"修复守护进程中的重试阶梯问题": {"守护进", "重试阶", "试阶梯"},
+		"上下文":         {"上下文"},
+		"中文上下文":       {"中文上", "上下文"},
+		"下载中":         {"下载中"},
+		"等待中的任务":      {"等待中", "的任务"},
+		"将来为了支持对象上传":  {"将来为", "支持对", "对象上", "象上传"},
+		"一致性检查与对账":    {"一致性", "性检查", "与对账"},
+		"修复上下文压缩后的问题": {"修复上", "上下文", "文压缩"},
+	} {
+		got := " " + join(anyTerms(q)) + " "
+		for _, k := range keys {
+			if !strings.Contains(got, " "+k+" ") {
+				t.Fatalf("anyTerms(%q) = %q lacks %q", q, got, k)
+			}
+		}
+	}
+	// A clause made only of particles keeps its shingles rather than
+	// yielding nothing.
+	if got := anyTerms("就是这个"); join(got) != "就是这 是这个" {
+		t.Fatalf("all-particle run: %v, want its unfiltered shingles", got)
 	}
 	// Latin is untouched by the CJK filter (the particle runes never
 	// occur in a non-CJK run).
-	if got := anyTerms("retry ladder 的了是"); strings.Join(got, " ") != "ladder retry" {
+	if got := anyTerms("retry ladder 的了是"); join(got) != "ladder 的了是 retry" {
 		t.Fatalf("latin: %v", got)
 	}
 }
