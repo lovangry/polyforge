@@ -34,7 +34,9 @@ all of them. `--limit` caps results: default 20, `1..200` (anything else
 is refused locally, nothing sent). By default a memory must contain EVERY
 query word, so keep queries short (2–4 distinctive words); `--any` switches
 to the ranked any-term match (a memory sharing any of the query's words,
-best overlap first), for a long or descriptive query. In `--any` mode
+best overlap first), for a long or descriptive query. In both modes a
+fresher memory ranks ahead of a comparable older one (`rule.*` and `doc.*`
+never age); a clearly better old match still ranks first. In `--any` mode
 stopwords and words under 3 characters are ignored, as are non-CJK words
 over 40 characters (hashes, base64). Chinese/Japanese/Korean text has no word
 boundaries, so it is matched by overlapping 3-character pieces ("重试阶梯" →

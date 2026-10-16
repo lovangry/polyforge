@@ -55,9 +55,10 @@ func parseAuthorityDoc(raw []byte, dirMemID string) (*frontmatter, string, error
 	return &fm, body, nil
 }
 
-// rowMatchesFrontmatter compares the metadata set the file can correct.
-func rowMatchesFrontmatter(e *Entry, fm *frontmatter) bool {
-	return strPtrEq(e.Title, fm.Title) &&
+// rowMatchesFrontmatter compares the metadata set the file can correct;
+// body is the document's body (the title may be derived from it).
+func rowMatchesFrontmatter(e *Entry, fm *frontmatter, body string) bool {
+	return strPtrEq(e.Title, rowTitle(fm.Title, body)) &&
 		sliceEq(e.Tags, fm.Tags) &&
 		sliceEq(e.Related, fm.Related) &&
 		e.Visibility == fm.Visibility &&
@@ -168,14 +169,13 @@ func (s *Store) reconcileOne(memID string) error {
 			return perr
 		}
 		sha := shaHex(raw)
-		if sha == e.ContentSHA && rowMatchesFrontmatter(e, fm) {
+		if sha == e.ContentSHA && rowMatchesFrontmatter(e, fm, body) {
 			return nil // a writer completed ③ while we waited
 		}
-		if uerr := s.updateRowFromFile(e, fm, raw, sha, st); uerr != nil {
+		if uerr := s.updateRowFromFile(e, fm, body, raw, sha, st); uerr != nil {
 			return uerr
 		}
 		s.sweepDirTransients(dir)
-		_ = body
 		return nil
 	}
 	// Active file missing: a redact that crashed between ① and ② is
@@ -194,7 +194,7 @@ func (s *Store) reconcileOne(memID string) error {
 // exact file state, so the next pass can skip the entry on the stamp
 // alone. st may be nil (the stat failed): the row is then written
 // unstamped and the next pass re-verifies it.
-func (s *Store) updateRowFromFile(e *Entry, fm *frontmatter, raw []byte, sha string, st os.FileInfo) error {
+func (s *Store) updateRowFromFile(e *Entry, fm *frontmatter, body string, raw []byte, sha string, st os.FileInfo) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -206,7 +206,7 @@ func (s *Store) updateRowFromFile(e *Entry, fm *frontmatter, raw []byte, sha str
 	}
 	if _, err := tx.Exec(`UPDATE memories SET content_sha=?1, content_len=?2, title=?3, tags=?4,
 		related=?5, visibility=?6, updated_at=?7, fs_mtime_ns=?8, fs_size=?9 WHERE id=?10`,
-		sha, len(raw), anyPtr(fm.Title), jsonOrEmpty(fm.Tags), jsonOrEmpty(fm.Related),
+		sha, len(raw), anyPtr(rowTitle(fm.Title, body)), jsonOrEmpty(fm.Tags), jsonOrEmpty(fm.Related),
 		fm.Visibility, fm.UpdatedAt, fsM, fsS, e.ID); err != nil {
 		return err
 	}
@@ -375,6 +375,12 @@ func (s *Store) rebuildIndex() (int, error) {
 	}
 	if err := s.sweepTransients(); err != nil {
 		return 0, errf(api.ErrMemUpstream, "", "sweep: %v", err)
+	}
+	// Title backfill first: rows written before titles were derived get
+	// theirs from the file, so the walk below finds them matching their
+	// file instead of correcting each one with a full row + index write.
+	if err := s.backfillTitles(); err != nil {
+		return 0, errf(api.ErrMemUpstream, "", "titles: %v", err)
 	}
 	var projDirs []string
 	all, err := os.ReadDir(filepath.Join(s.dataDir, "memory"))
@@ -735,11 +741,11 @@ func (s *Store) rebuildActiveEntry(dirProject, memID string) (rebuildOutcome, er
 	if rerr != nil {
 		return rebuildUnresolved, nil // vanished mid-pass: the row-driven scan decides
 	}
-	fm, _, perr := parseAuthorityDoc(raw, memID)
+	fm, body, perr := parseAuthorityDoc(raw, memID)
 	if perr != nil {
 		return rebuildUnresolved, nil // invalid frontmatter never becomes an illegal row
 	}
-	if row.ContentSHA != shaHex(raw) || !rowMatchesFrontmatter(row, fm) {
+	if row.ContentSHA != shaHex(raw) || !rowMatchesFrontmatter(row, fm, body) {
 		if cerr := s.reconcileOne(memID); cerr != nil {
 			if ae, ok := cerr.(*APIError); ok && ae.Code == api.ErrMemBadInput {
 				return rebuildUnresolved, nil
@@ -812,6 +818,7 @@ func (s *Store) bindingsExist(fm *frontmatter) bool {
 // the row unstamped — the next pass re-verifies and re-queues it — never
 // stamped with no index row.
 func (s *Store) backfillRow(fm *frontmatter, raw []byte, dirProject, memID, status string) error {
+	_, body, _ := splitFrontmatter(string(raw))
 	rel := "memory/" + dirProject + "/" + memID
 	if status == "redacted" {
 		rel = "memory/" + dirProject + "/_redacted/" + memID
@@ -828,7 +835,7 @@ func (s *Store) backfillRow(fm *frontmatter, raw []byte, dirProject, memID, stat
 	if _, err := tx.Exec(`INSERT INTO memories(id, project_id, owner_user_id, work_item_id, type, title,
 		visibility, authority_path, content_sha, content_len, tags, related, idempotency_key, status, created_at, updated_at)
 		VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)`,
-		memID, fm.ProjectID, fm.OwnerUserID, anyPtr(fm.WorkItemID), fm.Type, anyPtr(fm.Title),
+		memID, fm.ProjectID, fm.OwnerUserID, anyPtr(fm.WorkItemID), fm.Type, anyPtr(rowTitle(fm.Title, body)),
 		fm.Visibility, rel, shaHex(raw), len(raw), jsonOrEmpty(fm.Tags), jsonOrEmpty(fm.Related),
 		idem, status, fm.CreatedAt, fm.UpdatedAt); err != nil {
 		return err

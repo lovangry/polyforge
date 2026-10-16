@@ -263,7 +263,7 @@ func anyTerms(q string) []string {
 
 // SearchAny is the ranked any-term search: a memory matches when it
 // contains at least one of q's terms (anyTerms), and hits come back in
-// FTS5 rank order. The rank is bm25 over the trigram index's 3-rune
+// FTS5 rank order weighted by freshness (freshness.go). The rank is bm25 over the trigram index's 3-rune
 // pieces, not over words: a short term also matches inside longer words
 // ("fix" in "prefix"), which adds some noise the ranking only partly
 // absorbs. At most max(anyCandidateFloor, anyCandidatesPerHit×limit)

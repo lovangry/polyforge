@@ -17,7 +17,9 @@ the project memory so a later `recall` finds it.
 pf remember --project P --type T [--title S] [--visibility V] [--tags a,b] [--work-item ID] <content | - (stdin) | @file>
 ```
 
-`--type` is required (e.g. `experience.debug`, `fact.note`). The content
+`--type` is required (e.g. `experience.debug`, `fact.note`). Without
+`--title` aihub derives one from the content's first line (markdown
+markers stripped, cut to 80 characters). The content
 is the positional text; `-` reads it from stdin, `@file` from a file.
 `--project` is REQUIRED (polyforge#113 — no default project exists) and
 must be a project of this machine's cli.toml `[workspace]` mapping (owner

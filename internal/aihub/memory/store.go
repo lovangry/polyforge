@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/silgrid/polyforge/internal/aihub/core"
@@ -85,12 +86,16 @@ type Store struct {
 	// call; it is invoked only from the goroutine running the pass.
 	ReconcileProgress func(ProgressReport)
 
+	// now is the search clock the freshness term ages entries against
+	// (freshness.go); tests pin it.
+	now func() time.Time
+
 	mu    sync.Mutex
 	locks map[string]*sync.Mutex // per-mem_id write mutex
 }
 
 func NewStore(db *core.DB, dataDir string) *Store {
-	return &Store{db: db, dataDir: dataDir, locks: map[string]*sync.Mutex{}}
+	return &Store{db: db, dataDir: dataDir, now: time.Now, locks: map[string]*sync.Mutex{}}
 }
 
 func (s *Store) authorityDir(projectID, memID string) string {
@@ -145,6 +150,8 @@ type CreateRequest struct {
 // Create runs the write order: ① tmp+fsync, ② one Core tx (row + FTS),
 // ③ rename over the authority file. Between ② and ③ no half-committed
 // state is ever served (INV-7f); crash residue is swept by reconcile.
+// A blank title is derived from the body for the row (rowTitle); the
+// authority frontmatter keeps the title as requested.
 func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	if strings.TrimSpace(req.Content) == "" {
 		return nil, errf(api.ErrMemBadInput, "", "content required")
@@ -249,11 +256,13 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	}
 	defer tx.Rollback()
 	fsM, fsS := stampArgs(fsStamp)
+	_, docBody, _ := splitFrontmatter(string(authorityBytes))
+	title := rowTitle(req.Title, docBody)
 	if _, err := tx.Exec(`INSERT INTO memories(id, project_id, owner_user_id, work_item_id, type, title,
 		visibility, authority_path, content_sha, content_len, tags, related, idempotency_key, status, created_at, updated_at,
 		fs_mtime_ns, fs_size)
 		VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'active',?14,?14,?15,?16)`,
-		memID, projectID, owner, anyPtr(req.WorkItemID), req.Type, anyPtr(req.Title), req.Visibility, rel,
+		memID, projectID, owner, anyPtr(req.WorkItemID), req.Type, anyPtr(title), req.Visibility, rel,
 		contentSHA, len(authorityBytes), jsonOrEmpty(req.Tags), jsonOrEmpty(req.Related), idem, now,
 		fsM, fsS); err != nil {
 		return nil, err
@@ -333,7 +342,8 @@ func (s *Store) load(memID string) (*Entry, error) {
 
 // Search runs the real-time text query: FTS5 trigram for ≥3-rune tokens,
 // substring widening for shorter tokens (kept from v0; a trigram index
-// cannot answer <3-rune queries, which are the common CJK shape).
+// cannot answer <3-rune queries, which are the common CJK shape). Hits
+// come back in bm25 order weighted by per-type freshness (freshness.go).
 // memType filters by memory type: a value ending in ".*" is a prefix
 // match (X.* → prefix "X."), any other value is an exact match.
 // allowed filters candidates (membership/visibility, applied by the
@@ -362,7 +372,8 @@ func (s *Store) SearchMode(match, project, q, memType string, tags []string, lim
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	f := searchFilter{project: project, memType: memType, tags: tags, limit: limit, allowed: allowed}
+	f := searchFilter{project: project, memType: memType, tags: tags, limit: limit, allowed: allowed,
+		now: s.now().UTC().Format(time.RFC3339Nano)}
 	if match == MatchAny {
 		return s.searchAny(q, f)
 	}
@@ -388,6 +399,7 @@ type searchFilter struct {
 	tags    []string
 	limit   int
 	allowed func(*Entry) bool
+	now     string // the query time the freshness term ages against
 }
 
 // collect answers the filtered hits for one search. match is the FTS5
@@ -444,7 +456,7 @@ func (s *Store) collect(match string, short []string, maxCands int, f searchFilt
 		return false
 	}
 	if match == "" {
-		scanned, serr := s.scanBodies(f.project)
+		scanned, serr := s.scanBodies(f.project, f.now)
 		if serr != nil {
 			return nil, serr
 		}
@@ -453,7 +465,7 @@ func (s *Store) collect(match string, short []string, maxCands int, f searchFilt
 	}
 	// A bounded search examines one best-ranked window and stops there.
 	if maxCands > 0 {
-		cands, err := s.ftsPage(match, f.project, maxCands, 0)
+		cands, err := s.ftsPage(match, f.project, f.now, maxCands, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -466,7 +478,7 @@ func (s *Store) collect(match string, short []string, maxCands int, f searchFilt
 	// could silently answer fewer than limit hits while more exist.
 	batch := limit * 4
 	for offset := 0; ; offset += batch {
-		cands, err := s.ftsPage(match, f.project, batch, offset)
+		cands, err := s.ftsPage(match, f.project, f.now, batch, offset)
 		if err != nil {
 			return nil, err
 		}
@@ -476,14 +488,17 @@ func (s *Store) collect(match string, short []string, maxCands int, f searchFilt
 	}
 }
 
-// ftsPage reads one rank-ordered page of FTS candidates.
-// project, when non-empty, keeps only that project's rows.
-func (s *Store) ftsPage(match, project string, limit, offset int) ([]candRow, error) {
+// ftsPage reads one page of FTS candidates in freshness-weighted rank
+// order (freshness.go; now is the query time). project, when non-empty,
+// keeps only that project's rows.
+func (s *Store) ftsPage(match, project, now string, limit, offset int) ([]candRow, error) {
 	rows, err := s.db.Query(`SELECT f.mem_id, f.body FROM memories m
 		JOIN memory_fts f ON f.mem_id = m.id
 		WHERE memory_fts MATCH ?1 AND m.status='active'
 		AND (?4 = '' OR m.project_id = ?4)
-		ORDER BY rank LIMIT ?2 OFFSET ?3`, match, limit, offset, project)
+		ORDER BY f.rank * (1 + `+ftoa(freshnessBoost)+` * `+freshnessSQL("?5")+`),
+		m.updated_at DESC, m.id
+		LIMIT ?2 OFFSET ?3`, match, limit, offset, project, now)
 	if err != nil {
 		// A typed refusal, never a degrade to a full scan: answering
 		// every memory for a query FTS could not parse is a leak.
@@ -521,12 +536,13 @@ func typeMatches(entryType, memType string) bool {
 type candRow struct{ id, body string }
 
 // scanBodies returns every active entry's indexed body for substring
-// filtering (the short-token path); project, when non-empty, keeps only
-// that project's rows.
-func (s *Store) scanBodies(project string) ([]candRow, error) {
+// filtering (the short-token path), freshest first (no rank exists here;
+// freshness.go); project, when non-empty, keeps only that project's rows.
+func (s *Store) scanBodies(project, now string) ([]candRow, error) {
 	rows, err := s.db.Query(`SELECT f.mem_id, f.body FROM memories m
 		JOIN memory_fts f ON f.mem_id = m.id WHERE m.status='active'
-		AND (?1 = '' OR m.project_id = ?1)`, project)
+		AND (?1 = '' OR m.project_id = ?1)
+		ORDER BY `+freshnessSQL("?2")+` DESC, m.updated_at DESC, m.id`, project, now)
 	if err != nil {
 		return nil, errf(api.ErrMemUnavailable, "", "scan: %v", err)
 	}
