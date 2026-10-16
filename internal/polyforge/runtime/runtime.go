@@ -816,12 +816,22 @@ func mintSessionID() (string, error) {
 // the blocked compensation). Start still returns only once the claim
 // settled.
 func (r *Runtime) Start(ctx context.Context, wi string) error {
+	manual := r.takeModels(wi) // always consumed: a refused start must not leak it
 	if r.isDown() {
 		return claimDeferredError(wi)
 	}
+	key := r.Resolve(wi)
+	if key == "" {
+		key = wi
+	}
+	s, ok := r.tryLockWI(key)
+	if !ok {
+		return claimInFlightError(wi)
+	}
 	r.opMu.Lock()
-	j, err := r.claimLocked(ctx, wi)
+	j, err := r.claimLocked(ctx, wi, manual)
 	r.opMu.Unlock()
+	r.unlockWI(key, s)
 	if err != nil {
 		return err
 	}
@@ -844,8 +854,7 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 // latches are released only once the CLAIMING placeholder is in the table
 // (or the start settled otherwise), so a work item is never claimed twice
 // in-process.
-func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
-	manual := r.takeModels(wi) // always consumed: a refused start must not leak it
+func (r *Runtime) claimLocked(ctx context.Context, wi string, manual []string) (*job, error) {
 	if err := r.startGate(wi, nil); err != nil {
 		return nil, err
 	}
@@ -1281,6 +1290,8 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, wi, sessionID string, re
 // to settle (Start's lane, and the restart's journal replays).
 func (r *Runtime) runClaim(ctx context.Context, wi string, j *job) error {
 	note, sceneErr := r.claimScene(j)
+	s := r.lockWI(j.wi)
+	defer r.unlockWI(j.wi, s)
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	return r.finishClaim(ctx, wi, j, sceneErr, note)
@@ -1952,6 +1963,20 @@ func copyTree(src, dst string) error {
 // and waits for the claim lane to settle it (closeClaim) — opMu is not
 // held while waiting.
 func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
+	id := r.Resolve(wi)
+	if id == "" {
+		id = wi
+	}
+	s, ok := r.tryLockWI(id)
+	if !ok {
+		return errBusy(id)
+	}
+	locked := true
+	defer func() {
+		if locked {
+			r.unlockWI(id, s)
+		}
+	}()
 	r.opMu.Lock()
 	j := r.resolveJob(wi)
 	if j == nil {
@@ -1972,6 +1997,8 @@ func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 	}
 	if done := j.requestClaimClose(reason); done != nil {
 		r.opMu.Unlock()
+		r.unlockWI(id, s) // the claim lane settles the close under the lock
+		locked = false
 		select {
 		case <-done:
 		case <-ctx.Done():
@@ -2174,6 +2201,14 @@ func (r *Runtime) BeginShutdown(ctx context.Context) {
 // recorded in it) did not travel, so "answers may be lost; question
 // re-opened" (m3).
 func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
+	s, ok := r.tryLockWI(j.wi)
+	if !ok {
+		// another operation of the work item is under way: never
+		// quarantine the scene under it; a job it leaves behind keeps its
+		// monitor, which re-emits the verdict
+		return
+	}
+	defer r.unlockWI(j.wi, s)
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	// The job may have settled (Stop finished, bounded fail) between

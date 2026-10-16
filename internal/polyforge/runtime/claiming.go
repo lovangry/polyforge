@@ -309,7 +309,7 @@ type claimReplay struct {
 // daemon's socket. A shutdown meanwhile defers them (BeginShutdown) with
 // their journal entries kept.
 //
-// The caller holds opMu. The shutdown latch and the WaitGroup's Add are
+// The caller holds no lock. The shutdown latch and the WaitGroup's Add are
 // read and done under mu, so BeginShutdown (which latches under mu before
 // it waits) either waits for these goroutines or they are never started: a
 // replay the shutdown caught is deferred here and then, journal kept.
@@ -336,16 +336,20 @@ func (r *Runtime) runReplays(ctx context.Context, replays []claimReplay) {
 }
 
 // deferReplays settles journal replays whose clones must not start — a
-// shutdown caught them, or the startup aborts (opMu held): each
+// shutdown caught them, or the startup aborts (no lock held): each
 // placeholder goes, its journal entry stays for the next start
 // (finishClaim's deferral), and a Stop that requested a close meanwhile
 // still gets its close.
 func (r *Runtime) deferReplays(_ context.Context, replays []claimReplay) {
 	for _, cr := range replays {
 		cr.j.claim.cancel()
+		s := r.lockWI(cr.j.wi)
+		r.opMu.Lock()
 		// the claim's own (now cancelled) context: finishClaim defers
 		// whatever the caller's context says
 		_ = r.finishClaim(cr.j.claim.ctx, cr.wi, cr.j, context.Canceled, context.Canceled.Error())
+		r.opMu.Unlock()
+		r.unlockWI(cr.j.wi, s)
 	}
 }
 

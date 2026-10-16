@@ -33,6 +33,11 @@ const cleanupBound = 10 * time.Second
 // already verified the attempt-id fence and the RUNNING state; opMu
 // serializes it against Start/Stop/Restart.
 func (r *Runtime) recoverOp(ctx context.Context, j *job, cause, detail string) {
+	s, ok := r.tryLockWI(j.wi)
+	if !ok {
+		return // another operation of the work item is under way: it decides the job
+	}
+	defer r.unlockWI(j.wi, s)
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	if r.jobOf(j.wi) != j || j.isBusy() {

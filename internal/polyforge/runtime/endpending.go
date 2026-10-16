@@ -234,6 +234,11 @@ func (r *Runtime) retrySeal(j *job, note string) {
 
 // sealAttempt is one retry of a SEALING close; true = settled.
 func (r *Runtime) sealAttempt(j *job, note string) bool {
+	s, ok := r.tryLockWI(j.wi)
+	if !ok {
+		return false // another operation of the work item is under way
+	}
+	defer r.unlockWI(j.wi, s)
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	if r.jobOf(j.wi) != j {

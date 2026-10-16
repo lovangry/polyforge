@@ -318,7 +318,6 @@ func (r *Runtime) RestartAttach(wi string) bool {
 func (r *Runtime) reconcile(ctx context.Context, st *stateFile) error {
 	defer r.endRestarting()
 	r.opMu.Lock()
-	defer r.opMu.Unlock()
 	// B1 journal replay FIRST, before the state.json records: a journaled
 	// start (crash between the claim call and the spawn) must win over any
 	// stale record of the same WI — the replay carries the secret the
@@ -327,6 +326,7 @@ func (r *Runtime) reconcile(ctx context.Context, st *stateFile) error {
 	// replays it answered sit CLAIMING in the table; their clones start
 	// once the records are reconciled, outside opMu (runReplays, B-8).
 	replays := r.resumeClaiming(ctx)
+	r.opMu.Unlock()
 	for _, rec := range st.Jobs {
 		if rec.SessionID == "" {
 			continue
@@ -336,9 +336,14 @@ func (r *Runtime) reconcile(ctx context.Context, st *stateFile) error {
 		}
 		// One bad record never aborts the daemon (v2 §6): a missing
 		// capsule / unmapped project parks that WI alone; everything else
-		// keeps its record-kept posture.
+		// keeps its record-kept posture. The record is reconciled under
+		// its work item's lock.
+		s := r.lockWI(rec.WorkItemID)
+		r.opMu.Lock()
 		r.restartOne(ctx, rec)
 		r.announceReconciled(rec.WorkItemID)
+		r.opMu.Unlock()
+		r.unlockWI(rec.WorkItemID, s)
 	}
 	if r.restartStopping(ctx) {
 		// a shutdown during the reconciliation: the records not reached
@@ -555,12 +560,17 @@ func (e *hubTransportError) Unwrap() error { return e.err }
 // returns the cause as the DAEMON-409 refusal detail — the resume door
 // never answers the restart copy for a capsule it cannot resume.
 func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
-	r.opMu.Lock()
-	defer r.opMu.Unlock()
 	id := r.Resolve(wi)
 	if id == "" {
 		id = wi
 	}
+	s, ok := r.tryLockWI(id)
+	if !ok {
+		return "", errBusy(id)
+	}
+	defer r.unlockWI(id, s)
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
 	j := r.jobOf(id)
 	if j == nil {
 		return "", &api.Error{Code: api.ErrDaemonNotFound, Detail: fmt.Sprintf("no paused work item %s held by this daemon", id)}
@@ -1071,6 +1081,11 @@ func (r *Runtime) awaitVerify(ctx context.Context, rec *jobRecord, cause error) 
 // verifyAttempt is one deferred restart verify; true = settled (the
 // reconciliation ran, or the job went away meanwhile).
 func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bool {
+	s, ok := r.tryLockWI(j.wi)
+	if !ok {
+		return false // another operation of the work item is under way
+	}
+	defer r.unlockWI(j.wi, s)
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	if ctx.Err() != nil || r.closing() {
