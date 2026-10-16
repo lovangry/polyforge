@@ -65,8 +65,8 @@ type fakeHub struct {
 	// capsuleRepoBase, when set, makes SessionClaim materialize the EMPTY
 	// bare capsule repo aihub creates at claim (the production contract):
 	// the runtime's claim-time clone path has a remote to clone. The
-	// runtime's no-remote local init is a typed refusal since the audit's
-	// dead-code sweep (there is no production local-init path).
+	// runtime's no-remote local init is a typed refusal (there is no
+	// production local-init path).
 	capsuleRepoBase string
 	// claimFaults scripts SessionClaim failures, consumed in order: each
 	// answers its err, after committing the claim when afterCommit is
@@ -444,7 +444,7 @@ func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, *supervise.Q
 	r := New(cfg, hub, sp, toOB, fromOB)
 	// The claim-time capsule remote: aihub creates the bare repo at claim
 	// (the fake hub implements the contract; the runtime's no-remote
-	// local init is a typed refusal since the audit's dead-code sweep).
+	// local init is a typed refusal).
 	if fh, ok := hub.(*fakeHub); ok {
 		fh.capsuleRepoBase = filepath.Join(r.cfg.DataDir, "capsule-remotes")
 		r.cfg.GitRemoteBase = fh.capsuleRepoBase

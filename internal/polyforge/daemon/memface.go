@@ -40,11 +40,11 @@ func (h memSearchHit) title() string {
 
 // recallSnapshot binds the F6-A claim-time seam: goal+content (and the
 // work item's own project, so the search is scoped to exactly that
-// project — audit B5's daemon half: the snapshot used to be filled
-// from a search over every project the machine credential could read)
-// in, the top-K hits (identity + bounded excerpt) out. The runtime's
-// materialize writes the answer as the static snapshot; failures travel
-// back as errors and degrade to a noticed empty list there.
+// project, never a search over every project the machine credential
+// can read) in, the top-K hits (identity + bounded excerpt) out. The
+// runtime's materialize writes the answer as the static snapshot;
+// failures travel back as errors and degrade to a noticed empty list
+// there.
 func recallSnapshot(hub Hub) func(query, project string, topK int) ([]runtime.RecalledMemory, error) {
 	return func(query, project string, topK int) ([]runtime.RecalledMemory, error) {
 		hits, err := memSearch(hub, query, project, topK, snapshotExcerptRunes)

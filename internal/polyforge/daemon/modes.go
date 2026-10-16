@@ -453,7 +453,7 @@ func (q *jobQueue) FreeSlots() int {
 // backfill: strictly priority desc, then FIFO; an entry still inside its
 // DAEMON-503 backoff is skipped). A started job occupies its slot by
 // appearing in the runtime's live list; a Take()n entry whose claim is
-// still under way occupies one too (repo review 2026-10-16 B-8: the
+// still under way occupies one too (B-8: the
 // dispatcher runs each claim in its own goroutine, so the live list
 // learns of it only once the claim landed). An entry whose work item is
 // already in flight waits for that claim to settle.

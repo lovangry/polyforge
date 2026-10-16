@@ -1,7 +1,7 @@
 package runtime
 
 // review_wave3_test.go — runtime regressions for the 2026-10-16 repo
-// review, wave 3 (runtime lane).
+// review.
 
 import (
 	"context"

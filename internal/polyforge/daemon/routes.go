@@ -74,7 +74,7 @@ type statusJob struct {
 	StopReason string `json:"stop_reason,omitempty"`
 	// AwaitingHub: the restart-time session verify could not reach aihub
 	// and is being retried — a RECOVERING job waiting for the hub, not an
-	// ordinary recovery (repo review 2026-10-16 B-2).
+	// ordinary recovery (B-2).
 	AwaitingHub bool `json:"awaiting_hub,omitempty"`
 }
 
@@ -490,17 +490,16 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 // resumePausedRoute serves POST /jobs/{id}/resume-paused — the
 // live-holder half of the operator's `pf resume` on a work item this
 // daemon holds PAUSED. The CLI has already PATCHed clean_pause=false at
-// the hub (the resume's hub-side effect, unchanged); before the fix the
-// ONLY consumer of that hub state was the startup reconciliation
-// (runtime/restart.go), which runs exactly once per daemon process — a
-// LIVE holder never re-observed the cleared flag, so a paused work item
-// sat parked until its holder restarted. This route runs the same
-// reconciliation for the ONE retained paused record NOW: verify the
-// session still holds the WI (paused, clean_pause cleared), re-attach it
-// (SessionAttach) and continue the current step IN PLACE through the
-// recovery engine — the exact semantics attaching after a restart has,
-// including re-posing a pending unanswered question and waiting for the
-// human answer before any dispatch.
+// the hub (the resume's hub-side effect). The startup reconciliation
+// (runtime/restart.go) runs exactly once per daemon process, so without
+// this route a LIVE holder would never re-observe the cleared flag and a
+// paused work item would sit parked until its holder restarted. This
+// route runs the same reconciliation for the ONE retained paused record
+// NOW: verify the session still holds the WI (paused, clean_pause
+// cleared), re-attach it (SessionAttach) and continue the current step
+// IN PLACE through the recovery engine — the exact semantics attaching
+// after a restart has, including re-posing a pending unanswered question
+// and waiting for the human answer before any dispatch.
 //
 // The daemon's run context, NOT the HTTP request's (see
 // resumeBlockedRoute): the recovery continuation must survive the CLI
@@ -829,7 +828,7 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 // refuseStepOrigin is the step-origin guard on the whole UDS face
-// (v2-converge.md Appendix C(b); repo review 2026-10-16 V-1): the agent
+// (v2-converge.md Appendix C(b); V-1): the agent
 // executing a work item must never drive the daemon. Every request that
 // is not a read (GET/HEAD — status, watch snapshot, subscriptions,
 // attention stay open; a GET attention with mark=1 or ack=1 records
@@ -840,7 +839,7 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 // (runtime.StepProcessOrigin: the PF_WI_ID/PF_DAEMON_ID markers on the
 // peer, an ancestor or its process-group leader). A request whose peer
 // credential is unavailable is refused too: the guard fails closed.
-// Born as the answer-only #122 guard; an answer keeps its own wording.
+// An answer keeps its own #122 wording (answerFromStepProcess).
 func (d *Daemon) refuseStepOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if (r.Method != http.MethodGet && r.Method != http.MethodHead) || attentionRecords(r) {

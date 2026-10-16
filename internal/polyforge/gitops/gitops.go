@@ -150,9 +150,9 @@ func (o Opts) Env() []string {
 // every inherited GIT_* variable and with no system or global config —
 // the carrier lane's rule (carrierEnv). An operator's ~/.gitconfig must
 // not reroute the credentialed push (url.*.insteadOf) nor hand the
-// session secret to a credential helper that stores it (repo review
-// 2026-10-16 V-5). bindRepo adds the capsule's external git-dir binding;
-// additions (the askpass pair) come last.
+// session secret to a credential helper that stores it (V-5). bindRepo
+// adds the capsule's external git-dir binding; additions (the askpass
+// pair) come last.
 func hubEnv(o Opts, bindRepo bool, additions []string) []string {
 	env := make([]string, 0, len(os.Environ())+4+len(additions))
 	for _, kv := range os.Environ() {
@@ -354,8 +354,8 @@ func checkLocalGitlink(env []string, dir string) error {
 // path under an ignored capsule tree (a task repo under repos/) only
 // reaches the index when the capsule .gitignore lost its line: the fix
 // is restoring it — deleting that repository's .git would destroy the
-// task repo's history (repo review 2026-10-16 B-25/V-13). Anywhere
-// else the embedded repository is agent residue.
+// task repo's history (B-25/V-13). Anywhere else the embedded
+// repository is agent residue.
 func gitlinkRemedy(path string) string {
 	if strings.HasPrefix(path, "repos/") || strings.HasPrefix(path, "artifacts/release-") {
 		return "The capsule .gitignore no longer ignores " + path + ": restore it (it must contain " +
@@ -477,16 +477,16 @@ func CommitPush(o Opts, message string) (string, bool, PushTimings, error) {
 // folds commits without a seq trailer back into the next chain commit.
 const EventUntrailedCommitsFolded = "untrailered_commits_folded"
 
-// foldUntrailered is the V-2 auto-heal (repo review 2026-10-16). The
-// capsule root's .git pointer (Clone) makes a step's own
-// `git commit` in the capsule root land on the chain branch with no
-// Polyforge-Seq trailer; aihub's pre-receive rejects every pushed commit
-// without one, so every later publish of that WI would fail forever, and
-// nextSeq would count the foreign commit too. When HEAD is not the newest
-// trailered commit (walking first parents), the branch is soft-reset onto
-// that commit: the foreign commits' content stays staged and is folded
-// into the next chain commit under a proper seq, and an
-// EventUntrailedCommitsFolded event records it.
+// foldUntrailered is the V-2 auto-heal. The capsule root's .git pointer
+// (Clone) makes a step's own `git commit` in the capsule root land on
+// the chain branch with no Polyforge-Seq trailer; aihub's pre-receive
+// rejects every pushed commit without one, so every later publish of
+// that WI would fail forever, and nextSeq would count the foreign commit
+// too. When HEAD is not the newest trailered commit (walking first
+// parents), the branch is soft-reset onto that commit: the foreign
+// commits' content stays staged and is folded into the next chain commit
+// under a proper seq, and an EventUntrailedCommitsFolded event records
+// it.
 //
 // Only commits ABOVE the newest trailered one are ever touched, and none
 // of those can be on the server (the hook refuses them), so the reset
@@ -822,11 +822,11 @@ var (
 
 // chainRemoteTimeout bounds every git call of the chain lane that talks
 // to the hub — the chain push, the capsule clone, the carrier ls-remote
-// and fetch (repo review 2026-10-16 B-15). Each runs under the per-WI
-// lock; unbounded, a hung remote held the lock forever (observe abandons
-// a timed-out push goroutine that still holds it, and the shutdown's WIP
-// snapshot then blocked on Lock). On expiry the git process group is
-// killed, like the carrier lane's calls.
+// and fetch (B-15). Each runs under the per-WI lock; unbounded, a hung
+// remote would hold the lock forever (observe abandons a timed-out push
+// goroutine that still holds it, and the shutdown's WIP snapshot would
+// then block on Lock). On expiry the git process group is killed, like
+// the carrier lane's calls.
 var chainRemoteTimeout = 10 * time.Minute
 
 // carrierFlags lead every git call on the carrier lane: no hooks, no
@@ -1014,9 +1014,9 @@ func carrierPush(o Opts, env []string, tmp, refspec string, credAdditions []stri
 		args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
 	}
 	args = append(args, o.RemoteURL, refspec)
-	// The same ref-transaction CAS retry as the chain push (#46, repo
-	// review 2026-10-16 B-17): an overlapping push of the same ref is a
-	// duplicate publish, not a carrier failure worth a human decision.
+	// The same ref-transaction CAS retry as the chain push (#46, B-17):
+	// an overlapping push of the same ref is a duplicate publish, not a
+	// carrier failure worth a human decision.
 	for attempt := 1; ; attempt++ {
 		out, err := gitTimed(o.bound(carrierPushTimeout), append(env, credAdditions...), tmp, args...)
 		if err == nil || !refCasRejected(out+": "+err.Error()) || attempt >= pushRaceAttempts || o.expired() {
@@ -1138,9 +1138,8 @@ func refCasRejected(out string) bool {
 // worktree, so no move — and no cross-device copy — follows. The working
 // branch is pinned to main (an empty remote's clone otherwise sits on the
 // init default). Takes the per-WI lock. Cancelling ctx kills the clone
-// (repo review 2026-10-16 B-8: the claim lane runs it outside the
-// runtime's global lock, and a stop or a shutdown during the claim aborts
-// it).
+// (B-8: the claim lane runs it outside the runtime's global lock, and a
+// stop or a shutdown during the claim aborts it).
 //
 // An existing git-dir target is a STALE git-dir (a previous session's
 // HEAD/index): silently adopting it (or merging the fresh clone over it)

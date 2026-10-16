@@ -1,6 +1,6 @@
 package runtime
 
-// pilot1_test.go: the pilot fix-lane regressions.
+// pilot1_test.go: the pilot regressions.
 //
 //   - F1: runtime-state/work-item.json is materialized at Start and
 //     repaired from aihub when missing (v1 has no agent→server read path;

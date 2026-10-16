@@ -67,8 +67,7 @@ func newAuditRuntime(t *testing.T, repos []api.ProjectRepo) (*Runtime, string) {
 
 // A claim whose project has a models entry dispatches under the yaml's
 // precedence (the governing source at every dispatch) and records NO
-// effective-candidates audit — the field was deleted with the audit's
-// dead-code sweep.
+// effective-candidates audit — capsule.json carries no such field.
 func TestGovernedClaimWritesAuditRecord(t *testing.T) {
 	r, ws := newAuditRuntime(t, nil)
 	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    default: { models: [pi:w79/flow-a, pi:w79/flow-b] }\n")

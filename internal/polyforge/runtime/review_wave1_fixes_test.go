@@ -1,6 +1,6 @@
 package runtime
 
-// review_wave1_fixes_test.go — the review round on the 2026-10-16 wave-1
+// review_wave1_fixes_test.go — the review of the 2026-10-16 repo-review
 // fixes: the first blocked close pushes before it closes, Restart never
 // blocks on the end_pending lane, a permanent push rejection stops the
 // push and closes, the deferred verify yields to shutdown and takes

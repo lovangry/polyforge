@@ -230,7 +230,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // only an operator can fix — configuration, identity, workspace, on-disk
 // state, a failed restart reconciliation (EX_CONFIG). The ensure
 // supervision loop ends on it instead of restarting into the same
-// failure every few seconds (repo review 2026-10-16 B-14); the next
+// failure every few seconds (B-14); the next
 // `pf daemon ensure` starts a fresh loop once the cause is fixed.
 const ExitNeedsOperator = 78
 

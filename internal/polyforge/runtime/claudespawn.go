@@ -123,24 +123,21 @@ func (s *claudeSpawner) buildCmd(p SpawnParams) (*exec.Cmd, error) {
 	// is hard-set by the adapter (an operator env value would hijack the
 	// step's config dir and would duplicate the env entry).
 	//
-	// ANTHROPIC_* (repo review 2026-10-16 V-11, superseded by env
-	// hygiene): EVERY inherited ANTHROPIC_* is stripped too, so the
+	// ANTHROPIC_*: EVERY inherited ANTHROPIC_* is stripped too, so the
 	// `env` block of <claude-config>/settings.json is the ONLY source of
-	// a claude step's credential, endpoint and model defaults. Before,
-	// whatever the daemon inherited (e.g. the tmux server's
-	// ANTHROPIC_BASE_URL / AUTH_TOKEN / MODEL of a human's session)
-	// reached every step, and whether settings.json beat a same-named
-	// process variable was unverified; a variable only in the process env
-	// certainly applied. Now nothing of it reaches the step — set every
-	// ANTHROPIC_* a step needs in settings.json. (`pf daemon ensure`
-	// also no longer hands the daemon any ANTHROPIC_*: see
-	// supervisor/env.go.) pi steps strip nothing extra here, but they
-	// too see only the daemon's environment — for an ensure-started
-	// daemon the allow-list — so a pi provider key must be in the step
-	// agent dir's auth.json (copied from the operator agent dir) or a
-	// literal in its models.json; a key that only lived in the daemon's
-	// environment (a provider *_API_KEY, a models.json `$NAME`) no
-	// longer reaches pi steps.
+	// a claude step's credential, endpoint and model defaults. Whatever
+	// the daemon inherited (e.g. the tmux server's ANTHROPIC_BASE_URL /
+	// AUTH_TOKEN / MODEL of a human's session) must not reach a step, and
+	// a variable in the process env could otherwise override or add to
+	// settings.json. Set every ANTHROPIC_* a step needs in settings.json
+	// (`pf daemon ensure` hands the daemon no ANTHROPIC_* either: see
+	// supervisor/env.go). pi steps strip nothing extra here, but they too
+	// see only the daemon's environment — for an ensure-started daemon
+	// the allow-list — so a pi provider key must be in the step agent
+	// dir's auth.json (copied from the operator agent dir) or a literal
+	// in its models.json; a key that lives only in the daemon's
+	// environment (a provider *_API_KEY, a models.json `$NAME`) does not
+	// reach pi steps.
 	inherited := newEnvSanitizer(s.cfg.EnvSecrets...).childEnv()
 	env := make([]string, 0, len(inherited)+len(additions))
 	for _, kv := range inherited {

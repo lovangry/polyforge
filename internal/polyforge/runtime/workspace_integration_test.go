@@ -89,10 +89,9 @@ func TestTwoWorkspacesTwoYamlsOneDaemon(t *testing.T) {
 	_, rawA := readIdentity(t, capA)
 	_, rawB := readIdentity(t, capB)
 
-	// The per-step candidate computation no longer lands in capsule.json
-	// (the audit field was deleted with the audit's dead-code sweep; the
-	// workspace yaml governs every dispatch directly). Neither capsule
-	// records anything of the other project's identity.
+	// The per-step candidate computation does not land in capsule.json
+	// (the workspace yaml governs every dispatch directly). Neither
+	// capsule records anything of the other project's identity.
 	if strings.Contains(rawA, "effective_candidates") || strings.Contains(rawB, "effective_candidates") {
 		t.Fatalf("the deleted audit key must not be written: A %s B %s", rawA, rawB)
 	}
@@ -101,7 +100,7 @@ func TestTwoWorkspacesTwoYamlsOneDaemon(t *testing.T) {
 	}
 
 	// Per-claim freshness: an edit between claims governs the NEXT claim
-	// (the audit field is gone; neither capsule carries the deleted key).
+	// (neither capsule carries the effective_candidates key).
 	writeWorkspaceYaml(t, wsA, "steps:\n  proj-a:\n    default: { models: [pi:w079-edit-v2] }\n")
 	if err := r.Start(context.Background(), "wi_w079intA2"); err != nil {
 		t.Fatalf("Start A2: %v", err)

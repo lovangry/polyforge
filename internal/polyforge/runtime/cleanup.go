@@ -1,8 +1,8 @@
-// cleanup.go: the layered process cleanup (reference.md §6.2, minus the
-// deleted layer-0 cgroup kill — audit-subtraction pass B). One WI's
-// agent tree — the agent itself, its step agents and command children — is
-// wiped with escalating precision, because a surviving orphan keeps writing
-// the capsule next to the re-derived agent (single-writer domain).
+// cleanup.go: the layered process cleanup (reference.md §6.2, minus its
+// layer-0 cgroup kill). One WI's agent tree — the agent itself, its step
+// agents and command children — is wiped with escalating precision,
+// because a surviving orphan keeps writing the capsule next to the
+// re-derived agent (single-writer domain).
 //
 //	L1 PPID snapshot: walk /proc and snapshot the FULL descendant set
 //	   BEFORE any signal (100% precise while the tree is intact).

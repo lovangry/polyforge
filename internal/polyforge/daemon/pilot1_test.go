@@ -1,6 +1,6 @@
 package daemon
 
-// pilot1_test.go: the F2 route-level regressions of the pilot fix lane.
+// pilot1_test.go: the pilot's F2 route-level regressions.
 // A ticket submitted by its "<project>#<seq>" slug runs entirely under
 // the CANONICAL id (queue keys, runtime job keys, capsule paths), and
 // every later route call by EITHER spelling — status, observe, pause —

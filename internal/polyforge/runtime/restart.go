@@ -40,12 +40,12 @@ package runtime
 //	  the owner's `pf resume` re-claims through the ordinary Start.
 //	verify does not match + paused/clean_pause under another session →
 //	  drop the record: restart must NOT auto-resume it.
-//	aihub unreachable (transport error, timeout, 5xx) → no verdict, no
-//	  hub transition (v2-converge §6, repo review 2026-10-16 B-2): the
-//	  record is kept, orphans are reaped, a running record shows
-//	  RECOVERING, and the verify is retried with backoff (awaitVerify);
-//	  its first answer runs the ordinary reconciliation above. A typed
-//	  verify refusal (4xx) parks the work item blocked, naming it.
+//	aihub unreachable (transport error, timeout, 5xx) → no verdict, no hub
+//	  transition (v2-converge §6, B-2): the record is kept, orphans are
+//	  reaped, a running record shows RECOVERING, and the verify is retried
+//	  with backoff (awaitVerify); its first answer runs the ordinary
+//	  reconciliation above. A typed verify refusal (4xx) parks the work
+//	  item blocked, naming it.
 //
 // A mid-flight record whose capsule directory is missing, or whose project
 // fell out of the [workspace] mapping, is NOT a startup failure (v2-converge
@@ -466,7 +466,7 @@ func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job, rec
 		// wrote is NOBODY's verdict: finishing it wrapped would report a
 		// success no one decided, so the close finishes BLOCKED — with a
 		// note naming the interrupted, cause-unknown seal — and a human
-		// decides (audit B2).
+		// decides.
 		reason := j.stopReason
 		note := ""
 		if !isTerminalStopReason(reason) {
@@ -556,7 +556,7 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) {
 		}
 		// aihub unreachable (transport error, timeout, 5xx): NOT a
 		// verdict. The record is kept and the verify retried with backoff
-		// (v2-converge §6, repo review 2026-10-16 B-2).
+		// (v2-converge §6, B-2).
 		r.awaitVerify(ctx, rec, err)
 		return
 	}
@@ -680,7 +680,7 @@ func (r *Runtime) restartVerified(ctx context.Context, rec *jobRecord, v *api.Se
 		// the unblock path's re-claim (`pf resume` → Start, which
 		// quarantines-or-clones the old scene itself) refuse as "already
 		// active" and count as an occupied slot until the next restart
-		// (repo review 2026-10-16 B-6). The capsule stays on disk.
+		// (B-6). The capsule stays on disk.
 		r.reapOrphans(rec.WorkItemID, rec.CapsuleDir)
 		r.forgetRecord(rec)
 	case api.StatusQueued:
@@ -718,8 +718,8 @@ func verifyRefused(err error) bool {
 }
 
 // awaitVerify is the restart posture for a record whose session verify
-// could not reach aihub (v2-converge §6; repo review 2026-10-16 B-2). An
-// unreachable hub is not a verdict, so nothing is decided and no hub
+// could not reach aihub (v2-converge §6; B-2).
+// An unreachable hub is not a verdict, so nothing is decided and no hub
 // transition is attempted: the record is KEPT (it carries the only copy
 // of the session secret and of any unpushed capsule commits), orphaned
 // step processes are reaped first (single writer), a running record is

@@ -176,14 +176,13 @@ func (s *piSpawner) bin() string {
 // infrastructure failure the recovery engine should see. So the pin
 // rides argv.
 //
-// The operator's agent-directory settings no longer leak into the step
-// process at all (addendum 2): the dedicated step agent directory
+// The operator's agent-directory settings do not reach the step process
+// at all (addendum 2): the dedicated step agent directory
 // (PI_CODING_AGENT_DIR, refreshed before every spawn) holds only the
 // minimal set — credentials, model configuration, subagent definitions,
-// the subagent extension — and NO settings.json, so no operator preference (a defaultModel
-// override, a package declaration) applies. The old "residual settings
-// pollution, deliberately accepted" caveat is resolved by that
-// relocation; the argv pin stays for the loud-failure property above.
+// the subagent extension — and NO settings.json, so no operator
+// preference (a defaultModel override, a package declaration) applies.
+// The argv pin stays for the loud-failure property above.
 func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 	args := []string{"--mode", "rpc"}
 	args = append(args, piIsolationFlags...)

@@ -32,8 +32,8 @@ type JobState string
 //	CLAIMING → RUNNING                        (the claim's agent started)
 //
 // CLAIMING is the in-memory placeholder of a start whose claim landed and
-// whose capsule clone/materialize runs outside opMu (repo review
-// 2026-10-16 B-8). It occupies the work item's slot and refuses a second
+// whose capsule clone/materialize runs outside opMu (B-8).
+// It occupies the work item's slot and refuses a second
 // start, but it is never persisted: the claiming journal is its durable
 // form, and every way out of it other than RUNNING drops the record.
 //
@@ -158,7 +158,7 @@ type jobRecord struct {
 	GitDir     string `json:"git_dir"`
 	RemoteURL  string `json:"remote_url"`
 	// CleanPause mirrors the hub's operator-pause flag (reference.md §3.5).
-	// Since the v1.5 review Finding 2 an operator pause RETAINS the
+	// Per the v1.5 review Finding 2, an operator pause RETAINS the
 	// record (StatePaused): the flag is latched true at the pause close
 	// — exactly the marker the restart reconciliation reads alongside
 	// the hub's own clean_pause verdict. A graceful shutdown leaves it

@@ -3,10 +3,10 @@ package daemon
 // identity.go: the daemon identity model (v2-converge §4).
 //
 //   - daemon id: <data-dir>/daemon-id holds THE id once written. The
-//     first start resolves it exactly as before (--machine-id, default
-//     m-<hostname>) and records it; a later flag value that disagrees refuses to start rather than
-//     silently switching identity (aihub refuses to register a new id
-//     from a daemon key, so the string must never drift).
+//     first start resolves it (--machine-id, default m-<hostname>) and
+//     records it; a later flag value that disagrees refuses to start
+//     rather than silently switching identity (aihub refuses to register
+//     a new id from a daemon key, so the string must never drift).
 //   - chat ids: <data-dir>/chats.json maps (harness, harness-session) to
 //     a chat id so a resumed conversation keeps the same chat. A chat id
 //     is a notification label, never a credential.

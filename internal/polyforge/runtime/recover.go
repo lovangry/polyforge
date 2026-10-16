@@ -1,9 +1,8 @@
 // recover.go: the recovery engine (reference.md §6.2) and the recovery
 // lifecycle entry (Recover). Every relaunch kills the agent tree, commits
 // the dirty capsule and starts a fresh in-process driver derivation that
-// continues from execution.json (the transcript resume→fresh cascade this
-// file once implemented was removed in polyforge#106; a step's own retry
-// shape is the driver's business):
+// continues from execution.json (no transcript resume→fresh cascade,
+// polyforge#106; a step's own retry shape is the driver's business):
 //
 //	relaunch failing → one FAILED recovery: the budget counts failures and
 //	  a successful recovery RESETS it. After MaxRecoveries (default 2)
@@ -82,11 +81,11 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	switch capsuleWorkflowStatus(j.capsuleDir) {
 	case capsule.WorkflowStatusCompleted:
 		fmt.Fprintf(os.Stderr, "runtime: %s: driver workflow completed — wrapping (recovery cause %q is the completion signal, not a death)\n", j.wi, cause)
-		// The ordinary seal push runs (repo review 2026-10-16 B-7): the
-		// driver does no git, and the observe flush that would carry the
-		// terminal execution.json may have failed or timed out. On a clean
-		// tree CommitPush only re-pushes HEAD; a failed push degrades the
-		// close to blocked like every other terminal close.
+		// The ordinary seal push runs (B-7): the driver does no git, and
+		// the observe flush that would carry the terminal execution.json
+		// may have failed or timed out. On a clean tree CommitPush only
+		// re-pushes HEAD; a failed push degrades the close to blocked like
+		// every other terminal close.
 		if err := r.stopOp(ctx, j, protocol.FinishWrapped, false, ""); err != nil {
 			fmt.Fprintf(os.Stderr, "runtime: %s: terminal wrap failed (record kept for the next restart): %v\n", j.wi, err)
 		}
@@ -114,7 +113,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		r.boundedFail(ctx, j, "workflow blocked: the owner holds the next move (resume / cancel)")
 		return
 	}
-	// The single recovery ledger (C7, audit-subtraction pass B): ONE
+	// The single recovery ledger (C7): ONE
 	// counter of consecutive recovery failures. A recovery whose relaunch
 	// made no real progress — no step result accepted since — is a
 	// failure, counted at the NEXT re-entry (that re-entry is its proof);
@@ -189,10 +188,9 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		return
 	}
 
-	// The engine binding is the driver or NOTHING (polyforge#106): the
-	// legacy in-package WI-Agent spawn is deleted, so a nil starter is a
-	// misassembled runtime, not an engine choice — refused loudly, never
-	// fallen back from.
+	// The engine binding is the driver or NOTHING (polyforge#106): there
+	// is no other engine, so a nil starter is a misassembled runtime, not
+	// an engine choice — refused loudly, never fallen back from.
 	starter := r.cfg.AgentStarter
 	if starter == nil {
 		r.boundedFail(ctx, j, "runtime misassembly: no execution engine bound (Config.AgentStarter is nil) — the legacy in-package WI-Agent engine was deleted (polyforge#106); the daemon binds the driver bridge starter unconditionally at assembly")
@@ -303,9 +301,9 @@ func (r *Runtime) effectiveCandidatesForRecovery(j *job) map[string][]string {
 // RESETS the failure budget — the counter is spent by failures only.
 // v1.5: RTRecovered carries SpawnN (the B2 fence key) and the in-process
 // session secret (the observe lane's M4 revalidation reads it); identity
-// otherwise changes NOT AT ALL — no new attempt, no generation bump. (The
-// resume-failure bookkeeping died with the legacy resume→fresh cascade —
-// polyforge#106: every relaunch is a fresh driver derivation.)
+// otherwise changes NOT AT ALL — no new attempt, no generation bump. (There
+// is no resume-failure bookkeeping — polyforge#106: every relaunch is a
+// fresh driver derivation.)
 func (r *Runtime) recovered(j *job, h AgentHandle, cause string) {
 	j.mu.Lock()
 	// C7: the ledger's reset is the accepted-result check at the next

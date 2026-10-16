@@ -45,7 +45,7 @@ type credConn struct {
 // the SHARED description — flipping the accepted conn into
 // kernel-blocking mode whose server-side read then blocked inside the
 // syscall, where no close could reach it: a live pooled CLI keep-alive
-// conn hung a real daemon shutdown (v0 polyforge#11 FIX-ROUND). Control
+// conn hung a real daemon shutdown (v0 polyforge#11). Control
 // runs against the real fd while no I/O is in flight (we are still at
 // accept time) and changes no modes.
 type credListener struct{ net.Listener }

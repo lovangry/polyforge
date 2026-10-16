@@ -1,6 +1,6 @@
 package runtime
 
-// REPRO test (review NEW-3, bug-fix lane): the crash window between the
+// REPRO test (review NEW-3): the crash window between the
 // retained-Paused wrap close and its SessionEnd.
 //
 // Scenario under test, exactly as reported:

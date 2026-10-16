@@ -53,8 +53,8 @@ type Config struct {
 	// and the driver is the only engine (polyforge#106). The daemon binds
 	// bridge.Start here unconditionally at assembly; tests bind
 	// driver-compatible scripted starters. nil is a MISASSEMBLY, not an
-	// engine choice: dispatch refuses it loudly (the legacy in-package
-	// WI-Agent spawn this field used to fall back to is deleted).
+	// engine choice: dispatch refuses it loudly (there is no fallback
+	// engine).
 	AgentStarter AgentStartFunc
 	MachineID    string // registered machine identity
 	// Mapping is the workspace→projects plan of record (polyforge#113):
@@ -114,7 +114,7 @@ type Config struct {
 	RecallTopK int
 	// MemoryRecall, when non-nil, is the F6-A claim-time semantic-recall
 	// seam: materialize calls it with the claim's goal+content, the work
-	// item's own project (audit B5: the snapshot is scoped to that
+	// item's own project (B5: the snapshot is scoped to that
 	// project, not to everything the daemon credential can read) and the
 	// top-K, and writes the answer as a static snapshot for the agent.
 	// The daemon binds it to aihub's memory search face (the machine
@@ -129,9 +129,9 @@ func (c *Config) fill() {
 		c.OperatorAgentDir = OperatorAgentDirDefault()
 		c.OperatorAgentDirExplicit = false
 	}
-	// 	v2.5.2/#171/#159: step processes run with their own session store
-	// (PI_CODING_AGENT_SESSION_DIR under the harness root)
-	// so the live-transcript locator's root follows them there by
+	// #171/#159: step processes run with their own session store
+	// (PI_CODING_AGENT_SESSION_DIR under the harness root), so the
+	// live-transcript locator's root follows them there by
 	// default. A harness-root override (tests, relocated installs)
 	// moves the whole harness tree together. An empty-DataDir bare
 	// Config (unit tests) keeps no redirect.
@@ -179,8 +179,8 @@ type Runtime struct {
 	// opMu serializes the mutating operations (Start/Stop/recover/Restart):
 	// the message loop and the daemon's direct calls share it, so the state
 	// machine never sees two drivers at once. It is NOT held across the
-	// slow network steps (repo review 2026-10-16 B-8): a claim's capsule
-	// clone and materialize run with the job CLAIMING in the table; a
+	// slow network steps (B-8): a claim's capsule clone
+	// and materialize run with the job CLAIMING in the table; a
 	// close's or a recovery's pushes and SessionEnd run with the job
 	// latched busy (offLock); a claim's compensation SessionEnd runs with
 	// its work item latched ending (claimEndOffLock). Each re-takes the
@@ -356,14 +356,13 @@ func (j *job) isBusy() bool {
 }
 
 // offLock runs fn — one job's slow network step: a chain push, the
-// task-repo WIP push, a SessionEnd — with opMu RELEASED (repo review
-// 2026-10-16 B-8, the claim's pattern carried to the closes and the
-// recovery). The caller holds opMu on entry and holds it again on
-// return; in between the job is latched busy, so no other door
-// interleaves with the step and one work item's hung push no longer
-// freezes the stop, pause, resume, wrap and recovery of every other.
-// It reports whether j is still the job table's entry for its work item
-// once the lock is retaken — when not, the caller must not mutate it.
+// task-repo WIP push, a SessionEnd — with opMu RELEASED (B-8, the claim's
+// pattern carried to the closes and the recovery). The caller holds opMu on
+// entry and holds it again on return; in between the job is latched busy,
+// so no other door interleaves with the step and one work item's hung push
+// no longer freezes the stop, pause, resume, wrap and recovery of every
+// other. It reports whether j is still the job table's entry for its work
+// item once the lock is retaken — when not, the caller must not mutate it.
 func (r *Runtime) offLock(j *job, fn func()) (current bool) {
 	j.mu.Lock()
 	j.busy++
@@ -468,16 +467,16 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 	}
 	// Finding 1(a) (v1.5 review, MAJOR): OBSuperseded is a SESSION-level
 	// verdict, not a derivation-level one — it is EXEMPT from the
-	// spawn-equality fence. The exact loss the fence used to cause: a
-	// verify in flight while a recovery bumps spawn N→N+1 emitted
-	// OBSuperseded(N), the fence dropped it at the counter mismatch, and
-	// the freshly-derived agent of a WI held elsewhere ran unsupervised
-	// forever (detection/push/revalidation all suppressed, the
-	// monitor latched). Every other OB kind stays fenced (B2).
+	// spawn-equality fence. Fencing it would lose it: a verify in flight
+	// while a recovery bumps spawn N→N+1 emits OBSuperseded(N), the fence
+	// would drop it at the counter mismatch, and the freshly-derived agent
+	// of a WI held elsewhere would run unsupervised forever
+	// (detection/push/revalidation all suppressed, the monitor latched).
+	// Every other OB kind stays fenced (B2).
 	if msg.Kind != protocol.OBSuperseded && msg.SpawnN != spawn {
 		return // stale handle: dropped (recovery-loop guard, §二)
 	}
-	// NEW-1 (delta review): OBSuperseded bypasses the spawn fence but is
+	// NEW-1: OBSuperseded bypasses the spawn fence but is
 	// fenced on the SESSION fingerprint instead — a stale message buffered
 	// in the OB channel must never kill a successor job of the same WI
 	// (a re-claim inside the message-residence window). An empty
@@ -746,8 +745,8 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 		return err
 	}
 	// The claim landed and the job sits CLAIMING in the table: the clone
-	// and the materialize run WITHOUT opMu (repo review 2026-10-16 B-8),
-	// so one slow or hung clone no longer freezes the stops, pauses,
+	// and the materialize run WITHOUT opMu (B-8), so
+	// one slow or hung clone no longer freezes the stops, pauses,
 	// resumes, recoveries and claims of every other work item.
 	return r.runClaim(ctx, wi, j)
 }
@@ -824,8 +823,8 @@ func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
 	// A journal entry left by an earlier attempt whose claim answer was
 	// lost (transport error, timeout, hub 5xx — see below) is REUSED
 	// rather than replaced: this start is then a replay of the same claim
-	// (repo review 2026-10-16 B-1), so a claim the hub had committed is
-	// adopted instead of orphaned.
+	// (B-1), so a claim the hub had committed is adopted instead of
+	// orphaned.
 	sessionID, key, replay, err := r.claimIntent(wi)
 	if err != nil {
 		return nil, err
@@ -877,8 +876,8 @@ func claimRefused(err error) bool {
 }
 
 // claimIntent answers the session secret and idempotency key this start
-// claims with (repo review 2026-10-16 B-1). With no journal entry for wi
-// it mints a fresh pair. An entry left by an earlier attempt whose answer
+// claims with (B-1). With no journal entry for wi it mints
+// a fresh pair. An entry left by an earlier attempt whose answer
 // was lost is checked first: SessionVerify says the journaled session
 // holds the WI → the claim landed, reuse the pair so the claim is a D4
 // replay that hands the same answer back; verify says it does not → the
@@ -1142,7 +1141,7 @@ func (r *Runtime) finishClaim(ctx context.Context, wi string, j *job, sceneErr e
 // job and turns it RUNNING (opMu held).
 func (r *Runtime) installClaim(ctx context.Context, wi string, j *job) error {
 	id := j.wi
-	// v2: the Go driver replaces the WI-Agent spawn. The daemon binds
+	// The Go driver is the engine. The daemon binds
 	// bridge.Start as AgentStarter at assembly; the driver owns the step
 	// state machine from here on. There is no second engine to fall back
 	// to (polyforge#106): a nil starter is a misassembly and refuses the
@@ -1338,8 +1337,8 @@ func (r *Runtime) abandonClaim(j *job, submitted string, origErr error, note str
 
 // claimEndOffLock sends the SessionEnd of a claim that never got (or no
 // longer has) a job in the table — the compensation of a failed start,
-// an operator close during the claim — with opMu RELEASED (repo review
-// 2026-10-16 B-8): the caller holds opMu on entry and again on return.
+// an operator close during the claim — with opMu RELEASED (B-8):
+// the caller holds opMu on entry and again on return.
 // Meanwhile the work item's keys are latched ending, so a Start of it
 // answers the typed transient (the dispatcher retries) rather than
 // replaying the claim this close is ending.
@@ -1429,9 +1428,8 @@ func (r *Runtime) prepareCapsule(ctx context.Context, j *job) error {
 	}
 	if o.RemoteURL == "" {
 		// A capsule whose origin cannot be resolved is never silently
-		// init'ed locally and restarted from step 1 (the audit's
-		// dead-code sweep: the local-init escape hatch's production-reachable
-		// path is gone; aihub always supplies the remote at claim). Loud and
+		// init'ed locally and restarted from step 1 (there is no local-init
+		// escape hatch: aihub always supplies the remote at claim). Loud and
 		// typed: the caller abandons the claim.
 		return &api.Error{Code: api.ErrDaemonCapsuleClone,
 			Detail: fmt.Sprintf("capsule clone failed: no remote URL is configured for %s — aihub always supplies one at claim; refusing a local init", j.wi)}
@@ -1522,8 +1520,8 @@ var renameFn = os.Rename
 // materialize lays out the capsule: workflows/,
 // capsule.json, session.json, .gitignore and the runtime-state/ tree.
 // The bundle is materialized as ONE atomic set with a completion marker
-// (F7, materialize.go; no digest verification — the digest chain is
-// deleted, polyforge#149 B9). The claim's task-repo
+// (F7, materialize.go; no digest verification — there is no digest
+// chain, polyforge#149 B9). The claim's task-repo
 // inventory is cloned into repos/<name> BEFORE the capsule identity is
 // written, so the recorded baselines are the true claim-time SHAs.
 func (r *Runtime) materialize(ctx context.Context, j *job) error {
@@ -1561,9 +1559,8 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	// polyforge#79: the claim-time audit record — the parsed yaml
 	// verbatim and the resolved repo sources. A no-yaml claim records
 	// NOTHING (omitempty, never fabricated) and its legacy fields are
-	// unchanged. (The per-step effective-candidate list was deleted with
-	// the audit's dead-code sweep: the workspace yaml is the recovery
-	// re-derivation's own governing source.)
+	// unchanged. (No per-step effective-candidate list is recorded: the
+	// workspace yaml is the recovery re-derivation's own governing source.)
 	blob, _ := json.MarshalIndent(idn, "", "  ")
 	if err := atomicfile.Write(filepath.Join(j.capsuleDir, capsule.CapsuleJSON), blob, 0o644); err != nil {
 		return err
@@ -1998,10 +1995,10 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	if endErr != nil {
 		if st, _ := j.snapshot(); st == StateSealing {
 			// Persist the push outcome and retry the close in the
-			// background (repo review 2026-10-16 B-4): without a retry
-			// lane the job sat SEALING — agent dead, every `pf wrap`
-			// answered "a close is already in progress" — until a
-			// daemon restart ran the finisher.
+			// background (B-4): without the retry the job would sit
+			// SEALING — agent dead, every `pf wrap` answering "a close is
+			// already in progress" — until a daemon restart ran the
+			// finisher.
 			if perr := r.persist(); perr != nil {
 				fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
 			}
@@ -2106,12 +2103,11 @@ func (r *Runtime) sealNetwork(j *job, reason, note string, alreadyPushed bool) (
 }
 
 // pauseOp is the operator pause close (v1.5 review Finding 2, MAJOR):
-// the M3 pause transition WITH record retention. The old contract
-// (a CLI pause sealed the capsule read-only, transitioned DONE and
-// dropped the record) destroyed the session secret locally — nobody
-// could ever attach again, `pf resume` printed a promise no restart
-// could fulfill, and a plain claim answered ALREADY_HELD. The new
-// contract:
+// the M3 pause transition WITH record retention. A pause that
+// sealed the capsule read-only, transitioned DONE and dropped the record
+// would destroy the session secret locally — nobody could ever attach
+// again, `pf resume` would print a promise no restart could fulfill, and
+// a plain claim would answer ALREADY_HELD. The contract:
 //
 //	RUNNING → PAUSED, persisted FIRST (a crash anywhere after the
 //	transition leaves a Paused record the restart reconciles);

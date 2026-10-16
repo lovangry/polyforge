@@ -71,7 +71,7 @@ func TestManualModelsBeatYamlAndAreAudited(t *testing.T) {
 	if got := r.loadManualModels("wi_man"); strings.Join(got, ",") != "pi:m/one,pi:m/two" {
 		t.Fatalf("daemon-side manual record %v", got)
 	}
-	// The capsule identity no longer records the per-step effective
+	// The capsule identity does not record the per-step effective
 	// candidates (audit subtraction pass B): the daemon-private state.json
 	// snapshot and the workspace yaml govern dispatches.
 	if raw, rerr := os.ReadFile(filepath.Join(j.capsuleDir, "capsule.json")); rerr == nil && strings.Contains(string(raw), "effective_candidates") {

@@ -1,6 +1,6 @@
 package runtime
 
-// NEW-3 follow-up coverage (bug-fix lane): the pending-close crash window
+// NEW-3 coverage: the pending-close crash window
 // of a retained Paused record beyond the wrap reason the repro test
 // drives. stopOp's fromPaused branch persists ANY terminal close intent
 // (wrapped|failed|blocked) on the retained record before SessionEnd goes

@@ -1,7 +1,7 @@
 package runtime
 
-// review_followups_test.go — follow-ups of the independent review of the
-// B-8 remainder / persisted-flags change.
+// review_followups_test.go — regressions from the independent review of
+// the B-8 remainder / persisted-flags change.
 
 import (
 	"context"

@@ -1,6 +1,6 @@
 package daemon
 
-// heartbeat.go: the M3 daemon liveness face (lane hb-m3). Every
+// heartbeat.go: the M3 daemon liveness face. Every
 // cfg.HeartbeatEvery the daemon POSTs /api/v1/machines/heartbeat: machine
 // identity, current mode and the WI ids it holds live. The server stamps
 // last_heartbeat_at itself — the payload carries no client timestamp (one
