@@ -190,6 +190,13 @@ func (d *Driver) transition(req TransitionRequest) error {
 			ErrStaleFence, req.Kind, req.SpawnN, d.spawnN)
 	}
 
+	if d.degraded {
+		// checked BEFORE anything is applied or written: a latched driver
+		// must not keep mutating memory and disk while reporting the
+		// transition blocked (repo review 2026-10-16 B-18)
+		return fmt.Errorf("driver: degraded (post-rename fsync previously failed); transitions blocked until restart")
+	}
+
 	snap := cloneExec(d.exec)
 	info := &appliedInfo{}
 	if err := d.applyLocked(req, info); err != nil {
@@ -213,9 +220,6 @@ func (d *Driver) transition(req TransitionRequest) error {
 		}
 		d.exec = snap
 		return fmt.Errorf("driver: execution.json persist failed (state reverted, dependent action blocked): %w", err)
-	}
-	if d.degraded {
-		return fmt.Errorf("driver: degraded (post-rename fsync previously failed); transitions blocked until restart")
 	}
 	d.initialized = true
 	if req.Kind == TransStepStart {

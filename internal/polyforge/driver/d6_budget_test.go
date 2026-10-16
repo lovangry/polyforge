@@ -226,3 +226,29 @@ func TestD6GateFailRewindZeroesTheGateBudget(t *testing.T) {
 		t.Fatalf("a gate-fail rewind must zero the gate's own T, got %dms", got)
 	}
 }
+
+// repo review 2026-10-16 B-18: once the degraded latch is set, a
+// transition is refused BEFORE it touches memory or execution.json.
+func TestDegradedLatchBlocksBeforeAnyWrite(t *testing.T) {
+	d, _, _, execPath := testEnv(t, spec("a"))
+	mustInit(t, d)
+	mustStart(t, d, "a", 1)
+	before := readExec(t, execPath).Version
+	d.mu.Lock()
+	d.degraded = true
+	memBefore := d.exec.Version
+	d.mu.Unlock()
+	if err := d.transition(TransitionRequest{
+		Kind: TransBudgetUpdate, StepID: "a", SpawnN: 1, Budget: &capsule.Budget{WallMs: 5000},
+	}); err == nil {
+		t.Fatal("a degraded driver must refuse the transition")
+	}
+	if got := readExec(t, execPath).Version; got != before {
+		t.Fatalf("execution.json written while degraded: version %d -> %d", before, got)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.exec.Version != memBefore {
+		t.Fatalf("memory mutated while degraded: version %d -> %d", memBefore, d.exec.Version)
+	}
+}
