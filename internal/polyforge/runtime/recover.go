@@ -29,17 +29,27 @@ import (
 // cleanupBound bounds one teardown's waits inside the six-layer cleanup.
 const cleanupBound = 10 * time.Second
 
-// recoverOp runs one recovery event from the message loop. Callers have
-// already verified the attempt-id fence and the RUNNING state; the work
-// item's lock serializes it against the other doors of the work item.
+// recoverOp runs one recovery of j's current derivation (see recoverAt).
 func (r *Runtime) recoverOp(ctx context.Context, j *job, cause, detail string) {
-	s, ok := r.tryLockWI(j.wi)
-	if !ok {
-		return // another operation of the work item is under way: it decides the job
-	}
+	_, spawn := j.snapshot()
+	r.recoverAt(ctx, j, spawn, cause, detail)
+}
+
+// recoverAt runs one recovery event for derivation spawn of j, off the
+// message loop: it waits for the work item's lock (another operation of
+// it — a close, the claim's settle, a restart step — decides first) and
+// re-checks the fence under it. A job that settled meanwhile, a later
+// derivation (a duplicate death signal of one already recovered), a state
+// other than RUNNING (a close or a pause took it) or a record the restart
+// reconciliation has not reached yet drops the event.
+func (r *Runtime) recoverAt(ctx context.Context, j *job, spawn int, cause, detail string) {
+	s := r.lockWI(j.wi)
 	defer r.unlockWI(j.wi, s)
 	if r.jobOf(j.wi) != j || j.pendingRestart() {
-		return // settled meanwhile, or the restart reconciliation decides it
+		return
+	}
+	if st, n := j.snapshot(); st != StateRunning || n != spawn {
+		return
 	}
 	r.recoverCore(ctx, j, cause, detail)
 }

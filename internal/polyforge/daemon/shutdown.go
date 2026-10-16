@@ -236,8 +236,9 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 	}
 
 	// Step 5: close the UDS face, stop the loops, and wait for the
-	// runtime message loop to drain — an in-flight recovery triggered
-	// before the monitors stopped must never outlive the process.
+	// runtime message loop to return. A recovery the loop handed off
+	// before the monitors stopped starts no agent behind the latch (step
+	// 1b); its record stays recovering for the next start.
 	d.closeFace()
 	if d.cancelRun != nil {
 		d.cancelRun()

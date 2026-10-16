@@ -437,7 +437,10 @@ func DefaultSpawner(cfg *Config) Spawner {
 // Run is the OB-message loop: it consumes Observe messages until ctx ends.
 // Every message is fenced by the derivation counter; the fencing and
 // per-state drops live here (§二: spawn_n ≠ current ⇒ dropped; SEALING
-// drops a same-derivation WINeedsRecovery).
+// drops a same-derivation WINeedsRecovery). The operation a message calls
+// for (a recovery, a supersession) runs on its own goroutine under its
+// work item's lock, so one work item's hung recovery push never delays
+// another work item's messages.
 func (r *Runtime) Run(ctx context.Context) error {
 	for {
 		for {
@@ -445,7 +448,9 @@ func (r *Runtime) Run(ctx context.Context) error {
 			if !ok {
 				break
 			}
-			r.handleOB(ctx, msg)
+			if op := r.obOp(ctx, msg); op != nil {
+				go op()
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -455,19 +460,29 @@ func (r *Runtime) Run(ctx context.Context) error {
 	}
 }
 
+// handleOB runs the operation one OB message calls for to its end (the
+// loop's dispatch, synchronous).
 func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
+	if op := r.obOp(ctx, msg); op != nil {
+		op()
+	}
+}
+
+// obOp fences one OB message and answers the operation it calls for, nil
+// when it is dropped.
+func (r *Runtime) obOp(ctx context.Context, msg protocol.OBMsg) func() {
 	r.mu.Lock()
 	j := r.jobs[msg.WorkItem]
 	r.mu.Unlock()
 	if j == nil {
-		return // unknown WI: nothing to fence on, drop
+		return nil // unknown WI: nothing to fence on, drop
 	}
 	state, spawn := j.snapshot()
 	if state == StateClaiming {
 		// no monitor watches a CLAIMING job (it has no agent yet): any
 		// message for it is stale — never let it quarantine or drop the
 		// placeholder (B-8)
-		return
+		return nil
 	}
 	// Finding 1(a) (v1.5 review, MAJOR): OBSuperseded is a SESSION-level
 	// verdict, not a derivation-level one — it is EXEMPT from the
@@ -478,7 +493,7 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 	// (detection/push/revalidation all suppressed, the monitor latched).
 	// Every other OB kind stays fenced (B2).
 	if msg.Kind != protocol.OBSuperseded && msg.SpawnN != spawn {
-		return // stale handle: dropped (recovery-loop guard, §二)
+		return nil // stale handle: dropped (recovery-loop guard, §二)
 	}
 	// NEW-1: OBSuperseded bypasses the spawn fence but is
 	// fenced on the SESSION fingerprint instead — a stale message buffered
@@ -487,7 +502,7 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 	// SessionFP is processed.
 	if msg.Kind == protocol.OBSuperseded && msg.SessionFP != "" {
 		if fp := j.fingerprint(); fp != "" && fp != msg.SessionFP {
-			return // a DIFFERENT session's supersession verdict: not ours
+			return nil // a DIFFERENT session's supersession verdict: not ours
 		}
 	}
 	switch msg.Kind {
@@ -500,17 +515,18 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 		// anyway, and a blocked verdict would sabotage the new owner).
 		// Reached regardless of the derivation counter (Finding 1(a)).
 		if state == StateDone {
-			return
+			return nil
 		}
-		r.supersedeOp(ctx, j, msg.Detail)
+		return func() { r.supersedeOp(ctx, j, msg.Detail) }
 	case protocol.OBNeedsRecovery:
 		if state != StateRunning {
 			// SEALING: push already landed, drop; RECOVERING: duplicate
 			// death signal; DONE: terminal.
-			return
+			return nil
 		}
-		r.recoverOp(ctx, j, msg.Reason, msg.Detail)
+		return func() { r.recoverAt(ctx, j, spawn, msg.Reason, msg.Detail) }
 	}
+	return nil
 }
 
 // send queues one RT→Observe message. The queue is unbounded and never
