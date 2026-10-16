@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
 // A recovery whose commit-dirty push hangs does not hold the latch, and
@@ -164,5 +166,103 @@ func TestShutdownDuringRestartLaneStepReturnsPromptly(t *testing.T) {
 	}
 	if ji, _ := r.Info(a); ji.Agent != nil && ji.Agent.Alive() {
 		t.Fatal("a live agent behind the latch")
+	}
+}
+
+// An agent start that binds after the latch stopped waiting for it is
+// torn down by its binder, and the claim is deferred like any the
+// shutdown caught: not RUNNING, journal entry kept, no RTStarted.
+func TestShutdownLateBoundClaimIsDeferred(t *testing.T) {
+	setGitIdentity(t)
+	hub := newFakeHub()
+	r, toOB, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	t.Cleanup(r.Close)
+	const a = "wi_sl_late_claim"
+	inner := r.cfg.AgentStarter
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	var h AgentHandle
+	r.cfg.AgentStarter = func(ctx context.Context, in AgentStartInput) (AgentHandle, error) {
+		close(entered)
+		<-proceed
+		var err error
+		h, err = inner(ctx, in)
+		return h, err
+	}
+	started := make(chan error, 1)
+	go func() { started <- r.Start(context.Background(), a) }()
+	<-entered
+	actx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if r.BeginShutdown(actx) {
+		t.Fatal("BeginShutdown settled with an agent start under way")
+	}
+	close(proceed)
+	if err := recvErr(t, started, "the late Start"); !IsClaimDeferred(err) {
+		t.Fatalf("late-bound Start = %v, want the deferral", err)
+	}
+	if h == nil || h.Alive() {
+		t.Fatal("the late-bound agent was not torn down")
+	}
+	if r.jobOf(a) != nil {
+		t.Fatal("the deferred claim left its job")
+	}
+	if journaled(r, a) == nil {
+		t.Fatal("the deferred claim dropped its journal entry (the next start must replay it)")
+	}
+	for {
+		m, ok := toOB.Pop()
+		if !ok {
+			break
+		}
+		if m.Kind == protocol.RTStarted {
+			t.Fatalf("a late-bound claim announced %+v", m)
+		}
+	}
+}
+
+// A recovery relaunch that binds after the latch stopped waiting is torn
+// down: the job stays RECOVERING with no agent and nothing is announced.
+func TestShutdownLateBoundRecoveryStaysRecovering(t *testing.T) {
+	setGitIdentity(t)
+	hub := newFakeHub()
+	r, toOB, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	t.Cleanup(r.Close)
+	const a = "wi_sl_late_rec"
+	startRunning(t, r, a)
+	for {
+		if _, ok := toOB.Pop(); !ok {
+			break
+		}
+	}
+	inner := r.cfg.AgentStarter
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	var h AgentHandle
+	r.cfg.AgentStarter = func(ctx context.Context, in AgentStartInput) (AgentHandle, error) {
+		close(entered)
+		<-proceed
+		var err error
+		h, err = inner(ctx, in)
+		return h, err
+	}
+	done := make(chan struct{})
+	go func() { r.recoverOp(context.Background(), r.jobOf(a), "agent exited", ""); close(done) }()
+	<-entered
+	actx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if r.BeginShutdown(actx) {
+		t.Fatal("BeginShutdown settled with a relaunch under way")
+	}
+	close(proceed)
+	<-done
+	if h == nil || h.Alive() {
+		t.Fatal("the late-bound relaunch was not torn down")
+	}
+	if ji, _ := r.Info(a); ji.State != StateRecovering || ji.Agent != nil {
+		t.Fatalf("job after the late relaunch = %s agent %v, want RECOVERING with no agent", ji.State, ji.Agent != nil)
+	}
+	if m, ok := toOB.Pop(); ok {
+		t.Fatalf("a late-bound relaunch announced %+v", m)
 	}
 }

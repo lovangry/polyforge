@@ -184,3 +184,43 @@ func TestRestartBoundCoversLaneLockWaitBehindHungRetry(t *testing.T) {
 	g.open()
 	waitFor(t, "the lane to end", func() bool { return !r.isRestarting() })
 }
+
+// While the lane is parked seeding the records (behind a work item's
+// parked retry), neither Restart's early return nor a persist from the
+// shutdown writes a state file missing the records not seeded yet.
+func TestRestartParkedSeedingNeverDropsRecords(t *testing.T) {
+	setGitIdentity(t)
+	hub := newFakeHub()
+	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	r.cfg.RestartHubWait = 200 * time.Millisecond
+	r.cfg.EndRetryBase = 10 * time.Millisecond
+	r.cfg.EndRetryMax = 20 * time.Millisecond
+	const x, y = "wi_rl_seed_x", "wi_rl_seed_y"
+	t.Cleanup(func() { r.Close(); terminateJobAgent(r, x); terminateJobAgent(r, y) })
+	recX, _ := restartRecord(t, r, hub, x)
+	recY, _ := restartRecord(t, r, hub, y)
+	writeStateFile(t, r, []*jobRecord{recX, recY}) // x first: seeding parks on it
+	g := hub.hangCall(t, "end", x)
+	r.retryClaimEnd(x, x, fakeSession(x+"-earlier"), "an earlier claim's compensation")
+	g.waitEntered(t, "the claim-end retry")
+	within(t, promptly, "Restart behind the parked retry", func() {
+		if err := r.Restart(context.Background()); err != nil {
+			t.Errorf("Restart: %v", err)
+		}
+	})
+	check := func(when string) {
+		t.Helper()
+		got := persistedIDs(t, r)
+		if !got[x] || !got[y] {
+			t.Fatalf("state.json %s = %v, want both records", when, got)
+		}
+	}
+	check("after the early return")
+	if err := r.Persist(); err != nil {
+		t.Fatal(err)
+	}
+	check("after a shutdown persist during the seeding")
+	g.open()
+	waitFor(t, "the lane to end", func() bool { return !r.isRestarting() })
+	check("after the reconciliation")
+}

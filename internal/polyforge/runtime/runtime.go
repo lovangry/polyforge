@@ -216,6 +216,10 @@ type Runtime struct {
 	// starts were still under way — the live-job snapshot may miss them,
 	// so a handle bound from now on is torn down by its binder at once.
 	shutdownLate bool
+	// seeding (under mu): the restart lane has not seeded every record
+	// yet — persist writes nothing meanwhile, so state.json never loses a
+	// record that is not in the job table yet.
+	seeding bool
 	// claimMu serializes the claiming journal's read-modify-writes: its
 	// writers hold different work items' locks.
 	claimMu sync.Mutex
@@ -578,6 +582,12 @@ func (r *Runtime) jobOf(wi string) *job {
 // is on disk.
 func (r *Runtime) persist() error {
 	r.mu.Lock()
+	if r.seeding {
+		// the job table does not hold every record yet: writing it would
+		// drop the rest; the lane persists once seeded
+		r.mu.Unlock()
+		return nil
+	}
 	r.persistGen++
 	gen := r.persistGen
 	recs := make([]*jobRecord, 0, len(r.jobs))
@@ -1322,8 +1332,14 @@ func (r *Runtime) installClaim(ctx context.Context, wi string, j *job) error {
 		j.agentStartedAt = h.StartedAt()
 		j.mu.Unlock()
 		if r.release() {
-			fmt.Fprintf(os.Stderr, "runtime: %s: agent bound after the shutdown stopped waiting for it — torn down\n", id)
+			// bound after the shutdown stopped waiting for it: not in its
+			// live set — torn down here, and the claim is deferred like
+			// any the shutdown caught (placeholder gone, journal entry
+			// kept, no RTStarted): the next start replays it
+			fmt.Fprintf(os.Stderr, "runtime: %s: agent bound after the shutdown stopped waiting for it — torn down, claim deferred\n", id)
 			r.killAgentTree(j)
+			r.dropJob(j)
+			return claimDeferredError(wi)
 		}
 	}
 	if err := j.transition(StateRunning); err != nil {

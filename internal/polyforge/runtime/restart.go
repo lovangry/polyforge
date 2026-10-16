@@ -183,6 +183,9 @@ func (r *Runtime) Restart(ctx context.Context) error {
 		r.endRestarting()
 		return err
 	}
+	r.mu.Lock()
+	r.seeding = true // until the lane seeded every record (persist writes nothing)
+	r.mu.Unlock()
 	lane := &restartLane{}
 	done := make(chan error, 1)
 	go func() { done <- r.reconcile(withRestartLane(ctx, lane), lane, st) }()
@@ -359,6 +362,9 @@ func (r *Runtime) reconcile(ctx context.Context, lane *restartLane, st *stateFil
 		}
 		r.unlockWI(rec.WorkItemID, s)
 	}
+	r.mu.Lock()
+	r.seeding = false
+	r.mu.Unlock()
 	// B1 journal replay FIRST, before the state.json records: a journaled
 	// start (crash between the claim call and the spawn) must win over any
 	// stale record of the same WI — the replay carries the secret the
@@ -403,6 +409,7 @@ func (r *Runtime) reconcile(ctx context.Context, lane *restartLane, st *stateFil
 func (r *Runtime) endRestarting() {
 	r.mu.Lock()
 	r.restarting = false
+	r.seeding = false
 	r.mu.Unlock()
 }
 
