@@ -532,3 +532,36 @@ func TestAttentionRouteCompat(t *testing.T) {
 	}
 	udsDo(t, td.sock, "POST", "/chats/chat_none/attention/ack", `{}`) // empty ack is harmless
 }
+
+// An attention ack whose persist fails must not leave the disk stale: the
+// watcher retries the ack, which is a no-op in memory by then, and that
+// retry persists.
+func TestAttentionAckRetryPersistsAfterAFailedWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, chatSubsFile)
+	s, err := newSubStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const k = "wi_1|blocked|"
+	if _, err := s.MarkShown("chat_a", k, attnDeliver); err != nil {
+		t.Fatal(err)
+	}
+	// injected persist failure: the store's parent "directory" is a file
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.path = filepath.Join(blocker, chatSubsFile)
+	if _, err := s.AckShown("chat_a", []string{k}); err == nil {
+		t.Fatal("the injected persist failure must surface")
+	}
+	s.path = path
+	if _, err := s.AckShown("chat_a", []string{k}); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	s2, _ := newSubStore(path)
+	if f, _ := s2.MarkShown("chat_a", k, attnDeliver); f {
+		t.Fatal("the retried ack must have reached the disk")
+	}
+}

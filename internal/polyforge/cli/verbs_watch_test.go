@@ -441,7 +441,9 @@ func TestWatchAttentionFetchThenAckAndOlderDaemon(t *testing.T) {
 		name string
 		key  string
 		ack  bool
-	}{{"new daemon", "wi_9|blocked|", true}, {"older daemon", "", false}} {
+	}{{"new daemon", "wi_9|blocked|", true}, {"older daemon", "", false},
+		// keys but no ack route (404): dropped quietly, not retried loudly
+		{"no ack route", "wi_9|blocked|", false}} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newWatchDaemon(t, completedSnap())
 			w.attn = []protocol.ChatAttentionItem{{WI: "wi_9", Reason: "blocked", Key: tc.key}}

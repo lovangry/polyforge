@@ -111,6 +111,10 @@ func Run(ctx context.Context, api API, opts Options) error {
 		// attnKeys are the attention notices printed but not yet acked
 		// (B-25 WA-4): retried every cycle until an ack lands.
 		attnKeys []string
+		// attnWarned: the attention-ack failure was reported (once until an
+		// ack lands); attnNoRoute: the daemon has no attention/ack route
+		// (older daemon, it marked at fetch) — stop acking.
+		attnWarned, attnNoRoute bool
 	)
 	for {
 		if opts.ParentAlive != nil && !opts.ParentAlive() {
@@ -129,7 +133,9 @@ func Run(ctx context.Context, api API, opts Options) error {
 					return werr
 				}
 			}
-			attnKeys = append(attnKeys, batch.attnKeys...)
+			if !attnNoRoute {
+				attnKeys = append(attnKeys, batch.attnKeys...)
+			}
 			if !paused || opts.Now().Sub(lastNotice) >= time.Minute {
 				fmt.Fprintf(opts.Err, "polyforge watch: %s (%s); retrying in %s\n", pausedText(err), shortErr(err), backoff)
 				lastNotice = opts.Now()
@@ -176,11 +182,19 @@ func Run(ctx context.Context, api API, opts Options) error {
 		} else {
 			unacked = map[string]bool{}
 		}
-		if attnKeys = append(attnKeys, batch.attnKeys...); len(attnKeys) > 0 {
-			if aerr := api.AckAttention(attnKeys); aerr != nil {
+		if !attnNoRoute {
+			attnKeys = append(attnKeys, batch.attnKeys...)
+		}
+		if len(attnKeys) > 0 {
+			switch aerr := api.AckAttention(attnKeys); {
+			case aerr == nil:
+				attnKeys, attnWarned = nil, false
+			case routeAbsent(aerr):
+				// an older daemon: it marked the notices shown at fetch
+				attnKeys, attnNoRoute = nil, true
+			case !attnWarned:
 				fmt.Fprintf(opts.Err, "polyforge watch: attention ack failed (%s); retrying without re-printing\n", shortErr(aerr))
-			} else {
-				attnKeys = nil
+				attnWarned = true
 			}
 		}
 		if printed > 0 && opts.WaitDecision {
@@ -211,6 +225,13 @@ type batch struct {
 	acks []protocol.ChatAck
 	// attnKeys: the Keys of the attention notices in out (fetch-then-ack)
 	attnKeys []string
+}
+
+// routeAbsent reports the daemon's answer for a route it does not serve
+// (the mux's untyped 404/405, decoded as HTTP-404/HTTP-405).
+func routeAbsent(err error) bool {
+	var ae *api.Error
+	return errors.As(err, &ae) && (ae.Code == "HTTP-404" || ae.Code == "HTTP-405")
 }
 
 func pausedText(err error) string {

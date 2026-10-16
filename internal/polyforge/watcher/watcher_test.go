@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
@@ -32,7 +33,8 @@ type fakeAPI struct {
 	// fetch-then-ack attention: items with a Key stay listed until acked
 	attnAcked    map[string]bool
 	attnAckCalls [][]string
-	attnAckFails int // the next attnAckFails AckAttention calls fail
+	attnAckFails int   // the next attnAckFails AckAttention calls fail
+	attnAckErr   error // when set, every AckAttention call fails with it
 }
 
 func (f *fakeAPI) Subscriptions() (protocol.ChatSubscriptions, error) {
@@ -93,6 +95,9 @@ func (f *fakeAPI) AckAttention(keys []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.attnAckCalls = append(f.attnAckCalls, append([]string(nil), keys...))
+	if f.attnAckErr != nil {
+		return f.attnAckErr
+	}
 	if f.attnAckFails > 0 {
 		f.attnAckFails--
 		return errors.New("attention ack: daemon hiccup")
@@ -931,5 +936,53 @@ func TestOlderDaemonWithoutAttentionKeysIsNotAcked(t *testing.T) {
 	}
 	if len(api.attnAckCalls) != 0 {
 		t.Fatalf("no Key, no attention ack: %v", api.attnAckCalls)
+	}
+}
+
+// A persistently failing attention ack is retried every cycle but reported
+// once, not every poll.
+func TestFailingAttentionAckWarnsOnce(t *testing.T) {
+	api := &fakeAPI{attention: []protocol.ChatAttentionItem{{WI: "wi_9", Reason: "blocked", Key: "wi_9|blocked|"}},
+		attnAckErr: errors.New("attention ack: daemon hiccup")}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	n := 0
+	var out, errw bytes.Buffer
+	_ = Run(ctx, api, Options{Out: &out, Err: &errw, Sleep: func(context.Context, time.Duration) {
+		if n++; n >= 6 {
+			cancel()
+		}
+	}})
+	if c := strings.Count(errw.String(), "attention ack failed"); c != 1 {
+		t.Fatalf("warned %d times, want once: %q", c, errw.String())
+	}
+	if len(api.attnAckCalls) < 5 {
+		t.Fatalf("the ack must keep being retried: %d calls", len(api.attnAckCalls))
+	}
+}
+
+// A daemon without the attention/ack route (404/405) marked the notices at
+// fetch: the watcher drops the keys, stops acking and stays quiet.
+func TestAttentionAckRouteAbsentStopsAcking(t *testing.T) {
+	for _, code := range []string{"HTTP-404", "HTTP-405"} {
+		t.Run(code, func(t *testing.T) {
+			fa := &fakeAPI{attention: []protocol.ChatAttentionItem{{WI: "wi_9", Reason: "blocked", Key: "wi_9|blocked|"}},
+				attnAckErr: &api.Error{Code: code, Detail: "404 page not found"}}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			n := 0
+			var out, errw bytes.Buffer
+			_ = Run(ctx, fa, Options{Out: &out, Err: &errw, Sleep: func(context.Context, time.Duration) {
+				if n++; n >= 4 {
+					cancel()
+				}
+			}})
+			if strings.Count(out.String(), "wi_9") != 1 {
+				t.Fatalf("printed once: %q", out.String())
+			}
+			if len(fa.attnAckCalls) != 1 || errw.Len() != 0 {
+				t.Fatalf("one ack, then stop, silently: calls=%d err=%q", len(fa.attnAckCalls), errw.String())
+			}
+		})
 	}
 }

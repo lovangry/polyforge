@@ -75,6 +75,10 @@ type subStore struct {
 	doc  subsDoc
 	live map[string]time.Time // chat id -> last watcher heartbeat
 	now  func() time.Time
+	// stale: the last persist failed, so the file lags the memory; an
+	// otherwise no-op attention ack persists again (the retry the watcher
+	// sends after the failed one must reach the disk).
+	stale bool
 }
 
 // newSubStore loads (or starts) the store at path.
@@ -101,7 +105,9 @@ func (s *subStore) persistLocked() error {
 	if err != nil {
 		return err
 	}
-	return atomicfile.Write(s.path, blob, 0o600)
+	err = atomicfile.Write(s.path, blob, 0o600)
+	s.stale = err != nil
+	return err
 }
 
 func (s *subStore) chatLocked(id string, create bool) *chatDoc {
@@ -245,7 +251,9 @@ func (s *subStore) MarkShown(chat, key string, mode attnMode) (fresh bool, err e
 // AckShown records the pending attention notices among keys as shown to
 // chat (the watcher printed them). Idempotent: a key already shown, or one
 // the chat was never delivered (unknown, garbage, from another chat), is
-// ignored. Answers how many keys were newly recorded.
+// ignored. Answers how many keys were newly recorded. The move happens in
+// memory first; if persisting it fails the ack answers the error and the
+// watcher's retry — a no-op in memory by then — persists again.
 func (s *subStore) AckShown(chat string, keys []string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -265,7 +273,7 @@ func (s *subStore) AckShown(chat string, keys []string) (int, error) {
 		}
 		n++
 	}
-	if n == 0 {
+	if n == 0 && !s.stale {
 		return 0, nil
 	}
 	return n, s.persistLocked()

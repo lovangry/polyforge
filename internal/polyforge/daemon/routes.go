@@ -820,7 +820,9 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 // (v2-converge.md Appendix C(b); repo review 2026-10-16 V-1): the agent
 // executing a work item must never drive the daemon. Every request that
 // is not a read (GET/HEAD — status, watch snapshot, subscriptions,
-// attention stay open) is refused DAEMON-403 when its UDS peer — the
+// attention stay open; a GET attention with mark=1 or ack=1 records
+// delivery state, so a step could hide a human's notices — it is guarded
+// like a mutation) is refused DAEMON-403 when its UDS peer — the
 // kernel's SO_PEERCRED record, never anything from the request body —
 // belongs to a step process tree of this daemon
 // (runtime.StepProcessOrigin: the PF_WI_ID/PF_DAEMON_ID markers on the
@@ -829,7 +831,7 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 // Born as the answer-only #122 guard; an answer keeps its own wording.
 func (d *Daemon) refuseStepOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		if (r.Method != http.MethodGet && r.Method != http.MethodHead) || attentionRecords(r) {
 			if reason := d.stepOriginRefusal(r); reason != "" {
 				writeErr(w, api.ErrDaemonForbidden, reason)
 				return
@@ -837,6 +839,17 @@ func (d *Daemon) refuseStepOrigin(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// attentionRecords reports a GET /chats/{id}/attention that changes state:
+// mark=1 (shown at fetch) or ack=1 (pending until acked). A plain list is a
+// read.
+func attentionRecords(r *http.Request) bool {
+	if !strings.HasPrefix(r.URL.Path, "/chats/") || !strings.HasSuffix(r.URL.Path, "/attention") {
+		return false
+	}
+	q := r.URL.Query()
+	return q.Get("mark") == "1" || q.Get("ack") == "1"
 }
 
 // stepOriginRefusal answers the refusal reason for a mutating request
