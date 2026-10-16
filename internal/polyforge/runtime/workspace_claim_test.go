@@ -259,7 +259,7 @@ func TestReplayWithInvalidYamlCompensatesBlocked(t *testing.T) {
 	hub.hold("wi_w079rep", session, api.StatusRunning)
 	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: [\n")
 
-	r.resumeClaiming(context.Background())
+	replayClaims(r)
 
 	if end := hub.lastEnd(); end.Status != api.StatusBlocked || end.Note == "" {
 		t.Fatalf("an invalid yaml at replay must end the session blocked with a note, got %+v", end)

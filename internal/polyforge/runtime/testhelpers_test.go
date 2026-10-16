@@ -75,6 +75,9 @@ type fakeHub struct {
 	// endBlock, when non-nil, parks every SessionEnd until it is closed
 	// (a hung hub).
 	endBlock chan struct{}
+	// endBlockFor parks the SessionEnds of one work item (canonical id)
+	// until its channel is closed.
+	endBlockFor map[string]chan struct{}
 }
 
 type claimFault struct {
@@ -240,9 +243,13 @@ func (h *fakeHub) SessionVerify(wi, sessionID string) (*api.SessionVerifyRespons
 func (h *fakeHub) SessionEnd(wi string, req api.SessionEndRequest) error {
 	h.mu.Lock()
 	block := h.endBlock
+	blockWI := h.endBlockFor[h.canonicalID(wi)]
 	h.mu.Unlock()
 	if block != nil {
 		<-block
+	}
+	if blockWI != nil {
+		<-blockWI
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -836,4 +843,23 @@ func writeSpawnJournal(p SpawnParams, pid int, startedAt string, spawnToken stri
 
 func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...func(string)) *proc {
 	return newProcOpts(cmd, stdin, stdout, procOpts{taps: taps})
+}
+
+// underOpMu runs fn holding opMu, as the runtime's own doors call the
+// locked operations (offLock releases and retakes it around the network
+// steps).
+func underOpMu(r *Runtime, fn func()) {
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	fn()
+}
+
+// replayClaims runs the claiming-journal replay as Restart does —
+// resumeClaiming under opMu, then the replays' clones outside it — and
+// waits for every replay to settle.
+func replayClaims(r *Runtime) {
+	var rs []claimReplay
+	underOpMu(r, func() { rs = r.resumeClaiming(context.Background()) })
+	r.runReplays(context.Background(), rs)
+	r.replays.Wait()
 }

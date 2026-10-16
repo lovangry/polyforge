@@ -151,9 +151,11 @@ func (r *Runtime) Restart(ctx context.Context) error {
 	// B1 journal replay FIRST, before the state.json records: a journaled
 	// start (crash between the claim call and the spawn) must win over any
 	// stale record of the same WI — the replay carries the secret the
-	// record may predate. startClaimed's sessionIsRecorded guard keeps the
-	// crash-past-registration window honest (see claiming.go).
-	r.resumeClaiming(ctx)
+	// record may predate. resumeClaiming's sessionIsRecorded guard keeps
+	// the crash-past-registration window honest (see claiming.go). The
+	// replays it answered sit CLAIMING in the table; their clones start
+	// once the records are reconciled, outside opMu (runReplays, B-8).
+	replays := r.resumeClaiming(ctx)
 	// Seed every recorded job into the live map first: persist() rewrites
 	// state.json from the map, so records that must SURVIVE the
 	// reconciliation (blocked, aihub-unreachable) are preserved by simply
@@ -183,7 +185,16 @@ func (r *Runtime) Restart(ctx context.Context) error {
 		// aihub-unreachable verdict only, which Restart logs and moves on.
 		_ = r.restartOne(ctx, rec)
 	}
-	return r.persist()
+	if err := r.persist(); err != nil {
+		// the startup aborts: no replay may clone or install an agent
+		// behind it — the journal entries stay for the next start.
+		for _, cr := range replays {
+			r.dropJob(cr.j)
+		}
+		return err
+	}
+	r.runReplays(ctx, replays)
+	return nil
 }
 
 // restartRelease is the superseded-at-restart path: the WI is held by
@@ -291,6 +302,9 @@ func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 	j := r.jobOf(id)
 	if j == nil {
 		return "", &api.Error{Code: api.ErrDaemonNotFound, Detail: fmt.Sprintf("no paused work item %s held by this daemon", id)}
+	}
+	if j.isBusy() {
+		return "", errBusy(id) // the pause close is still pushing (B-8)
 	}
 	state, _ := j.snapshot()
 	if state != StatePaused {
@@ -480,8 +494,15 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 	if rec.SessionID == "" {
 		return nil
 	}
-	if j := r.jobOf(rec.WorkItemID); j != nil && j.liveAgent() {
-		return nil // already running under this daemon: not a restart case
+	if j := r.jobOf(rec.WorkItemID); j != nil {
+		if j.liveAgent() {
+			return nil // already running under this daemon: not a restart case
+		}
+		if st, _ := j.snapshot(); st == StateClaiming {
+			// a journal replay holds the work item (resumeClaiming): its
+			// claim is the newer one, and the record was never seeded
+			return nil
+		}
 	}
 	// end_pending (v2-converge §6 bug 5): a bounded-fail whose
 	// SessionEnd(blocked) never reached the hub. The record carries the
@@ -719,6 +740,9 @@ func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bo
 	}
 	if r.jobOf(j.wi) != j || j.liveAgent() {
 		return true // closed, replaced or resumed by another door meanwhile
+	}
+	if j.isBusy() {
+		return false // another door's network step is in flight (B-8)
 	}
 	rec := j.record()
 	v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)

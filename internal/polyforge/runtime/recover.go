@@ -36,6 +36,9 @@ const cleanupBound = 10 * time.Second
 func (r *Runtime) recoverOp(ctx context.Context, j *job, cause, detail string) {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
+	if r.jobOf(j.wi) != j || j.isBusy() {
+		return // settled meanwhile, or a close's network step is in flight (B-8)
+	}
 	r.recoverCore(ctx, j, cause, detail)
 }
 
@@ -159,12 +162,21 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// state is committed and pushed BEFORE the new instance can touch the
 	// worktree. Best-effort by design: a failed push surfaces at the next
 	// boundary; the local commit already keeps the bytes.
-	_, _ = commitDirty(r, j)
-
+	//
 	// F1 repair: a capsule without runtime-state/work-item.json (a pre-F1
-	// pre-F1 scene) gets it re-materialized before the next derivation
-	// wakes up blind to its own goal. Best-effort, idempotent.
-	r.ensureWorkItemFile(j)
+	// scene) gets it re-materialized before the next derivation wakes up
+	// blind to its own goal (an aihub read when the claim snapshot is
+	// gone). Best-effort, idempotent.
+	//
+	// Both run outside opMu with the job latched busy (offLock, B-8): the
+	// job sits RECOVERING with no agent, so no other door acts on it.
+	if !r.offLock(j, func() {
+		_, _ = commitDirty(r, j)
+		r.ensureWorkItemFile(j)
+	}) {
+		fmt.Fprintf(os.Stderr, "runtime: %s: the job left the job table during its recovery; nothing relaunched\n", j.wi)
+		return
+	}
 
 	// The bundle is pinned at claim (v2-converge §2.4): recovery relaunches
 	// from the capsule's own materialized snapshot and never re-pins or
@@ -358,19 +370,35 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 	// the capsule ends at rides the blocked verdict (cross-daemon continue
 	// check, §7).
 	r.killAgentTree(j)
-	head := ""
-	chainPushed := true // nothing local to push without a capsule
-	if dirExists(j.capsuleDir) {
-		var perr error
-		head, perr = commitDirty(r, j)
-		chainPushed = perr == nil
-		// The re-claim the owner's resume runs restores the task repos
-		// from the carrier: their uncommitted work rides refs/pf-wip
-		// (polyforge#167). Before the verdict — the session credential
-		// dies with it.
-		r.saveTaskWIP(j, true, perr == nil)
+	// The pushes and the blocked close run outside opMu with the job
+	// latched busy (offLock, B-8); the verdict is applied once the lock
+	// is retaken.
+	settled := false
+	if !r.offLock(j, func() {
+		head := ""
+		chainPushed := true // nothing local to push without a capsule
+		if dirExists(j.capsuleDir) {
+			var perr error
+			head, perr = commitDirty(r, j)
+			chainPushed = perr == nil
+			// The re-claim the owner's resume runs restores the task repos
+			// from the carrier: their uncommitted work rides refs/pf-wip
+			// (polyforge#167). Before the verdict — the session credential
+			// dies with it.
+			r.saveTaskWIP(j, true, chainPushed)
+		}
+		j.mu.Lock()
+		j.endNote, j.endHead = detail, head
+		j.mu.Unlock()
+		// When boundedFail's own push did not land, the close goes
+		// through closeBlocked's push-then-close, so a hub blip never lets
+		// SessionEnd(blocked) land with unpushed commits.
+		settled = r.closeBlocked(j, !chainPushed)
+	}) {
+		fmt.Fprintf(os.Stderr, "runtime: %s: the job left the job table during its blocked close\n", j.wi)
+		return
 	}
-	r.finishBlocked(j, detail, head, chainPushed)
+	r.finishBlocked(j, detail, settled)
 	_ = ctx
 }
 

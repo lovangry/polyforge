@@ -38,6 +38,7 @@ func TestJournalReplayUnstartableCompensatesBlocked(t *testing.T) {
 	if err := r.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
+	r.replays.Wait() // the journal replays clone outside Restart (B-8)
 	// verify matched (adopted) and the replay issued exactly one claim
 	if n := hub.claimCount(); n != 1 {
 		t.Fatalf("the adopted entry must be replayed exactly once, got %d claims", n)

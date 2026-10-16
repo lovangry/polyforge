@@ -175,23 +175,16 @@ func (r *Runtime) retryClaimEnd(journalKey, wi, secret, note string) {
 		if !r.endBlockedAtHub(wi, secret, note, "") {
 			return false
 		}
-		r.clearClaiming(journalKey)
+		r.clearClaimingSession(journalKey, secret)
 		return true
 	})
 }
 
-// finishBlocked is the tail of boundedFail: the close verdict goes to the
-// hub; success drops the job, failure parks it end_pending (durable) and
-// retries. Observe is released either way — the driver is already dead.
-//
-// chainPushed reports whether boundedFail's own commit+push landed; when
-// it did not, the close goes through closeBlocked's push-then-close, so a
-// hub blip never lets SessionEnd(blocked) land with unpushed commits.
-func (r *Runtime) finishBlocked(j *job, detail, head string, chainPushed bool) {
-	j.mu.Lock()
-	j.endNote, j.endHead = detail, head
-	j.mu.Unlock()
-	settled := r.closeBlocked(j, !chainPushed)
+// finishBlocked is the locked tail of boundedFail, once the blocked
+// close went out (settled reports whether the hub took it): success drops
+// the job, failure parks it end_pending (durable) and retries. Observe is
+// released either way — the driver is already dead.
+func (r *Runtime) finishBlocked(j *job, detail string, settled bool) {
 	next := StateDone
 	if !settled {
 		next = StateEndPending
@@ -245,6 +238,9 @@ func (r *Runtime) sealAttempt(j *job, note string) bool {
 	}
 	if st, _ := j.snapshot(); st != StateSealing {
 		return true
+	}
+	if j.isBusy() {
+		return false // another door's network step is in flight (B-8)
 	}
 	j.mu.Lock()
 	reason := j.stopReason

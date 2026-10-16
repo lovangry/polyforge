@@ -178,18 +178,39 @@ type Runtime struct {
 
 	// opMu serializes the mutating operations (Start/Stop/recover/Restart):
 	// the message loop and the daemon's direct calls share it, so the state
-	// machine never sees two drivers at once. Start releases it while the
-	// claimed capsule is cloned and materialized (repo review 2026-10-16
-	// B-8): the job sits CLAIMING in the table meanwhile, and the lock is
-	// taken again to install the agent or settle the claim.
+	// machine never sees two drivers at once. It is NOT held across the
+	// slow network steps (repo review 2026-10-16 B-8): a claim's capsule
+	// clone and materialize run with the job CLAIMING in the table; a
+	// close's or a recovery's pushes and SessionEnd run with the job
+	// latched busy (offLock); a claim's compensation SessionEnd runs with
+	// its work item latched ending (claimEndOffLock). Each re-takes the
+	// lock and re-checks the job's identity before mutating it. The
+	// hub calls of the claim itself (probe, verify, SessionClaim) stay
+	// under it, bounded by the hub client's timeout.
 	opMu      sync.Mutex
 	statePath string
+	// persistMu serializes persist's snapshot and write: with the network
+	// steps outside opMu (B-8) closes of different work items persist
+	// concurrently, and an older snapshot must never land last.
+	persistMu sync.Mutex
 
 	// claimsAborted latches the shutdown's AbortClaims (under mu): once
 	// latched, a new Start answers DAEMON-410 without claiming and a
 	// CLAIMING one is cancelled and deferred, leaving its claiming-journal
 	// entry for the next daemon start.
 	claimsAborted bool
+	// endingClaims (under mu) latches the work-item keys (submitted
+	// spelling and canonical id) of a claim whose session end is on the
+	// wire outside opMu (claimEndOffLock): a Start of the same work item
+	// meanwhile answers the typed transient instead of replaying the
+	// journal entry of a session that close is ending.
+	endingClaims map[string]int
+	// claimMu serializes the claiming journal's read-modify-writes: the
+	// claim-end retry lane writes it without opMu.
+	claimMu sync.Mutex
+	// replays tracks the restart's journal-replay claim goroutines
+	// (runReplays).
+	replays sync.WaitGroup
 
 	// The durable-close retry lane (endpending.go): WIs whose
 	// SessionEnd(blocked) retry goroutine is running (one per WI), and
@@ -314,7 +335,51 @@ type job struct {
 	awaitingHub bool
 	// claim is the CLAIMING placeholder's lane (B-8); nil otherwise.
 	claim *claimLane
-	mu    sync.Mutex
+	// busy counts the slow network steps of this job running outside
+	// opMu (offLock): while it is non-zero no other door may act on the
+	// job — Stop answers 409, recovery / supersession / resume / the
+	// seal and verify retries / a claim over it back off.
+	busy int
+	mu   sync.Mutex
+}
+
+// isBusy reports whether a network step of j runs outside opMu.
+func (j *job) isBusy() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.busy > 0
+}
+
+// offLock runs fn — one job's slow network step: a chain push, the
+// task-repo WIP push, a SessionEnd — with opMu RELEASED (repo review
+// 2026-10-16 B-8, the claim's pattern carried to the closes and the
+// recovery). The caller holds opMu on entry and holds it again on
+// return; in between the job is latched busy, so no other door
+// interleaves with the step and one work item's hung push no longer
+// freezes the stop, pause, resume, wrap and recovery of every other.
+// It reports whether j is still the job table's entry for its work item
+// once the lock is retaken — when not, the caller must not mutate it.
+func (r *Runtime) offLock(j *job, fn func()) (current bool) {
+	j.mu.Lock()
+	j.busy++
+	j.mu.Unlock()
+	r.opMu.Unlock()
+	defer func() {
+		r.opMu.Lock()
+		j.mu.Lock()
+		j.busy--
+		j.mu.Unlock()
+		current = r.jobOf(j.wi) == j
+	}()
+	fn()
+	return
+}
+
+// errBusy is the refusal of a door that finds j's network step in
+// flight (offLock): the in-flight close or recovery decides the job.
+func errBusy(wi string) error {
+	return &api.Error{Code: api.ErrDaemonConflict,
+		Detail: fmt.Sprintf("%s: a close or recovery of this work item is in progress (its push or session end is under way); retry once it settles", wi)}
 }
 
 // claimLane is the bookkeeping of one start between its claim and its
@@ -478,6 +543,8 @@ func (r *Runtime) jobOf(wi string) *job {
 // placeholder is never written: its durable form is the claiming journal
 // (B-8), which the next start replays.
 func (r *Runtime) persist() error {
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
 	r.mu.Lock()
 	recs := make([]*jobRecord, 0, len(r.jobs))
 	for _, j := range r.jobs {
@@ -522,7 +589,7 @@ func (r *Runtime) NoteAlias(alias, canonical string) {
 }
 
 // NoteOrigin records the origin the NEXT job started for wi will carry.
-// The daemon calls it right before Start; startClaimed consumes it.
+// The daemon calls it right before Start; claimPlaceholder consumes it.
 func (r *Runtime) NoteOrigin(wi string, o Origin) {
 	r.mu.Lock()
 	if r.origins == nil {
@@ -677,7 +744,7 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 	// and the materialize run WITHOUT opMu (repo review 2026-10-16 B-8),
 	// so one slow or hung clone no longer freezes the stops, pauses,
 	// resumes, recoveries and claims of every other work item.
-	return r.runClaim(ctx, wi, j, true)
+	return r.runClaim(ctx, wi, j)
 }
 
 // claimLocked is Start's locked first half (opMu held): the pre-claim
@@ -687,12 +754,19 @@ func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
 	if r.abortedClaims() {
 		return nil, claimDeferredError(wi)
 	}
+	if r.claimEnding(wi) {
+		return nil, &api.Error{Code: api.ErrDaemonHubUnavailable,
+			Detail: fmt.Sprintf("%s: the session end of an earlier claim of this work item is still on the wire; retry later", wi)}
+	}
 	if j := r.jobOf(wi); j != nil {
+		if j.isBusy() {
+			return nil, errBusy(wi) // its close is still pushing (B-8)
+		}
 		if st, _ := j.snapshot(); st != StatePaused {
 			return nil, fmt.Errorf("runtime: %s already active (state %s)", wi, st)
 		}
 		// Finding 2 (v1.5 review): a RETAINED paused record is not an
-		// active run — the start may proceed over it (startClaimed drops
+		// active run — the start may proceed over it (claimPlaceholder drops
 		// the dead record once the hub accepted the new claim; a
 		// plain claim of the paused-held WI is refused by the hub's own
 		// ALREADY_HELD gate).
@@ -725,7 +799,7 @@ func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
 	}
 	// polyforge#175: a bundle whose candidates are not `<harness>:<model>`
 	// is a local defect too — refuse before the claim so the work item
-	// stays queued (startClaimed re-checks as the backstop).
+	// stays queued (claimPlaceholder re-checks as the backstop).
 	if probe.BundleName != nil {
 		if berr := r.CheckBundle(wi, *probe.BundleName); berr != nil {
 			return nil, berr
@@ -822,12 +896,17 @@ func (r *Runtime) claimIntent(wi string) (sessionID, key string, replay bool, er
 	return sessionID, randomKey(), false, nil
 }
 
-// startClaimed carries one OPEN claim (fresh or replayed) to a live agent.
-// Every failure after this point is compensated with SessionEnd(blocked)
-// — the D5 rule carried into the session model: a post-claim failure must
-// never leave an orphaned running session; the ticket needs human
-// attention, and the hub's session row is cleared either way. The
-// claiming journal entry is cleared on every settled outcome.
+// claimPlaceholder is the locked post-claim bookkeeping of one OPEN claim
+// (fresh or replayed; opMu held): the canonical id, the replaced paused
+// record, the manual models, the job itself, its capsule placement and
+// the per-step compose — then the job enters the table as the CLAIMING
+// placeholder (B-8) with the context its clone/materialize runs under
+// (runClaim carries it to a live agent). Every failure after the claim
+// is compensated with SessionEnd(blocked) — the D5 rule carried into the
+// session model: a post-claim failure must never leave an orphaned
+// running session; the ticket needs human attention, and the hub's
+// session row is cleared either way. The claiming journal entry is
+// cleared on every settled outcome.
 //
 // sessionID is THIS daemon's minted secret (the journal replay path passes
 // the journaled one back; the claim answer's fingerprint must agree).
@@ -841,20 +920,6 @@ func (r *Runtime) claimIntent(wi string) (sessionID, key string, replay bool, er
 // never reaches any path: its "#" is the URL fragment separator (a
 // slug-built push remote answers 404) and a glob character. The submitted
 // spelling is registered as an alias so lookups by it still resolve.
-func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *api.SessionClaimResponse, wcfg *workspace.Config, manual []string) error {
-	j, err := r.claimPlaceholder(ctx, wi, sessionID, resp, wcfg, manual)
-	if err != nil {
-		return err
-	}
-	return r.runClaim(ctx, wi, j, false)
-}
-
-// claimPlaceholder is the locked post-claim bookkeeping (opMu held): the
-// canonical id, the replaced paused record, the manual models, the job
-// itself, its capsule placement and the per-step compose — then the job
-// enters the table as the CLAIMING placeholder (B-8) with the context
-// its clone/materialize runs under. Every refusal here compensates
-// (abandonClaim) before any placeholder exists.
 func (r *Runtime) claimPlaceholder(ctx context.Context, wi, sessionID string, resp *api.SessionClaimResponse, wcfg *workspace.Config, manual []string) (*job, error) {
 	c := resp.Claim
 	// canonical id resolution (F2): the claim answer's work item is the
@@ -971,17 +1036,14 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, wi, sessionID string, re
 	return j, nil
 }
 
-// runClaim carries a CLAIMING job to a live agent. The capsule clone, the
-// sealed-head guard and the materialize run under the claim's own
-// context; with unlocked set the caller does NOT hold opMu and runClaim
-// takes it only to settle (Start, B-8) — otherwise the caller holds it
-// throughout (the restart's journal replay).
-func (r *Runtime) runClaim(ctx context.Context, wi string, j *job, unlocked bool) error {
+// runClaim carries a CLAIMING job to a live agent. The caller does NOT
+// hold opMu (B-8): the capsule clone, the sealed-head guard and the
+// materialize run under the claim's own context, and opMu is taken only
+// to settle (Start's lane, and the restart's journal replays).
+func (r *Runtime) runClaim(ctx context.Context, wi string, j *job) error {
 	note, sceneErr := r.claimScene(j)
-	if unlocked {
-		r.opMu.Lock()
-		defer r.opMu.Unlock()
-	}
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
 	return r.finishClaim(ctx, wi, j, sceneErr, note)
 }
 
@@ -1249,7 +1311,7 @@ func (r *Runtime) readBundleFrontmatter(bundleName string) (*workflow.Frontmatte
 // later restart replays the same key and retries the compensation); it
 // is loud but never masks the original error.
 func (r *Runtime) abandonClaim(j *job, submitted string, origErr error, note string) error {
-	if cerr := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
+	if cerr := r.claimEndOffLock(j.wi, submitted, api.SessionEndRequest{
 		SessionID: j.sessionID,
 		Status:    api.StatusBlocked,
 		Note:      note,
@@ -1263,8 +1325,49 @@ func (r *Runtime) abandonClaim(j *job, submitted string, origErr error, note str
 		r.retryClaimEnd(submitted, j.wi, j.sessionID, note)
 		return origErr
 	}
-	r.clearClaiming(submitted)
+	r.clearClaimingSession(submitted, j.sessionID)
 	return origErr
+}
+
+// claimEndOffLock sends the SessionEnd of a claim that never got (or no
+// longer has) a job in the table — the compensation of a failed start,
+// an operator close during the claim — with opMu RELEASED (repo review
+// 2026-10-16 B-8): the caller holds opMu on entry and again on return.
+// Meanwhile the work item's keys are latched ending, so a Start of it
+// answers the typed transient (the dispatcher retries) rather than
+// replaying the claim this close is ending.
+func (r *Runtime) claimEndOffLock(wi, submitted string, req api.SessionEndRequest) error {
+	keys := []string{wi}
+	if submitted != wi {
+		keys = append(keys, submitted)
+	}
+	r.mu.Lock()
+	if r.endingClaims == nil {
+		r.endingClaims = map[string]int{}
+	}
+	for _, k := range keys {
+		r.endingClaims[k]++
+	}
+	r.mu.Unlock()
+	r.opMu.Unlock()
+	defer func() {
+		r.opMu.Lock()
+		r.mu.Lock()
+		for _, k := range keys {
+			if r.endingClaims[k]--; r.endingClaims[k] <= 0 {
+				delete(r.endingClaims, k)
+			}
+		}
+		r.mu.Unlock()
+	}()
+	return r.hub.SessionEnd(wi, req)
+}
+
+// claimEnding reports whether a claim of wi is ending (claimEndOffLock).
+func (r *Runtime) claimEnding(wi string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.endingClaims[wi] > 0
 }
 
 // verifySealedHead is the cross-daemon continue guard (v2-converge §7): a
@@ -1614,6 +1717,10 @@ func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 		r.opMu.Unlock()
 		return fmt.Errorf("runtime: %s: no active job", wi)
 	}
+	if j.isBusy() {
+		r.opMu.Unlock()
+		return errBusy(j.wi)
+	}
 	if done := j.requestClaimClose(reason); done != nil {
 		r.opMu.Unlock()
 		select {
@@ -1675,7 +1782,7 @@ func (r *Runtime) closeClaim(wi string, j *job, reason string) error {
 	if err := quarantineCapsule(j.capsuleDir, j.git.GitDir); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: quarantine of the closed claim's capsule failed (scene left in place): %v\n", j.wi, err)
 	}
-	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
+	if err := r.claimEndOffLock(j.wi, wi, api.SessionEndRequest{
 		SessionID: j.sessionID,
 		Status:    status,
 		Note:      note,
@@ -1684,7 +1791,7 @@ func (r *Runtime) closeClaim(wi string, j *job, reason string) error {
 		r.retryClaimEnd(wi, j.wi, j.sessionID, note)
 		return fmt.Errorf("runtime: %s: the claim was stopped but its session-end failed (retrying a blocked close in the background): %w", j.wi, err)
 	}
-	r.clearClaiming(wi)
+	r.clearClaimingSession(wi, j.sessionID)
 	if status != api.StatusBlocked {
 		r.clearManualModels(j.wi)
 	}
@@ -1772,6 +1879,13 @@ func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
 	if r.jobOf(j.wi) != j {
 		return
 	}
+	if j.isBusy() {
+		// a close or recovery step is in flight outside opMu (B-8): never
+		// quarantine the scene under its push. That step meets the dead
+		// session itself (a refused push or session end); a job it leaves
+		// behind keeps its monitor, which re-emits the verdict.
+		return
+	}
 	r.killAgentTree(j)
 	if err := quarantineCapsule(j.capsuleDir, j.git.GitDir); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: superseded capsule quarantine failed (scene left in place): %v\n", j.wi, err)
@@ -1854,10 +1968,60 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	// Six-layer teardown: no writer survives into the sealed scene.
 	r.killAgentTree(j)
 
-	// Final push (§五) — UNLESS this close's seal push already reached
-	// the hub (alreadyPushed: a seal retry or the restart finisher after
-	// a successful push): a second push could only fail against a
-	// revoked credential. Only the read-only seal and the close remain.
+	// The network half — final push, task-repo WIP, SessionEnd — runs
+	// outside opMu with the job latched busy (offLock, B-8): the state
+	// already says SEALING (or the retained record carries the terminal
+	// stop reason), so every other door refuses this job meanwhile.
+	finalReason := reason
+	var endErr error
+	if !r.offLock(j, func() {
+		finalReason, endErr = r.sealNetwork(j, reason, note, alreadyPushed)
+	}) {
+		return fmt.Errorf("runtime: %s: the job left the job table during its close", j.wi)
+	}
+	if endErr != nil {
+		if st, _ := j.snapshot(); st == StateSealing {
+			// Persist the push outcome and retry the close in the
+			// background (repo review 2026-10-16 B-4): without a retry
+			// lane the job sat SEALING — agent dead, every `pf wrap`
+			// answered "a close is already in progress" — until a
+			// daemon restart ran the finisher.
+			if perr := r.persist(); perr != nil {
+				fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
+			}
+			r.retrySeal(j, note)
+		}
+		return fmt.Errorf("runtime: %s: session-end failed (job left sealing, retrying): %w", j.wi, endErr)
+	}
+	if err := sealReadOnly(j.capsuleDir); err != nil {
+		// The generation is closed; a chmod failure is a scene-preservation
+		// wart, not a seal failure. Loud, non-fatal.
+		fmt.Fprintf(os.Stderr, "runtime: %s: read-only seal incomplete: %v\n", j.wi, err)
+	}
+	if err := j.transition(StateDone); err != nil {
+		return err
+	}
+	r.dropJob(j)
+	if finalReason != protocol.FinishBlocked {
+		// terminal on this daemon: the manual --models list dies with it
+		// (a blocked end keeps it for the re-claim).
+		r.clearManualModels(j.wi)
+	}
+	if err := r.persist(); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
+	}
+	r.send(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: finalReason})
+	return nil
+}
+
+// sealNetwork is stopOp's network half, run outside opMu (offLock): the
+// final push — UNLESS this close's seal push already reached the hub
+// (alreadyPushed: a seal retry or the restart finisher after a
+// successful push; a second push could only fail against a revoked
+// credential) — the task-repo WIP lane and the fenced SessionEnd. It
+// answers the close's final reason (a failed push degrades it to
+// blocked) and the SessionEnd error.
+func (r *Runtime) sealNetwork(j *job, reason, note string, alreadyPushed bool) (string, error) {
 	finalReason := reason
 	chainOK := true
 	if !alreadyPushed {
@@ -1909,52 +2073,20 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	r.saveTaskWIP(j, finalReason != protocol.FinishWrapped, chainOK)
 	// v1.5: the terminal close is SessionEnd — fenced on the session
 	// hash. A STALE_SESSION refusal (this daemon was superseded between
-	// the seal push and here) surfaces as the error below and leaves the
-	// job SEALING, exactly like a hub outage: never a silent half-seal.
+	// the seal push and here) surfaces as the error and leaves the job
+	// SEALING, exactly like a hub outage: never a silent half-seal.
 	// The seal retry then finishes it locally (retrySeal).
 	// The status vocabulary is wrapped|failed|blocked — plus "paused",
 	// which the CLI pause path passes through (merge amend: paused routes
 	// to the M3 pause transition; the session is KEPT and clean_pause=true
 	// rides the same atomic fenced update — the ONLY pause producer is
 	// the operator CLI, so it is always a clean pause).
-	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
+	return finalReason, r.hub.SessionEnd(j.wi, api.SessionEndRequest{
 		SessionID:  j.sessionID,
 		Status:     finalReason,
 		Note:       note,
 		CleanPause: finalReason == api.StatusPaused,
-	}); err != nil {
-		if st, _ := j.snapshot(); st == StateSealing {
-			// Persist the push outcome and retry the close in the
-			// background (repo review 2026-10-16 B-4): without a retry
-			// lane the job sat SEALING — agent dead, every `pf wrap`
-			// answered "a close is already in progress" — until a
-			// daemon restart ran the finisher.
-			if perr := r.persist(); perr != nil {
-				fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
-			}
-			r.retrySeal(j, note)
-		}
-		return fmt.Errorf("runtime: %s: session-end failed (job left sealing, retrying): %w", j.wi, err)
-	}
-	if err := sealReadOnly(j.capsuleDir); err != nil {
-		// The generation is closed; a chmod failure is a scene-preservation
-		// wart, not a seal failure. Loud, non-fatal.
-		fmt.Fprintf(os.Stderr, "runtime: %s: read-only seal incomplete: %v\n", j.wi, err)
-	}
-	if err := j.transition(StateDone); err != nil {
-		return err
-	}
-	r.dropJob(j)
-	if finalReason != protocol.FinishBlocked {
-		// terminal on this daemon: the manual --models list dies with it
-		// (a blocked end keeps it for the re-claim).
-		r.clearManualModels(j.wi)
-	}
-	if err := r.persist(); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
-	}
-	r.send(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: finalReason})
-	return nil
+	})
 }
 
 // pauseOp is the operator pause close (v1.5 review Finding 2, MAJOR):
@@ -2009,6 +2141,28 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job) error {
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
+	// The network half runs outside opMu with the job latched busy
+	// (offLock, B-8): the record already says PAUSED.
+	var endErr error
+	if !r.offLock(j, func() { endErr = r.pauseNetwork(j) }) {
+		return fmt.Errorf("runtime: %s: the job left the job table during its pause close", j.wi)
+	}
+	if endErr != nil {
+		return fmt.Errorf("runtime: %s: session-end(paused) failed (record left paused; the next restart reconciles): %w", j.wi, endErr)
+	}
+	// The observe release (Finding 4): stops the monitor loop, prunes the
+	// latestSpawn entry, forgets the ledger. The retained record keeps
+	// its bookkeeping only.
+	r.send(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: protocol.FinishPaused})
+	_ = ctx
+	return nil
+}
+
+// pauseNetwork is pauseOp's network half, run outside opMu (offLock):
+// commit+push the dirty capsule (a failed push is log-only — see
+// pauseOp), the task-repo WIP lane and SessionEnd(paused). It answers
+// the SessionEnd error.
+func (r *Runtime) pauseNetwork(j *job) error {
 	r.syncLiveTranscript(j.capsuleDir)
 	_, _, _, perr := gitops.CommitPush(j.git, "seal: "+protocol.FinishPaused)
 	for i := 0; i < 2 && perr != nil; i++ {
@@ -2028,20 +2182,12 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job) error {
 	// (polyforge#167): an attach resumes in place, but a later
 	// re-claim restores from the carrier.
 	r.saveTaskWIP(j, true, perr == nil)
-	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
+	return r.hub.SessionEnd(j.wi, api.SessionEndRequest{
 		SessionID: j.sessionID,
 		Status:    api.StatusPaused,
 		// always true: the operator CLI is the only pause producer (M3)
 		CleanPause: true,
-	}); err != nil {
-		return fmt.Errorf("runtime: %s: session-end(paused) failed (record left paused; the next restart reconciles): %w", j.wi, err)
-	}
-	// The observe release (Finding 4): stops the monitor loop, prunes the
-	// latestSpawn entry, forgets the ledger. The retained record keeps
-	// its bookkeeping only.
-	r.send(protocol.RTMsg{Kind: protocol.RTFinished, WorkItem: j.wi, Reason: protocol.FinishPaused})
-	_ = ctx
-	return nil
+	})
 }
 
 // sealReadOnly makes the preserved scene read-only (files 0444, dirs 0555;

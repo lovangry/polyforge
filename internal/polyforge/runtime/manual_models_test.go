@@ -111,7 +111,7 @@ func TestManualModelsBeatYamlAndAreAudited(t *testing.T) {
 }
 
 // A crash between the claim and the start keeps the manual list: the
-// claiming journal carries it and the replay hands it to startClaimed.
+// claiming journal carries it and the replay hands it to claimPlaceholder.
 func TestManualModelsSurviveClaimingReplay(t *testing.T) {
 	hub := newFakeHub()
 	r, ws := newManualRuntime(t, hub)
@@ -122,7 +122,7 @@ func TestManualModelsSurviveClaimingReplay(t *testing.T) {
 	}
 	hub.hold("wi_manrep", session, api.StatusRunning)
 
-	r.resumeClaiming(context.Background())
+	replayClaims(r)
 
 	j := r.jobOf("wi_manrep")
 	if j == nil {
@@ -216,7 +216,9 @@ func TestManualModelsRecordDroppedOnTerminalVerdict(t *testing.T) {
 	j := seedJob(r, "wi_term")
 	r.saveManualModels("wi_term", []string{"pi:m/one"})
 	hub.hold("wi_term", "other", api.StatusWrapped)
-	if err := r.restartOne(context.Background(), j.record()); err != nil {
+	var err error
+	underOpMu(r, func() { err = r.restartOne(context.Background(), j.record()) })
+	if err != nil {
 		t.Fatal(err)
 	}
 	if got := r.loadManualModels("wi_term"); got != nil {
