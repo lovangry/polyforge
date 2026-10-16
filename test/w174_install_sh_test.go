@@ -35,6 +35,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -91,6 +92,10 @@ exit 0
 	if err != nil {
 		t.Fatal(err)
 	}
+	lnReal, err := exec.LookPath("ln")
+	if err != nil {
+		t.Fatal(err)
+	}
 	files := map[string]string{
 		"gh":   gh,
 		"tmux": "#!/bin/sh\necho \"tmux $*\" >> \"$W174_JOURNAL\"\nexec " + tmuxReal + " \"$@\"\n",
@@ -100,6 +105,10 @@ exit 0
 		"mv": "#!/bin/sh\nsrc=; last=\nfor a in \"$@\"; do src=$last; last=$a; done\n" +
 			"x=0; [ -x \"$src\" ] && x=1\necho \"mv x=$x $*\" >> \"$W174_JOURNAL\"\nexec " + mvReal + " \"$@\"\n",
 		"chmod": "#!/bin/sh\necho \"chmod $*\" >> \"$W174_JOURNAL\"\nexec " + chmodReal + " \"$@\"\n",
+		// W174_LN_FAIL=1 fails the release/current switch (ln -sfn): a
+		// failure injected after the daemon was stopped
+		"ln": "#!/bin/sh\necho \"ln $*\" >> \"$W174_JOURNAL\"\n" +
+			"[ \"${W174_LN_FAIL:-}\" = 1 ] && [ \"$1\" = -sfn ] && exit 1\nexec " + lnReal + " \"$@\"\n",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(in.shim, name), []byte(body), 0o755); err != nil {
@@ -516,26 +525,48 @@ func w174WatchBinary(t *testing.T, bin string, versions ...string) func() string
 	return func() string { close(done); return <-result }
 }
 
-// w174FakeDaemon serves this machine's socket in place of the daemon:
-// GET /status answers jobs; POST /shutdown is recorded and closes the
-// listener (the socket file goes with it), as a daemon's exit would.
+// w174FakeDaemon serves this machine's socket in place of the daemon and
+// holds its data-dir lock (daemon.lock, as a live daemon does): GET
+// /status answers jobs; POST /shutdown is recorded, closes the listener
+// (the socket file goes with it) and releases the lock, as a daemon's
+// exit would.
 type w174FakeDaemon struct {
 	ln       net.Listener
 	srv      *http.Server
+	lock     *os.File
 	shutdown chan struct{}
 }
 
-func w174StartFakeDaemon(t *testing.T, sock string, jobs []map[string]any) *w174FakeDaemon {
+// stop closes the listener and releases the lock.
+func (fd *w174FakeDaemon) stop() {
+	_ = fd.srv.Close()
+	_ = fd.lock.Close()
+}
+
+// A statusCode other than 200 answers GET /status with that code and no
+// job list.
+func w174StartFakeDaemon(t *testing.T, sock string, statusCode int, jobs []map[string]any) *w174FakeDaemon {
 	t.Helper()
 	_ = os.Remove(sock)
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fd := &w174FakeDaemon{ln: ln, shutdown: make(chan struct{})}
+	lock, err := os.OpenFile(filepath.Join(filepath.Dir(sock), "daemon.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("fake daemon: daemon.lock: %v", err)
+	}
+	fd := &w174FakeDaemon{ln: ln, lock: lock, shutdown: make(chan struct{})}
 	var once sync.Once
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
+		if statusCode != http.StatusOK {
+			http.Error(w, "unavailable", statusCode)
+			return
+		}
 		raw, _ := json.Marshal(map[string]any{"machine_id": "m-fake", "auto": false, "workspaces": []string{}, "jobs": jobs,
 			"queue": map[string]int{"pending": 0, "running": len(jobs)}})
 		w.Header().Set("Content-Type", "application/json")
@@ -545,12 +576,12 @@ func w174StartFakeDaemon(t *testing.T, sock string, jobs []map[string]any) *w174
 		_, _ = w.Write([]byte(`{"ok":true}`))
 		once.Do(func() {
 			close(fd.shutdown)
-			go func() { _ = fd.srv.Close() }()
+			go fd.stop()
 		})
 	})
 	fd.srv = &http.Server{Handler: mux}
 	go func() { _ = fd.srv.Serve(ln) }()
-	t.Cleanup(func() { _ = fd.srv.Close() })
+	t.Cleanup(fd.stop)
 	return fd
 }
 
@@ -643,14 +674,37 @@ func TestW174InstallPrepFailureLeavesMachineUntouched(t *testing.T) {
 
 	// the cause fixed, the same command upgrades
 	in.extraEnv = nil
-	if out, code := in.run(t); code != 0 {
+	if out, code = in.run(t); code != 0 {
 		t.Fatalf("upgrade after the fix: exit %d\n%s", code, out)
 	}
 	if cur, _ := os.Readlink(filepath.Join(in.data, "release", "current")); cur != "v0.0.2-w174" {
 		t.Fatalf("release/current -> %q", cur)
 	}
-	if again := in.oneDaemon(t, 10*time.Second); again == pid {
+	newPid := in.oneDaemon(t, 10*time.Second)
+	if newPid == pid {
 		t.Fatal("the old daemon survived the upgrade")
+	}
+	pid = newPid
+
+	// an incomplete checkout that IS release/current is never removed:
+	// prepare fails instead (the daemon and the tree stay as they are)
+	cur := filepath.Join(in.data, "release", "v0.0.2-w174")
+	if err := os.Remove(filepath.Join(cur, "skills", "polyforge", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	in.resetJournal(t)
+	out, code = in.run(t)
+	if code == 0 || !strings.Contains(out, "is incomplete") || !strings.Contains(out, "nothing on this machine was changed") {
+		t.Fatalf("an incomplete current checkout must fail prepare (exit %d):\n%s", code, out)
+	}
+	if _, err := os.Stat(filepath.Join(cur, "workflows")); err != nil {
+		t.Fatalf("the in-use checkout was removed: %v", err)
+	}
+	if lines := in.journalLines(); journalIndex(lines, "pf ops shutdown") >= 0 {
+		t.Fatalf("shut the daemon down:\n%s", strings.Join(lines, "\n"))
+	}
+	if again := in.oneDaemon(t, 5*time.Second); again != pid {
+		t.Fatalf("the daemon was replaced: %d -> %d", pid, again)
 	}
 }
 
@@ -662,9 +716,11 @@ func TestW174InstallPrepFailureLeavesMachineUntouched(t *testing.T) {
 func TestW174InstallRefusesWhileJobsRunThenForceProceeds(t *testing.T) {
 	in := w174InstallV1ThenStop(t)
 	v1Bin := w174ReadFile(t, in.bin)
-	fake := w174StartFakeDaemon(t, in.sock, []map[string]any{
+	fake := w174StartFakeDaemon(t, in.sock, http.StatusOK, []map[string]any{
 		{"work_item_id": "wi-7", "slug": "e2e#7", "status": "running"},
 		{"work_item_id": "wi-8", "slug": "e2e#8", "status": "paused"},
+		{"work_item_id": "wi-9", "slug": "e2e#9", "status": "end_pending"},
+		{"work_item_id": "wi-10", "slug": "e2e#10", "status": "recovering"},
 	})
 
 	in.release(t, "v0.0.2-w174")
@@ -673,13 +729,13 @@ func TestW174InstallRefusesWhileJobsRunThenForceProceeds(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("an upgrade with a running job must be refused:\n%s", out)
 	}
-	for _, want := range []string{"Upgrade refused", "e2e#7 (running)", "PF_INSTALL_FORCE=1", "pf pause", "nothing on this machine was changed"} {
+	for _, want := range []string{"Upgrade refused", "e2e#7 (running)", "e2e#10 (recovering)", "PF_INSTALL_FORCE=1", "pf pause", "nothing on this machine was changed"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("refusal lacks %q:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "e2e#8") {
-		t.Fatalf("a paused job must not block the upgrade:\n%s", out)
+	if strings.Contains(out, "e2e#8") || strings.Contains(out, "e2e#9") {
+		t.Fatalf("paused and end_pending jobs (no agent tree) must not block the upgrade:\n%s", out)
 	}
 	if fake.shutdownRequested() {
 		t.Fatal("the daemon was asked to shut down despite the refusal")
@@ -705,4 +761,91 @@ func TestW174InstallRefusesWhileJobsRunThenForceProceeds(t *testing.T) {
 	if in.loops() != 1 {
 		t.Fatalf("restart loops = %d (sessions %v), want 1", in.loops(), in.sessions())
 	}
+}
+
+// TestW174InstallJobCheckFailsClosed (repo
+// review 2026-10-16 V-3 follow-up): the job check fails closed — a socket
+// that does not answer /status with a job list refuses the upgrade (no
+// shutdown, nothing changed); paused and end_pending jobs alone (no agent
+// tree) let it proceed without the override.
+func TestW174InstallJobCheckFailsClosed(t *testing.T) {
+	in := w174InstallV1ThenStop(t)
+	v1Bin := w174ReadFile(t, in.bin)
+	fake := w174StartFakeDaemon(t, in.sock, http.StatusServiceUnavailable, nil)
+	in.release(t, "v0.0.2-w174")
+	in.resetJournal(t)
+	out, code := in.run(t)
+	if code == 0 || !strings.Contains(out, "job list could not be read") || !strings.Contains(out, "PF_INSTALL_FORCE=1") {
+		t.Fatalf("an unreadable job list must refuse the upgrade (exit %d):\n%s", code, out)
+	}
+	if fake.shutdownRequested() {
+		t.Fatal("the daemon was asked to shut down although its jobs are unknown")
+	}
+	w174AssertStillV1(t, in, v1Bin)
+	fake.stop()
+
+	fake = w174StartFakeDaemon(t, in.sock, http.StatusOK, []map[string]any{
+		{"work_item_id": "wi-8", "slug": "e2e#8", "status": "paused"},
+		{"work_item_id": "wi-9", "slug": "e2e#9", "status": "end_pending"},
+	})
+	in.resetJournal(t)
+	out, code = in.run(t)
+	if code != 0 {
+		t.Fatalf("paused/end_pending jobs must not block the upgrade: exit %d\n%s", code, out)
+	}
+	if !fake.shutdownRequested() {
+		t.Fatal("the upgrade did not shut the daemon down")
+	}
+	if cur, _ := os.Readlink(filepath.Join(in.data, "release", "current")); cur != "v0.0.2-w174" {
+		t.Fatalf("release/current -> %q", cur)
+	}
+	in.oneDaemon(t, 10*time.Second)
+}
+
+// TestW174InstallAbortAfterStopReportsState (repo review 2026-10-16 V-3
+// follow-up): a failure after the daemon was asked to stop (here: the
+// release/current switch) exits non-zero and says where the machine
+// stands — daemon stopped, which binary, where release/current points,
+// what to run — without restarting anything itself.
+func TestW174InstallAbortAfterStopReportsState(t *testing.T) {
+	in := w174NewInstall(t)
+	in.release(t, "v0.0.1-w174")
+	if out, code := in.run(t); code != 0 {
+		t.Fatalf("install v0.0.1: exit %d\n%s", code, out)
+	}
+	in.oneDaemon(t, 10*time.Second)
+
+	in.release(t, "v0.0.2-w174")
+	in.resetJournal(t)
+	in.extraEnv = []string{"W174_LN_FAIL=1"}
+	out, code := in.run(t)
+	if code == 0 {
+		t.Fatalf("a failed release switch must fail the install:\n%s", out)
+	}
+	for _, want := range []string{"cannot switch", "AFTER the daemon was asked to shut down", "pf binary " + in.bin + ": v0.0.2-w174",
+		"release/current -> v0.0.1-w174", "pf daemon ensure", "re-run this installer"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("abort report lacks %q:\n%s", want, out)
+		}
+	}
+	lines := in.journalLines()
+	if i := journalIndex(lines, "pf daemon ensure"); i >= 0 {
+		t.Fatalf("the aborted install started the daemon itself: %q", lines[i])
+	}
+	if len(in.daemons()) != 0 || in.loops() != 0 {
+		t.Fatalf("after the abort: daemons %v loops %d, want none", in.daemons(), in.loops())
+	}
+	if left, _ := filepath.Glob(filepath.Join(in.data, "release", ".current.tmp.*")); len(left) != 0 {
+		t.Fatalf("leftover: %v", left)
+	}
+
+	// re-running finishes the upgrade
+	in.extraEnv = nil
+	if out, code := in.run(t); code != 0 {
+		t.Fatalf("re-run: exit %d\n%s", code, out)
+	}
+	if cur, _ := os.Readlink(filepath.Join(in.data, "release", "current")); cur != "v0.0.2-w174" {
+		t.Fatalf("release/current -> %q", cur)
+	}
+	in.oneDaemon(t, 10*time.Second)
 }

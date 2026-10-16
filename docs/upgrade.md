@@ -912,9 +912,14 @@ migrates it in place; a second run changes nothing.
   is staged next to the installed one (`<bin>.new.<pid>`, already
   executable) and swapped by one rename: `pf` is never missing, partial
   or non-executable.
+  An abort after the daemon was asked to stop reports the state it
+  leaves (daemon stopped, the binary in place, where `release/current`
+  points) and what to run: re-run the installer, or `pf daemon ensure`.
 - **running jobs refuse the upgrade**: a binary upgrade needs the
   graceful shutdown, which terminates every live agent tree. While
-  `pf ops status` lists a job that is not `paused`, install.sh lists the
+  `pf ops status` lists a job that is running, recovering or sealing
+  (`paused` and `end_pending` have no agent tree and do not count), or
+  while the daemon's job list cannot be read, install.sh lists the
   jobs, changes nothing (the fetched `release/<VER>` checkout is kept for
   the next run) and exits non-zero. Wait for them, pause them
   (`pf pause <wi>`), or override — the interrupted work items recover at
