@@ -56,6 +56,14 @@ never been claimed — once a daemon has claimed it, the bundle is fixed.
 There is no `--attr` on `edit`: business attrs are set at create only (aihub
 does not accept `attrs` in a PATCH).
 
+A work item's design lives in its content (`pf file edit <wi> --content
+@design.md`) while the work item is open — never as a file in the
+workspace root or `.polyforge/` (polyforge#177). A terminal work item
+refuses the edit (`CORE-410`): store the design as a memory instead —
+`pf remember --project P --type doc.design --work-item <wi> @design.md`
+(see `remember.md` for reviews, decisions and audits). Scratch output
+goes to the workspace's `scratch/` only.
+
 `show` takes exactly one id (or slug) and renders the detail record plus
 its dependency block.
 

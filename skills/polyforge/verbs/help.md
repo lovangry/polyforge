@@ -42,10 +42,10 @@ see `verbs/ship.md`.
 
 | Verb | Fragment | Command |
 |---|---|---|
-| doctor | `verbs/doctor.md` | `pf doctor` — the machine's one health face: config, `[workspace]` mapping, connectivity (`--json` for machines) |
+| doctor | `verbs/doctor.md` | `pf doctor` — the machine's one health face: config, `[workspace]` mapping, workspace layout, connectivity (`--json` for machines; `--prune-scratch` removes stale scratch entries) |
 | chat | (`SKILL.md`, Chat identity) | `pf chat init --harness claude\|pi --harness-session ID` — the chat id a harness adapter exports as `PF_CHAT_ID` |
 | help | `verbs/help.md` | `pf help` — the registry face; this fragment is its routing-side index |
-| init | the init fragment (`init.md`) | NOT a `pf` verb (`pf init` is an unknown command): install / upgrade / machine setup — routes to the repo's `tools/install.sh` |
+| init | the init fragment (`init.md`) | install / upgrade / machine setup routes to the repo's `tools/install.sh` (not a `pf` verb); `pf init [<workspace-dir>]` gives a workspace its local layout — `scratch/` and the layout section of CLAUDE.md (polyforge#177) |
 
 ## Non-goals
 

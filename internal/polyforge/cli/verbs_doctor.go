@@ -32,6 +32,12 @@ import (
 //     aihub, named with its workspace on a miss; the inverse-ambiguity
 //     and duplicate refusals surface through the config check, which
 //     names both workspaces);
+//   - the workspace layout (polyforge#177, doctor_workspace.go): per
+//     mapped workspace, root entries outside the runtime-artifact
+//     convention and non-generated files under .polyforge/ warn with
+//     their suggested destination (never moved); scratch/ entries older
+//     than 14 days are reported (warn) and removed only with
+//     --prune-scratch, which lists what it removed;
 //   - workspace yaml: every mapped workspace's .polyforge.yaml loads
 //     through the daemon's own loader, its per-step model keys checked
 //     against the step ids of the workflows the daemon runs (the
@@ -102,11 +108,12 @@ const (
 var cmdDoctor = &Command{
 	Name:         "doctor",
 	Group:        GroupDiag,
-	Summary:      "Check this daemon's health: config, workspace mapping, connectivity, progress display",
-	Usage:        "pf doctor [--harness] [--json]",
+	Summary:      "Check this daemon's health: config, workspace mapping and layout, connectivity, progress display",
+	Usage:        "pf doctor [--harness] [--prune-scratch] [--json]",
 	NoConfigLoad: true,
 	Setup: func(fs *flag.FlagSet) {
 		fs.Bool("harness", false, "run only the harness progress-display checks")
+		fs.Bool("prune-scratch", false, "remove the mapped workspaces' scratch/ entries older than 14 days (default: report them only)")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 0 {
@@ -116,7 +123,7 @@ var cmdDoctor = &Command{
 		if boolFlag(fs, "harness") {
 			rep = doctorReport{OK: true, Checks: harnessDisplayChecks()}
 		} else {
-			rep = runDoctorChecks(ctx)
+			rep = runDoctorChecks(ctx, boolFlag(fs, "prune-scratch"))
 		}
 		if ctx.JSON {
 			b, err := json.Marshal(rep)
@@ -155,8 +162,9 @@ func countFails(rep doctorReport) int {
 // Ordering matters: config first; when it fails, every config-dependent
 // check is reported skip (not-run) rather than silently passing — the
 // not-faked-green contract. The aihub-flavored checks likewise refuse to
-// fake a verdict behind an unreachable server.
-func runDoctorChecks(ctx *Context) doctorReport {
+// fake a verdict behind an unreachable server. pruneScratch lets the
+// scratch check remove the stale entries it would otherwise report.
+func runDoctorChecks(ctx *Context, pruneScratch bool) doctorReport {
 	checks := []doctorCheck{}
 	add := func(name, status, detail string) {
 		checks = append(checks, doctorCheck{Name: name, Status: status, Detail: detail})
@@ -165,7 +173,7 @@ func runDoctorChecks(ctx *Context) doctorReport {
 	cfg, err := LoadConfig(ctx.ConfigPath)
 	if err != nil {
 		add(docChConfig, "fail", err.Error()+" — see the install docs for the migration steps")
-		for _, name := range []string{docChMapping, docChDirs, docChYaml, docChClaude, docChProjects, docChServer, docChSocket, docChSupervision, docChAuth} {
+		for _, name := range []string{docChMapping, docChDirs, docChLayout, docChScratch, docChYaml, docChClaude, docChProjects, docChServer, docChSocket, docChSupervision, docChAuth} {
 			add(name, "skip", "config-dependent check not run: the config could not be loaded")
 		}
 		checks = append(checks, harnessDisplayChecks()...)
@@ -202,6 +210,16 @@ func runDoctorChecks(ctx *Context) doctorReport {
 		} else {
 			add(docChDirs, "pass", fmt.Sprintf("all %d mapped workspace(s) exist as directories", len(cfg.Mapping.Workspaces())))
 		}
+	}
+
+	// The workspace layout (polyforge#177): warn-only, per mapped
+	// workspace that exists.
+	if cfg.Mapping.Empty() {
+		add(docChLayout, "skip", "not run: the mapping is absent")
+		add(docChScratch, "skip", "not run: the mapping is absent")
+	} else {
+		checks = append(checks, workspaceLayoutCheck(cfg.Mapping.Workspaces()),
+			scratchCheck(cfg.Mapping.Workspaces(), time.Now(), pruneScratch))
 	}
 
 	// Server reach: ANY http answer (even an error status) proves the

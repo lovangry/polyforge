@@ -1057,6 +1057,43 @@ print one command line that first backs them up into
 `~/polyforge-v1-backup-<timestamp>/`, then removes them. Nothing is
 removed automatically. Restart the harness sessions afterwards.
 
+## Workspace runtime-artifact layout (polyforge#177)
+
+Shared content — designs, reviews, decision sheets, audits, experience —
+belongs in aihub; a workspace keeps locally only `.repo/`, `capsules/`,
+`.polyforge/` (polyforge-generated only) and
+`scratch/` (disposable). The README's "Workspace layout" paragraph has
+the full convention. Per existing workspace, after upgrading `pf`:
+
+1. `pf init <workspace>` — creates `scratch/` and adds the layout
+   section to CLAUDE.md (inside the existing `polyforge:managed` block;
+   the human part is untouched; safe to re-run).
+2. `pf doctor` — the `workspace layout` row lists every root entry and
+   every `.polyforge/` entry outside the convention, with its
+   destination. Nothing is moved for you.
+3. Move each document listed into aihub. A design whose work item is
+   still open goes into its content; anything else becomes a memory
+   (memories cannot be edited later — only re-stored or redacted):
+
+   ```
+   pf file edit polyforge#160 --content @.polyforge/160-design.md            # open work item
+   pf remember --project polyforge --type doc.design   --work-item polyforge#159 --title "#159 design" @.polyforge/159-design.md
+   pf remember --project polyforge --type doc.review   --work-item polyforge#160 --title "#160 review" @.polyforge/160-review.md
+   pf remember --project polyforge --type doc.decision --title "owner decisions 2026-10" @.polyforge/decisions.md
+   pf remember --project polyforge --type doc.audit    --title "invented-logic audit" @.polyforge/audit.md
+   ```
+
+   A terminal work item refuses the content edit (`CORE-410`) — use the
+   `doc.design` memory with `--work-item` instead. Check with `pf recall
+   --project <p> --type doc.design "<title words>"` (or `doc.review`,
+   …), then delete the local file.
+4. Move logs, briefs, downloads and `.polyforge.yaml.bak-*` backups into
+   `scratch/`. `.polyforge/repo-map/` and `.polyforge/watchers/` are
+   legacy v1 artifacts — nothing in v2 generates or reads them; doctor
+   tolerates them, and you may delete them (CLAUDE.md lines pointing at
+   `repo-map/*.md` then dangle — drop them too). `pf doctor` reports scratch entries older than 14 days;
+   `pf doctor --prune-scratch` deletes them and lists what it deleted.
+
 ## Hub git calls ignore the operator's git config (repo review 2026-10-16 V-5)
 
 The daemon's git calls

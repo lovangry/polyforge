@@ -25,7 +25,7 @@ type Context struct {
 	Stderr io.Writer
 	Stdin  io.Reader
 	// ConfigPath is the raw --config global flag ("" = the documented
-	// default location). Only the NoConfigLoad verbs (doctor) need it;
+	// default location). Only the NoConfigLoad verbs (doctor, init) need it;
 	// everything else reads the resolved Cfg.
 	ConfigPath string
 }
@@ -68,7 +68,8 @@ type Command struct {
 // daemon UDS face (submit, watch, answer, pause, resume, wrap, ops) — with
 // `chat` (the harness chat identity, also GroupExec, so the help face shows
 // 8 exec verbs) between ops and watch, then the management face M1–M5, then the
-// machine health face (doctor, #113), then the daemon
+// machine health face (doctor, #113) and the workspace layout (init,
+// #177), then the daemon
 // placeholder (help-only: cmd/pf/main.go intercepts the real launch).
 var commands = []*Command{
 	cmdFile,
@@ -91,6 +92,7 @@ var commands = []*Command{
 	cmdProjects,
 	cmdBackup,
 	cmdDoctor,
+	cmdInit,
 	cmdDaemon,
 }
 
