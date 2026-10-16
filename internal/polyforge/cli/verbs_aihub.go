@@ -646,13 +646,14 @@ var cmdRecall = &Command{
 	Name:    "recall",
 	Group:   GroupData,
 	Summary: "Search project memories",
-	Usage:   "pf recall --project P <query> [--type T] [--tags a,b] [--limit N]",
+	Usage:   "pf recall --project P <query> [--any] [--type T] [--tags a,b] [--limit N]",
 	Setup: func(fs *flag.FlagSet) {
 		fs.String("project", "", "project name (required; validated against the [workspace] mapping)")
 		fs.String("q", "", "query text (alternative to the positional argument)")
 		fs.String("type", "", "memory type filter: exact (experience.debug), prefix (experience.*), or * (all types)")
 		fs.String("tags", "", "comma-separated tags")
 		fs.Int("limit", 20, "max results (1..200; default 20)")
+		fs.Bool("any", false, "ranked any-term match (memories sharing ANY of the query's words, best first) instead of the default every-word match; for long queries")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		q := stringFlag(fs, "q")
@@ -685,7 +686,11 @@ var cmdRecall = &Command{
 		if tags := stringFlag(fs, "tags"); tags != "" {
 			tagList = strings.Split(tags, ",")
 		}
-		raw, err := ctx.aihub().SearchMemories(proj, q, memType, tagList, limit)
+		match := ""
+		if boolFlag(fs, "any") {
+			match = "any"
+		}
+		raw, err := ctx.aihub().SearchMemories(proj, q, memType, tagList, limit, match)
 		if err != nil {
 			return err
 		}

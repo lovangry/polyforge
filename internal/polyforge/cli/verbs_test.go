@@ -549,6 +549,30 @@ func TestVerbRecallRequestShape(t *testing.T) {
 	}
 }
 
+// TestVerbRecallAnyMode: --any asks the server for the ranked any-term
+// mode (match=any); the default sends no match= at all, so the server's
+// every-token AND stays the human default.
+func TestVerbRecallAnyMode(t *testing.T) {
+	var rec reqRecorder
+	srv := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"items":[],"total":0}`)
+	})
+	env := withMappingConfig(t)
+	env["PF_SERVER"] = srv.URL
+	if code, _, stderr := runPf(t, env, "recall", "--project", "polyforge", "flaky build"); code != 0 {
+		t.Fatalf("recall: code=%d stderr=%s", code, stderr)
+	}
+	if got := rec.last(); strings.Contains(got.Path, "match=") {
+		t.Errorf("default recall must not send match=: %s", got.Path)
+	}
+	if code, _, stderr := runPf(t, env, "recall", "--project", "polyforge", "--any", "flaky build"); code != 0 {
+		t.Fatalf("recall --any: code=%d stderr=%s", code, stderr)
+	}
+	if got := rec.last(); !strings.Contains(got.Path, "match=any") {
+		t.Errorf("recall --any: path = %s, want match=any", got.Path)
+	}
+}
+
 // TestVerbRecallLimitContract: --limit is the CLI's product contract —
 // the default 20 is sent when the flag is omitted, and 1..200 is
 // validated locally so an out-of-range value fails loudly with NO

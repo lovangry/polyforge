@@ -133,3 +133,28 @@ func TestRecalledMemoriesNilSeamWritesNothing(t *testing.T) {
 		t.Fatalf("nil seam must not write a snapshot: %v", err)
 	}
 }
+
+// The claim query is the goal plus the content's head: a content body
+// past recallContentRunes is cut (rune-safe), a missing or blank one
+// leaves the goal alone.
+func TestRecallQueryBoundsContent(t *testing.T) {
+	if got := recallQuery("  the goal ", nil); got != "the goal" {
+		t.Fatalf("nil content: %q", got)
+	}
+	blank := "  \n "
+	if got := recallQuery("the goal", &blank); got != "the goal" {
+		t.Fatalf("blank content: %q", got)
+	}
+	short := "short body"
+	if got := recallQuery("the goal", &short); got != "the goal\nshort body" {
+		t.Fatalf("short content: %q", got)
+	}
+	long := strings.Repeat("检", recallContentRunes) + "TAILMARKER"
+	got := recallQuery("the goal", &long)
+	if strings.Contains(got, "TAILMARKER") || !strings.HasPrefix(got, "the goal\n检") {
+		t.Fatalf("long content not cut at %d runes: tail kept=%v", recallContentRunes, strings.Contains(got, "TAILMARKER"))
+	}
+	if n := len([]rune(got)); n != len([]rune("the goal\n"))+recallContentRunes {
+		t.Fatalf("query is %d runes, want goal + %d content runes", n, recallContentRunes)
+	}
+}
