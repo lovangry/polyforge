@@ -375,9 +375,16 @@ service host with seconds of downtime (no startup auto-migration, see
 
 ## Build & test
 
-    make check     # build + vet + test, all packages
+    make check     # build + vet + fmt + xrefs + test, all packages
+    make xrefs     # design-doc cross-references only
     go build ./...
     go test ./...
+
+`make xrefs` checks the cross-references and section anchors of
+`docs/design/polyforge-vnext/` (archived docs excluded); it skips with a
+message when python3 is missing. `.polyforge/release.sh` runs the same check
+before its test gate and fails the release instead of skipping, so run
+`make xrefs` whenever a change touches the design docs.
 
 Opt-in tests (skipped with a clear message unless their variable is set):
 `POLYFORGE_TEST_SYSTEM_INSTALL=1` runs

@@ -208,6 +208,7 @@ func (w *relWorld) env(extra ...string) []string {
 		"CALLLOG="+w.log, "FAKE_GH="+w.fakeRel, "FAKE_PUSH_DIGEST="+relFakeDigest, "FAKE_REGISTRY_DIGEST="+relFakeDigest,
 		"DOCKER_CONFIG="+dockerCfg, "HOME="+w.root,
 		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e",
+		"RELEASE_XREFS_CMD=echo xrefs >> \"$CALLLOG\"",
 		"RELEASE_TEST_CMD=echo tests >> \"$CALLLOG\"",
 		"RELEASE_BUILD_CMD=echo build >> \"$CALLLOG\"; mkdir -p artifacts/release-$TAG; echo aihub-bin > artifacts/release-$TAG/aihub; echo pf-bin > artifacts/release-$TAG/pf",
 	)
@@ -253,7 +254,7 @@ func TestReleaseScriptHappyPathOrderAndAssets(t *testing.T) {
 		t.Fatalf("release failed: %v\n%s", err, out)
 	}
 	calls := w.calls()
-	order := []string{"tests", "build", "docker build", "git push", "docker push", "docker inspect", "gh release create"}
+	order := []string{"xrefs", "tests", "build", "docker build", "git push", "docker push", "docker inspect", "gh release create"}
 	last := -1
 	for _, p := range order {
 		i := relIndex(calls, p)
@@ -300,6 +301,40 @@ func TestReleaseScriptHappyPathOrderAndAssets(t *testing.T) {
 	vout, verr := w.run(nil, "--verify", "v1.3.0")
 	if verr != nil {
 		t.Fatalf("verify of fresh release failed: %v\n%s", verr, vout)
+	}
+}
+
+// The design-doc cross-reference gate runs before the test gate; a
+// failure stops the release before tests, build and any publish. The
+// default (RELEASE_XREFS_CMD empty) runs check-xrefs.py itself — absent
+// from the fake repo, so it fails the same way — and RELEASE_TEST_CMD
+// being set does not skip it.
+func TestReleaseScriptXrefsGateFailsBeforeTests(t *testing.T) {
+	for name, cmd := range map[string]string{
+		"override": "RELEASE_XREFS_CMD=echo xrefs >> \"$CALLLOG\"; exit 3",
+		"default":  "RELEASE_XREFS_CMD=",
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := newRelWorld(t, []string{"v1.2.0"}, nil)
+			out, err := w.run([]string{cmd})
+			if err == nil {
+				t.Fatalf("release passed with a failing xrefs gate:\n%s", out)
+			}
+			if !strings.Contains(out, "design-doc cross-reference check failed") && !strings.Contains(out, "python3 not found") {
+				t.Fatalf("no clear xrefs message:\n%s", out)
+			}
+			if !strings.Contains(out, "nothing built or published") {
+				t.Fatalf("message does not say nothing was published:\n%s", out)
+			}
+			for _, p := range []string{"tests", "build", "docker", "git push", "gh release"} {
+				if i := relIndex(w.calls(), p); i >= 0 {
+					t.Fatalf("%q ran after the xrefs gate failed: %v", p, w.calls())
+				}
+			}
+			if got := w.originTags(); strings.Contains(got, "v1.3.0") {
+				t.Fatalf("tag pushed: %q", got)
+			}
+		})
 	}
 }
 

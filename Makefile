@@ -33,9 +33,9 @@ fmt:
 # (docs/design/polyforge-vnext/tools/check-xrefs.py; archived docs are not
 # checked). python3 is not a build dependency: without it the step is
 # skipped with a message instead of failing the whole check.
-# Note: .polyforge/release.sh's gate runs only `make test` (RELEASE_TEST_CMD),
-# so a release does not run xrefs; run `make check` (or `make xrefs`) before
-# tagging when docs changed.
+# .polyforge/release.sh runs the same checker before its test gate, but with
+# python3 required (a release fails instead of skipping); RELEASE_XREFS_CMD
+# overrides it the way RELEASE_TEST_CMD overrides the test gate.
 xrefs:
 	@if command -v python3 >/dev/null 2>&1; then \
 		python3 -I docs/design/polyforge-vnext/tools/check-xrefs.py; \
