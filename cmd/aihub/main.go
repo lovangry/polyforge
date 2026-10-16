@@ -88,22 +88,6 @@ func main() {
 		log.Printf("aihub: fresh install: seeded bootstrap admin usr_root — one-time api key (shown once, store it now): %s", key)
 	}
 
-	// Memory startup reconcile (authority files are the truth source).
-	// polyforge#129, serve-first: the reconcile's steady state is a
-	// freshness-stamp check (stat + row compare per entry, no reads, no
-	// index writes), but a first boot after an upgrade, an index repair
-	// is still O(library) — it runs in the
-	// background so the listener binds immediately, with progress logs
-	// for any long pass and a batch yield that lets API writers
-	// interleave. The completion line (always logged, previously gated
-	// on n>0, which made a no-op reconcile silent) is the readiness
-	// signal.
-	mems := memory.NewStore(db, *dataDir)
-	mems.ReconcileProgress = func(p memory.ProgressReport) {
-		log.Printf("aihub: memory reconcile: scanned %d, reindexed %d, elapsed %s",
-			p.Scanned, p.Reindexed, p.Elapsed.Round(time.Millisecond))
-	}
-
 	gitMgr, err := git.NewManager(*dataDir, core.NewOwnerManager(db))
 	if err != nil {
 		log.Fatalf("aihub: git manager: %v", err)
@@ -113,7 +97,7 @@ func main() {
 	jan.Start()
 	defer jan.Stop()
 
-	srv := server.New(db, *dataDir, gitMgr)
+	srv, mems := newServer(db, *dataDir, gitMgr)
 	srv.StaleAfter = *staleAfter
 	httpSrv := &http.Server{Addr: *listen, Handler: srv}
 
@@ -126,6 +110,16 @@ func main() {
 		log.Fatalf("aihub: listen: %v", err)
 	}
 
+	// Memory startup reconcile (authority files are the truth source).
+	// polyforge#129, serve-first: the reconcile's steady state is a
+	// freshness-stamp check (stat + row compare per entry, no reads, no
+	// index writes), but a first boot after an upgrade, an index repair
+	// is still O(library) — it runs in the
+	// background so the listener binds immediately, with progress logs
+	// for any long pass and a batch yield that lets API writers
+	// interleave. The completion line (always logged, previously gated
+	// on n>0, which made a no-op reconcile silent) is the readiness
+	// signal.
 	go func() {
 		start := time.Now()
 		n, err := mems.RebuildIndex()
@@ -151,6 +145,22 @@ func main() {
 	if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("aihub: %v", err)
 	}
+}
+
+// newServer assembles the HTTP server and returns the memory store the
+// startup reconcile must run on. It is srv.Mems itself — exactly one
+// memory.Store per process (repo review 2026-10-16 B-3): the store's
+// per-entry lock table is per instance, so a second instance reconciling
+// in the background could sweep the serving instance's in-flight
+// memory.md.tmp or delete a row whose file rename had not landed yet.
+func newServer(db *core.DB, dataDir string, gitMgr *git.Manager) (*server.Server, *memory.Store) {
+	srv := server.New(db, dataDir, gitMgr)
+	mems := srv.Mems
+	mems.ReconcileProgress = func(p memory.ProgressReport) {
+		log.Printf("aihub: memory reconcile: scanned %d, reindexed %d, elapsed %s",
+			p.Scanned, p.Reindexed, p.Elapsed.Round(time.Millisecond))
+	}
+	return srv, mems
 }
 
 // bootstrapAdmin seeds the first admin identity on a fresh install.
