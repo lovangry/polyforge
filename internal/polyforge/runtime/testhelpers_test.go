@@ -66,6 +66,15 @@ type fakeHub struct {
 	// runtime's no-remote local init is a typed refusal since the audit's
 	// dead-code sweep (there is no production local-init path).
 	capsuleRepoBase string
+	// claimFaults scripts SessionClaim failures, consumed in order: each
+	// answers its err, after committing the claim when afterCommit is
+	// set (the answer-lost-in-transit shape, repo review B-1).
+	claimFaults []claimFault
+}
+
+type claimFault struct {
+	err         error
+	afterCommit bool
 }
 
 func newFakeHub() *fakeHub {
@@ -122,6 +131,15 @@ func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimRe
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.claims = append(h.claims, req)
+	var fault *claimFault
+	if len(h.claimFaults) > 0 {
+		f := h.claimFaults[0]
+		h.claimFaults = h.claimFaults[1:]
+		fault = &f
+		if !f.afterCommit {
+			return nil, f.err
+		}
+	}
 	// The aihub claim contract: aihub creates the bare repo at claim. The
 	// fake hub materializes it when the test wired capsuleRepoBase, so
 	// the runtime's clone path has a remote.
@@ -154,6 +172,9 @@ func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimRe
 	}
 	h.held[id] = req.SessionID
 	h.status[id] = api.StatusRunning
+	if fault != nil {
+		return nil, fault.err // committed, answer lost
+	}
 	return resp, nil
 }
 

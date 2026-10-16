@@ -654,10 +654,6 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 			return berr
 		}
 	}
-	sessionID, err := mintSessionID()
-	if err != nil {
-		return err
-	}
 	// B1: the claim's idempotency key AND the session secret are
 	// journaled durably BEFORE the claim call. A crash anywhere between
 	// the claim and the spawn would otherwise orphan a running session
@@ -665,7 +661,16 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 	// journaled session, replay the SAME claim (same key → same response,
 	// D4) and either finish the start or compensate with
 	// SessionEnd(blocked).
-	key := randomKey()
+	//
+	// A journal entry left by an earlier attempt whose claim answer was
+	// lost (transport error, timeout, hub 5xx — see below) is REUSED
+	// rather than replaced: this start is then a replay of the same claim
+	// (repo review 2026-10-16 B-1), so a claim the hub had committed is
+	// adopted instead of orphaned.
+	sessionID, key, err := r.claimIntent(wi)
+	if err != nil {
+		return err
+	}
 	if err := r.noteClaiming(wi, sessionID, key, manual); err != nil {
 		return fmt.Errorf("runtime: %s: claiming journal write failed (refusing to claim): %w", wi, err)
 	}
@@ -677,12 +682,59 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 	}
 	resp, err := r.hub.SessionClaim(req)
 	if err != nil {
-		// the claim never opened: nothing can dangle, drop the journal
-		// entry so a restart does not replay a dead intention.
-		r.clearClaiming(wi)
-		return err
+		if claimRefused(err) {
+			// the hub answered and refused: the claim never opened,
+			// nothing can dangle — drop the journal entry so neither a
+			// retry nor a restart replays a dead intention.
+			r.clearClaiming(wi)
+			return err
+		}
+		// Transport loss, timeout or a hub 5xx: the claim MAY have been
+		// committed with the answer lost. The journal entry (the only
+		// copy of the secret) is KEPT and the start answers the typed
+		// transient, so the dispatcher requeues with backoff; the retry
+		// replays the same claim (claimIntent), and a restart in between
+		// replays it from the journal (resumeClaiming).
+		return &api.Error{Code: api.ErrDaemonHubUnavailable,
+			Detail: fmt.Sprintf("%s: claim answer lost (claiming journal kept; the retry replays the same claim): %v", wi, err)}
 	}
 	return r.startClaimed(ctx, wi, sessionID, resp, wcfg, manual)
+}
+
+// claimRefused reports whether a SessionClaim error is the hub's own
+// typed refusal (a 4xx envelope): the claim did not open. Anything else —
+// a transport error, a timeout, a 5xx — leaves the outcome unknown.
+func claimRefused(err error) bool {
+	var ae *api.Error
+	return errors.As(err, &ae) && ae.HTTPStatus() < 500
+}
+
+// claimIntent answers the session secret and idempotency key this start
+// claims with (repo review 2026-10-16 B-1). With no journal entry for wi
+// it mints a fresh pair. An entry left by an earlier attempt whose answer
+// was lost is checked first: SessionVerify says the journaled session
+// holds the WI → the claim landed, reuse the pair so the claim is a D4
+// replay that hands the same answer back; verify says it does not → the
+// earlier claim never landed or was ended since (a replay could hand
+// back a stale cached answer) — drop the entry and mint fresh; verify
+// unreachable → the typed transient, entry kept.
+func (r *Runtime) claimIntent(wi string) (sessionID, key string, err error) {
+	if rec := r.loadClaiming()[wi]; rec != nil && rec.SessionID != "" && rec.IdempotencyKey != "" {
+		v, verr := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
+		switch {
+		case verr != nil && !claimRefused(verr):
+			return "", "", &api.Error{Code: api.ErrDaemonHubUnavailable,
+				Detail: fmt.Sprintf("%s: verify of the journaled claim failed (claiming journal kept; retry later): %v", wi, verr)}
+		case verr == nil && v.Matches:
+			return rec.SessionID, rec.IdempotencyKey, nil
+		}
+		r.clearClaiming(wi)
+	}
+	sessionID, err = mintSessionID()
+	if err != nil {
+		return "", "", err
+	}
+	return sessionID, randomKey(), nil
 }
 
 // startClaimed carries one OPEN claim (fresh or replayed) to a live agent.

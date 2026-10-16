@@ -15,6 +15,12 @@ package runtime
 //     ours, adopt it and finish the start (the SAME idempotency key
 //     hands back the SAME claim answer, D4); not matches / the hub says
 //     otherwise → the intention is dead, drop the entry.
+//   - a claim call whose answer is lost (transport error, timeout, hub
+//     5xx) KEEPS the entry: the claim may have landed and the entry is
+//     the only copy of its secret. The in-process retry of the same
+//     start reuses it (claimIntent) and so does the next replay; only a
+//     typed refusal (4xx) or a verify that no longer matches drops it
+//     (repo review 2026-10-16 B-1).
 //
 // The file is a map keyed by the SUBMITTED id spelling (a slug is legal:
 // the claim endpoint accepts id-or-slug), so clearClaiming and the
@@ -188,6 +194,14 @@ func (r *Runtime) resumeClaiming(ctx context.Context) {
 			IdempotencyKey: rec.IdempotencyKey,
 		})
 		if err != nil {
+			if !claimRefused(err) {
+				// transport loss / 5xx: the outcome is unknown and the
+				// entry is the only copy of the secret — keep it for the
+				// next replay (repo review 2026-10-16 B-1), exactly like
+				// the verify failure above.
+				fmt.Fprintf(os.Stderr, "runtime: %s: claiming entry kept (aihub claim replay failed): %v\n", wi, err)
+				continue
+			}
 			// The claim face refuses the replay (the session was taken
 			// over, ended, or the server disagrees): the entry names an
 			// intention that can no longer be honored — drop it rather
