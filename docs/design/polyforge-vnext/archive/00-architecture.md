@@ -1,6 +1,8 @@
 # 00 — 总体架构：三模块边界与 Core/Capsule 状态分离
 
-> **ARCHIVED（repo review 2026-10-16 G-1）— 本文大部分描述已删除的机制：WI Agent（每 WI 一个持久 agent，INV-14）、Interactive/Batch/Drain、watcher dirty 位与 Revision 发布、`internal/{core,workflow,daemon,…}` 模块树、force-takeover / budget-increments / rotate-secret。标有 ARCHIVED 横幅的节 do not build from this；未标横幅的节也只作历史与溯源参考。现行设计权威：[v2-converge.md](v2-converge.md)、[wi-kind-contract.md](wi-kind-contract.md)、[08-capsule-base-migration.md](08-capsule-base-migration.md)；与代码冲突时一律以代码为准。**
+> **ARCHIVED 2026-10-16** (repo review 2026-10-16 wave 4): describes the v0/v1 design and is kept for history only — do not build from it. Current reference: [reference.md](../reference.md); decisions: [v2-converge.md](../v2-converge.md). Live mechanisms this file still held were moved there before archiving; section anchors are unchanged.
+
+> **ARCHIVED（repo review 2026-10-16 G-1）— 本文大部分描述已删除的机制：WI Agent（每 WI 一个持久 agent，INV-14）、Interactive/Batch/Drain、watcher dirty 位与 Revision 发布、`internal/{core,workflow,daemon,…}` 模块树、force-takeover / budget-increments / rotate-secret。标有 ARCHIVED 横幅的节 do not build from this；未标横幅的节也只作历史与溯源参考。现行设计权威：[v2-converge.md](../v2-converge.md)、[wi-kind-contract.md](../wi-kind-contract.md)、[08-capsule-base-migration.md](../08-capsule-base-migration.md)；与代码冲突时一律以代码为准。**
 > Most of this document describes deleted mechanisms. Sections bannered ARCHIVED must not be built from; the live authority is v2-converge.md plus the code.
 
 > Polyforge vNext 设计基线文档。本文档是其余七份文档（`01`–`07`）的**术语与不变量基线**：
@@ -17,7 +19,7 @@
 
 ### 1.1 范围 <!-- §1.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Interactive/Batch/Drain、watcher dirty 位、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Interactive/Batch/Drain、watcher dirty 位、takeover）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - 定义 Polyforge vNext 的三个部署单元——**路由 Skill（Routing Skill）**、**Daemon**（每机一个的
   本地执行守护进程，进程名 `pf-daemon`，见 §3.1 命名裁定）、**AIHub（核心服务）**——的职责边界与
@@ -73,7 +75,7 @@
 
 ### 2.1 术语首次定义索引 <!-- §2.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、Interactive/Batch/Drain、watcher dirty 位、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、Interactive/Batch/Drain、watcher dirty 位、takeover）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 以下术语的**唯一权威定义**均在其权威文档（见 §2.2 分配表）；本节仅作导航索引：
 - **路由 Skill、Daemon、Interactive/Batch/Drain、优雅停机（quiesce/shutdown）、持久化 Harness
@@ -91,7 +93,7 @@
 
 ### 2.2 术语权威分配表（全局，唯一权威） <!-- §2.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、Interactive/Batch/Drain、watcher dirty 位、takeover、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、Interactive/Batch/Drain、watcher dirty 位、takeover、read-through）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 每个术语只在列出的文档中给出权威定义；其他文档一律以「`文件名#锚点`」交叉引用，不得重复定义。
 
@@ -112,7 +114,7 @@
 
 ### 2.3 全局不变量基线 <!-- §2.3 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、Interactive/Batch/Drain、watcher dirty 位、takeover、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、Interactive/Batch/Drain、watcher dirty 位、takeover、read-through）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 以下不变量对全部八份文档成立；各文档可增加本域不变量，但不得与下列冲突。
 
@@ -137,7 +139,7 @@
 
 ### 3.1 三模块与命名裁定 <!-- §3.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、Interactive/Batch/Drain、backupBarrier、watcher dirty 位、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、Interactive/Batch/Drain、backupBarrier、watcher dirty 位、read-through）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 ```
 ┌─────────────┐   自然语言路由    ┌──────────────────────┐     HTTP(gRPC/JSON)      ┌──────────────────┐
@@ -226,7 +228,7 @@
 
 ### 3.2 候选功能归属判据 <!-- §3.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、Interactive/Batch/Drain、watcher dirty 位、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、Interactive/Batch/Drain、watcher dirty 位、read-through）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 任一候选功能按下列判据表唯一归属一个部署单元；判据按序适用，第一条命中即归属，列表已按特异性
 降序排列。
@@ -255,7 +257,7 @@
 
 ### 3.3 代码目录（vNext 目标仓库布局） <!-- §3.3 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest、Interactive/Batch/Drain、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest、Interactive/Batch/Drain、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 **正式取代声明（AIHub 层定稿裁决）**：AIHub 按全新仓库（new repo）实现。gen-2 spec 假设③——
 「vNext AIHub 由现有 aihub 代码库演进而来」——自本声明起正式作废：vNext AIHub 不继承、不演进
@@ -291,7 +293,7 @@ aihub/
 
 ### 3.4 Daemon 的三种 WI Job 执行模式（唯一执行者判据） <!-- §3.4 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、Interactive/Batch/Drain、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、Interactive/Batch/Drain、read-through）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 Daemon 是 Interactive / Batch / Drain 三种模式下**唯一**的 WI Job 执行者：任何 WI 的 Job 执行
 （创建 Capsule、派生持久 WI Agent、驱动到完成）都必须经过 Daemon，不存在绕过 Daemon 直接执行
@@ -416,7 +418,7 @@ Daemon 不自行扩大或缩小该集合，也不在未经确认前把调度器�
 
 ### 3.5 优雅停机（quiesce / shutdown，与 Drain 明确区分的独立概念） <!-- §3.5 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、Interactive/Batch/Drain、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、Interactive/Batch/Drain、takeover）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 「优雅停机」（graceful shutdown，亦称 **quiesce** 或 **shutdown**，三个名字指同一件事，全文档
 可互换使用，但均不得与 §3.4c 的 Drain 混用）是 Daemon **进程生命周期的终止路径**，与 Drain 是
@@ -435,7 +437,7 @@ Daemon 不自行扩大或缩小该集合，也不在未经确认前把调度器�
 
 ### 3.6 持久化 Harness RPC WI Agent（每 WI 一个） <!-- §3.6 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - **身份**：每个正在执行的 WI 有且只有一个 WI Agent 进程，由 Daemon 在创建 Job 时派生，
   在 Job 结束（wrap/fail/优雅停机中断）时回收（INV-14）。
@@ -468,7 +470,7 @@ Daemon 不自行扩大或缩小该集合，也不在未经确认前把调度器�
 
 ### 3.6a Harness 适配器的最小契约（v1：Pi、Claude） <!-- §3.6a -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 【polyforge#106 修订注记】本节原文描述的「宿主机原生进程 + agent 侧执行主循环」抽象随
 WI-Agent 引擎删除：引擎是 Daemon 内的 Go driver，step 派生是短驻 harness 进程。下表的
@@ -516,7 +518,7 @@ per-step isolation**：
 
 ### 4.1 数据类归属清单（唯一归属侧） <!-- §4.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 | 数据类别 | 归属侧 | 存储介质 | 权威定义 |
 |---|---|---|---|
@@ -552,7 +554,7 @@ per-step isolation**：
 
 ### 4.3 同步触发时机（INV-11 展开） <!-- §4.3 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 全扫描发布只允许在下列四类事件（+可选 milestone）上发生；「触发者」是**发起发布请求**的一方，
 「机械执行者」永远是 Daemon——不存在任何一方绕开 Daemon 直接写 Revision/HEAD 的路径：
@@ -572,7 +574,7 @@ Daemon 侧的机械执行实现见 `04-local-runtime.md#§6.3`/§6.4）。
 
 ## 5. API 与错误码（模块间接口总览） <!-- §5 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、PILOT-* 码、Revision/CAS/manifest、RunCommand、read-through、本地认证代理）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、PILOT-* 码、Revision/CAS/manifest、RunCommand、read-through、本地认证代理）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 本节只给**接口总览与权威文档指针**；每个接口的完整签名、参数与错误码在权威文档定义，对端文档
 引用时逐字一致。AIHub HTTP API 的端点权威枚举是 `02-aihub-core.md#§5.1` 的 canonical
@@ -631,7 +633,7 @@ origin，人工桥接验证可行后收编为一等动词）按同一判据落�
 
 ### 5.2 基线澄清（B01 裁定；供后续 spec 形式化引用） <!-- §5.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、Revision/CAS/manifest、flush 证据）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、Revision/CAS/manifest、flush 证据）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 四条已裁定的基线澄清，散点权威在各对应文档；后续 spec 形式化时必须按本节口径引用，不得重新
 解读：
@@ -657,7 +659,7 @@ origin，人工桥接验证可行后收编为一等动词）按同一判据落�
 
 ## 6. 核心流程（端到端概述） <!-- §6 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、Revision/CAS/manifest、Interactive/Batch/Drain、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、Revision/CAS/manifest、Interactive/Batch/Drain、read-through）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 以下用编号步骤描述端到端主流程的责任分工（细节均在各权威文档，本节不重复接口签名，也不作为
 可执行伪代码使用）：
@@ -707,7 +709,7 @@ origin，人工桥接验证可行后收编为一等动词）按同一判据落�
 
 ## 8. 安全边界（总则） <!-- §8 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、takeover、rotate-secret、本地认证代理）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、takeover、rotate-secret、本地认证代理）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - 信任面：Harness 用户（经路由 Skill）→ Daemon（本机，全权，唯一持有 AIHub 凭证与 Revision
   发布 token 的角色；**Revision 发布权仅属 Daemon**）→ WI Agent（本机原生进程，受 §3.7 v1 判据
@@ -739,7 +741,7 @@ origin，人工桥接验证可行后收编为一等动词）按同一判据落�
 
 ## 9. 监控（总则，指标分层） <!-- §9 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、Interactive/Batch/Drain、watcher dirty 位、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、Interactive/Batch/Drain、watcher dirty 位、read-through）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 | 层 | 指标类别 | 权威细节 |
 |---|---|---|
@@ -778,7 +780,7 @@ Markdown 权威文件，权威流程在 `06-memory-search.md#§10`（管理 CLI 
 
 ### 11.1 旧 skill 与散装 agent 定义的迁移矩阵（唯一处置权威） <!-- §11.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、pf upgrade）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、pf upgrade）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 vNext 不继承现行 polyforge 的任何 `/pf-*` skill 入口或散装 agent 定义；唯一处置如下（本表是唯一
 权威，部署面不得另立去向）：

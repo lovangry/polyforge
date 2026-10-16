@@ -2191,16 +2191,17 @@ func TestW113InstallDaemonFlagSurface(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestW113DesignDocsTeachMappingContract pins criterion #25's automated
-// floor: 04-local-runtime.md, 08-capsule-base-migration.md and
-// 00-architecture.md all describe the `[workspace."<path>"]` mapping
-// shape. (The current-surface-vs-history judgment is the manual
-// document-only review in artifacts/e2e-scenarios.md.)
+// floor: the live design docs — reference.md (the current-system
+// reference) and 08-capsule-base-migration.md — describe the
+// `[workspace."<path>"]` mapping shape. (04-local-runtime.md and
+// 00-architecture.md, which this test read before, were archived by the
+// repo review 2026-10-16 wave 4. The current-surface-vs-history judgment
+// is the manual document-only review in artifacts/e2e-scenarios.md.)
 func TestW113DesignDocsTeachMappingContract(t *testing.T) {
 	root := v1Root(t)
 	docs := []string{
-		filepath.Join(root, "docs", "design", "polyforge-vnext", "04-local-runtime.md"),
+		filepath.Join(root, "docs", "design", "polyforge-vnext", "reference.md"),
 		filepath.Join(root, "docs", "design", "polyforge-vnext", "08-capsule-base-migration.md"),
-		filepath.Join(root, "docs", "design", "polyforge-vnext", "00-architecture.md"),
 	}
 	for _, doc := range docs {
 		raw, err := os.ReadFile(doc)

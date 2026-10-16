@@ -118,7 +118,9 @@ aihub proxy only — pushes a step makes to an external origin are not fenced.
 ### 4.1 HTTP routes <!-- §4.1 -->
 
 Registered in `internal/aihub/server/server.go` `routes()` — 34 registrations. Auth: **key** = Bearer API
-key (`s.auth`), **admin** = key of a `role=admin` user (`s.authAdmin`). No unauthenticated route, no
+key (`s.auth`), **admin** = key of a `role=admin` user (`s.authAdmin`). Project access
+(`canRead`/`canWrite`): any membership (`viewer`/`writer`/`maintainer`) reads, `writer`+ writes, a global
+admin does both; a key scoped to one project is refused elsewhere (`AUTH-403`). No unauthenticated route, no
 health route. All paths under `/api/v1` except `/git/`.
 
 | Method | Path | Auth / gate | Notes |
@@ -249,7 +251,9 @@ Socket: `--socket` > `PF_DAEMON_SOCKET` > cli.toml `daemon_socket` > `/run/polyf
 
 - **Start = `pf daemon ensure` only** (`daemon/ensure.go`). Called by `tools/install.sh`, the Claude SessionStart hook (`--timeout 15s`) and the pi `pf-chat` extension. Socket answers → exit 0. Refuses inside a step (`PF_WI_ID` set). `<data-dir>/ensure.lock` (flock) serializes callers; losers wait and answer by the socket. Canonical argv: `--config`, `-machine-id`, `-data-dir`, `-socket`, `-workflows-dir <data-dir>/release/current/workflows`.
 - **tmux loop** (`internal/polyforge/supervisor`): session `polyforge-daemon`; loop runs `nohup pf daemon …`, appends to `<data-dir>/daemon.log` (rotated at 10 MiB); exit 0 → loop ends; **exit 78** → loop ends ("needs an operator fix"); anything else → restart after 5s. No tmux → one unsupervised start with a warning. `pf doctor` also accepts a self-managed `polyforge-daemon.service`.
-- **Exit 78** = `ExitNeedsOperator` (`daemon/main.go`): startup failure only an operator can fix — config, identity mismatch, no `[workspace]` mapping, workspace dirs, on-disk state, failed restart reconciliation. Fix, then `pf daemon ensure`.
+- **Exit 78** = `ExitNeedsOperator` (`daemon/main.go`): startup failure only an operator can fix — config, identity mismatch, no `[workspace]` mapping, workspace dirs, on-disk state, failed restart reconciliation. Fix, then `pf daemon ensure`. After a machine/container reboot the daemon is down until the next
+  interactive harness session runs ensure (auto-pull idles meanwhile); the skill retries an
+  execution-plane verb once after `pf daemon ensure` when the daemon is unreachable.
 - **Graceful shutdown** (`daemon/shutdown.go`; `pf ops shutdown`, SIGTERM/SIGINT; a second signal aborts hard): latch shutting-down (new starts `DAEMON-410`) → stop observe → terminate every agent tree (10s) → snapshot task repos to `refs/pf-wip/<name>` (per-job slice, ≤2m) → persist state → close listener. Whole budget **5 min** (`Config.ShutdownBudget`). Running WIs are **not** session-ended: they stay `running` at aihub with `clean_pause=false` and are attached on the next start. Cause written to `last-shutdown.json`, read once by the next start (`daemon_restarted` event; absent = `unknown`, i.e. crash/SIGKILL). There is no `pf daemon restart`: restart = `pf ops shutdown` then `pf daemon ensure`.
 - **Restart reconciliation** (`runtime/restart.go`): claiming-journal replay first; then per job record a session verify — match+paused+`clean_pause=false` → attach and resume; match+running → recover-resume; mismatch → release (kill, quarantine, drop; `session_released`); transport error → keep, mark `recovering`, retry with backoff (`session_verify_deferred`); typed 4xx → blocked (`session_verify_outage`). Missing capsule / unmapped project blocks only that WI (`capsule_missing`, `project_unmapped`). Orphans are reaped first (`runtime/reap.go`): spawn-journal pids + a `PF_WI_ID`+`PF_DAEMON_ID` environ sweep (layers in `runtime/cleanup.go`: PPID snapshot → process-group kill → (pid,starttime) re-kill → env-marker scan → cwd scan warns only). Decision record: `v2-converge.md#§6`.
 - **Recovery engine** (`runtime/recover.go`): transcript readable → resume the harness session; two consecutive resume failures → fresh derivation; after 2 consecutive failed recoveries (`MaxRecoveries`) the WI ends blocked. A daemon restart re-dispatches the same model and is not counted as a failure.
