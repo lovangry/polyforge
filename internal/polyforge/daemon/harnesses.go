@@ -29,15 +29,56 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// verifiedClaudeVersions are the Claude Code versions the adapter's
-// argv/stream contract was verified against. Another version is a doctor
-// warning, never a dispatch refusal (the CLI auto-updates).
-var verifiedClaudeVersions = map[string]bool{"2.1.296": true}
+// minClaudeVersion is the oldest Claude Code version the adapter's
+// argv/stream contract was verified against. The CLI auto-updates, so a
+// newer version passes; an older or unparsable one is a doctor warning,
+// never a dispatch refusal (decision 2026-10-16 G15).
+const minClaudeVersion = "2.1.296"
+
+// claudeVersionAtLeast reports whether v (a dotted numeric version, e.g.
+// "2.1.296") is >= min. An unparsable v is false.
+func claudeVersionAtLeast(v, min string) bool {
+	a, okA := parseDotted(v)
+	b, okB := parseDotted(min)
+	if !okA || !okB {
+		return false
+	}
+	for i := 0; i < len(a) || i < len(b); i++ {
+		var x, y int
+		if i < len(a) {
+			x = a[i]
+		}
+		if i < len(b) {
+			y = b[i]
+		}
+		if x != y {
+			return x > y
+		}
+	}
+	return true
+}
+
+// parseDotted parses "1.2.3" into its numeric parts; anything else fails.
+func parseDotted(v string) ([]int, bool) {
+	if v == "" {
+		return nil, false
+	}
+	var out []int
+	for _, p := range strings.Split(v, ".") {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return nil, false
+		}
+		out = append(out, n)
+	}
+	return out, true
+}
 
 // harnessDirStatus is one harness dir's existence fact (dir → path +
 // exists) of the claude status entry (polyforge#171, ruling 8).
@@ -55,11 +96,13 @@ const settingsTokenPrefix = "sk-ant-oat01-"
 
 // harnessStatus is one harness's /status entry.
 type harnessStatus struct {
-	Bin      string `json:"bin"`
-	Found    bool   `json:"found"`
-	Path     string `json:"path,omitempty"`
-	Version  string `json:"version,omitempty"`
-	Verified bool   `json:"verified,omitempty"`
+	Bin     string `json:"bin"`
+	Found   bool   `json:"found"`
+	Path    string `json:"path,omitempty"`
+	Version string `json:"version,omitempty"`
+	// Verified: Version parses and is >= MinVersion.
+	Verified   bool   `json:"verified,omitempty"`
+	MinVersion string `json:"min_version,omitempty"`
 	// VersionError is the --version probe's failure, when it failed.
 	VersionError string `json:"version_error,omitempty"`
 	// set|unset only — never a value.
@@ -117,7 +160,8 @@ func (d *Daemon) harnessStatuses() map[string]harnessStatus {
 	if p, err := exec.LookPath(cl.Bin); err == nil {
 		cl.Found, cl.Path = true, p
 		cl.Version, cl.VersionError = d.claudeVersion(p)
-		cl.Verified = verifiedClaudeVersions[cl.Version]
+		cl.MinVersion = minClaudeVersion
+		cl.Verified = claudeVersionAtLeast(cl.Version, minClaudeVersion)
 	}
 	return map[string]harnessStatus{"pi": pi, "claude": cl}
 }

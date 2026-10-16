@@ -601,7 +601,8 @@ claude_bin = "/root/.local/bin/claude"     # default: claude on the daemon's PAT
 
 `pf doctor` adds a `harness claude` check whenever any step resolves to
 claude: the binary must resolve on the daemon's PATH (else fail); the
-version should be a verified one (2.1.296); when no credential is
+version should be at least the verified minimum (2.1.296 — newer
+passes, older or unparsable warns); when no credential is
 visible — neither the daemon env nor the claude-config
 `settings.json` env block (the daemon reports set/unset, never a
 value) — it warns too. Credential values are never shown. The check

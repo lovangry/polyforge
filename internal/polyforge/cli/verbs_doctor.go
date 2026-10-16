@@ -49,7 +49,7 @@ import (
 //     prefixed fails, naming file and step). When any resolved candidate
 //     is `claude:`, "harness claude" judges the daemon's view of the
 //     Claude Code CLI (GET /status?harnesses=1: binary found → else fail;
-//     version in the verified set, credential variables set,
+//     version >= the verified minimum, credential variables set,
 //     ANTHROPIC_BASE_URL unset → else warn) and lists every such step
 //     with its whole candidate chain (each candidate's harness shown by
 //     its prefix) and the level it came from. Credential values are
@@ -472,7 +472,11 @@ func claudeHarnessCheck(steps []workspace.StepResolution, workflowsDir string, d
 	case h.VersionError != "":
 		warn("version unknown (" + h.VersionError + ")")
 	case !h.Verified:
-		warn(fmt.Sprintf("version %s is not in the verified set (the adapter's argv/stream contract was verified on another version)", h.Version))
+		min := h.MinVersion
+		if min == "" {
+			min = "the verified minimum"
+		}
+		warn(fmt.Sprintf("version %s is older than %s or unparsable (the adapter's argv/stream contract is verified from that version on)", h.Version, min))
 	}
 	tokenSet := h.AuthTokenEnv == "set" || h.SettingsEnv["ANTHROPIC_AUTH_TOKEN"] == "set"
 	switch {
