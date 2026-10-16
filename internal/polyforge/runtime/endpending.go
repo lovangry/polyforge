@@ -162,7 +162,7 @@ func (r *Runtime) retryEndPending(j *job) {
 }
 
 // restartEndPending is the daemon-start half: it only SCHEDULES the
-// background retry. Restart holds opMu before the socket serves, and the
+// background retry. Restart runs before the socket serves, and the
 // attempt pushes the chain first (unbounded network work) — a synchronous
 // attempt there could hang the daemon's startup on a hung hub.
 func (r *Runtime) restartEndPending(j *job) {

@@ -141,7 +141,20 @@ func (r *Runtime) requireMidflightCapsule(wi, project, dir string) error {
 // are dropped or released; a job with no local record needs no
 // reconciliation (a running WI whose capsule lives on another machine is
 // that machine's business).
+//
+// Restart holds opMu except around the network steps it reaches (a
+// close's or a recovery's pushes and SessionEnd, a claim's compensation
+// end — offLock / claimEndOffLock, B-8); the restarting latch keeps the
+// deferred verifies it schedules from running before it returned.
 func (r *Runtime) Restart(ctx context.Context) error {
+	r.mu.Lock()
+	r.restarting = true
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.restarting = false
+		r.mu.Unlock()
+	}()
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
 	st, err := loadState(r.statePath)
@@ -188,6 +201,7 @@ func (r *Runtime) Restart(ctx context.Context) error {
 		// the startup aborts: no replay may clone or install an agent
 		// behind it — the journal entries stay for the next start.
 		for _, cr := range replays {
+			cr.j.claim.cancel()
 			r.dropJob(cr.j)
 		}
 		return err
@@ -322,6 +336,13 @@ func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 		return "", &api.Error{Code: api.ErrDaemonConflict, Detail: fmt.Sprintf("a %s close of the retained paused record is pending (a crash interrupted it); the next daemon start replays the close", rec.StopReason)}
 	}
 	v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
+	var vae *api.Error
+	if err == nil || errors.As(err, &vae) {
+		// the hub answered: a restart-time verify deferral is over (its
+		// backoff retry would otherwise find a live agent and leave the
+		// latch set, refusing every close as "waiting for aihub")
+		r.clearAwaitingHub(j)
+	}
 	if err != nil {
 		var ae *api.Error
 		if errors.As(err, &ae) {
@@ -746,8 +767,20 @@ func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bo
 		// record persists and the next restart verifies afresh.
 		return true
 	}
-	if r.jobOf(j.wi) != j || j.liveAgent() {
-		return true // closed, replaced or resumed by another door meanwhile
+	r.mu.Lock()
+	restarting := r.restarting
+	r.mu.Unlock()
+	if restarting {
+		return false // Restart is still reconciling (it releases opMu around network steps)
+	}
+	if r.jobOf(j.wi) != j {
+		return true // closed or replaced by another door meanwhile
+	}
+	if j.liveAgent() {
+		// resumed by another door meanwhile (pf resume verified itself):
+		// the deferral is over
+		r.clearAwaitingHub(j)
+		return true
 	}
 	if j.isBusy() {
 		return false // another door's network step is in flight (B-8)
@@ -790,6 +823,19 @@ func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bo
 		r.send(msg)
 	}
 	return true
+}
+
+// clearAwaitingHub drops j's deferred-verify latch and persists the change.
+func (r *Runtime) clearAwaitingHub(j *job) {
+	j.mu.Lock()
+	was := j.awaitingHub
+	j.awaitingHub = false
+	j.mu.Unlock()
+	if was {
+		if err := r.persist(); err != nil {
+			fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
+		}
+	}
 }
 
 // blockUnrecoverable is the restart posture for ONE mid-flight record whose

@@ -211,6 +211,11 @@ type Runtime struct {
 	// replays tracks the restart's journal-replay claim goroutines
 	// (runReplays).
 	replays sync.WaitGroup
+	// restarting (under mu) is latched while Restart reconciles: Restart
+	// releases opMu around its network steps (offLock, claimEndOffLock),
+	// and a deferred verify must not run mid-reconciliation (it waits —
+	// retries — until Restart returned).
+	restarting bool
 
 	// The durable-close retry lane (endpending.go): WIs whose
 	// SessionEnd(blocked) retry goroutine is running (one per WI), and
@@ -760,7 +765,10 @@ func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
 	}
 	if j := r.jobOf(wi); j != nil {
 		if j.isBusy() {
-			return nil, errBusy(wi) // its close is still pushing (B-8)
+			// its close is still pushing (B-8): transient — the dispatcher
+			// and the resume-blocked door retry a DAEMON-503
+			return nil, &api.Error{Code: api.ErrDaemonHubUnavailable,
+				Detail: fmt.Sprintf("%s: a close or recovery of this work item is still on the wire; retry later", wi)}
 		}
 		if st, _ := j.snapshot(); st != StatePaused {
 			return nil, fmt.Errorf("runtime: %s already active (state %s)", wi, st)
@@ -1831,7 +1839,9 @@ func IsClaimDeferred(err error) bool {
 // start. Only claims that already sit CLAIMING are waited for: a Start
 // still queued on opMu (or on a hub call before its claim) defers itself
 // at the latch check and is never waited on, so a long close holding
-// opMu cannot eat the shutdown budget. opMu is not taken here.
+// opMu cannot eat the shutdown budget. The restart's journal-replay
+// goroutines are waited for within the same bound. opMu is not taken
+// here.
 func (r *Runtime) AbortClaims(ctx context.Context) {
 	r.mu.Lock()
 	r.claimsAborted = true
@@ -1854,6 +1864,16 @@ func (r *Runtime) AbortClaims(ctx context.Context) {
 			fmt.Fprintf(os.Stderr, "runtime: shutdown: %d claim(s) still settling at the wait's end\n", len(lanes)-i)
 			return
 		}
+	}
+	// the restart's journal-replay goroutines (runReplays) end with their
+	// claims: wait for them within the same bound so none outlives the
+	// shutdown
+	replaysDone := make(chan struct{})
+	go func() { r.replays.Wait(); close(replaysDone) }()
+	select {
+	case <-replaysDone:
+	case <-ctx.Done():
+		fmt.Fprintf(os.Stderr, "runtime: shutdown: journal replays still settling at the wait's end\n")
 	}
 }
 

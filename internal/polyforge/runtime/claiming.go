@@ -158,7 +158,8 @@ func (r *Runtime) clearClaimingSession(wi, sessionID string) {
 }
 
 // resumeClaiming replays every uncleared journal entry at daemon start
-// (called from Restart, opMu held, BEFORE the state.json records are
+// (called from Restart, opMu held — released only around a compensation
+// SessionEnd, claimEndOffLock — BEFORE the state.json records are
 // seeded — a journaled start must win over any stale record of the same
 // WI). Per entry:
 //
