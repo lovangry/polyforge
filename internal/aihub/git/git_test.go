@@ -871,3 +871,24 @@ func TestTaskWIPRefScratch(t *testing.T) {
 		t.Fatalf("carrier ref deletion accepted: %s", out)
 	}
 }
+
+// TestCGIHeaderEnvDropsCredentials: the Basic wi:secret header (and any
+// cookie) never reaches the http-backend / receive-pack / hook env;
+// ordinary headers still pass as HTTP_*.
+func TestCGIHeaderEnvDropsCredentials(t *testing.T) {
+	h := http.Header{}
+	h.Set("Authorization", "Basic d2k6c2VjcmV0")
+	h.Set("Proxy-Authorization", "Basic eA==")
+	h.Set("Cookie", "s=1")
+	h.Set("Accept", "application/x-git-upload-pack-result")
+	h.Set("Git-Protocol", "version=2")
+	env := strings.Join(cgiHeaderEnv(h), "\n")
+	for _, banned := range []string{"HTTP_AUTHORIZATION", "HTTP_PROXY_AUTHORIZATION", "HTTP_COOKIE", "HTTP_GIT_PROTOCOL", "d2k6c2VjcmV0"} {
+		if strings.Contains(env, banned) {
+			t.Errorf("CGI env carries %s:\n%s", banned, env)
+		}
+	}
+	if !strings.Contains(env, "HTTP_ACCEPT=application/x-git-upload-pack-result") {
+		t.Errorf("CGI env lost HTTP_ACCEPT:\n%s", env)
+	}
+}
