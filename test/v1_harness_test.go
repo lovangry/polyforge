@@ -1432,6 +1432,7 @@ func httpStatusOf(method, url, user, secret string) (int, http.Header, string) {
 type execStepView struct {
 	Status             string           `json:"status"`
 	Model              string           `json:"model"`
+	Effort             string           `json:"effort"`
 	StepStartedAt      string           `json:"step_started_at"`
 	Output             map[string]any   `json:"output"`
 	Attempts           []map[string]any `json:"attempts"`

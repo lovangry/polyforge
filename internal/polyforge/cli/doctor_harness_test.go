@@ -141,6 +141,19 @@ func TestDoctorCandidatePrefixAndClaudeTrigger(t *testing.T) {
 		t.Fatalf("mixed chain claude check: %s %q", st, detail)
 	}
 
+	// polyforge#176: the resolution table shows each candidate's effort;
+	// an effort its harness does not take fails the yaml check, named
+	put("steps:\n  polyforge:\n    fix: { models: [claude:claude-opus-5-5:high, pi:g/glm:low] }\n")
+	_, _, doc = doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, "harness claude"); st != "warn" || !strings.Contains(detail, "/fix: [claude:claude-opus-5-5:high, pi:g/glm:low] (steps.polyforge.fix.models)") {
+		t.Fatalf("effort chain claude check: %s %q", st, detail)
+	}
+	put("steps:\n  polyforge:\n    fix: { models: [claude:claude-opus-5-5:off] }\n")
+	_, _, doc = doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "fail" || !strings.Contains(detail, `steps.polyforge.fix.models[0]: "claude:claude-opus-5-5:off": effort "off" is not accepted by claude`) {
+		t.Fatalf("claude effort off: %s %q", st, detail)
+	}
+
 	// an unprefixed yaml candidate / a retired harness key: fail, named
 	put("steps:\n  polyforge:\n    fix: { models: [pi:g/glm, sub2api-glm/glm-5.3] }\n")
 	_, _, doc = doctorStatus(t, env, "--json", "doctor")

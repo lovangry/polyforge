@@ -909,6 +909,78 @@ steps:
 Run `pf doctor` after the edit: `workspace yaml` must pass, and
 `harness claude` must pass wherever a `claude:` candidate remains.
 
+## Thinking effort per candidate: `<harness>:<model>[:<effort>]` (polyforge#176)
+
+Until now polyforge passed no thinking level to a step's harness: each
+ran at its own default. A candidate may now end in a thinking effort:
+
+```
+<harness>:<model>[:<effort>]       e.g. claude:claude-opus-5-5:high, pi:sub2api-glm/glm-5.3:low
+```
+
+- `effort` is one word of a closed set — `off`, `minimal`, `low`,
+  `medium`, `high`, `xhigh`, `max` (lowercase; the union of what the two
+  harnesses accept, checked against `pi --help` and `claude --help`).
+- **Only the last segment, and only when it is one of those words, is
+  the effort.** Every other `:` stays in the model id:
+  `pi:ollama/llama3:8b` is the model `ollama/llama3:8b` with no effort,
+  `pi:ollama/llama3:8b:high` is that model at `high`. A misspelt effort
+  (`:hgih`, `:High`) is therefore part of the model id and fails at the
+  harness as an unknown model, not at load. Two trailing effort words
+  (`…:high:low`) are refused.
+- Mapping (the model id goes to `--model` unchanged either way):
+
+  | harness | accepts | argv |
+  |---|---|---|
+  | `pi` | `off minimal low medium high xhigh max` | `--thinking <effort>` |
+  | `claude` | `low medium high xhigh max` | `--effort <effort>` |
+
+  pi gets the `--thinking` flag rather than its `--model <id>:<level>`
+  shorthand, so `--model` stays exactly the model id and both harnesses
+  get the same shape (one dedicated flag).
+- **No effort = exactly the previous behaviour**: no flag is passed and
+  the harness uses its own default.
+- The same model at two efforts is two distinct candidates, so a chain
+  can escalate: `[pi:sub2api-glm/glm-5.3:medium, pi:sub2api-glm/glm-5.3:xhigh]`.
+  Switching walks whole candidates, effort included.
+
+The format holds in every place a candidate is written (`.polyforge.yaml`
+`steps.<project>.<default|step-id>.models`, bundle `model_candidates`,
+`pf submit --models`), with the #175 refusal surfaces: an effort the
+candidate's harness does not accept is refused naming the path —
+
+| where | message (example) |
+|---|---|
+| `.polyforge.yaml` (DAEMON-414 before the claim; `pf doctor` `workspace yaml` fails) | `steps.polyforge.fix.models[0]: "claude:claude-opus-5-5:off": effort "off" is not accepted by claude (it accepts low\|medium\|high\|xhigh\|max)` |
+| bundle `model_candidates` (the bundle fails to load) | `step fix: model_candidates[1]: "claude:claude-opus-5-5:minimal": effort "minimal" is not accepted by claude (…)` |
+| `pf submit --models` (the CLI, before any request) | `submit: --models: "claude:claude-opus-5-5:minimal": effort "minimal" is not accepted by claude (…)` |
+
+Where the effort shows: the claim-time candidate snapshot keeps the
+canonical string (`claude:claude-opus-5-5:high`); `pf doctor`'s
+`harness claude` resolution table lists the chains with their efforts;
+`pf ops status` gains a CANDIDATE column (shown when a job has a
+dispatch in flight on a pinned candidate) naming
+`<harness>:<model>[:<effort>]`; the step record in `execution.json`
+carries `effort` next to `model`, and the `step_started` event an
+`effort` field.
+
+**Upgrade check.** Nothing needs editing: a list without efforts behaves
+as before. Look only for a candidate that already ends in one of the
+seven words — it now means an effort. `pi:<id>:high` hands pi
+`--model <id> --thinking high`, the same as pi's own shorthand did
+(unless a model with that full id, `<id>:high`, exists — that id can no
+longer be named, see below); a
+`claude:<id>:<word>` that used to reach claude as a (non-existent) model
+id now runs `<id>` with `--effort <word>`, and with `off` or `minimal`
+it is refused (above). An in-flight work item whose snapshot holds such
+a refused candidate fails its driver start with an error naming the
+step and the candidate (it is not re-read as a pre-#175 bare id).
+
+**Known limit.** A model id that literally ends in an effort word (e.g.
+a model named `foo:max`) cannot be named: the last segment is always
+taken as the effort (`pi:foo:max` is `foo` at `max`), and
+`pi:foo:max:high` is refused as two efforts.
+
 ## Work machines: harnesses reference the release; the daemon is supervised (polyforge#174)
 
 Re-running `tools/install.sh` on a machine installed before this change

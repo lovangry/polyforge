@@ -497,7 +497,7 @@ func (d *Driver) announceStart(sp *StepSpawn, run StepRun, startedAt time.Time) 
 	th := d.effectiveThresholdsLocked(sp.StepID, meta.Granularity)
 	d.mu.Unlock()
 	d.cfg.Link.Fact(supervise.StepStarted{
-		Step: sp.StepID, SpawnN: sp.SpawnN, Model: sp.Model, Harness: meta.Harness,
+		Step: sp.StepID, SpawnN: sp.SpawnN, Model: sp.Model, Effort: sp.Effort, Harness: meta.Harness,
 		PID: meta.PID, TranscriptPath: meta.TranscriptPath, StartedAt: meta.StartedAt,
 		Thresholds: th, Resumed: meta.Resumed, HarnessSession: meta.HarnessSession,
 	})

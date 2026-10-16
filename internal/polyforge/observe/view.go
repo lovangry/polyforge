@@ -39,6 +39,10 @@ type Activity struct {
 	StepStartedAt time.Time
 	LastWorkAt    time.Time // zero = no work-class signal yet this dispatch
 	InDispatch    bool
+	// Candidate is the in-flight dispatch's model candidate,
+	// `<harness>:<model>[:<effort>]` (polyforge#176: the ops status
+	// face shows the effort it runs at); "" = the harness default model.
+	Candidate string
 }
 
 // Activities answers the activity of every monitored work item:

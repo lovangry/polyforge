@@ -60,6 +60,10 @@ type statusJob struct {
 	// job reads as stale, not fresh.
 	StepAgeSec     *int64 `json:"step_age_sec,omitempty"`
 	LastWorkAgoSec *int64 `json:"last_work_ago_sec,omitempty"`
+	// Candidate is the in-flight dispatch's model candidate,
+	// `<harness>:<model>[:<effort>]` (polyforge#176); absent between
+	// dispatches or on the harness's default model.
+	Candidate string `json:"candidate,omitempty"`
 	// Origin is how the job was submitted; may be absent.
 	Origin *runtime.Origin `json:"origin,omitempty"`
 	// StopReason is the recorded verdict of a close in flight or
@@ -683,6 +687,7 @@ func (d *Daemon) statusJobs() ([]statusJob, int) {
 			}
 		}
 		if act, ok := activity[ji.WorkItem]; ok && act.InDispatch {
+			sj.Candidate = act.Candidate
 			if !act.StepStartedAt.IsZero() {
 				age := int64(time.Since(act.StepStartedAt) / time.Second)
 				sj.StepAgeSec = &age

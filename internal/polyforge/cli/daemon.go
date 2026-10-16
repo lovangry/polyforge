@@ -245,6 +245,9 @@ type StatusJob struct {
 	// LAST-WORK columns).
 	StepAgeSec     *int64 `json:"step_age_sec,omitempty"`
 	LastWorkAgoSec *int64 `json:"last_work_ago_sec,omitempty"`
+	// Candidate is the in-flight dispatch's `<harness>:<model>[:<effort>]`
+	// (polyforge#176; absent = none in flight or the harness default).
+	Candidate string `json:"candidate,omitempty"`
 	// Origin is how the job was submitted (may be absent).
 	Origin *JobOrigin `json:"origin,omitempty"`
 	// AwaitingHub: a RECOVERING job whose restart-time session verify is

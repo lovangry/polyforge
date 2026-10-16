@@ -116,6 +116,7 @@ type TransitionRequest struct {
 	Gate       *GateVerdict    // gate_fail
 	Budget     *capsule.Budget // budget_update: the ADDITIVE delta
 	Model      string          // step_start: the pinned candidate this dispatch runs under
+	Effort     string          // step_start: that candidate's thinking effort (polyforge#176)
 	Status     string          // terminal: the target workflow_status
 	Reason     string          // terminal/rewind reason; answer: the answer text
 	QuestionID string          // answer: the question id being answered
@@ -315,6 +316,7 @@ func (d *Driver) applyStepStartLocked(req TransitionRequest, info *appliedInfo) 
 		st.Supervision.NextDispatch = "" // this dispatch consumed the shape the last failure ordered
 	}
 	st.Model = req.Model
+	st.Effort = req.Effort
 	st.StepStartedAt = d.stamp() // refreshes on every re-entry (03 §4.2 D8)
 	d.exec.WorkflowStatus = StatusRunning
 	d.exec.CurrentStep = req.StepID
@@ -779,6 +781,9 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 		kind = "step_started"
 		body["step"] = req.StepID
 		body["model"] = req.Model
+		if req.Effort != "" {
+			body["effort"] = req.Effort
+		}
 		body["resume"] = info.resume
 	case TransStepResult:
 		if req.Result == nil {

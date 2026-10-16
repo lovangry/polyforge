@@ -373,9 +373,10 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 	wsSet := append([]string(nil), s.Workspaces...)
 	sort.Strings(wsSet)
 	fmt.Fprintf(w, "workspaces: %s\n\n", strings.Join(wsSet, ", "))
-	showOrigin := false
+	showOrigin, showCandidate := false, false
 	for _, j := range s.Jobs {
 		showOrigin = showOrigin || j.Origin != nil
+		showCandidate = showCandidate || j.Candidate != ""
 	}
 	rows := make([][]string, 0, len(s.Jobs))
 	for _, j := range s.Jobs {
@@ -414,12 +415,18 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 			status += " (awaiting aihub)"
 		}
 		row := []string{api.DisplayName(j.Slug, j.WorkItemID), status, sess, spawn, pid, question, stepAge, lastWork}
+		if showCandidate {
+			row = append(row, orDash(j.Candidate))
+		}
 		if showOrigin {
 			row = append(row, origin)
 		}
 		rows = append(rows, row)
 	}
 	head := []string{"WORK ITEM", "STATUS", "SESSION", "SPAWN", "AGENT PID", "QUESTION", "STEP-AGE", "LAST-WORK"}
+	if showCandidate { // polyforge#176: the candidate a dispatch runs on, effort included
+		head = append(head, "CANDIDATE")
+	}
 	if showOrigin { // the column appears only when some job has one
 		head = append(head, "ORIGIN")
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
+	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
 // TestSubmitAndStatus pins the claim round trip: SubmitResponse shape,
@@ -473,6 +474,33 @@ func TestStatusShowsNeedsInput(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("needs_input never surfaced on /status: %+v", st.Jobs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// polyforge#176: /status names the in-flight dispatch's candidate, effort
+// included (the ops status CANDIDATE column), from the monitor's activity.
+func TestStatusShowsInFlightCandidate(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.submitClaim(t, "wi_candst")
+	td.waitMonitored(t, "wi_candst")
+	st0 := td.statusOf(t)
+	if j := statusJobOf(&st0, "wi_candst"); j == nil || j.Candidate != "" {
+		t.Fatalf("no dispatch announced yet: candidate %+v", j)
+	}
+	td.sup.Link("wi_candst").Fact(supervise.StepStarted{
+		Step: "fix", SpawnN: 1, Model: "claude-opus-5-5", Effort: "high", Harness: "claude",
+		StartedAt: time.Now(), Thresholds: supervise.Thresholds{Silence: time.Hour, Tool: time.Hour, StepTimeout: time.Hour},
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		st := td.statusOf(t)
+		if j := statusJobOf(&st, "wi_candst"); j != nil && j.Candidate == "claude:claude-opus-5-5:high" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("candidate never surfaced on /status: %+v", st.Jobs)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

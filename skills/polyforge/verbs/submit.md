@@ -17,7 +17,7 @@ submit as usual.
 ## Command
 
 ```
-pf submit <id> [--priority low|normal|high|urgent] [--models <harness>:<model>,...]
+pf submit <id> [--priority low|normal|high|urgent] [--models <harness>:<model>[:<effort>],...]
 ```
 
 `--priority` defaults to `normal`. `--models` is a manual model-candidate
@@ -30,7 +30,12 @@ or duplicate candidates, else a local bad-input refusal. Every candidate is
 (e.g. `--models claude:claude-opus-5-5,pi:sub2api-glm/glm-5.3`); a candidate
 without a prefix, with an unknown prefix or an empty model is refused up
 front, naming it (`"sub2api-glm/glm-5.3" needs a harness prefix (pi:… or
-claude:…)`). A chain may mix harnesses: a switch onto a candidate of another
+claude:…)`). A candidate may end in a thinking effort (polyforge#176), e.g.
+`--models claude:claude-opus-5-5:high,pi:sub2api-glm/glm-5.3:low`: only a last
+segment among `off minimal low medium high xhigh max` is the effort (pi takes
+all seven as `--thinking`, claude `low`…`max` as `--effort`); an effort the
+harness does not take is refused up front the same way; omitted, the harness
+uses its own default. A chain may mix harnesses: a switch onto a candidate of another
 harness starts a fresh session with the previous transcript as read-only
 reference. Candidate precedence,
 highest first: `--models` > yaml `steps.<project>.<step-id>.models` > bundle step

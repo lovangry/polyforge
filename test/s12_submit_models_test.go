@@ -77,6 +77,12 @@ func TestS12ManualModelsBadInputRefused(t *testing.T) {
 	if !strings.Contains(out, `submit: --models: "sub2api-glm/glm-5.3" needs a harness prefix (pi:… or claude:…)`) {
 		t.Fatalf("unprefixed --models refusal: %q", out)
 	}
+	// polyforge#176: an effort the candidate's harness does not take is
+	// refused up front too
+	out = d.pfWant(inst, 1, "submit", wi, "--models", "pi:a/b:minimal,claude:claude-opus-5-5:minimal")
+	if !strings.Contains(out, `submit: --models: "claude:claude-opus-5-5:minimal": effort "minimal" is not accepted by claude (it accepts low|medium|high|xhigh|max)`) {
+		t.Fatalf("claude effort --models refusal: %q", out)
+	}
 	if st := inst.wiStatus(t, wi); st != "queued" {
 		t.Fatalf("a refused submit moved the WI to %q", st)
 	}
