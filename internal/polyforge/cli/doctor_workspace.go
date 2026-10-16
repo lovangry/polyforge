@@ -80,7 +80,7 @@ func workspaceLayoutCheck(wss []string) doctorCheck {
 		c.Detail = strings.Join(parts, "; ")
 	default:
 		c.Status = "pass"
-		c.Detail = fmt.Sprintf("every mapped workspace keeps the layout (root: .repo/, capsules/, scratch/, .polyforge/, CLAUDE.md, CLAUDE.local.md, AGENTS.md, %s and dot-entries other than %s backups; .polyforge/: the legacy v1 repo-map/, watchers/)", workspace.FileName, workspace.FileName)
+		c.Detail = fmt.Sprintf("every mapped workspace keeps the layout (root: .repo/, capsules/, scratch/, .polyforge/, CLAUDE.md, CLAUDE.local.md, AGENTS.md, go.work, go.work.sum, %s and dot-entries other than %s backups; .polyforge/: the legacy v1 repo-map/, watchers/)", workspace.FileName, workspace.FileName)
 	}
 	return c
 }

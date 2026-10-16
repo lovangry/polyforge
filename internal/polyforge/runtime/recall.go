@@ -9,11 +9,11 @@ package runtime
 //   - at claim time the daemon recalls the project's memories
 //     semantically — goal+content as the query, the aihub memory search
 //     face as the index — and writes the top-K hits as a static snapshot
-//     into the capsule: runtime-state/recalled-memories.json, an input
-//     the agent reads like any other capsule file;
-//   - the runtime half (recall/remember over the UDS face) lives in the
-//     observe lane (internal/polyforge/observe/memory.go) and the skill
-//     contract.
+//     into the capsule: runtime-state/recalled-memories.json, which the
+//     driver renders into every step prompt as non-binding history
+//     (driver/spawn.go recalledMemoriesSection, decision 2026-10-16 G3);
+//   - the runtime half (recall/remember over the UDS face) was deleted
+//     (v2-converge); the snapshot is the step agent's only memory path.
 //
 // The snapshot is an ENRICHMENT, never a gate: an unreachable aihub, a
 // refused search or a zero-hit query all degrade to an empty list plus a
@@ -27,11 +27,12 @@ import (
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
+	"github.com/silgrid/polyforge/internal/common/capsule"
 )
 
 const (
 	// relRecalledMemories is the snapshot's capsule-relative path.
-	relRecalledMemories = "runtime-state/recalled-memories.json"
+	relRecalledMemories = capsule.RecalledMemoriesJSON
 	// defaultRecallTopK is the snapshot's default hit count (F6 ruling:
 	// K=10, configurable through runtime.Config.RecallTopK).
 	defaultRecallTopK = 10

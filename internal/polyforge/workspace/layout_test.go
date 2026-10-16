@@ -130,7 +130,7 @@ func TestStrayEntries(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, f := range []string{".polyforge.yaml", "CLAUDE.md", "AGENTS.md", ".gitignore", ".mcp.json", ".env.example",
+	for _, f := range []string{".polyforge.yaml", "CLAUDE.md", "AGENTS.md", "go.work", "go.work.sum", ".gitignore", ".mcp.json", ".env.example",
 		".polyforge.yaml.bak-v270", "notes.md", "run.log", ".polyforge/design.md", ".polyforge/state.json", ".polyforge/repo-map/x.md"} {
 		writeFile(t, filepath.Join(ws, f), "x")
 	}

@@ -26,9 +26,12 @@ answers only memories of projects the caller can read; `project=` naming an
 unknown project or one the caller cannot read answers the same non-leaking
 `CORE-404`; reading a memory needs read access to its project (else `MEM-404`);
 writing needs the writer (or maintainer) role (else `MEM-403`); admins pass. The routing flow derives
-the value from the WI under discussion. `--type` filters one memory type (e.g. `experience.debug`);
-`--tags` is comma-separated and an entry must contain all of them;
-`--limit` caps results.
+the value from the WI under discussion. `--type` is exact
+(`experience.debug`), a prefix (`experience.*` — every type under
+`experience.`) or `*` (all, same as omitting it); any other `*` placement
+is refused locally. `--tags` is comma-separated and an entry must contain
+all of them. `--limit` caps results: default 20, `1..200` (anything else
+is refused locally, nothing sent).
 
 ## Success
 

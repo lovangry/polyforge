@@ -39,13 +39,15 @@ mapping exists): a restart loop in tmux session `polyforge-daemon` runs it
 with `-workflows-dir release/current/workflows` and revives it within ~5s
 after a crash; after a container/machine restart (tmux does not survive
 one) the next pi or Claude Code session runs the same ensure. An upgrade
-shuts the daemon down gracefully (the loop ends with that clean exit —
+first downloads, verifies and fetches everything, refuses (changing nothing)
+while the daemon runs jobs — wait, `pf pause` them, or re-run with
+`PF_INSTALL_FORCE=1` in front of `bash` — then shuts the daemon down gracefully (the loop ends with that clean exit —
 `pf ops shutdown` always stops for good, only failures are restarted — except
 exit 78, below),
 swaps the binary, then ensures again; meanwhile it holds the ensure lock,
 so a harness session starting mid-upgrade starts nothing. A daemon already running with a different workflows
 dir, or without its loop, is reported, never auto-restarted. Finally it
-verifies connectivity. If the machine's daemon id is new to aihub, an admin
+runs `pf doctor`. If the machine's daemon id is new to aihub, an admin
 registers it afterwards — the installer prints a note to that effect pointing
 at `pf ops status`, which shows the daemon's id. Re-running the same command upgrades
 and is idempotent. Daily use from a session is natural language via the
@@ -307,26 +309,13 @@ work item filed against the project-agnostic `release` workflow bundle
 "发版" files that WI). If the goal names a bump (`major`, `minor`, `patch`) it is
 passed verbatim to the repo's procedure; otherwise the repo default applies.
 
-The bundle has three steps, each `gate: true`, fresh context, with command
-evidence required; a failure terminates the WI (published tags, releases and
-images are immutable, so there is no rewind into a re-release):
-
-1. `release` - fetches and resets the capsule clone to origin's default-branch
-   head, records the pre-release remote tag list, checks the procedure supports
-   `--verify`, then runs `.polyforge/release.sh [bump]` (which runs the repo's
-   test gate itself). No procedure in the capsule is a FAIL; two repos carrying
-   one is `PF-RELEASE-AMBIGUOUS_OWNER`. If origin's head already carries a
-   release tag (`v*`), or a re-dispatch finds a remote tag its earlier
-   attempt's pre-release list lacks, the step is a FAIL
-   `PF-RELEASE-ALREADY_RELEASED`, never a second release.
-2. `verify` - a fresh judge that trusts nothing from step 1: release commit vs
-   origin head, the new tag exists and points at it, every older tag is
-   unchanged, release notes are non-empty, then `.polyforge/release.sh --verify
-   <version>`. Only a pass writes the verified version that `deploy` reads.
-3. `deploy` - runs `.polyforge/deploy.sh <version> --confirm <version>` for the
-   verified version only (never "latest"). A project with no `deploy.sh`
-   defers (it releases without deploying). The procedure ends with production
-   on the new version or rolled back; a rollback is a step FAIL.
+The bundle runs three gate steps — `release` (`.polyforge/release.sh [bump]`),
+an independent `verify` (`release.sh --verify <version>`; only a pass writes the
+version `deploy` reads) and `deploy` (`.polyforge/deploy.sh <version> --confirm
+<version>`; a project without `deploy.sh` releases without deploying). A failure
+terminates the WI: published tags, releases and images are immutable, so there
+is no rewind into a re-release. The step-by-step checks and failure codes are in
+[workflows/release/workflow.md](workflows/release/workflow.md) and its steps.
 
 A failed `deploy` ends the WI failed with production on the old version (rolled
 back, or refused before touching it). Redeploy the already-verified version by
@@ -345,56 +334,18 @@ dispatches):
 - `.polyforge/deploy.sh <version> --confirm <version>` deploys exactly that
   version; production ends on it or rolled back, rollback exits non-zero.
 
-This repository's own procedures: `release.sh` (vX.Y.Z, bump `major|minor|patch`,
-default `minor`) refuses a dirty tree or a HEAD that is not the fetched
-`origin/main` or a HEAD that already carries a release tag on origin, refuses unless
-every commit that entered `main` since the previous release tag came through a merged
-PR (main's first-parent history must be merge commits that `gh api
-repos/<repo>/commits/<sha>/pulls` names as a merged PR's merge commit — the shape
-the workflows' `deliver` step produces with `gh pr merge --merge`), and takes the
-version floor from the highest semver among the ORIGIN tags only (an unreadable
-`ls-remote` is fatal) — these cheap refusals run first; only then does it run
-`make test` (including the e2e suite, ~20 minutes), build the two
-binaries and the `ghcr.io/silgrid/aihub:<tag>` image, claims the version by
-pushing the git tag (fails if it exists: nothing is published), pushes the
-image, writes `aihub-image.digest` after the push, then `SHA256SUMS` and
-`gh release create` with the four assets (`aihub-linux-amd64`, `pf-linux-amd64`,
-`aihub-image.digest`, `SHA256SUMS`). `aihub-image.digest` holds the bare image digest
-`sha256:<64 hex>`; `deploy.sh` looks for `ghcr.io/silgrid/aihub@<that digest>` among
-the pulled image's repo digests. `release.sh --verify <version>` also requires the
-version to be strictly greater than every other tag on origin and runs the same
-PR-only check over previous-tag..version. It never deletes or
-overwrites a tag, release or image; a failure after the tag push burns the version
-(cut the next one).
-
-`deploy.sh` deploys the aihub service host: it requires `--confirm <version>`
-equal to the version argument (no prompt), takes a server-side lock for the
-whole mutating part (fails fast if another deploy holds it), runs on a machine
-with `gh` and `docker` logged in to the private `ghcr.io/silgrid/aihub` - the
-server never holds GitHub credentials. Machine preconditions (checked in its
-preflight; when the release bundle's `deploy` step runs it, they apply to the
-step's machine): a running docker daemon, `gh` with GHCR read access, root
-BatchMode ssh to `AIHUB_HOST`, `rsync`, a writable `BACKUP_ROOT` (default
-`/data/polyforge-backups`), and the target tag — for a downgrade also the running
-one — in the LOCAL repo (`git fetch --tags origin`). Steps: ONLINE verified full backup; pull
-`ghcr.io/silgrid/aihub:<tag>`, check the repo digest against the release's
-`aihub-image.digest` (itself checked via `SHA256SUMS`), `docker save | ssh
-docker load`, verify the image ID on the server and tag it
-`polyforge/aihub:<tag>`; edit only the aihub service of the server's compose
-file; then the switch window — the old container stops (graceful drain), the
-versions' upgrade SQL under `deploy/sql/` runs (one transaction per script;
-there is no startup auto-migration, see [docs/upgrade.md](docs/upgrade.md)),
-and just that container is recreated (seconds of downtime, measured and
-printed); post-swap checks. If post-swap verification fails or the service does
-not come back, it AUTOMATICALLY rolls the compose image back to
-`polyforge/aihub:<old>`, recreates, verifies the old version answers and prints
-`ROLLED BACK` (the applied versions' `rollback.sql` runs first, in descending
-order, so the old binary never sees the new schema; distinct non-zero exit; if the rollback itself fails it prints
-loud manual instructions). Data restore stays manual (it needs a stop).
-`--dry-run` shows the plan and the compose diff; `--force` is a human-only
-override. Deploying a work machine is re-running `tools/install.sh`. It is a
-deployment pipeline, not a release system (`07-deployment-pilot.md §1.1/§6.3`,
-`00-architecture.md §3.3`).
+This repository's own procedures are the authority for everything they do —
+the version scheme, the PR-only check, the test gate, the artifacts, the
+deploy lock, backups, the upgrade-SQL switch window, automatic rollback and the
+machine preconditions: read the header comments of
+[.polyforge/release.sh](.polyforge/release.sh) and
+[.polyforge/deploy.sh](.polyforge/deploy.sh). In short:
+`release.sh` (vX.Y.Z, default bump `minor`) publishes `aihub-linux-amd64`,
+`pf-linux-amd64`, `aihub-image.digest`, `SHA256SUMS` and
+`ghcr.io/silgrid/aihub:<tag>`; `deploy.sh` promotes that image onto the aihub
+service host with seconds of downtime (no startup auto-migration, see
+[docs/upgrade.md](docs/upgrade.md)). Deploying a work machine is re-running
+`tools/install.sh`.
 
 ```
  RELEASE: a WI on the `release` bundle (no platform release code)
@@ -537,6 +488,7 @@ locally only:
 <workspace>/
   .polyforge.yaml   human-written model candidates
   CLAUDE.md         workspace notes (polyforge-managed block + the human part)
+  go.work(.sum)     optional Go workspace tying the .repo/ clones together
   .repo/<repo>/     clones for humans and interactive agents
   capsules/<wi>/    work item workspaces (daemon-managed)
   .polyforge/       polyforge-generated files only — no documents (legacy v1 repo-map/, watchers/ are tolerated)
@@ -556,14 +508,18 @@ days — a `scratch` that is a symlink is never scanned or pruned — and `pf do
 removes them, listing each. Step agents are unaffected: they work inside
 their capsule.
 
-Per-project model candidates. A workspace root may carry a
+**Per-project model candidates (`.polyforge.yaml`).** This part (down to
+the docs/upgrade.md pointer) is the one authority for the workspace yaml's shape,
+candidate syntax and precedence; the routing skill's fragments, `pf
+submit --models` and docs/upgrade.md point here. A workspace root may carry a
 `.polyforge.yaml` whose only section is `steps` (strict: unknown keys at
 any level, duplicate keys, type mismatches, empty model ids and a
 per-step key that is no step id of the daemon's installed workflows, a
 project the cli.toml mapping does not route to this workspace, and
 duplicate model ids in one list are load errors; a step entry's only key is `models`; the pre-#169
 top-level `models:` section and the old `projects:` / `workflow_defaults:`
-shapes fail loudly):
+shapes fail loudly; YAML merge keys (`<<`) are refused — share a list with
+anchors, `models: &x [...]` / `{ models: *x }`):
 
 ```yaml
 # Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
@@ -576,11 +532,17 @@ steps:
 ```
 
 Every candidate — here, in a bundle's `model_candidates` and in
-`pf submit --models` — is `<harness>:<model>` with harness `pi` or
-`claude` (polyforge#175; split on the first `:`, the prefix mandatory). A
+`pf submit --models` — is `<harness>:<model>[:<effort>]` with harness `pi` or
+`claude` (polyforge#175; split on the first `:`, the prefix mandatory; no
+prefix, an unknown prefix or an empty model refuses). A
 chain may mix harnesses; a switch onto a candidate of another harness
 starts a fresh session with the previous transcript as read-only
-reference.
+reference. A step with no list (or an empty one) runs pi's own default
+model. The optional effort (polyforge#176) is the last segment only
+when it is one of `off minimal low medium high xhigh max` —
+`pi:ollama/llama3:8b` keeps `:8b` in the model id; pi gets it as
+`--thinking <effort>` (all seven), claude as `--effort <effort>`
+(`low`…`max`; `off`/`minimal` refuse); no effort, no flag.
 
 For a step of the claimed project the list is, highest first: the work
 item's manual `pf submit <id> --models pi:a,claude:b` list (every step; kept by this
@@ -596,8 +558,9 @@ skips that project and logs once) and nothing is claimed, so the work item
 stays queued for other machines. Repo lists and clone URLs always come from
 the aihub project registry. `pf doctor` reports the same refusal (an
 unknown per-step key and a leftover `models:` section included) before
-any claim. Upgrading from the pre-#169 shape: see
-[docs/upgrade.md](docs/upgrade.md).
+any claim. An edit takes effect on the next claim with no daemon restart
+(the file is read fresh before every claim). Upgrading from the pre-#169
+shape: see [docs/upgrade.md](docs/upgrade.md).
 
 Supervision bounds (v2-converge 2.4) — Go duration strings (e.g. `700ms`,
 `5m`), flags only (no environment fallbacks). Omitting a flag, or passing
@@ -628,43 +591,8 @@ Minimal external dependencies: pure-Go SQLite (modernc.org/sqlite), yaml.v3, gol
 
 ## `pf recall` — memory search
 
-Searches a project's memories on the aihub memory face (trigram-indexed
-full-text search):
-
-    pf recall --project P <query> [--type T] [--tags a,b] [--limit N]
-
-`<query>` is required (positional or `--q`); so is `--project` — there
-is no default project anymore (polyforge#113), and the value is
-validated against the `[workspace]` mapping: an unmapped project, or no
-mapping at all, fails locally naming the mapped projects, and nothing is
-sent (`pf remember` applies the same check; owner ruling 2026-10-16). aihub
-additionally gates memory by project membership: a search answers only
-projects the caller can read, and `project=` naming an unknown or unreadable
-project answers the same `CORE-404`; reading a memory needs read access,
-writing one needs the writer role. Flags:
-
-- `--limit N` — max results. **Default 20** when the flag is omitted
-  (the CLI's product choice, sent explicitly); values must satisfy
-  `1 ≤ N ≤ 200` — anything else fails loudly before a request is sent
-  (`pf: recall: --limit must be 1..200`). The endpoint's own default of
-  50 is a wire backstop for other callers, not this verb's contract.
-- `--type T` — memory type filter, exactly three legal forms:
-  - exact — `--type experience.debug` matches only that type;
-  - prefix — `--type experience.*` matches every type under the
-    `experience.` prefix (`experience.debug`, `experience.approach`, …;
-    `fact.*` does not match `experience.*` types);
-  - all — `--type *` is equivalent to omitting the flag.
-
-  Any other `*` placement (`*.debug`, `exp*rience`, `experience*`) is
-  rejected locally with no request sent. The
-  `GET /api/v1/memories/search` face interprets a trailing `.*` the same way.
-- `--tags a,b` — comma-separated tag filter (a hit carries all of them).
-
-Examples:
-
-    pf recall --project polyforge flaky build
-    pf recall --project polyforge --type 'experience.*' --limit 50 flaky build
-    pf recall --project polyforge --type fact.note --tags postgres,backoff "retry ladder"
+`pf help recall` prints the usage; the flags, the `--project` mapping check
+and the failure codes are in [skills/polyforge/verbs/recall.md](skills/polyforge/verbs/recall.md).
 
 ## Contributing & filing work items
 

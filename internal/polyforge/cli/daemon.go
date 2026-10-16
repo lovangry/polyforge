@@ -205,6 +205,7 @@ type HarnessStatus struct {
 	Path            string                `json:"path,omitempty"`
 	Version         string                `json:"version,omitempty"`
 	Verified        bool                  `json:"verified,omitempty"`
+	MinVersion      string                `json:"min_version,omitempty"`
 	VersionError    string                `json:"version_error,omitempty"`
 	AuthTokenEnv    string                `json:"auth_token_env,omitempty"`
 	APIKeyEnv       string                `json:"api_key_env,omitempty"`

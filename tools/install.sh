@@ -248,12 +248,16 @@ if [ -n "$STAGED" ]; then
     # a pf submit) is interrupted like a forced one and recovers at the
     # next daemon start; the window is the few ms until the request.
     echo "   stopping daemon (graceful; its restart loop ends with it)"
-    STOPPED=1
-    if [ -x "$BIN" ] && "$BIN" ops shutdown >/dev/null 2>&1; then
-      :
-    else
-      curl -s -m 5 -X POST --unix-socket "$DAEMON_SOCKET" http://localhost/shutdown >/dev/null 2>&1 || true
+    # A refused/failed request (an unloadable cli.toml, a wrong socket)
+    # stops nothing: fail now instead of waiting out the budget and
+    # reporting a still-live daemon as stopped.
+    if ! SHUT_OUT=$("$BIN" ops shutdown 2>&1) && daemon_running; then
+      echo "ERROR: pf ops shutdown failed, so the daemon is still running; $UNCHANGED (the fetched release/$VER checkout is kept for the next run)."
+      printf '%s\n' "$SHUT_OUT" | sed 's/^/     /'
+      echo "   fix what it reports (check: pf doctor; pf ops status), then re-run this installer."
+      exit 1
     fi
+    STOPPED=1
     WAITED=0
     while daemon_running || loop_running; do
       if ! daemon_running && loop_running; then
@@ -506,28 +510,8 @@ if [ ! -d "$WORKFLOWS" ]; then
   echo "   SKIP: $WORKFLOWS missing (release checkout incomplete) — daemon needs workflows"
 elif [ -S "$DAEMON_SOCKET" ] && curl -s --unix-socket "$DAEMON_SOCKET" http://localhost/status 2>/dev/null | grep -q machine_id; then
   echo "   daemon already running ($(curl -s --unix-socket "$DAEMON_SOCKET" http://localhost/status 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('machine_id','?'))" 2>/dev/null))"
-  # /status does not expose -workflows-dir; read it from the daemon's argv.
   # Never auto-restart here: a live daemon may be running jobs.
-  RUN_WF=$(python3 - "$DAEMON_SOCKET" <<'PYEOF' 2>/dev/null || true
-import glob, sys
-sock = sys.argv[1]
-for f in glob.glob("/proc/[0-9]*/cmdline"):
-    try:
-        a = open(f, "rb").read().decode("utf-8", "replace").split("\0")
-    except OSError:
-        continue
-    if "daemon" not in a:
-        continue
-    if not any(x.lstrip("-") == "socket=" + sock or (x.lstrip("-") == "socket" and a[i + 1:i + 2] == [sock])
-               for i, x in enumerate(a)):
-        continue
-    for i, x in enumerate(a):
-        if x.lstrip("-").startswith("workflows-dir="):
-            print(x.split("=", 1)[1]); sys.exit(0)
-        if x.lstrip("-") == "workflows-dir" and i + 1 < len(a):
-            print(a[i + 1]); sys.exit(0)
-PYEOF
-)
+  RUN_WF=$(curl -s -m 5 --unix-socket "$DAEMON_SOCKET" http://localhost/status 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('workflows_dir',''))" 2>/dev/null || true)
   if [ -n "$RUN_WF" ] && [ "$RUN_WF" != "$WORKFLOWS" ]; then
     echo "   ACTION: daemon runs with -workflows-dir $RUN_WF; restart it with -workflows-dir $WORKFLOWS (pf ops shutdown, wait for jobs to drain, rerun this installer)"
   fi
@@ -541,14 +525,6 @@ elif ! grep -q '^[[:space:]]*\[workspace' "$CFG"; then
   echo "   SKIP: no [workspace] mapping in $CFG yet — the daemon refuses to start until one exists"
   echo "   add a mapping (see the migration steps above or the commented template in the config), then: pf daemon ensure"
 else
-  # The installer (not the daemon) owns workspace creation: the daemon
-  # requires every mapped workspace dir to pre-exist and creates only
-  # capsules/ inside each.
-  mkdir -p "$DAEMON_DATA/ws"
-  if [ ! -f "$DAEMON_DATA/ws/.gitignore" ] || ! grep -qx 'capsules/' "$DAEMON_DATA/ws/.gitignore"; then
-    printf 'capsules/\n' >> "$DAEMON_DATA/ws/.gitignore"
-    echo "   added capsules/ to $DAEMON_DATA/ws/.gitignore (daemon never touches .gitignore)"
-  fi
   # `pf daemon ensure` owns the launch (polyforge#174): the restart loop
   # in tmux runs the canonical argv — --config, -machine-id (recorded
   # daemon-id, else m-<short hostname>), -data-dir, -socket and
@@ -567,12 +543,9 @@ else
 fi
 # ─── 5. verify ──────────────────────────────────────────────────────
 echo "== 5/5 verify"
-"$BIN" queue --project polyforge > /dev/null 2>&1 \
-  && echo "   ✓ pf queue works" \
-  || echo "   ✗ pf queue failed — check api_key in $CFG"
-[ -S "$DAEMON_SOCKET" ] && curl -s --unix-socket "$DAEMON_SOCKET" http://localhost/status 2>/dev/null | grep -q machine_id \
-  && echo "   ✓ daemon alive" \
-  || echo "   ✗ daemon not responding"
+# pf doctor is the one health judgement (aihub key and projects, daemon
+# socket, mapping, harnesses); a fail is reported, never fatal here.
+"$BIN" doctor 2>&1 | sed 's/^/   /' || true
 echo ""
 echo "Done. Daily use: 'pf queue' / 'pf submit <wi>' / 'pf watch <wi> --once'"
 echo "From a pi session: just ask naturally (polyforge skill routes)."

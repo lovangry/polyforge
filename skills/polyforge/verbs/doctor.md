@@ -87,6 +87,9 @@ no user file is ever written — the user pastes the snippet.
 | `pi install layout` | pi's settings `packages` hold the local release `<data-dir>/release/current` | a `git:…silgrid/polyforge.git@<ver>` entry (the old clone), another polyforge checkout, no entry, or no release behind it → re-run `tools/install.sh` | no pi agent dir |
 | `v1 harness leftovers` | no v1 artifact | any of: a pi package from `GMISWE/ieops-aihub`, a v1 bridge extension listed in pi's settings or present at `~/.pi/agent/extensions/polyforge`, a v1 Claude skill (`using-polyforge`, `pf-*`), a v1 Claude plugin (`polyforge@…`, the ieops-aihub marketplace) — the detail lists each and one copy-paste command line that first backs everything up into `~/polyforge-v1-backup-<timestamp>/`, then removes them (`pi remove`, `mv`, `claude plugin uninstall`) | — |
 
+The `v1 harness leftovers` check is migration hygiene and is removed at
+v3.0.
+
 v1 artifacts hook the same session events as the v2 adapters (pi loads
 `~/.pi/agent/extensions/*` and package extensions side by side), so show
 the user the command and let them run it; restart the harness sessions
@@ -99,7 +102,7 @@ fail):
 
 | Check | `pass` | `warn` | `skip` |
 |---|---|---|---|
-| `workspace layout` | the root holds only `.repo/`, `capsules/`, `scratch/`, `.polyforge/`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md` and dot-entries (`.polyforge.yaml`, `.gitignore`, `.pi`, `.claude`, `.mcp.json`, … — harness/tool owned), and `.polyforge/` only `repo-map/` and `watchers/` (legacy v1 artifacts nothing generates any more — tolerated, safe to delete) | each other entry, with its destination: a document (`.md`, `.txt`, `.pdf`, `.html`, …) → aihub (`pf file edit <wi> --content @f` while the work item is open, else `pf remember --type doc.design\|doc.review\|doc.decision\|doc.audit`); a `.polyforge.yaml.*` backup or other file → `scratch/`; a directory holding `.git` → `.repo/`; another directory → `scratch/`. Nothing is moved or deleted | no mapping |
+| `workspace layout` | the root holds only `.repo/`, `capsules/`, `scratch/`, `.polyforge/`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `go.work` / `go.work.sum` (a Go workspace tying the `.repo/` clones together) and dot-entries (`.polyforge.yaml`, `.gitignore`, `.pi`, `.claude`, `.mcp.json`, … — harness/tool owned), and `.polyforge/` only `repo-map/` and `watchers/` (legacy v1 artifacts nothing generates any more — tolerated, safe to delete) | each other entry, with its destination: a document (`.md`, `.txt`, `.pdf`, `.html`, …) → aihub (`pf file edit <wi> --content @f` while the work item is open, else `pf remember --type doc.design\|doc.review\|doc.decision\|doc.audit`); a `.polyforge.yaml.*` backup or other file → `scratch/`; a directory holding `.git` → `.repo/`; another directory → `scratch/`. Nothing is moved or deleted | no mapping |
 | `workspace scratch` | no `scratch/` entry older than 14 days (or `--prune-scratch` removed them — the detail lists each path) | entries whose newest change — the later of mtime and ctime, of the entry and everything under it, so a download keeping old mtimes is not stale on arrival — is older than 14 days, listed; run `pf doctor --prune-scratch` to remove them. Also a `scratch` that is a symlink or a file (never scanned or pruned), and an entry that could not be read (skipped, the rest still judged) | no mapping |
 
 Stale scratch is reported, not removed, by default: the doctor is a probe
@@ -140,7 +143,7 @@ in, never calls a model and never reports a credential value.
 |---|---|---|
 | `pass` | the binary resolves, the version is a verified one, a credential variable is set | — (the detail lists every step with a claude candidate: its whole chain, each candidate's harness shown by its prefix, and the level the chain came from) |
 | `fail` | the claude binary does not resolve on the daemon's PATH | Install Claude Code and log it in (a human does this), or set `claude_bin` in cli.toml / `--claude-bin`. |
-| `warn` | unverified version; no credential visible (neither the `<harness-root>/claude-config/settings.json` `env` block's `ANTHROPIC_AUTH_TOKEN` nor the daemon env's `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`); both a token and an API key set; a rejected token / gateway pairing or a `CLAUDE_CONFIG_DIR` in that `env` block; `ANTHROPIC_BASE_URL` set in the daemon env | Relay the note. The claude-config `settings.json` `env` block is the single credential authority (polyforge#171; the daemon reports its keys as set/unset, never values): put ONE `ANTHROPIC_AUTH_TOKEN` (+ optional `ANTHROPIC_BASE_URL`) there, never `CLAUDE_CONFIG_DIR` — see docs/upgrade.md. |
+| `warn` | version older than the verified minimum (2.1.296) or unparsable; no credential visible (neither the `<harness-root>/claude-config/settings.json` `env` block's `ANTHROPIC_AUTH_TOKEN` nor the daemon env's `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`); both a token and an API key set; a rejected token / gateway pairing or a `CLAUDE_CONFIG_DIR` in that `env` block; `ANTHROPIC_BASE_URL` set in the daemon env | Relay the note. The claude-config `settings.json` `env` block is the single credential authority (polyforge#171; the daemon reports its keys as set/unset, never values): put ONE `ANTHROPIC_AUTH_TOKEN` (+ optional `ANTHROPIC_BASE_URL`) there, never `CLAUDE_CONFIG_DIR` — see docs/upgrade.md. |
 | `skip` | claude steps exist but the daemon is unreachable | Start the daemon and re-run. |
 
 Note (V-11): the daemon's environment — and so every claude step's — is the

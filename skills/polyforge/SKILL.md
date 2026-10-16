@@ -22,9 +22,7 @@ Nothing else. The split between the target faces is fixed (the architecture's ro
   execution scene. The `pf` CLI talks to the **local daemon over its unix
   domain socket** (default `/run/polyforge.sock`); the daemon translates each
   route into its Runtime (lifecycle) and Observe (supervision) modules.
-- **Delivery** is not a verb: the delivery lanes (`feature-full`, `bug-fix`,
-  `autopilot`, `chore`) end with a `deliver` workflow step that pushes the
-  feature branch and opens the PR. There is no `pf ship`; see `verbs/ship.md`.
+- **Delivery** is not a verb — the workflow's own `deliver` step (`verbs/ship.md`).
 
 Direct connection does not bypass any permission boundary: the `pf` CLI passes
 through the same AIHub authentication as any other HTTP client, and daemon
@@ -233,29 +231,16 @@ Five standing rules, binding on every polyforge session:
    executor, specify the outcome plus its acceptance criteria — never an
    execution path.
 5. **Per-step models live in `.polyforge.yaml`; each candidate names its harness.** A
-   workspace root may carry a `.polyforge.yaml` whose only section is
-   `steps`: per project, a `default` entry and/or entries keyed by step id
-   (`fix`, `code`, `review`, ... — a key must be a step id of the
-   installed workflows), each `{ models: [...] }` (`models` is the only
-   key). Every candidate is `<harness>:<model>[:<effort>]` — `pi:` or
-   `claude:` (Claude Code, run as `claude -p --bare`, logged in by a
-   human beforehand), split on the first `:` — e.g.
-   `[claude:claude-opus-5-5:high, pi:sub2api-glm/glm-5.3]`. The optional
-   effort is the last segment only when it is one of `off minimal low
-   medium high xhigh max` (pi takes all, as `--thinking`; claude takes
-   `low`…`max`, as `--effort`; an effort that harness does not take is
-   refused, while a word outside the set is part of the model name);
-   omitted, the harness uses its own default. The prefix is mandatory and is the whole truth (no inference from the id, no
-   `harness` key — a leftover one refuses); the same format holds for
-   the bundles' `model_candidates` and `pf submit --models`. A chain may
-   mix harnesses: when the next candidate runs on another harness the
-   step starts a fresh session with the previous transcript as read-only
-   reference. The daemon
-   reads it fresh before every claim; an invalid file refuses the claim
-   (DAEMON-414) WITHOUT claiming — the work item stays queued for other
-   machines. The repo inventory and clone URLs always come from the aihub
-   project registry; the cli.toml `[workspace]` mapping is the only
-   placement source.
+   workspace root may carry a `.polyforge.yaml` (`steps.<project>.<default|step-id>:
+   { models: [...] }`, `models` the only key) whose candidates are
+   `<harness>:<model>[:<effort>]` (`pi:` or `claude:`, the prefix mandatory
+   — the same format as the bundles' `model_candidates` and `pf submit
+   --models`). The daemon reads it fresh before every claim; an invalid
+   file refuses the claim (DAEMON-414) WITHOUT claiming — the work item
+   stays queued for other machines. Schema, syntax and precedence: the
+   README's "Per-project model candidates" paragraphs (via `verbs/init.md`).
+   The repo inventory and clone URLs always come from the aihub project
+   registry; the cli.toml `[workspace]` mapping is the only placement source.
 
 ## The `pf` CLI: shared invocation contract
 

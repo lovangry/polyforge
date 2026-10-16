@@ -23,7 +23,7 @@
 | 主线 | 安装与升级 | install.sh（安装与升级均重跑它）、发版、aihub 部署 |
 | 主线 | 团队与权限 | 用户、key、项目、成员角色、agent 信任边界 |
 | 主线 | 任务管理与生命周期 | WI 状态机、依赖、就绪队列、领取（session 锁）、blocked 出口 |
-| 主线 | 记忆 | 存储与检索、recall/remember、领取时快照 |
+| 主线 | 记忆 | 存储与检索、recall/remember、领取时快照（`runtime-state/recalled-memories.json`，driver 以"非约束性历史"注入每个 step 提示，有界；无快照则不加该节） |
 | 主线 | workflow 定义 | bundle、step、gate/rewind、按步骤选模型（将来：harness） |
 | 主线 | 执行 | daemon、capsule、driver、并发、工作区映射 |
 | 主线 | 交付 | ship → git 分支 / PR (removed by polyforge#166: delivery is the workflows' deliver step. The driver checks the deliver step's recorded commands and the delivered history after the fact and escalates violations to a human; prevention rests on the step contract and the machine's local pre-push hook.) |
@@ -574,3 +574,88 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 - `driver_stalled`：supervisor 同时向 driver 发判定，并经 `OBNeedsRecovery(reason=driver_stalled)` 交给恢复引擎——卡死的 driver 无法自己消费判定；恢复引擎杀树并重拉，计入连续恢复失败计数器。当前 driver 自身不做 git/推送（推送在 supervisor 的推送环里，受 60s 单次上界约束），所以该规则管的是"driver 在步骤之间的任何卡死"。
 - **终态关闭的封存推送**（repo review 2026-10-16 B-7）：workflow 以 completed / failed 结束时，关闭路径照常执行一次 seal 推送（`CommitPush`，干净树只是重推 HEAD），不再假设 driver 已推送（driver 不做 git，终态 `execution.json` 与 transcript 尾只经推送到达 hub）；最终推送重试后仍失败则关闭降级为 **blocked**（本地提交保留字节，hub 从未收到终态），而不是在缺终态的链上 `SessionEnd(wrapped|failed)`。
 - 前一次 transcript 作为"只读参考"仅在 capsule 里读得到时才附上（capsule 内的转录靠提交边界同步，进程刚死时可能还没有）；声明的 resume 路径不可读时，resume 退化为 fresh。
+
+## 附录 E：运行中实际存在的契约清单（自代码生成，2026-10-16，decision 2026-10-16 G17） <!-- §E -->
+
+本附录只登记现状，不新增也不改变任何机制：以下各项在代码里是活的、有读者或有外部可见面，但此前设计文档里查不到。来源即表中的常量与文件；与代码不一致时以代码为准，并回改本表。
+
+### E.1 事件 kind（`<data-dir>/events.log`，`protocol.EventEntry` 一行一条）
+
+事件是"新闻"不是状态：执行态权威始终是 capsule 的 `runtime-state/execution.json`（INV-1），追加失败只降级不影响正确性（`observe/events.go`）。`pf watch` 读取的就是这些行。
+
+| kind | 发射者 | 含义 |
+|---|---|---|
+| `job_started` / `job_stopped` | observe（`monitor.go`、`observe.go`） | 监督开始 / 结束一个 job |
+| `supervisor_verdict` | observe `monitor.go` | 一条监督裁决（`step_dead` 及其 cause/证据，或 `driver_stalled`）在送达 driver 时落盘 |
+| `needs_recovery` | observe `monitor.go` | 同一 attempt 内的信号要求恢复（reason/detail/spawn_n） |
+| `wi_agent_rederived` | observe `monitor.go` | 恢复后的后继 step 进程已起（spawn_n） |
+| `pending_invalid` | observe `monitor.go` | `execution.json` 的 `pending_question` 缺 `id`，被投影忽略（每次看到一条） |
+| `transcript_missing` | observe `monitor.go` | 提交边界找不到本次派生的 harness 会话文件（F3，仅告警，提交照常） |
+| `published` / `push_failed` / `push_backpressure` / `push_poisoned_local` | observe `monitor.go`；`push_failed` 另由 runtime 封存路径经 EventTap 发出（`runtime.go`、`endpending.go`） | capsule 链推送成功 / 失败 / 背压 / 本地 gitlink 预检拒绝（后者不计入 M8） |
+| `session_superseded` | observe `session.go`；runtime `runtime.go` | 周期 session 校验发现另一 daemon 持有该 WI（载荷只有公开指纹） |
+| `session_verify_failed` | observe `session.go` | 周期 session 校验连不上 aihub（只记录，不采取行动） |
+| `queue_fetch_denied` | daemon `daemon.go`（`wi=""`） | auto-pull 的 ready 队列拉取被 401/403/404 拒绝；每个"健康→拒绝"周期一次 |
+| `submit_rejected` / `submit_dropped` | daemon `restartsignal.go`、`daemon.go` | 已应答 accepted 的 submit 在派发时失败 / 重启后不再重放（body 写原因） |
+| `daemon_restarted` | daemon `restartsignal.go` | 写入每个重启对账恢复或停放的 WI；body 带上次停机原因（`last-shutdown.json`，否则 `unknown`） |
+| `capsule_missing` / `project_unmapped` / `session_verify_outage` | runtime `restart.go` | 重启对账把 WI 置 blocked 的原因（同时是 blocked 原因码） |
+| `session_verify_deferred` | runtime `restart.go` | 重启时的 session 校验连不上 aihub，记录保留、稍后重试 |
+| `session_released` | runtime `restart.go` | 重启时发现 WI 已被别的 session 持有：杀进程树、隔离 capsule、丢弃记录 |
+| `interrupted_seal` / `pending_close_replay` / `seal_finished_locally` | runtime `restart.go`、`endpending.go` | 中断的封存以 blocked 收尾 / 重放持久化的收尾意图 / hub 已不再持有 session，本地完成封存 |
+| `missing_midflight_capsule` | runtime `recover.go` | 运行中 capsule 消失，拒绝静默重建（#103） |
+| `manual_models_dropped` | runtime `runtime.go` | 重新领取时丢弃早于 `<harness>:<model>` 格式的 `--models` 记录（#175） |
+| `exec_init` / `step_started` / `step_done` / `gate_verdict` / `needs_input` / `incomplete` / `rewind` / `terminal` / `budget_update` / `answered` / `interrupted` / `resumed` / `step_failed` / `blocked` / `candidate_switched` / `candidates_exhausted` | driver `transition.go`（`emitLocked` 按已提交的状态转移发出） | 状态转移的进度新闻；body 带 spawn_n 与 step |
+| `driver_stalled` / `step_dead` / `verdict_stale` / `schema_fault` | driver `driver.go`、`supervision.go` | driver 收到的监督裁决 / 过期裁决被丢弃 / 结果信封持续被拒（契约坏了而非模型问题） |
+| `envelope_rejected` / `gate_verdict_bound` / `human_gate_unasked` | driver `result.go` 常量 | 信封校验拒绝（原文带错误）/ gate 步以 completed 交了 fail 判定，被改绑为 gate_failed / `requires_human_answer: if_asked` 步零提问完成 |
+| `output_schema_violation` / `output_schema_unloadable` | driver `outputschema.go` | 输出不符合声明的 schema / schema 读不出来 |
+| `authored_tests_rebaselined` | driver `testfiles.go` | 人工批准的测试文件改动成为新基线 |
+
+### E.2 chat / watch 文件
+
+| 路径 | 写者 | 内容 |
+|---|---|---|
+| `<data-dir>/chats.json` | daemon `identity.go` | (harness, harness-session) → chat id，让恢复的会话沿用同一 chat；chat id 只是通知标签，不是凭据 |
+| `<data-dir>/chat-subs.json` | daemon `chatsubs.go` | 每个 chat 订阅的 WI、事件游标、已送达的决策键与已显示的提醒；原子写 |
+| `<data-dir>/chat-status/<chat>.status` | 常驻 watcher（`watcher/engine.go`；路径由 daemon 的订阅应答 `status_path` 给出，`daemon/chatsubs.go`） | 该 chat 的进度文件（主路径） |
+| `$XDG_RUNTIME_DIR/polyforge/chat-<chat>.{lock,pid,status}`（无 `XDG_RUNTIME_DIR` 时为临时目录下按 uid 区分的 0700 目录） | 常驻 watcher `watcher/files.go` | 单实例锁、pid 文件、回退进度文件（daemon 未给出主路径时）；回退目录不是本人所有或可被他人写入时拒绝使用 |
+
+### E.3 `attrs.blocked_seal` 与 `sealed_head` / `sealed_machine`
+
+- `work_items.attrs.blocked_seal = {"head": <sha>, "machine": <id>}`（`core/session.go` `blockedSealKey`）：带 head 的 `End(blocked)` 写入，其他任何 End/Pause 清除；不改 schema，搭在业务 attrs JSON 上。
+- 领取应答的 `sealed_head` / `sealed_machine`（`api/types.go` `SessionClaim`）由它读出：另一台机器继续一个 blocked WI 时，其 clone 里必须恰好有这个 head，否则拒绝（第 7 节"跨 daemon 继续"）。用户 PATCH attrs 可能把它删掉，后果只是该检查失效（fail open）。
+- 与 `02-aihub-core.md` INV-2c（attrs 不得承载执行态字段）的关系未裁定；本附录只登记现状，不做迁移（G17 选 A，I-5 不做 D）。
+
+### E.4 daemon data dir（默认 `~/.local/share/polyforge`）
+
+| 文件 | 写者 | 内容 |
+|---|---|---|
+| `daemon-id` | daemon `identity.go` | 首次启动记录的 daemon id；之后与 flag/env 不一致即拒绝启动 |
+| `daemon.lock` / `ensure.lock` | daemon `daemon.go` / `ensure.go` | 单 daemon flock / `pf daemon ensure` 与安装器互斥 |
+| `daemon.log` | `pf daemon ensure` 的重启循环 | daemon 输出，超过 10 MiB 轮转为 `.1` |
+| `daemon-state.json` | daemon `modes.go` | auto 开关与并发上限 |
+| `submit-queue.json` | daemon `modes.go` | 已接受、待派发的 submit 队列（重启后重放） |
+| `last-shutdown.json` | daemon `restartsignal.go` | 上次停机原因，供 `daemon_restarted` 使用 |
+| `runtime-state.json` | runtime `runtime.go` | runtime 的 job 记录（`04` 里称作 `state.json`） |
+| `claiming.json` | runtime `claiming.go` | 领取前的持久化意图日志（B1，v1.5 契约 §4.2），崩溃后重放 |
+| `manual-models.json` | runtime `manualmodels.go` | 每个 WI 的 `pf submit --models` 列表（只在本机有效） |
+| `events.log`（`.1`…`.3`）/ `events.seq` | observe `events.go` | 事件 JSONL（16 MiB 轮转，保留 3 代）/ 轮转时写入的每 WI 序号快照，保证 seq 跨重启单调 |
+| `chats.json`、`chat-subs.json`、`chat-status/` | 见 E.2 | |
+| `git/<wi>.git` | runtime | capsule 的外置 git-dir（agent 碰不到 hooks/config） |
+| `release/<tag>`、`release/current` | `tools/install.sh` | release checkout；daemon 以 `release/current/workflows` 为 `-workflows-dir` |
+| `step-agent/`、`step-agent-sessions/`、`claude-config/` | runtime（harness root，默认即 data dir） | 专用 pi agent 目录 / pi 会话 / Claude Code 配置目录（其 `settings.json` env 块是凭据权威层） |
+
+### E.5 capsule 布局（`common/capsule/capsule.go` 及各常量）
+
+| 路径 | 内容 |
+|---|---|
+| `capsule.json`、`session.json`、`.gitignore` | capsule 身份（含各仓库领取时 SHA）/ 公开 session 指纹 / 只忽略 `repos/`、`artifacts/release-*/` 与 `sync/` |
+| `runtime-state/work-item.json` | daemon 写入的 WI 快照 |
+| `runtime-state/execution.json` | 执行态唯一权威（`03` §4.2） |
+| `runtime-state/spawn-journal.jsonl` | 每次 step 派生一行（harness、会话、transcript 路径） |
+| `runtime-state/pending-results/<spawn_n>.json` | step agent 交付结果信封的唯一通道 |
+| `runtime-state/recalled-memories.json` | 领取时的记忆快照；driver 以"非约束性历史"注入 step 提示（G3） |
+| `artifacts/steps/<step>/s<spawn_n>/result.json` | 已接受信封的归档 |
+| `artifacts/handoff-<step>.md` | 声明 `handoff` 的步骤按路径约定写出，后续 inherit 步读取 |
+| `session/session-<token>.jsonl` | harness 会话文件，在提交边界同步进来 |
+| `sync/session-handle`、`sync/materialized.json`、`sync/materialize-staging/` | daemon 私有（不进链）：所属 session 指纹 / bundle 物化完成标记 / 物化暂存区 |
+| `workflows/<bundle>/`、`agents/` | 物化的 workflow bundle / step 定义副本（`agents/` 是 decision 2026-10-16 G4 的删除对象） |
+| `repos/<name>/`、`logs/`、`artifacts/` | 任务仓库 clone（各有自己的 git 历史）/ 日志 / step 产出 |
