@@ -965,3 +965,17 @@ func TestChainPushIgnoresGlobalGitConfig(t *testing.T) {
 		t.Fatalf("the push was rerouted to the decoy by ~/.gitconfig: %s", out)
 	}
 }
+
+// hub transfers abort on a stalled HTTP transfer (review nit on V-5).
+func TestHubEnvBoundsStalledTransfers(t *testing.T) {
+	t.Setenv("GIT_HTTP_LOW_SPEED_LIMIT", "1")
+	env := strings.Join(hubEnv(Opts{}, false, nil), "\n") + "\n"
+	for _, want := range []string{"GIT_HTTP_LOW_SPEED_LIMIT=1000\n", "GIT_HTTP_LOW_SPEED_TIME=60\n", "GIT_CONFIG_GLOBAL=/dev/null\n"} {
+		if !strings.Contains(env, want) {
+			t.Fatalf("hubEnv lacks %q", want)
+		}
+	}
+	if strings.Contains(env, "GIT_HTTP_LOW_SPEED_LIMIT=1\n") {
+		t.Fatal("an inherited GIT_* value must not survive")
+	}
+}

@@ -161,7 +161,10 @@ func hubEnv(o Opts, bindRepo bool, additions []string) []string {
 			env = append(env, kv)
 		}
 	}
-	env = append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	env = append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
+		// a stalled HTTP transfer (below 1 KB/s for 60 s) aborts long
+		// before chainRemoteTimeout — the task-repo lane's values
+		"GIT_HTTP_LOW_SPEED_LIMIT=1000", "GIT_HTTP_LOW_SPEED_TIME=60")
 	if bindRepo {
 		env = append(env, "GIT_DIR="+o.GitDir, "GIT_WORK_TREE="+o.CapsuleDir)
 	}
