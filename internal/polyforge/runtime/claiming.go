@@ -189,7 +189,7 @@ func (r *Runtime) resumeClaiming(ctx context.Context) (replays []claimReplay) {
 		}
 		var v *api.SessionVerifyResponse
 		var err error
-		r.hubUnlocked(func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) })
+		r.hubUnlocked(func() { r.laneHub(func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) }) })
 		if r.restartStopping(ctx) {
 			return replays // nothing decided: the entry stays
 		}
@@ -212,11 +212,13 @@ func (r *Runtime) resumeClaiming(ctx context.Context) (replays []claimReplay) {
 		}
 		var resp *api.SessionClaimResponse
 		r.hubUnlocked(func() {
-			resp, err = r.hub.SessionClaim(api.SessionClaimRequest{
-				WorkItemID:     rec.WorkItemID,
-				SessionID:      rec.SessionID,
-				MachineID:      rec.MachineID,
-				IdempotencyKey: rec.IdempotencyKey,
+			r.laneHub(func() {
+				resp, err = r.hub.SessionClaim(api.SessionClaimRequest{
+					WorkItemID:     rec.WorkItemID,
+					SessionID:      rec.SessionID,
+					MachineID:      rec.MachineID,
+					IdempotencyKey: rec.IdempotencyKey,
+				})
 			})
 		})
 		if r.restartStopping(ctx) {

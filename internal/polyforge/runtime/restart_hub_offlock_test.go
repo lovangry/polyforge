@@ -10,6 +10,7 @@ package runtime
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -394,5 +395,49 @@ func TestOffLockShutdownDuringHungRestartAttach(t *testing.T) {
 	}
 	if recs := loadRecords(t, r); len(recs) != 1 || recs[0].SessionID != rec.SessionID {
 		t.Fatalf("the record must be kept for the next start, got %+v", recs)
+	}
+}
+
+// A healthy hub with a slow recovery push past RestartHubWait: the wait
+// bounds only unanswered hub calls, so Restart keeps waiting for the push
+// (the synchronous shape) and nothing is shown waiting for aihub.
+func TestOffLockRestartSlowPushIsNotAwaitingHub(t *testing.T) {
+	setGitIdentity(t)
+	hub := newFakeHub()
+	sp := &scriptedSpawner{}
+	r, _, _ := newTestRuntime(t, hub, sp)
+	r.cfg.RestartHubWait = 100 * time.Millisecond
+	ev := &eventKinds{}
+	r.cfg.EventTap = ev.tap
+	const a = "wi_rs_slowpush"
+	t.Cleanup(func() { r.Close(); terminateJobAgent(r, a) })
+	rec, _ := restartRecord(t, r, hub, a)
+	url, release := stallingRemote(t)
+	rec.RemoteURL = url
+	writeStateFile(t, r, []*jobRecord{rec})
+	// unflushed work: the recovery's commit-dirty push goes to the stalled remote
+	if err := os.WriteFile(filepath.Join(rec.CapsuleDir, "dirty.txt"), []byte("unflushed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- r.Restart(context.Background()) }()
+	waitBusy(t, r, a) // the recovery push is under way outside opMu
+	select {
+	case err := <-done:
+		t.Fatalf("Restart returned during a slow push with a healthy hub (err %v)", err)
+	case <-time.After(5 * r.cfg.RestartHubWait):
+	}
+	if ji, _ := r.Info(a); ji.AwaitingHub || ev.count(a, EventSessionVerifyDeferred) != 0 {
+		t.Fatalf("a slow push was shown waiting for aihub (state %s, awaiting %v)", ji.State, ji.AwaitingHub)
+	}
+	release()
+	if err := recvErr(t, done, "Restart after the push settled"); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if ji, ok := r.Info(a); !ok || ji.State != StateRunning || ji.Agent == nil || ji.AwaitingHub {
+		t.Fatalf("after Restart = state %s agent %v awaiting %v (ok=%v), want RUNNING", ji.State, ji.Agent != nil, ji.AwaitingHub, ok)
+	}
+	if r.isRestarting() || ev.count(a, EventSessionVerifyDeferred) != 0 {
+		t.Fatal("the slow-push restart left the reconciliation latched or raised a deferral")
 	}
 }

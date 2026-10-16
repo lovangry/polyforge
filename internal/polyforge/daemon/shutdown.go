@@ -247,6 +247,16 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 		case <-ctx.Done():
 		}
 	}
+	// ...and for a restart reconciliation step still in flight (a
+	// recovery's push and relaunch: the relaunch meets the cancelled run
+	// context; the lane starts no new step after the latch), then persist
+	// what it settled — no lane step outlives the sequence.
+	d.rt.WaitRestartStep(ctx)
+	if d.faceOwned {
+		if err := d.rt.Persist(); err != nil {
+			fmt.Fprintf(os.Stderr, "daemon: state.json persist failed: %v\n", err)
+		}
+	}
 	// Stop the runtime's durable-close retry goroutines.
 	d.rt.Close()
 	// Final sweep: no writer survives the shutdown — a recovery that was

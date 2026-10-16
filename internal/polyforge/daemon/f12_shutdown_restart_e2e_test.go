@@ -256,6 +256,8 @@ func TestShutdownRestartFullChainPushIdempotency(t *testing.T) {
 		e2eRecord(wiPush, capPush, gitPush, barePush),
 	)
 
+	basePush := gitHead(t, gitPush, "HEAD")
+
 	// --- the OLD process: starts, recovers, and begins publishing. ---
 	release := make(chan struct{})
 	sp1 := &parkedSpawner{release: release}
@@ -281,6 +283,15 @@ func TestShutdownRestartFullChainPushIdempotency(t *testing.T) {
 			}
 		}
 		return false
+	})
+	// ...and wi_e2e_push's commit-dirty commit stands locally: its
+	// reconciliation step (the push now parked in the hook, then the
+	// relaunch) is in flight. The shutdown below lets that step finish
+	// and starts no new one — without this wait it could latch before
+	// the lane reached wi_e2e_push at all.
+	waitFor(t, "old daemon's commit-dirty commit of "+wiPush, 10*time.Second, func() bool {
+		h := gitHead(t, gitPush, "HEAD")
+		return h != "" && h != basePush
 	})
 
 	// --- the graceful stop: parks in the stop-notice ack, keeping the

@@ -98,11 +98,12 @@ type Config struct {
 	// (defaults 2s / 60s). Retries run until the hub accepts the close.
 	EndRetryBase time.Duration
 	EndRetryMax  time.Duration
-	// RestartHubWait bounds how long Restart waits for its reconciliation
-	// — whose session verifies, attaches and journal replays need aihub —
-	// before it returns and lets the daemon serve (default 5s). A
-	// reconciliation still waiting on the hub then finishes in the
-	// background, its records shown waiting for aihub (restart.go).
+	// RestartHubWait is how long one hub call of the restart
+	// reconciliation (a verify, a replayed claim, an attach) may go
+	// unanswered before Restart returns and lets the daemon serve
+	// (default 5s); the reconciliation then finishes in the background,
+	// its unverified records shown waiting for aihub (restart.go). Local
+	// and git work never ends the wait early.
 	RestartHubWait time.Duration
 	// EventTap, when non-nil, receives runtime-sourced diagnostic events
 	// (kind "push_failed" on a seal push that failed after its retries)
@@ -231,7 +232,7 @@ type Runtime struct {
 	// (runReplays).
 	replays sync.WaitGroup
 	// restarting (under mu) is latched while the restart reconciliation
-	// runs (Restart, then its lane past RestartHubWait): it releases opMu
+	// runs (Restart, then its lane after an early return): it releases opMu
 	// around every network step, and meanwhile a deferred verify waits
 	// (retries) and a Start answers the typed transient.
 	restarting bool
@@ -240,6 +241,19 @@ type Runtime struct {
 	// re-attachment pass already ran, and the lane hands every job it
 	// brings back to life to the observe lane itself.
 	restartServed bool
+	// restartAttached (under mu): the work items that were live when
+	// Restart returned before its lane finished — exactly the set the
+	// daemon's startup re-attachment pass hands to observe (RestartAttach);
+	// every job the lane brings to life afterwards it announces itself.
+	restartAttached map[string]bool
+	// laneRunning / laneHubSince (under mu): the restart lane is running,
+	// and the moment its current hub call (a verify, a replayed claim, an
+	// attach) went out — zero while it runs local or git work. Restart's
+	// wait bounds only hub calls, and the shutdown joins only non-hub
+	// steps (WaitRestartStep; a hub answer meets the shutdown latch and
+	// decides nothing).
+	laneRunning  bool
+	laneHubSince time.Time
 
 	// The durable-close retry lane (endpending.go): WIs whose
 	// SessionEnd(blocked) retry goroutine is running (one per WI), and
@@ -2029,7 +2043,8 @@ func IsClaimDeferred(err error) bool {
 // still queued on opMu (or on a hub call before its claim) defers itself
 // at the latch check and is never waited on, so a long close holding
 // opMu cannot eat the shutdown budget. The restart's journal-replay
-// goroutines are waited for within the same bound. opMu is not taken
+// goroutines are waited for within the same bound (the reconciliation
+// lane's own step is joined later, WaitRestartStep). opMu is not taken
 // here.
 func (r *Runtime) AbortClaims(ctx context.Context) {
 	r.mu.Lock()
@@ -2063,6 +2078,34 @@ func (r *Runtime) AbortClaims(ctx context.Context) {
 	case <-replaysDone:
 	case <-ctx.Done():
 		fmt.Fprintf(os.Stderr, "runtime: shutdown: journal replays still settling at the wait's end\n")
+		return
+	}
+}
+
+// WaitRestartStep is the shutdown's join of the restart reconciliation
+// lane (called once the run context is cancelled, before the final agent
+// sweep): it waits — bounded by ctx — for a step in flight (a recovery's
+// push and relaunch) to finish, so no lane step outlives the shutdown; the
+// relaunch meets the cancelled run context, and whatever it still
+// installed the sweep collects. The lane starts no new step after the
+// shutdown latch, and one parked on a hub call is not waited for: its
+// answer meets the latch and decides nothing.
+func (r *Runtime) WaitRestartStep(ctx context.Context) {
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		r.mu.Lock()
+		idle := !r.laneRunning || !r.laneHubSince.IsZero()
+		r.mu.Unlock()
+		if idle {
+			return
+		}
+		select {
+		case <-tick.C:
+		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, "runtime: shutdown: the restart reconciliation's step still running at the wait's end\n")
+			return
+		}
 	}
 }
 
