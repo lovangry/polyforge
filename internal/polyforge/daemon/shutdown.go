@@ -161,15 +161,14 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 	// Step 1: the latch, before any other action.
 	d.modes.SetShuttingDown()
 
-	// Step 1b (repo review 2026-10-16 B-8): claims under way run outside
-	// the Run loop and outside the runtime's lock. Stop them before the
-	// live-job snapshot: no new claim starts, every capsule/task-repo
-	// clone is cancelled, and each in-flight claim is DEFERRED — its
-	// claiming-journal entry (and its queue entry) stay for the next
-	// start, the work item is never turned blocked — and none can
-	// install an agent behind the teardown below. Only claims already
-	// CLAIMING are waited for, and at most claimAbortWait — the WIP
-	// snapshots below need the rest of the budget.
+	// Step 1b (RR B-8): claims under way run outside the Run loop and
+	// outside the runtime's lock. Stop them before the live-job snapshot: no
+	// new claim starts, every capsule/task-repo clone is cancelled, and each
+	// in-flight claim is DEFERRED — its claiming-journal entry (and its
+	// queue entry) stay for the next start, the work item is never turned
+	// blocked — and none can install an agent behind the teardown below.
+	// Only claims already CLAIMING are waited for, and at most
+	// claimAbortWait — the WIP snapshots below need the rest of the budget.
 	actx, acancel := context.WithTimeout(ctx, claimAbortWait(ctx))
 	d.rt.AbortClaims(actx)
 	acancel()
@@ -178,10 +177,9 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 	// set only shrinks from this moment (no source may add a job).
 	live := d.liveJobs()
 
-	// Step 2 (polyforge#106): the pf/stop_notice delivery face and the
-	// agent's flush(shutdown) wait are deleted with the WI-Agent lane —
-	// the driver owns the step state machine, so there is no agent to
-	// notify or wait on.
+	// Step 2 (polyforge#106): no pf/stop_notice delivery and no agent
+	// flush(shutdown) wait — the driver owns the step state machine, so
+	// there is no agent to notify or wait on.
 
 	// Step 4a: stop the observe lane FIRST and WAIT for every monitor to
 	// be gone — a monitor that watched the teardown would fire

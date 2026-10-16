@@ -94,10 +94,10 @@ func (r *Runtime) endPendingAttempt(j *job) bool {
 
 // closeBlocked sends one job's SessionEnd(blocked), pushing the local
 // chain FIRST when push is set, with the session credential that dies
-// with the close (repo review 2026-10-16 B-2): boundedFail commits the
-// dirty capsule before the verdict, and when that push failed (most often
-// the same outage that fails the close) the commits would otherwise stay
-// local while the hub's blocked WI is re-claimed from the remote chain.
+// with the close (RR B-2): boundedFail commits the dirty capsule before the
+// verdict, and when that push failed (most often the same outage that
+// fails the close) the commits would otherwise stay local while the hub's
+// blocked WI is re-claimed from the remote chain.
 // Reports whether the close is SETTLED. Push outcomes:
 //
 //   - landed → the close goes out;
@@ -219,16 +219,15 @@ func (r *Runtime) finishBlocked(j *job, detail string, settled bool) {
 	}
 }
 
-// retrySeal is the SEALING job's close retry (repo review 2026-10-16
-// B-4): the terminal SessionEnd failed after the agent was torn down, so
-// the job sits in SEALING with its verdict recorded. Each attempt takes
-// opMu, checks the job is still the current SEALING one, and runs the
-// very close the restart finisher runs — stopOp(alreadySealing) with the
-// recorded reason and push state. A typed STALE_SESSION answer (the
-// session no longer holds the work item: an earlier close landed with
-// its answer lost, or an admin ended it) stops the retry and finishes
-// the close locally. Shutdown stops the retry; the persisted SEALING
-// record is finished by the next restart.
+// retrySeal is the SEALING job's close retry (RR B-4): the terminal SessionEnd
+// failed after the agent was torn down, so the job sits in SEALING with its
+// verdict recorded. Each attempt takes opMu, checks the job is still the
+// current SEALING one, and runs the very close the restart finisher runs —
+// stopOp(alreadySealing) with the recorded reason and push state. A typed
+// STALE_SESSION answer (the session no longer holds the work item: an
+// earlier close landed with its answer lost, or an admin ended it) stops
+// the retry and finishes the close locally. Shutdown stops the retry; the
+// persisted SEALING record is finished by the next restart.
 func (r *Runtime) retrySeal(j *job, note string) {
 	r.goRetry("seal:"+j.wi, func() bool { return r.sealAttempt(j, note) })
 }

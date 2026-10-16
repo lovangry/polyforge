@@ -132,9 +132,9 @@ func TestSpawnEnvSanitized(t *testing.T) {
 			t.Fatalf("env must carry %q, got:\n%s", want, env)
 		}
 	}
-	// The injected-but-unread PF_SESSION_HANDLE / PF_SPAWN_N were deleted
-	// with the audit's dead-code sweep: the derivation identity reaches
-	// the harness through the capsule spawn journal, never env.
+	// PF_SESSION_HANDLE / PF_SPAWN_N are never injected: the derivation
+	// identity reaches the harness through the capsule spawn journal,
+	// never env.
 	for _, gone := range []string{"PF_SESSION_HANDLE=", "PF_SPAWN_N="} {
 		if strings.Contains(env, gone) {
 			t.Fatalf("the deleted %s must not be injected, got:\n%s", gone, env)

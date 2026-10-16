@@ -34,11 +34,8 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/harness"
 )
@@ -126,24 +123,21 @@ func (s *claudeSpawner) buildCmd(p SpawnParams) (*exec.Cmd, error) {
 	// is hard-set by the adapter (an operator env value would hijack the
 	// step's config dir and would duplicate the env entry).
 	//
-	// ANTHROPIC_* (repo review 2026-10-16 V-11, superseded by env
-	// hygiene): EVERY inherited ANTHROPIC_* is stripped too, so the
+	// ANTHROPIC_*: EVERY inherited ANTHROPIC_* is stripped too, so the
 	// `env` block of <claude-config>/settings.json is the ONLY source of
-	// a claude step's credential, endpoint and model defaults. Before,
-	// whatever the daemon inherited (e.g. the tmux server's
-	// ANTHROPIC_BASE_URL / AUTH_TOKEN / MODEL of a human's session)
-	// reached every step, and whether settings.json beat a same-named
-	// process variable was unverified; a variable only in the process env
-	// certainly applied. Now nothing of it reaches the step — set every
-	// ANTHROPIC_* a step needs in settings.json. (`pf daemon ensure`
-	// also no longer hands the daemon any ANTHROPIC_*: see
-	// supervisor/env.go.) pi steps strip nothing extra here, but they
-	// too see only the daemon's environment — for an ensure-started
-	// daemon the allow-list — so a pi provider key must be in the step
-	// agent dir's auth.json (copied from the operator agent dir) or a
-	// literal in its models.json; a key that only lived in the daemon's
-	// environment (a provider *_API_KEY, a models.json `$NAME`) no
-	// longer reaches pi steps.
+	// a claude step's credential, endpoint and model defaults. Whatever
+	// the daemon inherited (e.g. the tmux server's ANTHROPIC_BASE_URL /
+	// AUTH_TOKEN / MODEL of a human's session) must not reach a step, and
+	// a variable in the process env could otherwise override or add to
+	// settings.json. Set every ANTHROPIC_* a step needs in settings.json
+	// (`pf daemon ensure` hands the daemon no ANTHROPIC_* either: see
+	// supervisor/env.go). pi steps strip nothing extra here, but they too
+	// see only the daemon's environment — for an ensure-started daemon
+	// the allow-list — so a pi provider key must be in the step agent
+	// dir's auth.json (copied from the operator agent dir) or a literal
+	// in its models.json; a key that lives only in the daemon's
+	// environment (a provider *_API_KEY, a models.json `$NAME`) does not
+	// reach pi steps.
 	inherited := newEnvSanitizer(s.cfg.EnvSecrets...).childEnv()
 	env := make([]string, 0, len(inherited)+len(additions))
 	for _, kv := range inherited {
@@ -168,43 +162,9 @@ func (s *claudeSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, 
 	if err != nil {
 		return nil, err
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	stdin, err := cmd.StdinPipe()
+	proc, stdin, err := startHarness(cmd, p, false)
 	if err != nil {
 		return nil, err
-	}
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		return nil, err
-	}
-	errR, errW, err := os.Pipe()
-	if err != nil {
-		outR.Close()
-		outW.Close()
-		return nil, err
-	}
-	cmd.Stdout = outW
-	cmd.Stderr = errW
-	if err := cmd.Start(); err != nil {
-		outR.Close()
-		outW.Close()
-		errR.Close()
-		errW.Close()
-		return nil, fmt.Errorf("runtime: harness start failed: %w", err)
-	}
-	outW.Close()
-	errW.Close()
-	proc := newProcOpts(cmd, nil, outR, procOpts{
-		taps:   recordTaps(p),
-		stderr: errR,
-		onExit: p.OnExit,
-	})
-	if p.Journal != nil {
-		if jerr := p.Journal(cmd.Process.Pid, proc.startedAt); jerr != nil {
-			stdin.Close()
-			_ = proc.Terminate(5 * time.Second)
-			return nil, fmt.Errorf("runtime: spawn journal failed (process torn down): %w", jerr)
-		}
 	}
 	_, werr := stdin.Write([]byte(p.InitialPrompt))
 	cerr := stdin.Close()
@@ -212,28 +172,9 @@ func (s *claudeSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, 
 		werr = cerr
 	}
 	if werr != nil {
-		// a CLI that died at startup (a bad credential, an unknown model)
-		// never read the prompt: its stderr is the explanation the driver
-		// classifies (EPIPE path, as pi)
-		_ = proc.Terminate(5 * time.Second)
-		select {
-		case <-proc.exited:
-		case <-time.After(2 * time.Second):
-		}
-		if detail := strings.TrimSpace(proc.tail.String()); detail != "" {
-			return nil, fmt.Errorf("runtime: initial prompt injection failed (process torn down): %w; harness stderr: %s", werr, detail)
-		}
-		return nil, fmt.Errorf("runtime: initial prompt injection failed (process torn down): %w", werr)
+		return nil, injectionFailed(proc, werr)
 	}
 	return proc, nil
-}
-
-// recordTaps wires a dispatch's OnRecord callback into the stdout taps.
-func recordTaps(p SpawnParams) []func(string) {
-	if p.OnRecord == nil {
-		return nil
-	}
-	return []func(string){p.OnRecord}
 }
 
 // harnessSpawner is the production spawner: it dispatches each

@@ -1,8 +1,8 @@
 package runtime
 
-// pitranscript.go: the pi-harness live-transcript face (F3 of the pilot
-// fix lane). The real harness ignores the PI_SESSION_DIR env the v0
-// supervisor trusted (the variable the harness actually honors is its
+// pitranscript.go: the pi-harness live-transcript face (pilot F3).
+// The real harness ignores the PI_SESSION_DIR env the v0 supervisor
+// trusted (the variable the harness actually honors is its
 // own <APP>_CODING_AGENT_SESSION_DIR; v0's port blind-carried the dead
 // name), so a fresh derivation's transcript lands at the harness's
 // DEFAULT session store —

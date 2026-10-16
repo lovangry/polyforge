@@ -208,9 +208,9 @@ type StatusResponse struct {
 
 // HarnessStatus is one harness's daemon-side status: binary, version,
 // and whether the credential variables are set ("set"/"unset" — never a
-// value). polyforge#171 adds the claude entry's harness-root layout
-// (the three dirs) and the claude-config settings.json env block facts
-// (key → set/unset, never values) plus its pairing warnings.
+// value). The claude entry also carries its harness-root layout
+// (polyforge#171: the three dirs) and the claude-config settings.json env
+// block facts (key → set/unset, never values) plus its pairing warnings.
 type HarnessStatus struct {
 	Bin             string                `json:"bin"`
 	Found           bool                  `json:"found"`
@@ -244,7 +244,7 @@ type StatusJob struct {
 	Status string `json:"status"`
 	// SpawnN is the v1.5 B2 derivation counter; SessionFingerprint is
 	// the PUBLIC session handle (B3) — the session model's identity
-	// pair, replacing the deleted attempt-id lineage handle.
+	// pair.
 	SpawnN             int    `json:"spawn_n,omitempty"`
 	SessionFingerprint string `json:"session_fingerprint,omitempty"`
 	AgentPID           int    `json:"agent_pid,omitempty"`

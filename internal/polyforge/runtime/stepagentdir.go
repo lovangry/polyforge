@@ -1,8 +1,7 @@
 package runtime
 
-// stepagentdir.go: the dedicated step agent directory (audit-subtraction
-// pass B, addendum 2 / owner ruling A) and the harness-root map. A step
-// pi process runs with
+// stepagentdir.go: the dedicated step agent directory (addendum 2 /
+// owner ruling A) and the harness-root map. A step pi process runs with
 // PI_CODING_AGENT_DIR pointing at a directory the DAEMON owns under its
 // harness root — never inside a capsule (capsules are committed and pushed to
 // aihub and are agent-writable) and never the operator's own agent

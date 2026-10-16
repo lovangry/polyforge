@@ -13,8 +13,8 @@ package runtime
 //     runtime-state/recalled-memories.json, which the driver renders
 //     into every step prompt as non-binding history
 //     (driver/spawn.go recalledMemoriesSection, decision 2026-10-16 G3);
-//   - the runtime half (recall/remember over the UDS face) was deleted
-//     (v2-converge); the snapshot is the step agent's only memory path.
+//   - there is no runtime half (recall/remember over the UDS face,
+//     v2-converge); the snapshot is the step agent's only memory path.
 //
 // The snapshot is an ENRICHMENT, never a gate: an unreachable aihub, a
 // refused search or a zero-hit query all degrade to an empty list plus a
@@ -136,7 +136,7 @@ func (r *Runtime) writeRecalledMemories(j *job) {
 	case strings.TrimSpace(snap.Query) == "":
 		snap.Notice = "no task definition to recall against"
 	default:
-		// The search is scoped to the work item's own project (B5): the
+		// The search is scoped to the work item's own project (audit B5): the
 		// snapshot must not draw on every project the daemon credential
 		// can read. A populated query implies item != nil (the query is
 		// built from it); the nil check keeps the seam honest anyway.

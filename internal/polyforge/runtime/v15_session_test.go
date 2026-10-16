@@ -1,9 +1,8 @@
 package runtime
 
-// v15_session_test.go: the v1.5 session-model regressions the lane was
-// asked to add — the B1 journal-replay compensation branch, spawn_n
-// monotonicity across the recovery ladder, and the OBSuperseded
-// kill+quarantine response (M4/m3).
+// v15_session_test.go: the v1.5 session-model regressions — the B1
+// journal-replay compensation branch, spawn_n monotonicity across the
+// recovery ladder, and the OBSuperseded kill+quarantine response (M4/m3).
 
 import (
 	"context"

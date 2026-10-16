@@ -1,7 +1,6 @@
 package runtime
 
-// repos.go: the task-repo half of the v0 claim contract, restored for v1
-// (真机 pilot gap DAEMON-507 lane). Claim answers the task-repo inventory
+// repos.go: the task-repo half of the claim contract. Claim answers the task-repo inventory
 // (api.Claim.Repos, served by aihub: the WI's declared repo_inventory,
 // else every repo of its project — reference.md §2.1);
 // materialize turns it into real git clones under the capsule's
@@ -296,13 +295,12 @@ func gitTask(ctx context.Context, dir string, args ...string) (string, error) {
 
 // taskGitEnv is the environment of every task-repo git call: the daemon's
 // own environ (the machine's default credential context) made
-// non-interactive (repo review 2026-10-16 B-8). The claim lane runs
-// them outside the runtime's opMu, but a credential prompt on the
-// daemon's tmux tty, or a stalled transfer, would still pin the claim
-// (and its slot) until a stop or a shutdown cancels it. So: git's
-// own credential prompt is off (fail instead), and an HTTP transfer below
-// 1 KB/s for 60 s aborts. An operator's explicit setting of either
-// variable wins.
+// non-interactive (RR B-8). The claim lane runs them outside the runtime's
+// opMu, but a credential prompt on the daemon's tmux tty, or a stalled
+// transfer, would still pin the claim (and its slot) until a stop or a
+// shutdown cancels it. So: git's own credential prompt is off (fail
+// instead), and an HTTP transfer below 1 KB/s for 60 s aborts. An
+// operator's explicit setting of either variable wins.
 func taskGitEnv() []string {
 	env := os.Environ()
 	for _, kv := range []string{
@@ -368,10 +366,9 @@ func repoCloneErr(wi string, pr api.ProjectRepo, format string, args ...any) *ap
 // the machine's default git credential context, made non-interactive
 // (taskGitEnv).
 //
-// A cancelled ctx (a stop or a shutdown during the claim, repo review
-// 2026-10-16 B-8) kills the whole process group — git hands the transfer
-// to a remote helper that would otherwise keep running and keep the
-// output pipe open.
+// A cancelled ctx (a stop or a shutdown during the claim, RR B-8) kills
+// the whole process group — git hands the transfer to a remote helper
+// that would otherwise keep running and keep the output pipe open.
 func gitClone(ctx context.Context, url, dir string) error {
 	cmd := exec.CommandContext(ctx, "git", "clone", "--", url, dir)
 	cmd.Env = taskGitEnv()

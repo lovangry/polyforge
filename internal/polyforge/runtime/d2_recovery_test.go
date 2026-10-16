@@ -138,7 +138,7 @@ func TestBoundedFailSessionEndFailureKeepsRecordAndRetries(t *testing.T) {
 }
 
 // Bug 5, daemon-start half: a restarted daemon retries an end_pending
-// record's close (on the background lane — repo review 2026-10-16).
+// record's close (on the background lane).
 func TestRestartRetriesEndPendingRecord(t *testing.T) {
 	hub := newFakeHub()
 	r, j, _ := endPendingRuntime(t, hub)

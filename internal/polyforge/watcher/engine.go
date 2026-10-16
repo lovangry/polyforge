@@ -102,8 +102,8 @@ func Run(ctx context.Context, api API, opts Options) error {
 		paused     bool
 		lastNotice time.Time
 		attended   bool
-		// unacked holds the lines already printed whose ack failed (repo
-		// review 2026-10-16 B-23): the daemon still holds the old cursor,
+		// unacked holds the lines already printed whose ack failed (RR B-23):
+		// the daemon still holds the old cursor,
 		// so the next cycle re-derives the same decisions — they are not
 		// printed again, only their acks retried, until an ack round
 		// fully succeeds.

@@ -553,13 +553,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// has: an old daemon mid-graceful-shutdown keeps its listener (it
 	// closes only at step 5 of the sequence) while its in-flight
 	// recovery pushes are still running, so dialing the socket here is
-	// the only reliable "is the old process gone yet?" check. Restart
-	// reconciliation used to run BEFORE this guard, which let a daemon
-	// started in that window push the same work items from a second
-	// process — the per-WI git mutex is process-local, so nothing
-	// serialized the two lanes and the server's ref compare-and-swap
-	// rejected the duplicate pushes. Guarding first makes the new
-	// process abort before it can open a push lane at all.
+	// the only reliable "is the old process gone yet?" check. Were restart
+	// reconciliation to run BEFORE this guard, a daemon started in that
+	// window could push the same work items from a second process — the
+	// per-WI git mutex is process-local, so nothing would serialize the
+	// two lanes and the server's ref compare-and-swap would reject the
+	// duplicate pushes. Guarding first makes the new process abort
+	// before it can open a push lane at all.
 	lst, err := d.listenUDS()
 	if err != nil {
 		// Startup abort: unwind the lanes this process already started,
@@ -647,8 +647,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 			// Only the shutdown sequence closes the face (its step 5),
 			// and it still has the runtime drain and the final agent
-			// sweep to run: returning here let the process exit
-			// mid-sequence (repo review 2026-10-16 B-16).
+			// sweep to run: returning here would let the process exit
+			// mid-sequence (RR B-16).
 			<-d.shutDone
 			return nil
 		case <-dispatch.C:
@@ -915,11 +915,11 @@ func (d *Daemon) occupiedSlots() map[string]bool {
 }
 
 // dispatch starts pending jobs into free slots, priority-desc then FIFO.
-// Each claim runs in its own goroutine (repo review 2026-10-16 B-8): a
-// slow capsule or task-repo clone no longer holds the Run loop, so the
-// loop keeps serving shutdown, drain and the next dispatch ticks. The
-// queue counts a Take()n entry against the slots until it settles, so
-// the concurrency cap holds across the goroutines.
+// Each claim runs in its own goroutine (RR B-8): a slow capsule or task-repo
+// clone does not hold the Run loop, so the loop keeps serving shutdown,
+// drain and the next dispatch ticks. The queue counts a Take()n entry
+// against the slots until it settles, so the concurrency cap holds across
+// the goroutines.
 func (d *Daemon) dispatch() {
 	for !d.modes.ShuttingDown() {
 		e := d.q.Take()
@@ -953,13 +953,12 @@ func (d *Daemon) startEntry(e qEntry) {
 	}
 	var ae *api.Error
 	if errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable {
-		// The hub could not be reached, or the claim's answer was
-		// lost: the accepted submit stays queued and is retried with
-		// backoff (never dropped on a transient blip, never blocking
-		// the other entries). A claim that may have landed keeps its
-		// claiming-journal entry, so the retry replays the SAME claim
-		// and adopts the session (repo review 2026-10-16 B-1). One
-		// log line per episode.
+		// The hub could not be reached, or the claim's answer was lost: the
+		// accepted submit stays queued and is retried with backoff (never
+		// dropped on a transient blip, never blocking the other entries). A
+		// claim that may have landed keeps its claiming-journal entry, so
+		// the retry replays the SAME claim and adopts the session (RR B-1).
+		// One log line per episode.
 		if e.Deferrals == 0 {
 			fmt.Fprintf(os.Stderr, "daemon: start %s deferred, will retry with backoff: %v\n", e.WorkItemID, err)
 		}
