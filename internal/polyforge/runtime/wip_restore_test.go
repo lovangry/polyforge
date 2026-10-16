@@ -104,7 +104,7 @@ func (g *wipRig) block(t *testing.T) {
 	if j == nil {
 		t.Fatal("no live job to block")
 	}
-	underOpMu(g.r, func() { g.r.boundedFail(context.Background(), j, "test: blocked") })
+	underLock(g.r, j.wi, func() { g.r.boundedFail(context.Background(), j, "test: blocked") })
 	if last := g.hub.lastEnd(); last.Status != api.StatusBlocked {
 		t.Fatalf("close = %+v, want blocked", last)
 	}
@@ -263,7 +263,7 @@ func TestWrappedCloseLeavesNoWIPRef(t *testing.T) {
 		t.Fatal("setup: no stale WIP ref")
 	}
 	var err error
-	underOpMu(g.r, func() { err = g.r.stopOp(context.Background(), j, "wrapped", false, "") })
+	underLock(g.r, j.wi, func() { err = g.r.stopOp(context.Background(), j, "wrapped", false, "") })
 	if err != nil {
 		t.Fatalf("wrapped close: %v", err)
 	}

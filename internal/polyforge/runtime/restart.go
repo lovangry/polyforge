@@ -144,14 +144,14 @@ func (r *Runtime) requireMidflightCapsule(wi, project, dir string) error {
 // reconciliation (a running WI whose capsule lives on another machine is
 // that machine's business).
 //
-// Locking: Restart seeds the records under opMu (local work only), then
-// reconciles them on a lane: the journal replays hold no lock but a
-// placeholder's or a compensation's work item lock; each record is
-// reconciled under its work item's lock and opMu, released around every
-// network step — the record's session verify and attach (hubUnlocked /
-// offLock), a close's or a recovery's pushes and SessionEnd (offLock). A
-// seeded record is marked restartPending until the lane reconciled it,
-// so no door acts on an unreconciled record: its Stop and
+// Locking: Restart seeds each record under its work item's lock (local
+// work only), then reconciles them on a lane: the journal replays hold no
+// lock but a placeholder's or a compensation's work-item lock; each
+// record is reconciled under its work item's lock, its network steps
+// included — the session verify and attach, a close's or a recovery's
+// pushes and SessionEnd — so one hung step holds only that work item's
+// doors. A seeded record is marked restartPending until the lane
+// reconciled it, so no door acts on an unreconciled record: its Stop and
 // resume answer DAEMON-409; while the reconciliation runs every Start
 // answers DAEMON-503 and the deferred verifies wait (restarting).
 //
@@ -337,8 +337,8 @@ func (r *Runtime) RestartAttach(wi string) bool {
 }
 
 // reconcile is the restart reconciliation lane (see Restart): the journal
-// replays, then every seeded record, then the persist and the replays'
-// clones. opMu is held except around the network steps.
+// replays, then every seeded record (each under its work item's lock),
+// then the persist and the replays' clones.
 func (r *Runtime) reconcile(ctx context.Context, lane *restartLane, st *stateFile) error {
 	defer r.endRestarting()
 	defer lane.ended.Store(true)
@@ -362,10 +362,8 @@ func (r *Runtime) reconcile(ctx context.Context, lane *restartLane, st *stateFil
 		// keeps its record-kept posture. The record is reconciled under
 		// its work item's lock.
 		s := r.lockWI(rec.WorkItemID)
-		r.opMu.Lock()
 		r.restartOne(ctx, rec)
 		r.announceReconciled(rec.WorkItemID)
-		r.opMu.Unlock()
 		r.unlockWI(rec.WorkItemID, s)
 	}
 	if r.restartStopping(ctx) {
@@ -513,23 +511,17 @@ func (r *Runtime) attachPaused(ctx context.Context, rec *jobRecord, cause, detai
 	if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
 		return err
 	}
-	// The attach runs with opMu released and its work-item lock held
-	// (offLock, B-8): a Stop or a second resume of it answers DAEMON-409
-	// meanwhile, the other work items' doors stay open.
+	// The attach runs under the work item's lock (the caller's): a Stop or
+	// a second resume of it answers DAEMON-409 meanwhile, the other work
+	// items' doors stay open.
 	var err error
-	attach := func() {
-		r.hubCall(ctx, func() {
-			_, err = r.hub.SessionAttach(rec.WorkItemID, api.SessionAttachRequest{
-				WorkItemID: rec.WorkItemID,
-				SessionID:  rec.SessionID,
-				MachineID:  r.cfg.MachineID,
-			})
+	r.hubCall(ctx, func() {
+		_, err = r.hub.SessionAttach(rec.WorkItemID, api.SessionAttachRequest{
+			WorkItemID: rec.WorkItemID,
+			SessionID:  rec.SessionID,
+			MachineID:  r.cfg.MachineID,
 		})
-	}
-	if !r.offLock(j, attach) {
-		// defensive: a busy job leaves the table through no other door
-		return fmt.Errorf("runtime: %s: the record left the job table during its session attach", rec.WorkItemID)
-	}
+	})
 	if err == nil && r.isDown() {
 		// the shutdown latched while the attach was on the wire: resume
 		// nothing behind its teardown. The hub now says running under our
@@ -573,9 +565,9 @@ func (e *hubTransportError) Unwrap() error { return e.err }
 // close, the session no longer holds the WI, or another door's network
 // step of it in flight), DAEMON-503 (hub unreachable — nothing was
 // resumed), DAEMON-410 (the shutdown latched during the verify). The
-// verify and the attach run with opMu released and its work-item lock held
-// (offLock): a Stop of it answers DAEMON-409 meanwhile, a Start
-// DAEMON-503, and every other work item stays operable. A typed mid-flight failure
+// whole resume — verify, attach and the recovery continuation — runs
+// under the work item's lock: a Stop of it answers DAEMON-409 meanwhile,
+// a Start DAEMON-503, and every other work item stays operable. A typed mid-flight failure
 // (missing capsule / unmapped project) BLOCKS the work item first
 // (blockUnrecoverable, the ordinary bounded-fail close at aihub) and
 // returns the cause as the DAEMON-409 refusal detail — the resume door
@@ -590,8 +582,6 @@ func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 		return "", errBusy(id)
 	}
 	defer r.unlockWI(id, s)
-	r.opMu.Lock()
-	defer r.opMu.Unlock()
 	j := r.jobOf(id)
 	if j == nil {
 		return "", &api.Error{Code: api.ErrDaemonNotFound, Detail: fmt.Sprintf("no paused work item %s held by this daemon", id)}
@@ -615,19 +605,7 @@ func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 		// resume must not race the close it would cancel.
 		return "", &api.Error{Code: api.ErrDaemonConflict, Detail: fmt.Sprintf("a %s close of the retained paused record is pending (a crash interrupted it); the next daemon start replays the close", rec.StopReason)}
 	}
-	// The verify (and the attach below) run with opMu released and the
-	// job its work-item lock held (offLock): a Stop, a pause or a second resume
-	// of it answers DAEMON-409 meanwhile, a Start DAEMON-503, and every
-	// other work item's doors stay open.
-	var v *api.SessionVerifyResponse
-	var err error
-	if !r.offLock(j, func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) }) {
-		return "", &api.Error{Code: api.ErrDaemonConflict, Detail: fmt.Sprintf("%s: the record left the job table during the resume's session verify; nothing was resumed", id)}
-	}
-	if st, _ := j.snapshot(); st != StatePaused {
-		// defensive: a busy job's state moves through no other door
-		return "", &api.Error{Code: api.ErrDaemonConflict, Detail: fmt.Sprintf("work item turned %s during the resume's session verify; nothing was resumed", st)}
-	}
+	v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
 	if r.isDown() {
 		// the shutdown latched while the verify was on the wire: attach
 		// nothing behind its teardown — the record stays paused, the
@@ -680,8 +658,8 @@ func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 			}
 			return "", &api.Error{Code: api.ErrDaemonInternal, Detail: err.Error()}
 		}
-		// the recovery continuation runs synchronously (opMu held, released
-		// around its pushes like every recovery): a
+		// the recovery continuation runs synchronously (under the work
+		// item's lock, like every recovery): a
 		// terminal capsule verdict or an exhausted relaunch ladder closes
 		// the job inside it — the WI does NOT continue in place then.
 		if nj := r.jobOf(id); nj == nil {
@@ -843,19 +821,12 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) {
 		}
 		return
 	}
-	// The verify runs with opMu released and its work-item lock held
-	// (offLock): one hung verify holds neither the other work items'
-	// doors nor — past RestartHubWait — the daemon's socket.
+	// The verify runs under the work item's lock (the lane's): one hung
+	// verify holds neither the other work items' doors nor — past
+	// RestartHubWait — the daemon's socket.
 	var v *api.SessionVerifyResponse
 	var err error
-	verify := func() { r.hubCall(ctx, func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) }) }
-	if j := r.jobOf(rec.WorkItemID); j != nil {
-		if !r.offLock(j, verify) {
-			return // defensive: a busy record leaves the table through no other door
-		}
-	} else {
-		r.hubUnlocked(verify)
-	}
+	r.hubCall(ctx, func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) })
 	if r.restartStopping(ctx) {
 		return // a shutdown meanwhile: nothing is decided, the record is kept
 	}
@@ -1102,8 +1073,6 @@ func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bo
 		return false // another operation of the work item is under way
 	}
 	defer r.unlockWI(j.wi, s)
-	r.opMu.Lock()
-	defer r.opMu.Unlock()
 	if ctx.Err() != nil || r.closing() {
 		// shutting down: nothing may be recovered or spawned now — the
 		// record persists and the next restart verifies afresh.
@@ -1113,7 +1082,7 @@ func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bo
 	restarting := r.restarting
 	r.mu.Unlock()
 	if restarting {
-		return false // the restart reconciliation is still running (it releases opMu around network steps)
+		return false // the restart reconciliation is still running
 	}
 	if r.jobOf(j.wi) != j {
 		return true // closed or replaced by another door meanwhile
@@ -1125,13 +1094,11 @@ func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bo
 		return true
 	}
 	rec := j.record()
-	// the verify runs with opMu released and its work-item lock held
-	// (offLock, B-8): a hung hub holds no other work item's door
+	// the verify runs under the work item's lock: a hung hub holds no
+	// other work item's door
 	var v *api.SessionVerifyResponse
 	var err error
-	if !r.offLock(j, func() { r.hubCall(ctx, func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) }) }) {
-		return true // defensive: a busy job leaves the table through no other door
-	}
+	r.hubCall(ctx, func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) })
 	if ctx.Err() != nil || r.closing() || r.isDown() {
 		return true // shutting down meanwhile: the record persists, the next start verifies afresh
 	}

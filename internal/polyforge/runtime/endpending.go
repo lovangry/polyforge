@@ -245,7 +245,8 @@ func (r *Runtime) finishBlocked(j *job, detail string, settled bool) {
 
 // retrySeal is the SEALING job's close retry: the terminal SessionEnd
 // failed after the agent was torn down, so the job sits in SEALING with its
-// verdict recorded. Each attempt takes opMu, checks the job is still the
+// verdict recorded. Each attempt takes the work item's lock (or tries
+// later when another operation of it holds it), checks the job is still the
 // current SEALING one, and runs the very close the restart finisher runs —
 // stopOp(alreadySealing) with the recorded reason and push state. A typed
 // STALE_SESSION answer (the session no longer holds the work item: an
@@ -263,8 +264,6 @@ func (r *Runtime) sealAttempt(j *job, note string) bool {
 		return false // another operation of the work item is under way
 	}
 	defer r.unlockWI(j.wi, s)
-	r.opMu.Lock()
-	defer r.opMu.Unlock()
 	if r.jobOf(j.wi) != j {
 		return true // settled or replaced meanwhile
 	}

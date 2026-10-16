@@ -169,7 +169,7 @@ func TestClaimCrashRestartReplaysSameKey(t *testing.T) {
 	if err := r2.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
-	r2.replays.Wait() // the journal replays clone outside Restart (B-8)
+	settleReplays(r2) // the journal replays clone outside Restart
 	if n := hub2.claimCount(); n != 1 {
 		t.Fatalf("the replay must issue exactly one claim, got %d", n)
 	}
@@ -213,7 +213,7 @@ func TestStaleClaimingEntryDropped(t *testing.T) {
 	if err := r.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
-	r.replays.Wait() // the journal replays clone outside Restart (B-8)
+	settleReplays(r) // the journal replays clone outside Restart
 	if n := hub.claimCount(); n != 0 {
 		t.Fatalf("a stale entry must not be re-claimed, got %d claims", n)
 	}

@@ -1,7 +1,7 @@
 package runtime
 
 // b8_claim_outside_opmu_test.go — repo review 2026-10-16 B-8: the claim's
-// capsule clone and materialize run outside the runtime's opMu, so one
+// capsule clone and materialize run outside every runtime lock, so one
 // slow or hung clone no longer freezes the other work items, and a
 // stop, a pause or a shutdown during the claim cancels it cleanly.
 
@@ -65,7 +65,7 @@ func waitClaiming(t *testing.T, r *Runtime, wi string) {
 }
 
 // within runs fn and fails the test when it does not return in time —
-// the "promptly" of B-8 (before the fix these calls waited on opMu
+// the "promptly" of B-8 (before the fix these calls waited on a global lock
 // behind the hung clone, i.e. forever).
 func within(t *testing.T, d time.Duration, what string, fn func()) {
 	t.Helper()
@@ -277,7 +277,7 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 	if err := r2.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
-	r2.replays.Wait() // the journal replays clone outside Restart (B-8)
+	settleReplays(r2) // the journal replays clone outside Restart
 	defer terminateJobAgent(r2, wi)
 	ji, ok := r2.Info(wi)
 	if !ok || ji.State != StateRunning || ji.SessionID != rec.SessionID {

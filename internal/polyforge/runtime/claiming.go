@@ -368,10 +368,10 @@ type claimReplay struct {
 // daemon's socket. A shutdown meanwhile defers them (BeginShutdown) with
 // their journal entries kept.
 //
-// The caller holds no lock. The shutdown latch and the WaitGroup's Add are
-// read and done under mu, so BeginShutdown (which latches under mu before
-// it waits) either waits for these goroutines or they are never started: a
-// replay the shutdown caught is deferred here and then, journal kept.
+// The caller holds no lock. The placeholders already sit CLAIMING in the
+// table, so a shutdown latched before or after this point cancels them and
+// waits for their claims to settle (BeginShutdown); a replay the latch
+// caught first is deferred here, journal kept.
 func (r *Runtime) runReplays(ctx context.Context, replays []claimReplay) {
 	r.mu.Lock()
 	if r.down {
@@ -379,11 +379,9 @@ func (r *Runtime) runReplays(ctx context.Context, replays []claimReplay) {
 		r.deferReplays(ctx, replays)
 		return
 	}
-	r.replays.Add(len(replays))
 	r.mu.Unlock()
 	for _, cr := range replays {
 		go func(cr claimReplay) {
-			defer r.replays.Done()
 			if err := r.runClaim(ctx, cr.wi, cr.j); err != nil {
 				if IsClaimDeferred(err) {
 					return // a shutdown during the replay: the entry stays

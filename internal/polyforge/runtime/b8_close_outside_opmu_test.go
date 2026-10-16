@@ -3,7 +3,7 @@ package runtime
 // b8_close_outside_opmu_test.go — repo review 2026-10-16 B-8, the
 // remainder: the closes' and the recovery's network steps (chain push,
 // task-repo WIP, SessionEnd), a failed start's compensation and the
-// restart's journal-replay clone run outside the runtime's opMu, so one
+// restart's journal-replay clone hold only their own work item's lock, so one
 // work item's hung push no longer freezes the stop, pause, resume and
 // wrap of the others.
 
@@ -307,7 +307,7 @@ func TestB8ShutdownDuringHungSealPush(t *testing.T) {
 	_ = recvErr(t, stopA, "A's close")
 }
 
-// The restart's journal replay clones outside Restart and opMu: a hung
+// The restart's journal replay clones outside Restart and every lock: a hung
 // replay clone neither holds Restart (the daemon's socket waits on it)
 // nor the other work items; a shutdown defers it with its entry kept.
 func TestB8RestartReplayCloneOutsideOpMu(t *testing.T) {
@@ -336,7 +336,7 @@ func TestB8RestartReplayCloneOutsideOpMu(t *testing.T) {
 	actx, cancel := context.WithTimeout(bg(), 20*time.Second)
 	defer cancel()
 	within(t, 25*time.Second, "BeginShutdown", func() { r.BeginShutdown(actx) })
-	r.replays.Wait()
+	settleReplays(r)
 	if got := journaled(r, slow); got == nil || got.SessionID != sess {
 		t.Fatalf("journal after the deferred replay = %+v, want the original entry", got)
 	}

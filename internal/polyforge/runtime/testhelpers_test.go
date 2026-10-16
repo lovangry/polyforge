@@ -532,13 +532,13 @@ func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, *supervise.Q
 	return r, toOB, fromOB
 }
 
-// settleOps waits, at most bound, until no operation holds a work item's
-// lock and no claim sits CLAIMING.
+// settleOps waits, at most bound, until no restart reconciliation runs,
+// no operation holds a work item's lock and no claim sits CLAIMING.
 func settleOps(r *Runtime, bound time.Duration) {
 	deadline := time.Now().Add(bound)
 	for time.Now().Before(deadline) {
 		r.mu.Lock()
-		idle := len(r.slots) == 0
+		idle := len(r.slots) == 0 && !r.restarting
 		for _, j := range r.jobs {
 			if st, _ := j.snapshot(); st == StateClaiming {
 				idle = false
@@ -948,23 +948,26 @@ func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...
 	return newProcOpts(cmd, stdin, stdout, procOpts{taps: taps})
 }
 
-// underOpMu runs fn holding opMu, as the runtime's own doors call the
-// locked operations (offLock releases and retakes it around the network
-// steps).
-func underOpMu(r *Runtime, fn func()) {
-	r.opMu.Lock()
-	defer r.opMu.Unlock()
+// underLock runs fn holding wi's lock, as the runtime's own doors call
+// the locked operations.
+func underLock(r *Runtime, wi string, fn func()) {
+	s := r.lockWI(wi)
+	defer r.unlockWI(wi, s)
 	fn()
 }
 
+// settleReplays waits for the restart's journal replays (and every other
+// operation under way) to settle.
+func settleReplays(r *Runtime) { settleOps(r, 20*time.Second) }
+
 // replayClaims runs the claiming-journal replay as Restart does —
-// resumeClaiming under opMu, then the replays' clones outside it — and
-// waits for every replay to settle.
+// resumeClaiming, then the replays' clones — and waits for every replay
+// to settle.
 func replayClaims(r *Runtime) {
 	var rs []claimReplay
-	underOpMu(r, func() { rs = r.resumeClaiming(context.Background()) })
+	rs = r.resumeClaiming(context.Background())
 	r.runReplays(context.Background(), rs)
-	r.replays.Wait()
+	settleReplays(r)
 }
 
 // capsuleSessionHandle answers the session handle the capsule's

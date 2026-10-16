@@ -189,16 +189,6 @@ type Runtime struct {
 	// manualMu guards the daemon-local manual-models.json (manualmodels.go).
 	manualMu sync.Mutex
 
-	// opMu serializes the mutating operations other than a claim (Stop,
-	// recover, resume, the restart reconciliation's records), each taken
-	// after the work item's own lock. It is NOT held across the slow
-	// network steps: a close's or a recovery's pushes and SessionEnd, a
-	// resume's verify and attach, the restart reconciliation's and the
-	// deferred retry's verifies run with its work-item lock held (offLock).
-	// Each re-takes the lock and re-checks what it relies on before
-	// mutating. No aihub call runs under opMu. A claim (Start, a journal
-	// replay) runs under its work item's lock alone.
-	opMu      sync.Mutex
 	statePath string
 	// persistGen (under mu) numbers persist's snapshots in the order they
 	// were taken; persistMu serializes the writes, and a write whose
@@ -225,13 +215,10 @@ type Runtime struct {
 	// claimMu serializes the claiming journal's read-modify-writes: its
 	// writers hold different work items' locks.
 	claimMu sync.Mutex
-	// replays tracks the restart's journal-replay claim goroutines
-	// (runReplays).
-	replays sync.WaitGroup
 	// restarting (under mu) is latched while the restart reconciliation
-	// runs (Restart, then its lane after an early return): it releases opMu
-	// around every network step, and meanwhile a deferred verify waits
-	// (retries) and a Start answers the typed transient.
+	// runs (Restart, then its lane after an early return): meanwhile a
+	// deferred verify waits (retries) and a Start answers the typed
+	// transient.
 	restarting bool
 	// restartServed (under mu): Restart returned before its
 	// reconciliation finished — the daemon serves, its startup
@@ -387,24 +374,6 @@ func (j *job) pendingRestart() bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	return j.restartPending
-}
-
-// offLock runs fn — one job's slow network step: a chain push, the
-// task-repo WIP push, a SessionEnd — with opMu RELEASED. The caller holds
-// the job's work-item lock throughout (no other door of it interleaves)
-// and opMu on entry, and holds it again on return, so one work item's
-// hung push no longer freezes the stop, pause, resume, wrap and recovery
-// of every other. It reports whether j is still the job table's entry for
-// its work item once the lock is retaken — when not, the caller must not
-// mutate it.
-func (r *Runtime) offLock(j *job, fn func()) (current bool) {
-	r.opMu.Unlock()
-	defer func() {
-		r.opMu.Lock()
-		current = r.jobOf(j.wi) == j
-	}()
-	fn()
-	return
 }
 
 // errBusy is the refusal of a door that finds another operation of the
@@ -987,16 +956,6 @@ func (r *Runtime) startAdmit(id string) error {
 	return nil
 }
 
-// hubUnlocked runs fn — one hub call of the restart reconciliation that
-// has no job of its own to latch busy — with opMu RELEASED; the caller
-// holds opMu on entry and holds it again on return, and re-checks
-// whatever it relies on.
-func (r *Runtime) hubUnlocked(fn func()) {
-	r.opMu.Unlock()
-	defer r.opMu.Lock()
-	fn()
-}
-
 // claimInFlightError is the typed transient a Start of a work item meets
 // while another operation of it (most often another start's hub calls)
 // holds its lock.
@@ -1264,13 +1223,6 @@ func (r *Runtime) finishClaim(ctx context.Context, wi string, j *job, sceneErr e
 	if sceneErr != nil {
 		r.dropJob(j)
 		return r.abandonClaim(ctx, j, wi, sceneErr, note)
-	}
-	if r.jobOf(j.wi) != j {
-		// defensive: nothing but finishClaim drops a placeholder, but an
-		// agent must never be installed for a job the table no longer
-		// holds — end the session blocked instead.
-		err := fmt.Errorf("runtime: %s: the claim's placeholder left the job table before its agent started", j.wi)
-		return r.abandonClaim(ctx, j, wi, err, err.Error())
 	}
 	return r.installClaim(ctx, wi, j)
 }
@@ -1821,10 +1773,14 @@ func copyTree(src, dst string) error {
 // (retrySeal) — and by a restart's finisher if the daemon stops first —
 // never a silent half-seal.
 //
-// A job still CLAIMING (B-8: its capsule clone/materialize runs outside
-// opMu) has no agent and no scene to seal: the close cancels the clone
-// and waits for the claim lane to settle it (closeClaim) — opMu is not
-// held while waiting.
+// A job still CLAIMING (its capsule clone/materialize runs with no lock
+// held) has no agent and no scene to seal: the close cancels the clone
+// and waits for the claim lane to settle it (closeClaim) — the work
+// item's lock is not held while waiting.
+//
+// The whole close runs under the work item's lock, its pushes and
+// SessionEnd included: every other door of the work item refuses
+// meanwhile, and no door of any other work item waits on it.
 func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 	id := r.Resolve(wi)
 	if id == "" {
@@ -1843,18 +1799,14 @@ func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 			r.unlockWI(id, s)
 		}
 	}()
-	r.opMu.Lock()
 	j := r.resolveJob(wi)
 	if j == nil {
-		r.opMu.Unlock()
 		return fmt.Errorf("runtime: %s: no active job", wi)
 	}
 	if j.pendingRestart() {
-		r.opMu.Unlock()
 		return errReconciling(j.wi)
 	}
 	if done := j.requestClaimClose(reason); done != nil {
-		r.opMu.Unlock()
 		r.unlockWI(id, s) // the claim lane settles the close under the lock
 		locked = false
 		select {
@@ -1867,14 +1819,14 @@ func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 		j.mu.Unlock()
 		return err
 	}
-	defer r.opMu.Unlock()
 	return r.stopOp(ctx, j, reason, false, "")
 }
 
 // requestClaimClose records a close on a CLAIMING job and cancels its
 // clone/materialize; it answers the channel that closes once the claim
 // lane settled, or nil when the job is not CLAIMING. The first request
-// wins. Caller holds opMu (so the state cannot leave CLAIMING meanwhile).
+// wins. The caller holds the work item's lock (so the state cannot leave
+// CLAIMING meanwhile).
 func (j *job) requestClaimClose(reason string) <-chan struct{} {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -1996,8 +1948,7 @@ func IsClaimDeferred(err error) bool {
 // for: a Start still on its pre-claim steps defers itself at the latch, a
 // close or recovery on a hung push or hub call starts no agent once it
 // returns, and the restart reconciliation decides nothing after the
-// latch. Once it returned the live job set only shrinks. The restart's
-// journal-replay goroutines are waited for within the same bound.
+// latch. Once it returned the live job set only shrinks.
 func (r *Runtime) BeginShutdown(ctx context.Context) {
 	r.mu.Lock()
 	r.down = true
@@ -2036,17 +1987,6 @@ func (r *Runtime) BeginShutdown(ctx context.Context) {
 			return
 		}
 	}
-	// the restart's journal-replay goroutines (runReplays) end with their
-	// claims: wait for them within the same bound so none outlives the
-	// shutdown
-	replaysDone := make(chan struct{})
-	go func() { r.replays.Wait(); close(replaysDone) }()
-	select {
-	case <-replaysDone:
-	case <-ctx.Done():
-		fmt.Fprintf(os.Stderr, "runtime: shutdown: journal replays still settling at the wait's end\n")
-		return
-	}
 }
 
 // supersedeOp is the OBSuperseded response (v1.5 M4 + m3): the periodic
@@ -2068,8 +2008,6 @@ func (r *Runtime) supersedeOp(ctx context.Context, j *job, detail string) {
 		return
 	}
 	defer r.unlockWI(j.wi, s)
-	r.opMu.Lock()
-	defer r.opMu.Unlock()
 	// The job may have settled (Stop finished, bounded fail) between
 	// handleOB's fetch and this lock: a gone job needs nothing.
 	if r.jobOf(j.wi) != j {
@@ -2161,16 +2099,10 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	r.killAgentTree(j)
 
 	// The network half — final push, task-repo WIP, SessionEnd — runs
-	// outside opMu with its work-item lock held (offLock, B-8): the state
+	// under the work item's lock like the rest of the close: the state
 	// already says SEALING (or the retained record carries the terminal
-	// stop reason), so every other door refuses this job meanwhile.
-	finalReason := reason
-	var endErr error
-	if !r.offLock(j, func() {
-		finalReason, endErr = r.sealNetwork(ctx, j, reason, note, alreadyPushed)
-	}) {
-		return fmt.Errorf("runtime: %s: the job left the job table during its close", j.wi)
-	}
+	// stop reason).
+	finalReason, endErr := r.sealNetwork(ctx, j, reason, note, alreadyPushed)
 	if endErr != nil {
 		if st, _ := j.snapshot(); st == StateSealing {
 			// Persist the push outcome and retry the close in the
@@ -2206,7 +2138,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	return nil
 }
 
-// sealNetwork is stopOp's network half, run outside opMu (offLock): the
+// sealNetwork is stopOp's network half: the
 // final push — UNLESS this close's seal push already reached the hub
 // (alreadyPushed: a seal retry or the restart finisher after a
 // successful push; a second push could only fail against a revoked
@@ -2336,13 +2268,8 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job) error {
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
-	// The network half runs outside opMu with its work-item lock held
-	// (offLock, B-8): the record already says PAUSED.
-	var endErr error
-	if !r.offLock(j, func() { endErr = r.pauseNetwork(j) }) {
-		return fmt.Errorf("runtime: %s: the job left the job table during its pause close", j.wi)
-	}
-	if endErr != nil {
+	// The network half: the record already says PAUSED.
+	if endErr := r.pauseNetwork(j); endErr != nil {
 		return fmt.Errorf("runtime: %s: session-end(paused) failed (record left paused; the next restart reconciles): %w", j.wi, endErr)
 	}
 	// The observe release (Finding 4): stops the monitor loop, prunes the
@@ -2353,7 +2280,7 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job) error {
 	return nil
 }
 
-// pauseNetwork is pauseOp's network half, run outside opMu (offLock):
+// pauseNetwork is pauseOp's network half:
 // commit+push the dirty capsule (a failed push is log-only — see
 // pauseOp), the task-repo WIP lane and SessionEnd(paused). It answers
 // the SessionEnd error.

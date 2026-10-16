@@ -30,23 +30,22 @@ import (
 const cleanupBound = 10 * time.Second
 
 // recoverOp runs one recovery event from the message loop. Callers have
-// already verified the attempt-id fence and the RUNNING state; opMu
-// serializes it against Start/Stop/Restart.
+// already verified the attempt-id fence and the RUNNING state; the work
+// item's lock serializes it against the other doors of the work item.
 func (r *Runtime) recoverOp(ctx context.Context, j *job, cause, detail string) {
 	s, ok := r.tryLockWI(j.wi)
 	if !ok {
 		return // another operation of the work item is under way: it decides the job
 	}
 	defer r.unlockWI(j.wi, s)
-	r.opMu.Lock()
-	defer r.opMu.Unlock()
 	if r.jobOf(j.wi) != j || j.pendingRestart() {
 		return // settled meanwhile, or the restart reconciliation decides it
 	}
 	r.recoverCore(ctx, j, cause, detail)
 }
 
-// recoverCore is the recovery sequence; the caller holds opMu. cause
+// recoverCore is the recovery sequence; the caller holds the work item's
+// lock, across its pushes and the relaunch. cause
 // names the recovery trigger (the interrupted-dispatch archive's class
 // input, and the consecutive-failures ledger's exempt-cause key);
 // detail is the observe
@@ -170,16 +169,8 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// scene) gets it re-materialized before the next derivation wakes up
 	// blind to its own goal (an aihub read when the claim snapshot is
 	// gone). Best-effort, idempotent.
-	//
-	// Both run outside opMu with its work-item lock held (offLock, B-8): the
-	// job sits RECOVERING with no agent, so no other door acts on it.
-	if !r.offLock(j, func() {
-		_, _ = commitDirty(r, j)
-		r.ensureWorkItemFile(ctx, j)
-	}) {
-		fmt.Fprintf(os.Stderr, "runtime: %s: the job left the job table during its recovery; nothing relaunched\n", j.wi)
-		return
-	}
+	_, _ = commitDirty(r, j)
+	r.ensureWorkItemFile(ctx, j)
 
 	// The bundle is pinned at claim (v2-converge §2.4): recovery relaunches
 	// from the capsule's own materialized snapshot and never re-pins or
@@ -383,36 +374,28 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 	// the capsule ends at rides the blocked verdict (cross-daemon continue
 	// check, §7).
 	r.killAgentTree(j)
-	// The pushes and the blocked close run outside opMu with the job
-	// its work-item lock held (offLock); the verdict is applied once the lock
-	// is retaken.
-	settled := false
-	if !r.offLock(j, func() {
-		head := ""
-		chainPushed := true // nothing local to push without a capsule
-		if dirExists(j.capsuleDir) {
-			var perr error
-			head, perr = commitDirty(r, j)
-			chainPushed = perr == nil
-			// The re-claim the owner's resume runs restores the task repos
-			// from the carrier: their uncommitted work rides refs/pf-wip
-			// (polyforge#167). Before the verdict — the session credential
-			// dies with it.
-			r.saveTaskWIP(j, true, chainPushed)
-		}
-		j.mu.Lock()
-		j.endNote, j.endHead = detail, head
-		j.mu.Unlock()
-		// When boundedFail's own push did not land, the close goes
-		// through closeBlocked's push-then-close, so a hub blip never lets
-		// SessionEnd(blocked) land with unpushed commits.
-		settled = r.closeBlocked(ctx, j, !chainPushed)
-	}) {
-		fmt.Fprintf(os.Stderr, "runtime: %s: the job left the job table during its blocked close\n", j.wi)
-		return
+	// The pushes and the blocked close run under the work item's lock
+	// like the rest of the verdict.
+	head := ""
+	chainPushed := true // nothing local to push without a capsule
+	if dirExists(j.capsuleDir) {
+		var perr error
+		head, perr = commitDirty(r, j)
+		chainPushed = perr == nil
+		// The re-claim the owner's resume runs restores the task repos
+		// from the carrier: their uncommitted work rides refs/pf-wip
+		// (polyforge#167). Before the verdict — the session credential
+		// dies with it.
+		r.saveTaskWIP(j, true, chainPushed)
 	}
+	j.mu.Lock()
+	j.endNote, j.endHead = detail, head
+	j.mu.Unlock()
+	// When boundedFail's own push did not land, the close goes through
+	// closeBlocked's push-then-close, so a hub blip never lets
+	// SessionEnd(blocked) land with unpushed commits.
+	settled := r.closeBlocked(ctx, j, !chainPushed)
 	r.finishBlocked(j, detail, settled)
-	_ = ctx
 }
 
 // commitDirty is the commit-dirty-on-recover step (§六): stage everything,
@@ -440,8 +423,12 @@ func (r *Runtime) saveTaskWIP(j *job, keep, chainOK bool) {
 	if !dirExists(j.capsuleDir) {
 		return
 	}
-	gitops.PushTaskWIP(j.git, keep, chainOK)
+	pushTaskWIPFn(j.git, keep, chainOK)
 }
+
+// pushTaskWIPFn is the close's task-repo WIP push (a seam for the
+// hung-call tests).
+var pushTaskWIPFn = gitops.PushTaskWIP
 
 // SaveTaskWIP is the graceful-shutdown face of the WIP lane: called after
 // the shutdown terminated wi's agent tree, it snapshots the task repos'

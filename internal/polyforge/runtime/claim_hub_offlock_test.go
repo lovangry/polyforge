@@ -2,7 +2,7 @@ package runtime
 
 // claim_hub_offlock_test.go — the hub calls of a claim (work-item probe,
 // journal verify, SessionClaim) and of a live resume (verify, attach) run
-// outside opMu (B-8 finish): one hung hub call for work item A no longer
+// under work item A's lock alone: one hung hub call for A no longer
 // freezes the doors of every other work item, and the work item it hangs
 // for stays single-claimed and refuses competing doors meanwhile.
 

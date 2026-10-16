@@ -54,7 +54,7 @@ func TestTerminalWrapSealPushesTheFinalState(t *testing.T) {
 	}
 }
 
-// B-8 (S part): the task-repo clone runs under opMu on the claim lane;
+// B-8 (S part): the task-repo clone runs on the claim lane;
 // it must never wait on an interactive credential prompt.
 func TestTaskRepoCloneIsNonInteractive(t *testing.T) {
 	bin := t.TempDir()

@@ -295,8 +295,8 @@ func gitTask(ctx context.Context, dir string, args ...string) (string, error) {
 
 // taskGitEnv is the environment of every task-repo git call: the daemon's
 // own environ (the machine's default credential context) made
-// non-interactive. The claim lane runs them outside the runtime's
-// opMu, but a credential prompt on the daemon's tmux tty, or a stalled
+// non-interactive. The claim lane runs them outside every runtime
+// lock, but a credential prompt on the daemon's tmux tty, or a stalled
 // transfer, would still pin the claim (and its slot) until a stop or a
 // shutdown cancels it. So: git's own credential prompt is off (fail
 // instead), and an HTTP transfer below 1 KB/s for 60 s aborts. An
