@@ -296,7 +296,8 @@ func (p *ensurePlan) start(stdout, stderr io.Writer) error {
 // and the markers of a harness session (TMUX*, every CLAUDE*, PF_CHAT_ID,
 // PF_WI_ID) are dropped so the daemon — and the step agents it spawns —
 // never inherit them. Everything else (e.g. ANTHROPIC_*) is whatever the
-// tmux server carries.
+// tmux server carries — and reaches every step process (precedence vs
+// claude-config/settings.json: see runtime/claudespawn.go, V-11).
 func (p *ensurePlan) loopScript() string {
 	argv := []string{"nohup", shQuote(p.pfBin)}
 	for _, a := range p.daemonArgv() {
