@@ -98,6 +98,13 @@ type Config struct {
 	// (defaults 2s / 60s). Retries run until the hub accepts the close.
 	EndRetryBase time.Duration
 	EndRetryMax  time.Duration
+	// RestartHubWait is how long one hub call of the restart
+	// reconciliation (a verify, a replayed claim, an attach) may go
+	// unanswered before Restart returns and lets the daemon serve
+	// (default 5s); the reconciliation then finishes in the background,
+	// its unverified records shown waiting for aihub (restart.go). Local
+	// and git work never ends the wait early.
+	RestartHubWait time.Duration
 	// EventTap, when non-nil, receives runtime-sourced diagnostic events
 	// (kind "push_failed" on a seal push that failed after its retries)
 	// so they land in the daemon's durable events log next to the
@@ -150,6 +157,9 @@ func (c *Config) fill() {
 	if c.EndRetryMax <= 0 {
 		c.EndRetryMax = 60 * time.Second
 	}
+	if c.RestartHubWait <= 0 {
+		c.RestartHubWait = 5 * time.Second
+	}
 }
 
 // Runtime is the per-daemon WI lifecycle manager.
@@ -179,14 +189,18 @@ type Runtime struct {
 	// opMu serializes the mutating operations (Start/Stop/recover/Restart):
 	// the message loop and the daemon's direct calls share it, so the state
 	// machine never sees two drivers at once. It is NOT held across the slow
-	// network steps (RR B-8): a claim's capsule clone and materialize run
+	// network steps: a claim's capsule clone and materialize run
 	// with the job CLAIMING in the table; a close's or a recovery's pushes
 	// and SessionEnd run with the job latched busy (offLock); a claim's
 	// compensation SessionEnd runs with its work item latched ending
-	// (claimEndOffLock). Each re-takes the lock and re-checks the job's
-	// identity before mutating it. The hub calls of the claim itself (probe,
-	// verify, SessionClaim) stay under it, bounded by the hub client's
-	// timeout.
+	// (claimEndOffLock); the claim's own hub calls (probe, journal verify,
+	// SessionClaim) run with the work item latched starting
+	// (startingClaims); a resume's verify and attach, the restart
+	// reconciliation's and the deferred retry's verifies with the job
+	// latched busy (the restart's journal replays under the restarting
+	// latch). Each re-takes the lock and re-checks what it relies on (the
+	// job's identity, the start's admission, the shutdown latch) before
+	// mutating. No aihub call runs under opMu.
 	opMu      sync.Mutex
 	statePath string
 	// persistMu serializes persist's snapshot and write: with the network
@@ -205,17 +219,41 @@ type Runtime struct {
 	// meanwhile answers the typed transient instead of replaying the
 	// journal entry of a session that close is ending.
 	endingClaims map[string]int
+	// startingClaims (under mu) latches the work-item keys (submitted
+	// spelling, then the canonical id) of a Start between its first hub
+	// call and its CLAIMING placeholder (claimLocked): those hub calls
+	// run outside opMu, and a second Start of the same work item answers
+	// the typed transient meanwhile, a Stop DAEMON-409.
+	startingClaims map[string]bool
 	// claimMu serializes the claiming journal's read-modify-writes: the
 	// claim-end retry lane writes it without opMu.
 	claimMu sync.Mutex
 	// replays tracks the restart's journal-replay claim goroutines
 	// (runReplays).
 	replays sync.WaitGroup
-	// restarting (under mu) is latched while Restart reconciles: Restart
-	// releases opMu around its network steps (offLock, claimEndOffLock),
-	// and a deferred verify must not run mid-reconciliation (it waits —
-	// retries — until Restart returned).
+	// restarting (under mu) is latched while the restart reconciliation
+	// runs (Restart, then its lane after an early return): it releases opMu
+	// around every network step, and meanwhile a deferred verify waits
+	// (retries) and a Start answers the typed transient.
 	restarting bool
+	// restartServed (under mu): Restart returned before its
+	// reconciliation finished — the daemon serves, its startup
+	// re-attachment pass already ran, and the lane hands every job it
+	// brings back to life to the observe lane itself.
+	restartServed bool
+	// restartAttached (under mu): the work items that were live when
+	// Restart returned before its lane finished — exactly the set the
+	// daemon's startup re-attachment pass hands to observe (RestartAttach);
+	// every job the lane brings to life afterwards it announces itself.
+	restartAttached map[string]bool
+	// laneRunning / laneHubSince (under mu): the restart lane is running,
+	// and the moment its current hub call (a verify, a replayed claim, an
+	// attach) went out — zero while it runs local or git work. Restart's
+	// wait bounds only hub calls, and the shutdown joins only non-hub
+	// steps (WaitRestartStep; a hub answer meets the shutdown latch and
+	// decides nothing).
+	laneRunning  bool
+	laneHubSince time.Time
 
 	// The durable-close retry lane (endpending.go): WIs whose
 	// SessionEnd(blocked) retry goroutine is running (one per WI), and
@@ -340,6 +378,13 @@ type job struct {
 	awaitingHub bool
 	// claim is the CLAIMING placeholder's lane (B-8); nil otherwise.
 	claim *claimLane
+	// restartPending: a record Restart seeded whose session verify has
+	// not been answered yet (the reconciliation lane, restart.go). The
+	// seed latches it busy until the lane reaches it.
+	restartPending bool
+	// restartDeferNoted: Restart returned with this record still pending
+	// and showed it waiting for aihub (its deferred event is out).
+	restartDeferNoted bool
 	// busy counts the slow network steps of this job running outside
 	// opMu (offLock): while it is non-zero no other door may act on the
 	// job — Stop answers 409, recovery / supersession / resume / the
@@ -356,7 +401,7 @@ func (j *job) isBusy() bool {
 }
 
 // offLock runs fn — one job's slow network step: a chain push, the
-// task-repo WIP push, a SessionEnd — with opMu RELEASED (RR B-8, the claim's
+// task-repo WIP push, a SessionEnd — with opMu RELEASED (the claim's
 // pattern carried to the closes and the recovery). The caller holds opMu on
 // entry and holds it again on return; in between the job is latched busy,
 // so no other door interleaves with the step and one work item's hung push
@@ -380,10 +425,11 @@ func (r *Runtime) offLock(j *job, fn func()) (current bool) {
 }
 
 // errBusy is the refusal of a door that finds j's network step in
-// flight (offLock): the in-flight close or recovery decides the job.
+// flight (offLock, or a claim/resume latch): the in-flight step decides
+// the job.
 func errBusy(wi string) error {
 	return &api.Error{Code: api.ErrDaemonConflict,
-		Detail: fmt.Sprintf("%s: a close or recovery of this work item is in progress (its push or session end is under way); retry once it settles", wi)}
+		Detail: fmt.Sprintf("%s: a close, recovery, resume or claim of this work item is in progress (its push or hub call is under way); retry once it settles", wi)}
 }
 
 // claimLane is the bookkeeping of one start between its claim and its
@@ -729,11 +775,13 @@ func mintSessionID() (string, error) {
 // a crash after the call by verify — the ambiguous-claim window is
 // closed from both sides.
 //
-// Locking (B-8): opMu is held for the pre-claim checks, the claim, the
-// journal and the CLAIMING placeholder, released for the capsule clone
-// and the materialize, and taken again to install the agent (or to
-// settle the claim: an operator close, a shutdown deferral, the blocked
-// compensation). Start still returns only once the claim settled.
+// Locking (B-8): opMu is held for the pre-claim checks, the journal and
+// the CLAIMING placeholder, released for every hub call of the claim
+// (the work item latched starting meanwhile, claimLocked), for the
+// capsule clone and the materialize, and taken again to install the
+// agent (or to settle the claim: an operator close, a shutdown deferral,
+// the blocked compensation). Start still returns only once the claim
+// settled.
 func (r *Runtime) Start(ctx context.Context, wi string) error {
 	if r.abortedClaims() {
 		return claimDeferredError(wi)
@@ -745,39 +793,67 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 		return err
 	}
 	// The claim landed and the job sits CLAIMING in the table: the clone
-	// and the materialize run WITHOUT opMu (RR B-8), so one slow or hung
+	// and the materialize run WITHOUT opMu, so one slow or hung
 	// clone no longer freezes the stops, pauses, resumes, recoveries and
 	// claims of every other work item.
 	return r.runClaim(ctx, wi, j)
 }
 
-// claimLocked is Start's locked first half (opMu held): the pre-claim
-// checks, the journaled claim and the CLAIMING placeholder.
+// claimLocked is Start's locked first half: the pre-claim checks, the
+// journaled claim and the CLAIMING placeholder. The caller holds opMu on
+// entry and on return; the hub calls in between — the work-item probe, the
+// verify of a journaled claim and SessionClaim itself — run with opMu
+// RELEASED, so one hung hub call no longer freezes the doors of
+// every other work item. Meanwhile the work item's keys (the submitted
+// spelling, then the probe's canonical id) are latched starting — a
+// concurrent Start of it answers the typed transient, a Stop DAEMON-409 —
+// and a retained paused record the claim may replace is latched busy. The
+// latches are released only once the CLAIMING placeholder is in the table
+// (or the start settled otherwise), so a work item is never claimed twice
+// in-process.
 func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
 	manual := r.takeModels(wi) // always consumed: a refused start must not leak it
-	if r.abortedClaims() {
-		return nil, claimDeferredError(wi)
+	if err := r.startGate(wi, nil); err != nil {
+		return nil, err
 	}
-	if r.claimEnding(wi) {
-		return nil, &api.Error{Code: api.ErrDaemonHubUnavailable,
-			Detail: fmt.Sprintf("%s: the session end of an earlier claim of this work item is still on the wire; retry later", wi)}
+	if !r.latchStarting(wi) {
+		return nil, claimInFlightError(wi)
 	}
-	if j := r.jobOf(wi); j != nil {
-		if j.isBusy() {
-			// its close is still pushing (B-8): transient — the dispatcher
-			// and the resume-blocked door retry a DAEMON-503
-			return nil, &api.Error{Code: api.ErrDaemonHubUnavailable,
-				Detail: fmt.Sprintf("%s: a close or recovery of this work item is still on the wire; retry later", wi)}
+	keys := []string{wi}
+	var latched []*job
+	defer func() {
+		r.unlatchStarting(keys...)
+		for _, p := range latched {
+			p.mu.Lock()
+			p.busy--
+			p.mu.Unlock()
 		}
-		if st, _ := j.snapshot(); st != StatePaused {
-			return nil, fmt.Errorf("runtime: %s already active (state %s)", wi, st)
+	}()
+	latchPaused := func(key string) {
+		if j := r.jobOf(key); j != nil {
+			for _, p := range latched {
+				if p == j {
+					return
+				}
+			}
+			j.mu.Lock()
+			j.busy++
+			j.mu.Unlock()
+			latched = append(latched, j)
 		}
-		// Finding 2 (v1.5 review): a RETAINED paused record is not an
-		// active run — the start may proceed over it (claimPlaceholder drops
-		// the dead record once the hub accepted the new claim; a
-		// plain claim of the paused-held WI is refused by the hub's own
-		// ALREADY_HELD gate).
 	}
+	// own reports whether the job the gate meets under key is one this
+	// start latched itself (the retained paused record it may replace).
+	own := func(key string) *job {
+		j := r.jobOf(key)
+		for _, p := range latched {
+			if p == j {
+				return j
+			}
+		}
+		return nil
+	}
+	latchPaused(wi)
 	// Pre-claim placement + workspace-yaml check (polyforge#113, #79):
 	// resolve the work item's project (read-only GetWorkItem), then load
 	// its workspace's .polyforge.yaml strictly — BEFORE anything is
@@ -786,7 +862,12 @@ func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
 	// queued at aihub so another machine may take it — a bad local file
 	// must not block the team's task. A failed probe claims nothing
 	// either (no project, no workspace to read): the caller retries.
-	probe, perr := r.hub.GetWorkItem(wi)
+	var probe *api.WorkItem
+	var perr error
+	r.hubUnlocked(func() { probe, perr = r.hub.GetWorkItem(wi) })
+	if err := r.startGate(wi, own(wi)); err != nil {
+		return nil, err
+	}
 	if perr != nil {
 		var ae *api.Error
 		if errors.As(perr, &ae) && ae.HTTPStatus() < 500 {
@@ -799,6 +880,18 @@ func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
 	}
 	if probe == nil || probe.ProjectName == "" {
 		return nil, fmt.Errorf("runtime: %s: work-item probe answered no project (not claiming)", wi)
+	}
+	if id := probe.ID; id != "" && id != wi {
+		// the canonical id is known now: latch it too, so a start of the
+		// same work item under another spelling cannot claim alongside
+		if !r.latchStarting(id) {
+			return nil, claimInFlightError(wi)
+		}
+		keys = append(keys, id)
+		if err := r.startGate(id, own(id)); err != nil {
+			return nil, err
+		}
+		latchPaused(id)
 	}
 	wcfg, werr := r.LoadWorkspace(probe.ProjectName)
 	if werr != nil {
@@ -822,10 +915,10 @@ func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
 	//
 	// A journal entry left by an earlier attempt whose claim answer was
 	// lost (transport error, timeout, hub 5xx — see below) is REUSED
-	// rather than replaced: this start is then a replay of the same claim
-	// (RR B-1), so a claim the hub had committed is adopted instead of
+	// rather than replaced: this start is then a replay of the same claim,
+	// so a claim the hub had committed is adopted instead of
 	// orphaned.
-	sessionID, key, replay, err := r.claimIntent(wi)
+	sessionID, key, replay, err := r.claimIntent(wi, func() error { return r.startGate(wi, own(wi)) })
 	if err != nil {
 		return nil, err
 	}
@@ -838,7 +931,11 @@ func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
 		MachineID:      r.cfg.MachineID,
 		IdempotencyKey: key,
 	}
-	resp, err := r.hub.SessionClaim(req)
+	// No gate after the claim: whatever happened meanwhile (a shutdown
+	// latch included) the answer is settled below — claimPlaceholder
+	// defers a landed claim the shutdown caught, journal kept.
+	var resp *api.SessionClaimResponse
+	r.hubUnlocked(func() { resp, err = r.hub.SessionClaim(req) })
 	if err != nil {
 		if claimRefused(err) {
 			if replay {
@@ -852,7 +949,7 @@ func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
 			// the hub answered and refused: the claim never opened,
 			// nothing can dangle — drop the journal entry so neither a
 			// retry nor a restart replays a dead intention.
-			r.clearClaiming(wi)
+			r.clearClaimingSession(wi, sessionID)
 			return nil, err
 		}
 		// Transport loss, timeout or a hub 5xx: the claim MAY have been
@@ -864,7 +961,103 @@ func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
 		return nil, &api.Error{Code: api.ErrDaemonHubUnavailable,
 			Detail: fmt.Sprintf("%s: claim answer lost (claiming journal kept; the retry replays the same claim): %v", wi, err)}
 	}
+	// the paused records this start latched are released before the
+	// placeholder replaces one of them (the deferred release then finds
+	// none left)
+	for _, p := range latched {
+		p.mu.Lock()
+		p.busy--
+		p.mu.Unlock()
+	}
+	latched = nil
 	return r.claimPlaceholder(ctx, wi, sessionID, resp, wcfg, manual)
+}
+
+// startGate is the pre-claim admission check of a Start of key (opMu
+// held), re-run after each of its unlocked hub calls: no shutdown latch,
+// no session end of an earlier claim on the wire, no other job of the
+// work item in the table — except own, the retained paused record this
+// start itself latched, and any other retained paused record (Finding 2:
+// not an active run; claimPlaceholder replaces it once the hub accepted
+// the new claim, and the hub's own ALREADY_HELD gate refuses a plain
+// claim of a paused-held WI).
+func (r *Runtime) startGate(key string, own *job) error {
+	if r.abortedClaims() {
+		return claimDeferredError(key)
+	}
+	if r.isRestarting() {
+		// the restart reconciliation is still waiting on aihub (its
+		// journal replays and records decide which work items are ours):
+		// transient — the dispatcher and the resume-blocked door retry
+		return &api.Error{Code: api.ErrDaemonHubUnavailable,
+			Detail: fmt.Sprintf("%s: the daemon's restart reconciliation is still waiting for aihub; retry later", key)}
+	}
+	if r.claimEnding(key) {
+		return &api.Error{Code: api.ErrDaemonHubUnavailable,
+			Detail: fmt.Sprintf("%s: the session end of an earlier claim of this work item is still on the wire; retry later", key)}
+	}
+	j := r.jobOf(key)
+	if j == nil || j == own {
+		return nil
+	}
+	if j.isBusy() {
+		// its close, recovery or resume is on the wire (B-8): transient —
+		// the dispatcher and the resume-blocked door retry a DAEMON-503
+		return &api.Error{Code: api.ErrDaemonHubUnavailable,
+			Detail: fmt.Sprintf("%s: a close, recovery or resume of this work item is still on the wire; retry later", key)}
+	}
+	if st, _ := j.snapshot(); st != StatePaused {
+		return fmt.Errorf("runtime: %s already active (state %s)", key, st)
+	}
+	return nil
+}
+
+// hubUnlocked runs fn — one hub call of a claim or a resume that has no
+// job of its own to latch busy — with opMu RELEASED; the caller holds
+// opMu on entry and holds it again on return, and re-checks whatever it
+// relies on.
+func (r *Runtime) hubUnlocked(fn func()) {
+	r.opMu.Unlock()
+	defer r.opMu.Lock()
+	fn()
+}
+
+// latchStarting latches key as claiming (under mu); false when another
+// start already holds it.
+func (r *Runtime) latchStarting(key string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.startingClaims[key] {
+		return false
+	}
+	if r.startingClaims == nil {
+		r.startingClaims = map[string]bool{}
+	}
+	r.startingClaims[key] = true
+	return true
+}
+
+func (r *Runtime) unlatchStarting(keys ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, k := range keys {
+		delete(r.startingClaims, k)
+	}
+}
+
+// claimStarting reports whether a start of key is between its first hub
+// call and its CLAIMING placeholder (claimLocked).
+func (r *Runtime) claimStarting(key string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.startingClaims[key]
+}
+
+// claimInFlightError is the typed transient a Start of a work item meets
+// while another start of it is on its claim's hub calls.
+func claimInFlightError(wi string) error {
+	return &api.Error{Code: api.ErrDaemonHubUnavailable,
+		Detail: fmt.Sprintf("%s: another start of this work item is claiming (its hub calls are under way); retry later", wi)}
 }
 
 // claimRefused reports whether a SessionClaim error is the hub's own
@@ -876,17 +1069,23 @@ func claimRefused(err error) bool {
 }
 
 // claimIntent answers the session secret and idempotency key this start
-// claims with (RR B-1). With no journal entry for wi it mints a fresh pair.
+// claims with. With no journal entry for wi it mints a fresh pair.
 // An entry left by an earlier attempt whose answer was lost is checked
 // first: SessionVerify says the journaled session holds the WI → the claim
 // landed, reuse the pair so the claim is a D4 replay that hands the same
 // answer back; verify says it does not → the earlier claim never landed or
 // was ended since (a replay could hand back a stale cached answer) — drop
 // the entry and mint fresh; verify unreachable → the typed transient, entry
-// kept.
-func (r *Runtime) claimIntent(wi string) (sessionID, key string, replay bool, err error) {
+// kept. The verify runs with opMu released (hubUnlocked); gate re-checks
+// the start's admission once the lock is back.
+func (r *Runtime) claimIntent(wi string, gate func() error) (sessionID, key string, replay bool, err error) {
 	if rec := r.loadClaiming()[wi]; rec != nil && rec.SessionID != "" && rec.IdempotencyKey != "" {
-		v, verr := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
+		var v *api.SessionVerifyResponse
+		var verr error
+		r.hubUnlocked(func() { v, verr = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) })
+		if gerr := gate(); gerr != nil {
+			return "", "", false, gerr // entry kept: nothing was decided
+		}
 		switch {
 		case verr != nil && !claimRefused(verr):
 			return "", "", false, &api.Error{Code: api.ErrDaemonHubUnavailable,
@@ -894,7 +1093,7 @@ func (r *Runtime) claimIntent(wi string) (sessionID, key string, replay bool, er
 		case verr == nil && v.Matches:
 			return rec.SessionID, rec.IdempotencyKey, true, nil
 		}
-		r.clearClaiming(wi)
+		r.clearClaimingSession(wi, rec.SessionID)
 	}
 	sessionID, err = mintSessionID()
 	if err != nil {
@@ -1336,7 +1535,7 @@ func (r *Runtime) abandonClaim(j *job, submitted string, origErr error, note str
 
 // claimEndOffLock sends the SessionEnd of a claim that never got (or no
 // longer has) a job in the table — the compensation of a failed start,
-// an operator close during the claim — with opMu RELEASED (RR B-8):
+// an operator close during the claim — with opMu RELEASED:
 // the caller holds opMu on entry and again on return.
 // Meanwhile the work item's keys are latched ending, so a Start of it
 // answers the typed transient (the dispatcher retries) rather than
@@ -1714,7 +1913,15 @@ func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 	r.opMu.Lock()
 	j := r.resolveJob(wi)
 	if j == nil {
+		starting := r.claimStarting(wi)
 		r.opMu.Unlock()
+		if starting {
+			// a start of it is on its claim's hub calls (claimLocked):
+			// there is no job to close yet — the operator retries once
+			// the claim sits CLAIMING (or settled)
+			return &api.Error{Code: api.ErrDaemonConflict,
+				Detail: fmt.Sprintf("%s: a start of this work item is claiming (its hub calls are under way); retry once it settles", wi)}
+		}
 		return fmt.Errorf("runtime: %s: no active job", wi)
 	}
 	if j.isBusy() {
@@ -1836,7 +2043,8 @@ func IsClaimDeferred(err error) bool {
 // still queued on opMu (or on a hub call before its claim) defers itself
 // at the latch check and is never waited on, so a long close holding
 // opMu cannot eat the shutdown budget. The restart's journal-replay
-// goroutines are waited for within the same bound. opMu is not taken
+// goroutines are waited for within the same bound (the reconciliation
+// lane's own step is joined later, WaitRestartStep). opMu is not taken
 // here.
 func (r *Runtime) AbortClaims(ctx context.Context) {
 	r.mu.Lock()
@@ -1870,6 +2078,34 @@ func (r *Runtime) AbortClaims(ctx context.Context) {
 	case <-replaysDone:
 	case <-ctx.Done():
 		fmt.Fprintf(os.Stderr, "runtime: shutdown: journal replays still settling at the wait's end\n")
+		return
+	}
+}
+
+// WaitRestartStep is the shutdown's join of the restart reconciliation
+// lane (called once the run context is cancelled, before the final agent
+// sweep): it waits — bounded by ctx — for a step in flight (a recovery's
+// push and relaunch) to finish, so no lane step outlives the shutdown; the
+// relaunch meets the cancelled run context, and whatever it still
+// installed the sweep collects. The lane starts no new step after the
+// shutdown latch, and one parked on a hub call is not waited for: its
+// answer meets the latch and decides nothing.
+func (r *Runtime) WaitRestartStep(ctx context.Context) {
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		r.mu.Lock()
+		idle := !r.laneRunning || !r.laneHubSince.IsZero()
+		r.mu.Unlock()
+		if idle {
+			return
+		}
+		select {
+		case <-tick.C:
+		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, "runtime: shutdown: the restart reconciliation's step still running at the wait's end\n")
+			return
+		}
 	}
 }
 
@@ -1994,7 +2230,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	if endErr != nil {
 		if st, _ := j.snapshot(); st == StateSealing {
 			// Persist the push outcome and retry the close in the
-			// background (RR B-4): without the retry the job would sit
+			// background: without the retry the job would sit
 			// SEALING — agent dead, every `pf wrap` answering "a close is
 			// already in progress" — until a daemon restart ran the
 			// finisher.

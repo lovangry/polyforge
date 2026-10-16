@@ -161,7 +161,7 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 	// Step 1: the latch, before any other action.
 	d.modes.SetShuttingDown()
 
-	// Step 1b (RR B-8): claims under way run outside the Run loop and
+	// Step 1b: claims under way run outside the Run loop and
 	// outside the runtime's lock. Stop them before the live-job snapshot: no
 	// new claim starts, every capsule/task-repo clone is cancelled, and each
 	// in-flight claim is DEFERRED — its claiming-journal entry (and its
@@ -245,6 +245,16 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 		select {
 		case <-d.rtDone:
 		case <-ctx.Done():
+		}
+	}
+	// ...and for a restart reconciliation step still in flight (a
+	// recovery's push and relaunch: the relaunch meets the cancelled run
+	// context; the lane starts no new step after the latch), then persist
+	// what it settled — no lane step outlives the sequence.
+	d.rt.WaitRestartStep(ctx)
+	if d.faceOwned {
+		if err := d.rt.Persist(); err != nil {
+			fmt.Fprintf(os.Stderr, "daemon: state.json persist failed: %v\n", err)
 		}
 	}
 	// Stop the runtime's durable-close retry goroutines.

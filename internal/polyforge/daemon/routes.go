@@ -74,7 +74,7 @@ type statusJob struct {
 	StopReason string `json:"stop_reason,omitempty"`
 	// AwaitingHub: the restart-time session verify could not reach aihub
 	// and is being retried — a RECOVERING job waiting for the hub, not an
-	// ordinary recovery (RR B-2).
+	// ordinary recovery.
 	AwaitingHub bool `json:"awaiting_hub,omitempty"`
 }
 
@@ -828,7 +828,7 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 // refuseStepOrigin is the step-origin guard on the whole UDS face
-// (v2-converge.md Appendix C(b); RR V-1): the agent executing a work item
+// (v2-converge.md Appendix C(b)): the agent executing a work item
 // must never drive the daemon. Every request that is not a read (GET/HEAD —
 // status, watch snapshot, subscriptions, attention stay open; a GET
 // attention with mark=1 or ack=1 records delivery state, so a step could
