@@ -52,10 +52,14 @@ aihub 启动后在后台运行 `Store.RebuildIndex`（`cmd/aihub/main.go`；先�
 | GET | `/api/v1/memories/{id}` | 读权限；无权与不存在同为 `MEM-404` | 元数据；`?format=content` 返回原始 Markdown 正文 |
 | POST | `/api/v1/memories/{id}/redact` | 先过读门（`memRead`）：无读权限 → `MEM-404`；能读但非 owner 且非 admin → `MEM-403` | 软删除；非 active → `MEM-409` |
 
-检索有两种模式（`server.go` 按 `match=` 选择；membership / 可见性 / `project` / `type` / `tags` 过滤与 `limit` 在两种模式下完全相同）：
+检索有两种模式，唯一入口 `Store.SearchMode`（`server.go` 按 `match=` 选择；membership / 可见性 / `type` / `tags` 过滤与 `limit` 在两种模式下完全相同，`project=` 在两种模式下都在候选 SQL 内收窄）：
 
 - **`match=all`（缺省，`Store.Search`）**：每个词都必须命中——≥3 字符的词作为 FTS5 trigram 短语 AND 起来，更短的词走子串匹配（中文短词常见）。适合 2–4 个关键词的短查询。
-- **`match=any`（`Store.SearchAny`，`memory/search_any.go`）**：查询转小写，按字母/数字/`_` 的连续段切词，丢弃 <3 或 >40 字符的词和一小组停用词（英文虚词 + markdown/URL 噪声），去重，超过 32 个时保留最长的 32 个；各词加引号以 OR 连接，按 FTS5 bm25 排序。过滤后没有可用词 → 无命中（不报错）。用于长的描述性查询（领取时 recall）。
+- **`match=any`（`memory/search_any.go` `anyTerms`）**：查询转小写，按词字符（字母、数字、组合附标 `unicode.IsMark`、`_`）的连续段切分，段内在 CJK 与非 CJK 文字切换处再切开。
+  - 非 CJK 段是一个词：保留 3–40 字符且不在停用词表（英文虚词 + markdown/URL 噪声）中的词。
+  - CJK 段（汉字、平假名、片假名、谚文）是没有词界的分句：切成重叠的 3 字符片段（「重试阶梯」→ 重试阶、试阶梯）；不足 3 字符的段不产生任何项；40 字符上限不适用于 CJK。
+  - 去重后取至多 32 项：在词池（最长优先）与 CJK 片段池（各分句轮流取）之间交替，任一池用完由另一池补满，互不挤占。
+  - 各项加引号以 OR 连接，按 FTS5 bm25 排序；只检查 bm25 顺序的前 max(100, 10×limit) 个候选，不再翻页（AND 模式翻页到底）。过滤后没有可用项 → 无命中（不报错）。用于长的描述性查询（领取时 recall）。
 
 ### 5.2 错误码 <!-- §5.2 -->
 
