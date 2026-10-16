@@ -82,7 +82,7 @@ Step 元素字段——driver 解析的九个键（`internal/polyforge/driver/wo
 
 frontmatter 不声明 step 间输入 wiring、`cwd` 或排序键：上游产物落 capsule `artifacts/` 与 `execution.json` 的 `steps.<id>.output`，下游 step 的指令按产物路径约定读取；step 进程的 cwd 恒为 capsule 根。
 
-**加载期校验（以代码为准）**：AIHub 创建 WI 时不解析 frontmatter。唯一的结构校验在工作机 driver 加载已物化 bundle 时执行（`LoadWorkflow` → `validateWorkflow`）；任一规则失败 → 该 workflow 加载失败、WI 不派发；错误点名 step 与问题，不带规则编号或错误码。读取宽松：未知键忽略。
+**加载期校验（以代码为准）**：AIHub 创建 WI 时不解析 frontmatter。认领前 daemon 先对本机 checkout 的 bundle 做候选检查（`common/workflow.CheckCandidates`：无前缀候选、`harness` 键、损坏的 YAML → `DAEMON-414`，WI 留在 queued；auto-pull 跳过该 bundle）。结构校验在工作机 driver 加载已物化 bundle 时执行（`LoadWorkflow` → `validateWorkflow`）；任一规则失败 → 该 workflow 加载失败、WI 不派发；错误点名 step 与问题，不带规则编号或错误码。读取宽松：未知键忽略。
 
 | 规则 | 内容 |
 |---|---|
@@ -107,7 +107,7 @@ frontmatter 不声明 step 间输入 wiring、`cwd` 或排序键：上游产物�
 8. `review`（`gate: true`；读完整 diff（含测试提交）与 verification 报告；`on_fail: {target: code}`）
 9. `deliver`（`gate: true`、`requires_command_evidence: true`；合并、推送特性分支、PR；`on_fail: {target: code}`；文件在 `_shared/steps/deliver.md`）
 
-所有交付 bundle（feature-full / bug-fix / chore / autopilot）统一以 `… → verification → review → deliver` 结尾（polyforge#165）。流程级 `rewind`：`max_total: 4`、`max_per_step: 2`。
+交付 bundle feature-full / bug-fix / chore 统一以 `… → verification → review → deliver` 结尾（polyforge#165）；autopilot 为 `grill → fix → verification → deliver`（无 review）。流程级 `rewind`：`max_total: 4`、`max_per_step: 2`。
 
 **发版独立成 bundle（2026-10-13 裁定）**：交付 bundle 不含 `release` 槽位；发版与部署只经项目无关的 `workflows/release/` bundle，作为单独的 WI 提交。三步：`release`（`gate: true`：capsule 内 fetch 并重置到 origin 默认分支头、记录发版前远端 tag、探测 `.polyforge/release.sh` 是否支持 `--verify`、跑 `.polyforge/release.sh [bump]`；owner = 携带 `.polyforge/release.sh` 的 repo：零个 → FAIL，恰一个 → 执行，≥2 → FAIL `PF-RELEASE-AMBIGUOUS_OWNER`）→ `verify`（`gate: true`，fresh 上下文：发版 commit 与 origin 头、新 tag 存在且指向发版 commit、发版前每个 tag 不变、发版说明非空，最后 `release.sh --verify <version>`）→ `deploy`（`gate: true`：只部署 verify 写入 `artifacts/verified-version.json` 的版本；owner = 携带 `.polyforge/deploy.sh` 的 repo，零个 → `defer`，≥2 → FAIL；执行 `.polyforge/deploy.sh <v> --confirm <v>`，回滚 = step FAIL）。三步均 `requires_command_evidence: true`、均不声明 `on_fail`（失败即 `failed_gate`，已发布的 tag/release/image 不可变，重发由人另提 WI）。verdict 词汇由 driver 机械绑定（`driver/result.go`）：`release` 为 `[pass, fail]`（pass 须带非空 `version` 与至少一条 `artifacts_published`），`deploy` 为 `[pass, defer, fail]`（pass 须带非空 `version`）。防线在 `.polyforge/deploy.sh` 内：`--confirm <version>`、服务器侧锁、失败自动回滚。
 
@@ -155,11 +155,11 @@ frontmatter 字段——**driver 只读 `output`**：
 
 两种上下文关系都由 frontmatter 的 step 键声明，**语义全在路径约定上，没有摘要/清单校验**：
 
-- **`context_policy: inherit`（缺省）**：派发时 driver 取**最近一个已 done 且声明了 `handoff: true` 的更早 step**，按 `artifacts/handoff-<step-id>.md` 读出交接正文，原样拼进本 step 的派发 prompt（「Handoff from step …」小节）；没有这样的上游、或文件不在，就只是少了那一段，不是失败。
+- **`context_policy: inherit`（缺省）**：派发时 driver 取**最近一个声明了 `handoff: true` 的更早 step**（它必须已 done，否则派发报错），按 `artifacts/handoff-<step-id>.md` 读出交接正文，原样拼进本 step 的派发 prompt（「Handoff from step …」小节）；没有这样的上游、或文件不在，就只是少了那一段，不是失败（`driver/spawn.go` `resolveHandoff`）。
 - **`context_policy: fresh`**：不注入交接正文；上游产物按路径约定自取。`gate: true` 的 step 一律 `fresh`（解析器强制）。
 - **`handoff: true`**（只在某个下游 inherit step 以本 step 为最近交接源时才声明；2026-10-16 裁定 G10 删除了 7 处无读者的声明）：本 step 收尾前必须写 `artifacts/handoff-<step-id>.md`。
 
-**结果信封是最小契约**——`outcome` + `output`（`needs_input` 另带 `question_id` + `question`）加派发身份围栏，没有 `handoff_ref`、sha256、artifacts 清单（`v2-converge.md#§2.6`）。driver 在最小契约之外的机械门禁：V4 命令取证（声明 `requires_command_evidence: true` 的 step 的 completed 结果带 `command_evidence: [{argv, exit_code, duration_ms}]`，至少一条、argv 非空、`duration_ms > 0`，被接受的取证由 driver 写入 `output.commands`）；已提交测试文件门禁（`output.test_files` 的每条路径必须在其所在 task repo 的 HEAD 已提交，polyforge#156）；已写测试不可改（polyforge#164 H4）；release/deploy verdict 绑定。违者信封被拒，同一进程内重试，连续 3 次 → step blocked `result_invalid`。
+**结果信封是最小契约**——`outcome` + `output`（`needs_input` 另带 `question_id` + `question`）加派发身份围栏，没有 `handoff_ref`、sha256、artifacts 清单（`v2-converge.md#§2.6`）。driver 在最小契约之外的机械门禁：V4 命令取证（声明 `requires_command_evidence: true` 的 step 的 completed 结果带 `command_evidence: [{argv, exit_code, duration_ms}]`，至少一条、argv 非空、`duration_ms > 0`，被接受的取证由 driver 写入 `output.commands`）；已提交测试文件门禁（`output.test_files` 的每条路径必须在其所在 task repo 的 HEAD 已提交，polyforge#156）；已写测试不可改（polyforge#164 H4）；release/deploy verdict 绑定。违者信封被拒，带拒绝原因在同一进程内重试；第 4 次连续被拒（`maxEnvelopeRejects` = 3 次重试）→ step blocked `result_invalid`。另有：needs_input 问题形状、pre_existing 失败的边界、deliver 绑定、人工 gate 拒绝、release/deploy 的 `fail_reason` 必填与 `defer` 只在 deploy 合法（`driver/result.go`、`driver/deliver.go`）。
 
 ### 4.5 bundle 引用 <!-- §4.5 -->
 
@@ -185,7 +185,7 @@ bundle 引用只有 `bundle_name` 一个 scalar（polyforge#149 B9 删除了整�
 6. 触发 FAIL 的 gate 自身不归档、保持 `in_progress`，以 fresh 形态重入，累计 T 归零（`v2-converge.md#§2.4`）。
 7. 从 target 继续 §6.1。
 
-**候选指针在 rewind 中重置**（INV-1g）：被重置的 step 重跑从候选列表第 1 项开始；gate FAIL 的任何路径都不切换候选。上界可在 frontmatter 配置，达到即终止，没有"人工授权后继续"的第三条路径——后续只能是 WI 层面的决定（`pf cancel` 后另开 WI）。
+**候选指针在 rewind 中重置**（INV-1g）：被重置的 step 重跑从候选列表第 1 项开始；gate FAIL 的任何路径都不切换候选。上界可在 frontmatter 配置（≤0 的值回落为缺省 4 / 2，无法用 0 关闭 rewind），达到即终止，没有"人工授权后继续"的第三条路径——后续只能是 WI 层面的决定（`pf cancel` 后另开 WI）。
 
 ### 6.3 基础设施失败 → 当前 step 原地重试（按死因有界切换候选） <!-- §6.3 -->
 
@@ -193,11 +193,11 @@ bundle 引用只有 `bundle_name` 一个 scalar（polyforge#149 B9 删除了整�
 2. 处理（一次原子写入，`TransStepFailed`）：step 保持 `in_progress`，向 `steps.<id>.attempts[]` 追加一条 `cause: infra_failure` 的记录（带 `failure_cause`）、更新失败计数与放宽后的阈值、写入下一次派发形态。
 3. 原地重新派发同一 step，不跳过、不回退；已 done 的 step 绝不重跑。
 4. **候选切换**（`driver/candidates.go`）：生效列表按 `reference.md#§7.5` 的优先级取得；指针 = 最后一条 `gate_fail_rewind` 归档之后、模型类死因（`model_error`、`model_hung`、`step_timeout_slow_model`、`exit_model_class`）的 `infra_failure` 条目数，取到末位为止——只依赖 `execution.json`，崩溃恢复后复算一致。宿主机类死因使 step blocked、不推进；其余死因（含 `rate_limited`、界内的 `upstream_transient`）原模型重试。候选用尽后保持末位。
-5. 同一步计入的失败达上限（`DefaultMaxStepFailures` = 3）→ step blocked；daemon 重启造成的中断不计失败、不推进指针。
+5. 计入的失败达上限（`DefaultMaxStepFailures` = 3）→ step blocked；该计数**按候选**：换到新候选时清零；`rate_limited` 与界内的 `upstream_transient` 不计（后者连续 2 次后第 3 次归为 `exit_model_class` 换候选）；daemon 重启造成的中断不计失败、不推进指针（`driver/supervision.go`）。
 
 ### 6.3b 归档 attempts 的两分法（cause 语义） <!-- §6.3b -->
 
-`steps.<id>.attempts[]` 只有两类元素，以 `cause` 二分、互斥：
+`steps.<id>.attempts[]` 的失败记录只有两类，以 `cause` 二分、互斥（另有一类非失败记录：每个被接受的 completed 结果追加一条 `cause: accepted`，`driver/transition.go`，供恢复引擎的进度账本与候选指针复算使用）：
 
 1. **`gate_fail_rewind`**：§6.2 第 4 步追加——业务车道的失效归档，随后该 step 重置为 `pending`。
 2. **`infra_failure`**：§6.3 第 2 步追加——可审计的中断记录，不改变 step 状态（保持 `in_progress`），同时是候选指针复算的输入。
@@ -227,5 +227,5 @@ bundle 引用只有 `bundle_name` 一个 scalar（polyforge#149 B9 删除了整�
 ### 6.6 预算（budget） <!-- §6.6 -->
 
 - 结构：step 级 `budget: {wall_minutes: int}`，唯一的键；不存在 requests/tokens 维度或 workflow 级预算（polyforge#147）。
-- 语义：`wall_minutes` 是**估计值**——该 step 跨全部派发的累计运行时长界 T = max(3 × wall_minutes, 全局 `--step-timeout`，缺省 90m)（`driver/supervision.go` 的 `WallEstimateFactor`；`v2-converge.md#§2.4`）。≤30 分钟的估计在该式下不起作用，交付 bundle 都不声明；release bundle 的 `release` step 声明 45（T = 135m）。
+- 语义：`wall_minutes` 是**估计值**——该 step 跨全部派发的累计运行时长界 T = max(3 × wall_minutes, 全局 `--step-timeout`，缺省 90m)（`driver/supervision.go` 的 `WallEstimateFactor`；`v2-converge.md#§2.4`）。在缺省 `--step-timeout` 90m 下，≤30 分钟的估计不起作用，交付 bundle 都不声明；release bundle 的 `release` step 声明 45（T = 135m）。
 - 超出 T：supervisor 判 `step_timeout_long_task` / `step_timeout_slow_model`，按 `v2-converge.md#§2.3` 处理（放宽 T 并持久化；慢模型换候选；长任务第二次超时后 blocked）。

@@ -1,13 +1,11 @@
 // recover.go: the recovery engine (reference.md §6.2) and the recovery
-// lifecycle entry (§一 Recover). Discriminator = transcript availability
-// (NOT same-machine/cross-machine — cross-machine recovery gets the
-// transcript for free through capsule git):
+// lifecycle entry (Recover). Every relaunch kills the agent tree, commits
+// the dirty capsule and starts a fresh in-process driver derivation that
+// continues from execution.json (the transcript resume→fresh cascade this
+// file once implemented was removed in polyforge#106; a step's own retry
+// shape is the driver's business):
 //
-//	transcript readable → resume (attach the harness to the recorded
-//	  session; seconds)
-//	resume failing twice consecutively → fresh derivation (a brand-new
-//	  agent that may read the capsule's old transcripts for context)
-//	fresh failing → one FAILED recovery: the budget counts failures and
+//	relaunch failing → one FAILED recovery: the budget counts failures and
 //	  a successful recovery RESETS it. After MaxRecoveries (default 2)
 //	  consecutive failed recoveries the WI terminates
 //	  RTFinished(blocked) — the consecutive-failures ledger: never a

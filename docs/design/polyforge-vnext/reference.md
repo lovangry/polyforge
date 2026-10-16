@@ -53,11 +53,11 @@ PATCH never sets status (`patchableFields`). Every transition is one guarded UPD
 |---|---|---|
 | — → queued | `POST /work-items` → `WIManager.Create` | writer on the project; `repo_inventory` frozen at create (names only, must be project repos — `core/inventory.go`) |
 | queued → running | `POST …/claim` → `core/session.go` `Claim` | §3.2 |
-| running → paused | `POST …/session-end` `status=paused` → `Pause` | session kept; `clean_pause` set atomically; event `session_paused` |
-| paused → running | `POST …/session-attach` → `Attach` | hash match ∧ paused ∧ `clean_pause=false`, else `CORE-409 NOT_ATTACHABLE`; operator unpause = PATCH `clean_pause:false` |
+| running → paused | `POST …/session-end` `status=paused` → `Pause` | must be running (`NOT_RUNNING`); session kept; `clean_pause` set atomically; event `session_paused` |
+| paused → running | `POST …/session-attach` → `Attach` | hash mismatch → `CORE-403 STALE_SESSION`; not paused or `clean_pause=true` → `CORE-409 NOT_ATTACHABLE`; operator unpause = PATCH `clean_pause:false` |
 | running/paused → wrapped/failed/blocked | `POST …/session-end` → `End` | hash-fenced; clears the whole session row; wrapped/failed set `closed_at`; blocked sets `waiting_on='owner'` and, with `head_sha`, `attrs.blocked_seal` (§3.5); event `session_ended` |
-| running/paused → queued | `POST …/force-end-session` → `ForceEnd` | admin or project maintainer; reason required; clears session + seal; event `session_superseded` (old fingerprint). CLI: `pf ops end-session <wi> --reason …` |
-| blocked → queued | `POST …/resume-blocked` → `ResumeBlocked` | reporter/maintainer/admin; status blocked (`NOT_BLOCKED`) ∧ no session (`SESSION_HELD`); event `wi_resumed` |
+| running/paused → queued | `POST …/force-end-session` → `ForceEnd` | admin or project maintainer; reason required; terminal → `CORE-410`, no session → `CORE-409 NOT_HELD`; clears session + seal; event `session_superseded` (old fingerprint). CLI: `pf ops end-session <wi> --reason …` |
+| blocked → queued | `POST …/resume-blocked` → `ResumeBlocked` | reporter/maintainer/admin; terminal → `CORE-410`; status blocked (`NOT_BLOCKED`) ∧ no session (`SESSION_HELD`); event `wi_resumed` |
 | queued/paused/blocked → canceled | `POST …/cancel` → `Cancel` | reporter/maintainer/admin; running → `CORE-409`; terminal → `CORE-410`; event `work_item_canceled` |
 
 The blocked WI has exactly two exits: `pf resume` (continue = resume-blocked + a fresh claim) and
@@ -66,7 +66,7 @@ The blocked WI has exactly two exits: `pf resume` (continue = resume-blocked + a
 
 ### 2.2 Dependencies, parents, ready queue <!-- §2.2 -->
 
-- Edge kinds `blocks` (default), `supersedes`, `related` (`core/workitem.go` `AddDependency`); same project only; no self-edge; non-`related` edges refuse cycles (`CORE-409 DEPENDENCY_CYCLE`). Only a **wrapped** blocker releases a `blocks` edge (`core/owner.go`, #161).
+- Edge kinds `blocks` (default), `supersedes`, `related` (`core/workitem.go` `AddDependency`); same project only; no self-edge; a `blocks` blocker must be an execution ticket (`CORE-400 BLOCKER_NOT_EXECUTABLE`); non-`related` edges refuse cycles (`CORE-409 DEPENDENCY_CYCLE`). Only a **wrapped** blocker releases a `blocks` edge (`core/owner.go`, #161).
 - Parent/child and bundle binding rules: `wi-kind-contract.md#§2` (one nesting level, `PARENT_NOT_REGISTRY`, `HAS_CHILDREN_NO_BUNDLE`, bundle frozen at first claim).
 - Ready queue `GET /projects/{p}/ready-queue` (`core/queue.go`): `{project, items, running, paused, pending_bundles}`; `items` = queued ∧ `waiting_on` empty ∧ no unfinished `blocks` edge ∧ has a bundle ∧ inventory repos still exist; ordered priority (`urgent high normal low`) then `created_at`. No `blocked` segment.
 
@@ -74,7 +74,7 @@ The blocked WI has exactly two exits: `pf resume` (continue = resume-blocked + a
 
 ### 3.1 Secret, hash, fingerprint <!-- §3.1 -->
 
-- **secret** `session_id`: 32 random bytes hex, minted by the daemon (`runtime/runtime.go`), journaled before the claim call (§3.5). Lives only in the daemon's job record (`runtime-state.json`) and in a one-shot `GIT_ASKPASS` file; never in the capsule, events, logs, argv or step env.
+- **secret** `session_id`: 32 random bytes hex, minted by the daemon (`runtime/runtime.go`), journaled before the claim call (§3.5). Lives only in the daemon's data dir — the claiming journal (`claiming.json`) and the job record (`runtime-state.json`) — and in a one-shot `GIT_ASKPASS` file; never in the capsule, argv or step env.
 - aihub stores only `session_hash = hex(sha256(secret))`; public **fingerprint** = first 16 hex chars (`api.SessionHashHex`, `api.SessionFingerprint` in `internal/common/api/types.go`). WI reads expose `session_fingerprint`, `session_machine`, `session_started_at`, `clean_pause`.
 
 ### 3.2 Claim <!-- §3.2 -->
@@ -84,7 +84,7 @@ The blocked WI has exactly two exits: `pf resume` (continue = resume-blocked + a
 not authorize). One transaction (`core/session.go` `claimTx`), checked in order: not terminal
 (`CORE-410 TERMINAL_STATE`), no session (`CORE-409 ALREADY_HELD`), queued (`NOT_CLAIMABLE`), no
 unfinished blocker (`DEPENDENCY_BLOCKED`), bundle present (`NOT_CLAIMABLE`); then
-`UPDATE … WHERE status='queued' AND session_hash IS NULL`. Response `{claim, work_item}`
+`UPDATE … WHERE status='queued' AND session_hash IS NULL` (0 rows → `CORE-409 RACE_LOST`); a declared inventory repo that left the project → `CORE-409 INVENTORY_REPO_GONE`. Response `{claim, work_item}`
 (`api.SessionClaimResponse`; `claim.repos` = the inventory-filtered project repos; `sealed_head` /
 `sealed_machine` from the blocked seal). Idempotency (`claim_idempotency` table): same key replays the
 same response; a different caller/WI → `CORE-409 IDEMPOTENCY_KEY_REUSED`; a replay whose session is no
@@ -100,8 +100,9 @@ longer live → `CORE-403 STALE_SESSION`. Idempotency rows are kept forever (`v2
 
 `/git/<wi>.git` (`internal/aihub/git/proxy.go`, `core/owner.go` `CheckSessionCredential`): Basic user
 must be the WI id, password the live session secret. No session → `GIT-401 NO_SESSION`; mismatch →
-`GIT-401 BAD_CREDENTIAL` (message names the current holder fingerprint); status ≠ running →
-`GIT-403 PAUSED`. Backup layer: the push must carry `--push-option=session-fingerprint=<fp>` and the
+`GIT-401 BAD_CREDENTIAL` (message names the current holder fingerprint); stored fingerprint not the
+secret's → `GIT-401 BAD_FINGERPRINT`; status ≠ running → `GIT-403 PAUSED` (checked on every smart-HTTP
+request, so fetch/clone are refused too). Backup layer: the push must carry `--push-option=session-fingerprint=<fp>` and the
 pre-receive hook compares it with the proxy-derived fingerprint (`git/hook.go`). Fencing covers the
 aihub proxy only — pushes a step makes to an external origin are not fenced.
 
@@ -135,19 +136,19 @@ health route. All paths under `/api/v1` except `/git/`.
 | POST | `/work-items/{id}/session-verify`, `/session-attach`, `/session-end` | key (scope check) + secret | §3.3 |
 | POST | `/work-items/{id}/force-end-session` | admin/maintainer | §2.1 |
 | POST | `/work-items/{id}/resume-blocked` | reporter/maintainer/admin | §2.1 |
-| POST, GET | `/work-items/{id}/dependencies` | key | add / list edges |
-| DELETE | `/work-items/{id}/dependencies/{blocking}/{kind}` | key | physical delete |
+| POST, GET | `/work-items/{id}/dependencies` | add: writer; list: read | add / list edges; an unreadable blocker is `CORE-404` |
+| DELETE | `/work-items/{id}/dependencies/{blocking}/{kind}` | writer | physical delete |
 | GET | `/projects/{project}/ready-queue` | key + read | §2.2 |
 | POST | `/machines/heartbeat` | key; first registration needs admin or any-project maintainer | §4.3 |
 | GET | `/machines` | admin | §4.3 |
 | POST | `/memories` | key + writer (else `MEM-403`) | §9 |
-| GET | `/memories/search` | key | `q` (required), `type` (exact or `X.*`), `tags`, `limit` (≤200, default 50), `project`, `excerpt` (≤8192 runes → `content_excerpt`) |
+| GET | `/memories/search` | key | `q` (required), `type` (exact or `X.*`), `tags`, `limit` (default 50; ≤0 or >200 → 50), `project`, `excerpt` (≤8192 runes → `content_excerpt`) |
 | GET | `/memories/{id}` | key; denied = `MEM-404` | `format=content` → raw Markdown body |
 | POST | `/memories/{id}/redact` | owner or admin | soft delete |
 | POST, GET / GET, PATCH | `/users`, `/users/{id}` | admin | |
 | POST, GET / DELETE | `/api-keys`, `/api-keys/{id}` | admin | |
 | POST, GET / GET | `/projects`, `/projects/{id}` | admin | |
-| PATCH | `/projects/{id}` | key + in-handler role gate | repos, membership |
+| PATCH | `/projects/{id}` | key + in-handler role gate | repos, membership, description, visible |
 | POST | `/admin/backup` | admin | `VACUUM INTO <data-dir>/backups/aihub-<ts>.db` — **SQLite only**, no memory files, no git repos (`core/admin.go`) |
 | ANY | `/git/` | session Basic auth (§3.4) | git smart-HTTP via `git http-backend` |
 
@@ -182,7 +183,7 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 | `CORE-400` | Validation. Reasons incl. `IMMUTABLE`, `HAS_CHILDREN_NO_BUNDLE`, `PARENT_*`, `INVENTORY_*`, `BLOCKER_*`, `EXECUTION_STATE_REJECTED` |
 | `CORE-403` | `STALE_SESSION`: the presented session is not the holder (attach/end/pause/idempotent replay) |
 | `CORE-404` | WI/project/user missing, or hidden by the read gate |
-| `CORE-409` | State conflict: `ALREADY_HELD NOT_CLAIMABLE DEPENDENCY_BLOCKED RACE_LOST IDEMPOTENCY_KEY_REUSED NOT_ATTACHABLE NOT_HELD NOT_RUNNING NOT_BLOCKED SESSION_HELD DEPENDENCY_CYCLE INVENTORY_REPO_GONE`; cancel of a running WI |
+| `CORE-409` | State conflict: `ALREADY_HELD NOT_CLAIMABLE DEPENDENCY_BLOCKED RACE_LOST IDEMPOTENCY_KEY_REUSED NOT_ATTACHABLE NOT_HELD NOT_RUNNING NOT_BLOCKED SESSION_HELD DEPENDENCY_CYCLE INVENTORY_REPO_GONE`; without a reason: cancel of a running WI, project already exists, state changed concurrently |
 | `CORE-410` | `TERMINAL_STATE` |
 | `CORE-500` | Untyped server error (default mapping) |
 | `CORE-508` | Another aihub holds `service.lock` |
@@ -192,13 +193,13 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 | `MEM-409` | Idempotency key reused; redact of a non-active memory |
 | `MEM-413` | Content over 1 MiB |
 | `MEM-500` | Memory fs/transaction failure |
-| `MEM-502` | Reconcile filesystem walk/sweep failure (name says "upstream"; nothing is) |
+| `MEM-502` | Startup reconcile failure (walk, sweep, row scan, per-entry, FTS, commit; the name says "upstream", nothing is) |
 | `MEM-503` | FTS query/scan failure |
 | `AUTH-401` | Missing/invalid API key |
 | `AUTH-403` | Not admin; key scoped to another project; not a writer |
 | `GIT-400` | Wrong smart-HTTP method/target |
 | `GIT-401` | `NO_SESSION`, `BAD_CREDENTIAL`, `BAD_FINGERPRINT`; client side "no push remote" |
-| `GIT-403` | `PAUSED`: push while the WI is not running |
+| `GIT-403` | `PAUSED`: any git request while the WI is not running |
 | `GIT-404` | Bad path / traversal / repo missing |
 | `GIT-412` | Local staged gitlink refused by `pf` before commit (the hook rejects gitlinks with text only) |
 | `GIT-500` | CGI failure; push failure in `pf` |
@@ -225,7 +226,8 @@ literals and those constants have zero uses; `core/admin.go` raises the unregist
 
 `internal/polyforge/daemon/routes.go` `routes()` — 17 routes, all wrapped by `refuseStepOrigin`: every
 non-read request whose peer (or its ancestors / process-group leader) carries this daemon's
-`PF_WI_ID`+`PF_DAEMON_ID` markers is refused `DAEMON-403` (`daemon/peercred.go`).
+`PF_WI_ID`+`PF_DAEMON_ID` markers — or whose peer credential cannot be read — is refused `DAEMON-403`
+(SO_PEERCRED capture `daemon/peercred.go`, check `runtime/stepproc.go` `StepProcessOrigin`).
 
 | Method | Path | Does | Caller |
 |---|---|---|---|
@@ -256,14 +258,14 @@ Socket: `--socket` > `PF_DAEMON_SOCKET` > cli.toml `daemon_socket` > `/run/polyf
   interactive harness session runs ensure (auto-pull idles meanwhile); the skill retries an
   execution-plane verb once after `pf daemon ensure` when the daemon is unreachable.
 - **Graceful shutdown** (`daemon/shutdown.go`; `pf ops shutdown`, SIGTERM/SIGINT; a second signal aborts hard): latch shutting-down (new starts `DAEMON-410`) → stop observe → terminate every agent tree (10s) → snapshot task repos to `refs/pf-wip/<name>` (per-job slice, ≤2m) → persist state → close listener. Whole budget **5 min** (`Config.ShutdownBudget`). Running WIs are **not** session-ended: they stay `running` at aihub with `clean_pause=false` and are attached on the next start. Cause written to `last-shutdown.json`, read once by the next start (`daemon_restarted` event; absent = `unknown`, i.e. crash/SIGKILL). There is no `pf daemon restart`: restart = `pf ops shutdown` then `pf daemon ensure`.
-- **Restart reconciliation** (`runtime/restart.go`): claiming-journal replay first; then per job record a session verify — match+paused+`clean_pause=false` → attach and resume; match+running → recover-resume; mismatch → release (kill, quarantine, drop; `session_released`); transport error → keep, mark `recovering`, retry with backoff (`session_verify_deferred`); typed 4xx → blocked (`session_verify_outage`). Missing capsule / unmapped project blocks only that WI (`capsule_missing`, `project_unmapped`). Orphans are reaped first (`runtime/reap.go`): spawn-journal pids + a `PF_WI_ID`+`PF_DAEMON_ID` environ sweep (layers in `runtime/cleanup.go`: PPID snapshot → process-group kill → (pid,starttime) re-kill → env-marker scan → cwd scan warns only). Decision record: `v2-converge.md#§6`.
-- **Recovery engine** (`runtime/recover.go`): transcript readable → resume the harness session; two consecutive resume failures → fresh derivation; after 2 consecutive failed recoveries (`MaxRecoveries`) the WI ends blocked. A daemon restart re-dispatches the same model and is not counted as a failure.
+- **Restart reconciliation** (`runtime/restart.go`): claiming-journal replay first; then per job record (orphans of that WI reaped inside each branch) a session verify — match+paused+`clean_pause=false` → attach and resume; match+running → recover-resume; mismatch → release (kill, quarantine, drop; `session_released`); transport error → keep, mark `recovering`, retry with backoff (`session_verify_deferred`); typed 4xx → blocked (`session_verify_outage`). Missing capsule / unmapped project blocks only that WI (`capsule_missing`, `project_unmapped`). Reaping (`runtime/reap.go`): spawn-journal pids + a `PF_WI_ID`+`PF_DAEMON_ID` environ sweep (layers in `runtime/cleanup.go`: PPID snapshot → process-group kill → (pid,starttime) re-kill → env-marker scan → cwd scan warns only). Decision record: `v2-converge.md#§6`.
+- **Recovery engine** (`runtime/recover.go`): kill the tree, commit dirty state, then relaunch the in-process driver as a fresh derivation (spawn_n advanced; the driver continues from `execution.json`; the old resume→fresh cascade is gone, polyforge#106); after 2 consecutive failed recoveries (`MaxRecoveries`) the WI ends blocked. (Within a step, the driver's own retry shape still resumes the transcript first — §7.4.) A daemon restart re-dispatches the same model and is not counted as a failure.
 
 ### 6.3 Configuration <!-- §6.3 -->
 
 - **cli.toml** `$XDG_CONFIG_HOME/polyforge/cli.toml` (default `~/.config/polyforge/cli.toml`; `cli/config.go`). Flat keys `server api_key daemon_socket user_id claude_bin`; env overrides `PF_SERVER PF_API_KEY PF_DAEMON_SOCKET PF_USER_ID PF_CHAT_ID`. Unknown sections / flat keys are load errors.
 - **`[daemon]`** keys exactly `step_timeout stall_window harness_root operator_agent_dir max_concurrent_jobs` (quoted Go durations, absolute paths; `parseDaemonTable`). The daemon reads the table itself from `--config`; precedence explicit flag > table > default (`daemon/main.go` `applyDaemonTable`). `pf ops max N` persists in `daemon-state.json` and wins until `pf ops max --reset`.
-- **`[workspace."<path>"]`** `projects = [...]` — the only source of capsule placement (no workspace flag/env). A project maps to exactly one workspace; zero sections → exit 78; each workspace dir must exist and `capsules/` be writable (`internal/polyforge/mapping`). Migration runbook: `08-capsule-base-migration.md#§2`.
+- **`[workspace."<path>"]`** `projects = [...]` — the only source of capsule placement (no workspace flag/env). A project maps to exactly one workspace; zero sections → exit 78; each workspace dir must exist and `capsules/` be writable (`internal/polyforge/mapping` builds the plan, `daemon/daemon.go` checks the dirs at start). Migration runbook: `08-capsule-base-migration.md#§2`.
 - **Daemon flags** (`daemon/main.go`): production-relevant `--config -socket -server -api-key -machine-id -data-dir (POLYFORGE_DATA_DIR, default ~/.local/share/polyforge) -workflows-dir -claude-bin -harness-root -operator-agent-dir (default ~/.pi/agent) -max-concurrent-jobs (4) -step-timeout (90m) -stall-window (10m)`; test/dev-only `-display-name -pi-bin -git-remote-base -recall-topk -auto -silence-window -tool-window -model-error-grace -revalidate-every -heartbeat-every`. Retired `POLYFORGE_HARNESS_ROOT` / `POLYFORGE_OPERATOR_AGENT_DIR` only warn.
 - **`.polyforge.yaml`** at the workspace root (`internal/polyforge/workspace/workspace.go`): closed grammar `steps.<project>.<default|step-id>.models: [candidates]`. Strict: unknown keys, `harness` (`RetiredHarnessHint`), the old top-level `models:`, unmapped projects, and step keys that are not installed step ids are errors → `DAEMON-414` before claim; `pf doctor` reports the same. Read fresh before every claim.
 - **Auto-pull**: `pf ops auto on|off` + `pf ops max N` (`v2-converge.md#§5`); with auto on the daemon pulls each mapped project's ready queue; accepted submits beyond the cap queue in `submit-queue.json` and replay after restart.
@@ -306,15 +308,17 @@ retired step `kind:`, `interactive:`, `tools:`); `name`/`description` are unread
 | `steps[].budget.wall_minutes` | estimate: T = max(3 × wall_minutes, `--step-timeout`) |
 
 Load-time rules (`validateWorkflow`): non-empty unique ids; `on_fail` only on gates and pointing
-earlier; `context_policy` ∈ {inherit, fresh}, gates fresh; `requires_human_answer` ∈ {true, false,
-if_asked}; candidates canonical. Step file frontmatter: only `output:` (draft-07 JSON Schema in YAML) is
+earlier; `context_policy` ∈ {inherit, fresh}, gates fresh. `requires_human_answer` ∈ {true, false,
+if_asked} is enforced by its YAML decoder; candidates are validated in `driver.New` and, before the
+claim, against the daemon checkout (`common/workflow.CheckCandidates`: unprefixed candidates or a
+`harness` key → `DAEMON-414`, WI stays queued). Rewind bounds ≤0 fall back to 4 / 2. Step file frontmatter: only `output:` (draft-07 JSON Schema in YAML) is
 read — injected into the prompt and checked record-only (`driver/outputschema.go`,
 `enforceOutputSchemas=false` → event `output_schema_violation`).
 
 ### 7.3 Step dispatch and the result envelope <!-- §7.3 -->
 
-- One harness process per dispatch, cwd = capsule. The step writes **one** JSON envelope to `runtime-state/pending-results/<spawn_n>.json`: `{wi_id, step_id, spawn_n, outcome, output, question_id, question, command_evidence}`; outcomes `completed | gate_failed | needs_input | incomplete` (`driver/result.go`). The driver archives it to `artifacts/steps/<step>/s<spawn_n>/result.json`.
-- Validation order (`ValidateStepResult`): outcome; identity + spawn_n fence; gate verdict binding (completed with `verdict: fail` → `gate_failed`); `requires_human_answer`; command evidence (argv non-empty, `duration_ms>0`); output schema (record-only); release/deploy verdict binding; committed test files / authored-tests unchanged. Three consecutive rejections → step blocked `result_invalid`. Details: `v2-converge.md#§2.6`.
+- One harness process per dispatch, cwd = capsule. The step writes **one** JSON envelope to `runtime-state/pending-results/<spawn_n>.json`: `{wi_id, step_id, spawn_n, outcome, output, question_id, question, command_evidence, submitted_at}`; outcomes `completed | gate_failed | needs_input | incomplete` (`driver/result.go`). The driver archives it to `artifacts/steps/<step>/s<spawn_n>/result.json`.
+- Validation order (`ValidateStepResult`): shape; identity + spawn_n fence; needs_input question shape; gate verdict binding (completed with `verdict: fail` → `gate_failed`); `requires_human_answer`; release/deploy verdict binding; command evidence (argv non-empty, `duration_ms>0`); committed test files; output schema (record-only); authored tests unchanged. A rejection is retried in-process with the reason; the 4th consecutive rejection (`maxEnvelopeRejects`=3 retries) blocks the step `result_invalid`. Details: `v2-converge.md#§2.6`.
 - `gate_failed` → bounded rewind (`driver/transition.go` `applyGateFailLocked`): no `on_fail` → `failed_gate`; a bound hit → `failed_rewind_exhausted`; else `[target, gate)` archived as `gate_fail_rewind` and reset, the verdict text delivered to the target as `pending_rewind_input`, candidate pointers reset.
 - `needs_input` → question stored in `execution.json`; a human answers with `pf answer` → daemon `/jobs/{wi}/answer` → driver bridge (`applyAnswerLocked`). Never answered by an agent (UDS step-origin refusal).
 - `incomplete` → workflow `blocked`. Workflow statuses: `running completed failed_gate failed_rewind_exhausted blocked`; step statuses `pending in_progress done` (`common/capsule/capsule.go`). A terminal workflow closes the WI (completed → `wrapped`, failed → `failed`, blocked → hub `blocked`) after a final seal push; if that push fails the close degrades to blocked (`v2-converge.md#§D`).
@@ -356,10 +360,10 @@ grace 1m; per-step failure bound 3 (`DefaultMaxStepFailures`). Timeouts relax (d
 
 ## 8. Capsule and git chain <!-- §8 -->
 
-- Layout: `v2-converge.md#§E` (E.5), constants `internal/common/capsule/capsule.go`; `pending-results/` and `sync/` are defined in `driver/spawn.go` and `runtime/materialize.go`. `.gitignore`: `/repos/`, `/artifacts/release-*/`, `/sync/`. The capsule's git-dir is external (`<data-dir>/git/<wi>.git`, a `.git` pointer file in the capsule) so steps never reach hooks/config.
+- Layout: `v2-converge.md#§E` (E.5), constants `internal/common/capsule/capsule.go`; `pending-results/` and `sync/` are defined in `driver/spawn.go` and `runtime/materialize.go`. `.gitignore`: `/repos/`, `/artifacts/release-*/`, `/sync/`. The capsule's git-dir is external (`<data-dir>/git/<wi>.git`, a `gitdir:` pointer file in the capsule): it is outside the capsule tree, but a step's own `git commit` in the capsule root still reaches it — hence the trailer fold below.
 - Chain rules (FF-only, `Polyforge-Seq` trailer from 1, blob ≤16 MiB, no gitlinks), push fencing, push retry schedule, re-claim = clone + task-repo restore, `DAEMON-516/518`: `v2-converge.md#§14.1`. Carrier refs `refs/pf-task/<name>`: `v2-converge.md#§14.2`. Uncommitted-work snapshots `refs/pf-wip/<name>`: `v2-converge.md#§14.3`.
 - Local invariants (`internal/polyforge/gitops/gitops.go`): one per-WI git mutex shared by runtime and observe; seq derived inside it; `index.lock` older than 10m removed at acquisition; local gitlink precheck (`GIT-412`); commits a step made on the chain branch without a trailer are folded back into the next chain commit (`untrailered_commits_folded`); an amended already-pushed commit is non-fast-forward and needs a human.
-- Push loop (`observe/observe.go`, `observe/monitor.go`): event-triggered on each `execution.json` commit; retry every 10s; `push_backpressure` after 5 unpushed boundaries or 30 min without success; 5 identical errors stop the round until the next boundary; 60s per push.
+- Push loop (`observe/observe.go`, `observe/monitor.go`): event-triggered on each `execution.json` commit; retry every 10s; `push_backpressure` after 5 consecutive failed pushes or 30 min without success; 5 identical errors stop the round until the next boundary; 60s per push.
 
 ## 9. Memory and recall <!-- §9 -->
 
@@ -377,7 +381,7 @@ excerpts; empty list + notice on error; never fails the claim — `runtime/recal
 
 The script headers are the contract; this section only points.
 
-- **Work machine**: `tools/install.sh` (header) — `curl … | bash -s -- <api-key> [server-host]`; stages the SHA-verified `pf`, checks out `<data-dir>/release/<ver>`, then under `ensure.lock` shuts the daemon down gracefully (refused while jobs run unless `PF_INSTALL_FORCE=1`), swaps `/usr/local/bin/pf` and the `release/current` symlink, writes cli.toml only if absent, installs the skill, runs `pf daemon ensure`, verifies. Upgrade = re-run it. Skill install: Claude `~/.claude/skills/polyforge` → symlink into `release/current` + one SessionStart hook in `~/.claude/settings.json`; pi one local `packages` entry naming `release/current` (`package.json` declares the skill and `extensions/pf-chat.ts`). `pf doctor` checks both (`cli/doctor_layout.go`).
+- **Work machine**: `tools/install.sh` (header) — `curl … | bash -s -- <api-key> [server-host]`; stages the SHA-verified `pf`, checks out `<data-dir>/release/<ver>`, then under `ensure.lock` (waits up to 120s, then proceeds without it) shuts the daemon down gracefully when a new binary was staged (refused while jobs run unless `PF_INSTALL_FORCE=1`), swaps `/usr/local/bin/pf` and the `release/current` symlink, keeps an existing cli.toml that has an `api_key` (else writes it), installs the skill, runs `pf daemon ensure` (skipped when the daemon already answers or there is no `[workspace]` mapping / workflows dir), verifies. Upgrade = re-run it. Skill install: Claude `~/.claude/skills/polyforge` → symlink into `release/current` + one SessionStart hook in `~/.claude/settings.json`; pi one local `packages` entry naming `release/current` (`package.json` declares the skill and `extensions/pf-chat.ts`). `pf doctor` checks both (`cli/doctor_layout.go`).
 - **Release**: `.polyforge/release.sh` (header) — `[major|minor|patch]` or `--verify <tag>`; clean tree at `origin/main`, PR-only history since the last tag, `make test`, `make release`, docker image `ghcr.io/silgrid/aihub:<tag>`, tag push (the version claim), assets + `gh release create`. Run by the `workflows/release` bundle (`release → verify → deploy`, no rewind).
 - **Deploy (aihub host only)**: `.polyforge/deploy.sh` (header) — `<version> --confirm <version>`, server-side lock, image via `docker save | ssh docker load`, online backups, seconds-long switch window applying `deploy/sql/<tag>/{upgrade,rollback,probe}.sql`, automatic rollback (exit 10). Schema history and operator steps: `docs/upgrade.md`.
 - Workspace layout helper: `pf init [<dir>]` (`cli/verbs_init.go`) — `scratch/` and the managed CLAUDE.md section; mapping stays a cli.toml edit.
@@ -387,8 +391,8 @@ The script headers are the contract; this section only points.
 `internal/polyforge/cli/cli.go` `commands`: aihub-direct `file queue cancel recall remember memory`;
 daemon `submit answer pause resume wrap ops chat watch`; admin `users api-keys machines projects backup`;
 `doctor`, `init`, `daemon` (`daemon ensure`; `cmd/pf/main.go` routes `pf daemon …` to
-`daemon.Main`). Exit codes: 0 ok, 1 client-class (4xx, validation, transport), 2 server-class (5xx,
-unknown verb, flag parse). The skill (`skills/polyforge/SKILL.md`) routes the 13 verbs + doctor/help/init,
+`daemon.Main`). Exit codes: 0 ok, 1 client-class (4xx, validation, transport, a sub-action's flag error), 2
+server-class (5xx, unknown verb, a global or verb flag parse error). The skill (`skills/polyforge/SKILL.md`) routes the 13 verbs + doctor/help/init,
 one fragment per verb under `verbs/` (`ship.md` only says delivery is the workflow's `deliver` step);
 `pf help` is the quick reference. Progress/notification design: `v2-converge.md#§3`.
 
