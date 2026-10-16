@@ -112,9 +112,10 @@ type Config struct {
 }
 
 // causeOperatorShutdown is the recovery lane's cause for a session
-// attach after a graceful operator shutdown (runtime/restart.go): an
-// interruption is a stop, not a model verdict, so it archives nothing.
-const causeOperatorShutdown = "operator daemon shutdown"
+// attach after a graceful operator shutdown (one definition:
+// runtime.CauseOperatorAttach): an interruption is a stop, not a model
+// verdict, so it archives nothing.
+const causeOperatorShutdown = rt.CauseOperatorAttach
 
 // interruptedFromCause maps the recovery lane's cause onto the driver's
 // interrupted-dispatch archive. An empty cause or an operator shutdown

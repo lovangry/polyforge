@@ -516,7 +516,8 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity
 
 // ---------------------------------------------------------------------------
 // v1.5 session endpoints (reference.md §3). The claim path is the machine
-// execution surface (any valid key, scope-checked); force-end-session keeps
+// execution surface (a scope-checked key with writer/maintainer membership
+// or admin — hSessionClaim's requireWrite); force-end-session keeps
 // the human decision gate (admin or project maintainer).
 
 // sessionClaimEnvelope is the claim/attach response: the SAME
@@ -1160,7 +1161,7 @@ func (s *Server) hSearchMemory(w http.ResponseWriter, r *http.Request, idn *iden
 	// the read face uses (an unresolvable and an inaccessible project
 	// answer identically), and applied in the candidate predicate IN
 	// ADDITION to — never instead of — the membership and visibility
-	// layers (06-memory-search.md §7's fixed two-layer order).
+	// layers (06-memory-search.md §6's fixed two-layer order).
 	project := ""
 	if p := q.Get("project"); p != "" {
 		projectID, err := s.projectIDOf(p)

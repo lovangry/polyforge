@@ -826,11 +826,16 @@ const (
 	ResumeClosed = "closed"
 )
 
+// CauseOperatorAttach is the recovery cause of a session attach after a
+// graceful operator shutdown; the bridge (internal/polyforge/bridge) imports
+// it so an interruption under this cause archives no attempt.
+const CauseOperatorAttach = "operator daemon shutdown"
+
 // Recovery causes that are lifecycle events, exempt from the
 // consecutive-failures ledger.
 const (
 	causeDaemonRestart  = "daemon_restart"
-	causeOperatorAttach = "operator daemon shutdown"
+	causeOperatorAttach = CauseOperatorAttach
 	// causeOperatorResume is the live-holder operator resume
 	// (wi_seWTgHeKtaa8): a deliberate stop's deliberate continuation —
 	// a lifecycle event like the operator attach, never a failure the

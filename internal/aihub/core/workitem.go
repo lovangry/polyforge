@@ -84,7 +84,7 @@ func validPriority(p string) bool {
 	return false
 }
 
-// forbidden attrs keys (execution-state blacklist; archive/02-aihub-core.md §5.1a, kept from v0
+// forbidden attrs keys (execution-state blacklist; reference.md §2.3, kept from v0
 // business semantics): Core never persists workflow execution state.
 var executionStateKeys = map[string]bool{
 	"current_step": true, "step_id": true, "step_attempt_id": true,

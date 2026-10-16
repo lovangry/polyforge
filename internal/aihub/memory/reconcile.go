@@ -27,7 +27,7 @@ import (
 // isNotFound reports the MEM-404 of s.load.
 func isNotFound(err error) bool {
 	ae, ok := err.(*APIError)
-	return ok && ae.Code == "MEM-404"
+	return ok && ae.Code == api.ErrMemNotFound
 }
 
 // parseAuthorityDoc parses an existing authority document: non-create
@@ -36,21 +36,21 @@ func isNotFound(err error) bool {
 func parseAuthorityDoc(raw []byte, dirMemID string) (*frontmatter, string, error) {
 	block, body, ok := splitFrontmatter(string(raw))
 	if !ok {
-		return nil, "", errf("MEM-400", "FRONTMATTER_INVALID", "no frontmatter block")
+		return nil, "", errf(api.ErrMemBadInput, "FRONTMATTER_INVALID", "no frontmatter block")
 	}
 	var fm frontmatter
 	if err := yaml.Unmarshal([]byte(block), &fm); err != nil {
-		return nil, "", errf("MEM-400", "FRONTMATTER_INVALID", "%v", err)
+		return nil, "", errf(api.ErrMemBadInput, "FRONTMATTER_INVALID", "%v", err)
 	}
 	if fm.ID == "" {
-		return nil, "", errf("MEM-400", "FRONTMATTER_INVALID", "frontmatter id missing")
+		return nil, "", errf(api.ErrMemBadInput, "FRONTMATTER_INVALID", "frontmatter id missing")
 	}
 	if dirMemID != "" && fm.ID != dirMemID {
-		return nil, "", errf("MEM-400", "FRONTMATTER_ID_MISMATCH", "frontmatter id %q != dir %q", fm.ID, dirMemID)
+		return nil, "", errf(api.ErrMemBadInput, "FRONTMATTER_ID_MISMATCH", "frontmatter id %q != dir %q", fm.ID, dirMemID)
 	}
 	if fm.Type == "" || !visibilities[fm.Visibility] || fm.OwnerUserID == "" ||
 		fm.ProjectID == "" || fm.CreatedAt == "" || fm.UpdatedAt == "" {
-		return nil, "", errf("MEM-400", "FRONTMATTER_INVALID", "missing/invalid required frontmatter fields")
+		return nil, "", errf(api.ErrMemBadInput, "FRONTMATTER_INVALID", "missing/invalid required frontmatter fields")
 	}
 	return &fm, body, nil
 }
@@ -104,7 +104,7 @@ func (s *Store) validatedLocked(memID string) (*Entry, error) {
 		return nil, err
 	}
 	if e.Status != "active" {
-		return nil, errf("MEM-404", "", "memory %s", memID)
+		return nil, errf(api.ErrMemNotFound, "", "memory %s", memID)
 	}
 	if s.entryConsistent(e) {
 		return e, nil
@@ -116,10 +116,10 @@ func (s *Store) validatedLocked(memID string) (*Entry, error) {
 	if err != nil {
 		// reconcile deleted an orphan row: the entry never existed as far
 		// as serving is concerned.
-		return nil, errf("MEM-404", "", "memory %s", memID)
+		return nil, errf(api.ErrMemNotFound, "", "memory %s", memID)
 	}
 	if fresh.Status != "active" || !s.entryConsistent(fresh) {
-		return nil, errf("MEM-404", "", "memory %s", memID)
+		return nil, errf(api.ErrMemNotFound, "", "memory %s", memID)
 	}
 	return fresh, nil
 }
@@ -474,7 +474,7 @@ func (s *Store) rebuildIndex() (int, error) {
 		unlock := s.memLock(id)
 		if cerr := s.reconcileOne(id); cerr != nil {
 			unlock()
-			if ae, ok := cerr.(*APIError); ok && ae.Code == "MEM-400" {
+			if ae, ok := cerr.(*APIError); ok && ae.Code == api.ErrMemBadInput {
 				continue // unparseable authority file: no branch can act
 			}
 			return 0, errf(api.ErrMemUpstream, "", "reconcile %s: %v", id, cerr)
@@ -741,7 +741,7 @@ func (s *Store) rebuildActiveEntry(dirProject, memID string) (rebuildOutcome, er
 	}
 	if row.ContentSHA != shaHex(raw) || !rowMatchesFrontmatter(row, fm) {
 		if cerr := s.reconcileOne(memID); cerr != nil {
-			if ae, ok := cerr.(*APIError); ok && ae.Code == "MEM-400" {
+			if ae, ok := cerr.(*APIError); ok && ae.Code == api.ErrMemBadInput {
 				return rebuildUnresolved, nil
 			}
 			return rebuildUnresolved, cerr

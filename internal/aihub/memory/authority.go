@@ -21,6 +21,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/silgrid/polyforge/internal/common/api"
 )
 
 // APIError mirrors the other aihub packages.
@@ -101,10 +103,10 @@ func Body(raw []byte) string {
 func parseFrontmatterBlock(block string) (map[string]any, error) {
 	var raw map[string]any
 	if err := yaml.Unmarshal([]byte(block), &raw); err != nil {
-		return nil, errf("MEM-400", "FRONTMATTER_INVALID", "%v", err)
+		return nil, errf(api.ErrMemBadInput, "FRONTMATTER_INVALID", "%v", err)
 	}
 	if raw == nil {
-		return nil, errf("MEM-400", "FRONTMATTER_INVALID", "empty frontmatter block")
+		return nil, errf(api.ErrMemBadInput, "FRONTMATTER_INVALID", "empty frontmatter block")
 	}
 	return raw, nil
 }

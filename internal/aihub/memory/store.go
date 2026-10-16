@@ -147,21 +147,21 @@ type CreateRequest struct {
 // state is ever served (INV-7f); crash residue is swept by reconcile.
 func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	if strings.TrimSpace(req.Content) == "" {
-		return nil, errf("MEM-400", "", "content required")
+		return nil, errf(api.ErrMemBadInput, "", "content required")
 	}
 	if req.Type == "" {
-		return nil, errf("MEM-400", "", "type required")
+		return nil, errf(api.ErrMemBadInput, "", "type required")
 	}
 	if !visibilities[req.Visibility] {
-		return nil, errf("MEM-400", "", "bad visibility %q", req.Visibility)
+		return nil, errf(api.ErrMemBadInput, "", "bad visibility %q", req.Visibility)
 	}
 	if len(req.Content) > maxContentBytes {
-		return nil, errf("MEM-413", "", "content exceeds 1 MiB")
+		return nil, errf(api.ErrMemTooLarge, "", "content exceeds 1 MiB")
 	}
 	var projectID string
 	if err := s.db.QueryRow(`SELECT id FROM projects WHERE name=?1 OR id=?1`, req.Project).Scan(&projectID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, errf("MEM-404", "", "project %q", req.Project)
+			return nil, errf(api.ErrMemNotFound, "", "project %q", req.Project)
 		}
 		return nil, err
 	}
@@ -172,7 +172,7 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 			*req.IdempotencyKey).Scan(&existing, &proj, &own)
 		if qerr == nil {
 			if proj != projectID || own != owner {
-				return nil, errf("MEM-409", "IDEMPOTENCY_KEY_REUSED",
+				return nil, errf(api.ErrMemConflict, "IDEMPOTENCY_KEY_REUSED",
 					"idempotency_key belongs to another owner or project")
 			}
 			return s.Get(existing)
@@ -189,7 +189,7 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 			return nil, err
 		}
 		if _, has := raw["id"]; has {
-			return nil, errf("MEM-400", "CLIENT_ID_NOT_ALLOWED", "content frontmatter must not carry an id")
+			return nil, errf(api.ErrMemBadInput, "CLIENT_ID_NOT_ALLOWED", "content frontmatter must not carry an id")
 		}
 		body = rest
 	} else {
@@ -219,17 +219,17 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 		return nil, err
 	}
 	if len(authorityBytes) > maxContentBytes {
-		return nil, errf("MEM-413", "", "authority document exceeds 1 MiB")
+		return nil, errf(api.ErrMemTooLarge, "", "authority document exceeds 1 MiB")
 	}
 	dir := s.authorityDir(projectID, memID)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return nil, errf("MEM-500", "", "mkdir: %v", err)
+		return nil, errf(api.ErrMemInternal, "", "mkdir: %v", err)
 	}
 	tmp := filepath.Join(dir, "memory.md.tmp")
 	authority := filepath.Join(dir, "memory.md")
 	// ①
 	if err := writeTmpSync(tmp, authorityBytes); err != nil {
-		return nil, errf("MEM-500", "", "write authority: %v", err)
+		return nil, errf(api.ErrMemInternal, "", "write authority: %v", err)
 	}
 	contentSHA := shaHex(authorityBytes)
 	// Freshness stamp (polyforge#129): the tmp file's mtime+size ARE the
@@ -266,10 +266,10 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	}
 	// ③
 	if err := os.Rename(tmp, authority); err != nil {
-		return nil, errf("MEM-500", "", "rename authority: %v", err)
+		return nil, errf(api.ErrMemInternal, "", "rename authority: %v", err)
 	}
 	if err := syncDir(dir); err != nil {
-		return nil, errf("MEM-500", "", "fsync authority dir: %v", err)
+		return nil, errf(api.ErrMemInternal, "", "fsync authority dir: %v", err)
 	}
 	return s.load(memID)
 }
@@ -306,7 +306,7 @@ func (s *Store) load(memID string) (*Entry, error) {
 			&e.apath, &e.ContentSHA, &e.ContentLen, &tags, &related, &e.Status, &e.CreatedAt, &e.UpdatedAt,
 			&fsM, &fsS)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, errf("MEM-404", "", "memory %s", memID)
+		return nil, errf(api.ErrMemNotFound, "", "memory %s", memID)
 	}
 	if err != nil {
 		return nil, err
@@ -340,7 +340,7 @@ func (s *Store) load(memID string) (*Entry, error) {
 // server layer).
 func (s *Store) Search(q string, memType string, tags []string, limit int, allowed func(*Entry) bool) ([]Entry, error) {
 	if strings.TrimSpace(q) == "" {
-		return nil, errf("MEM-400", "", "q required")
+		return nil, errf(api.ErrMemBadInput, "", "q required")
 	}
 	if limit <= 0 || limit > 200 {
 		limit = 50
@@ -528,7 +528,7 @@ func (s *Store) Redact(memID string) error {
 		return err
 	}
 	if e.Status != "active" {
-		return errf("MEM-409", "", "memory is %s", e.Status)
+		return errf(api.ErrMemConflict, "", "memory is %s", e.Status)
 	}
 	if !s.entryConsistent(e) {
 		// Crash residue on the entry being redacted: resolve it under the
@@ -537,12 +537,12 @@ func (s *Store) Redact(memID string) error {
 			if ferr := s.forwardCompleteRedact(e); ferr != nil {
 				return ferr
 			}
-			return errf("MEM-409", "", "memory is redacted")
+			return errf(api.ErrMemConflict, "", "memory is redacted")
 		}
 		if derr := s.deleteOrphanRow(memID); derr != nil {
 			return derr
 		}
-		return errf("MEM-404", "", "memory %s", memID)
+		return errf(api.ErrMemNotFound, "", "memory %s", memID)
 	}
 	// ① file move (the file location IS the authoritative state).
 	src := filepath.Join(s.dataDir, filepath.FromSlash(e.apath))
@@ -551,7 +551,7 @@ func (s *Store) Redact(memID string) error {
 		return err
 	}
 	if err := os.Rename(src, dst); err != nil {
-		return errf("MEM-500", "", "redact move: %v", err)
+		return errf(api.ErrMemInternal, "", "redact move: %v", err)
 	}
 	// ② metadata + FTS removal in one tx.
 	tx, err := s.db.Begin()

@@ -43,7 +43,9 @@ const (
 	ErrCoreConflict  = "CORE-409"
 	ErrCoreGone      = "CORE-410"
 	ErrCoreInternal  = "CORE-500"
-	ErrCoreLockHeld  = "CORE-508"
+	// ErrCoreStorage: the SQLite backup (VACUUM INTO) failed.
+	ErrCoreStorage  = "CORE-507"
+	ErrCoreLockHeld = "CORE-508"
 
 	// MEM — memory errors (06 §5)
 	ErrMemBadInput    = "MEM-400"
