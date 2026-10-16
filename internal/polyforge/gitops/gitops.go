@@ -301,10 +301,26 @@ func checkLocalGitlink(env []string, dir string) error {
 	detail := localGitlinkPrefix + ": staged gitlink (mode 160000) at " +
 		strings.Join(paths, ", ") +
 		" — an embedded git repository would poison the capsule chain (aihub's pre-receive rejects mode 160000 on every push, forever). " +
-		"No commit was created. Clean it: delete the embedded repository's .git directory (" +
-		filepath.Join(paths[0], ".git") + "), then `git rm --cached " + paths[0] + "`, then retry; " +
-		"verify with `git ls-files --stage | grep ^160000` (must be empty)."
+		"No commit was created. " + gitlinkRemedy(paths[0])
 	return &api.Error{Code: api.ErrGitGitlink, Detail: detail}
+}
+
+// gitlinkRemedy is the cleanup recipe of a GIT-412 refusal for path. A
+// path under an ignored capsule tree (a task repo under repos/) only
+// reaches the index when the capsule .gitignore lost its line: the fix
+// is restoring it — deleting that repository's .git would destroy the
+// task repo's history (repo review 2026-10-16 B-25/V-13). Anywhere
+// else the embedded repository is agent residue.
+func gitlinkRemedy(path string) string {
+	if strings.HasPrefix(path, "repos/") || strings.HasPrefix(path, "artifacts/release-") {
+		return "The capsule .gitignore no longer ignores " + path + ": restore it (it must contain " +
+			strings.ReplaceAll(strings.TrimSpace(capsule.GitignoreContent), "\n", " and ") +
+			") and retry. Do NOT delete " + filepath.Join(path, ".git") + " — that destroys the task repo's history."
+	}
+	return "Clean it: move the embedded repository out of the capsule (or add " + path + " to the capsule .gitignore); " +
+		"if, and only if, its history is disposable, delete its .git directory (" + filepath.Join(path, ".git") + ") instead. " +
+		"Then `git rm --cached " + path + "` if it is still staged, and retry; " +
+		"verify with `git ls-files --stage | grep ^160000` (must be empty)."
 }
 
 // PushTimings carries the wall-clock durations of the underlying git
@@ -382,7 +398,7 @@ func CommitPush(o Opts, message string) (string, bool, PushTimings, error) {
 			_, _ = git(env, o.CapsuleDir, "reset", "-q")
 			return "", false, timings, &api.Error{
 				Code:   api.ErrGitGitlink,
-				Detail: localGitlinkPrefix + ": embedded git repository without a commit checked out — " + err.Error() + ". No commit was created. Clean it: delete the embedded repository's .git directory, then retry.",
+				Detail: localGitlinkPrefix + ": embedded git repository without a commit checked out — " + err.Error() + ". No commit was created. Clean it: move the embedded repository out of the capsule (or add it to the capsule .gitignore; under repos/ the capsule .gitignore lost its /repos/ line — restore it, never delete a task repo's .git), then retry.",
 			}
 		}
 		return "", false, timings, err
