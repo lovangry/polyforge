@@ -97,6 +97,10 @@ func (j *job) info() JobInfo {
 // bookkeeping must reflect reality before the process exits).
 func (r *Runtime) Persist() error { return r.persist() }
 
+// Reconciling reports whether the restart reconciliation still runs (its
+// wait ran out with records waiting for aihub; see Restart).
+func (r *Runtime) Reconciling() bool { return r.isRestarting() }
+
 // resolveJob answers the job behind any id form: the canonical key first,
 // then the alias table — so daemon-side route lookups by the operator's
 // submitted spelling (a slug, most often) find the live job without an

@@ -81,7 +81,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	switch capsuleWorkflowStatus(j.capsuleDir) {
 	case capsule.WorkflowStatusCompleted:
 		fmt.Fprintf(os.Stderr, "runtime: %s: driver workflow completed — wrapping (recovery cause %q is the completion signal, not a death)\n", j.wi, cause)
-		// The ordinary seal push runs (RR B-7): the driver does no git, and
+		// The ordinary seal push runs: the driver does no git, and
 		// the observe flush that would carry the terminal execution.json
 		// may have failed or timed out. On a clean tree CommitPush only
 		// re-pushes HEAD; a failed push degrades the close to blocked like
