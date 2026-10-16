@@ -249,6 +249,26 @@ func TestAnyTermsCJKShingles(t *testing.T) {
 	}
 }
 
+// Particle-heavy shingles do not take term slots; content shingles that
+// touch one particle stay, and Latin words are unaffected.
+func TestAnyTermsCJKParticles(t *testing.T) {
+	got := anyTerms("修复守护进程中的重试阶梯问题")
+	want := []string{"修复守", "复守护", "守护进", "护进程", "进程中", "的重试", "重试阶", "试阶梯", "阶梯问", "梯问题"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("anyTerms = %v, want %v (程中的 / 中的重 dropped)", got, want)
+	}
+	// A multi-rune function word counts as particles: 进行 + 了.
+	got = anyTerms("进行了重试")
+	if strings.Join(got, " ") != "了重试" {
+		t.Fatalf("function word: %v, want [了重试]", got)
+	}
+	// Latin is untouched by the CJK filter (the particle runes never
+	// occur in a non-CJK run).
+	if got := anyTerms("retry ladder 的了是"); strings.Join(got, " ") != "ladder retry" {
+		t.Fatalf("latin: %v", got)
+	}
+}
+
 // The project scope narrows the FTS candidates inside the SQL: many
 // better-ranked matches of another project neither crowd the scoped
 // answer out of the any-term candidate window nor cost a load each.
