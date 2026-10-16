@@ -290,7 +290,7 @@ type Daemon struct {
 
 	// stepOriginOf resolves a /step/* caller to its work item (nil = the
 	// UDS peer credential, peerStepOrigin; tests bind a stub).
-	stepOriginOf func(*http.Request) (string, bool)
+	stepOriginOf func(*http.Request) (stepOrigin, string)
 	// projectIDs caches project name → aihub id for the step memory read.
 	projectIDs sync.Map
 	// outboxLocks holds one *sync.Mutex per work item: one memory-outbox
@@ -843,6 +843,9 @@ func (d *Daemon) bridge() {
 					continue
 				}
 			}
+			if msg.Kind == protocol.RTFinished {
+				d.dropOutbox(msg.WorkItem)
+			}
 			at := observe.Attach{Msg: msg}
 			if msg.Kind == protocol.RTStarted || msg.Kind == protocol.RTRecovered {
 				if ji, live := d.rt.Info(msg.WorkItem); live && ji.Agent != nil {
@@ -869,6 +872,9 @@ type agentAdapter struct {
 	exit     chan struct{}
 	pollStop chan struct{}
 	retire   sync.Once
+	// final runs once the driver has exited, before the exit is
+	// reported: the bounded final memory outbox flush (memoutbox.go).
+	final func()
 }
 
 // installAdapter registers the CURRENT handle of a work item and returns
@@ -878,6 +884,11 @@ func (d *Daemon) installAdapter(ji runtime.JobInfo) *agentAdapter {
 		h:        ji.Agent,
 		exit:     make(chan struct{}),
 		pollStop: make(chan struct{}),
+	}
+	if ji.CapsuleDir != "" && ji.Project != "" {
+		t := outboxTarget{wi: ji.WorkItem, project: ji.Project, capsuleDir: ji.CapsuleDir}
+		d.reopenOutbox(ji.WorkItem)
+		a.final = func() { d.finalFlush(t, outboxFlushWait) }
 	}
 	d.adapMu.Lock()
 	if old := d.adapters[ji.WorkItem]; old != nil {
@@ -905,6 +916,9 @@ func (a *agentAdapter) pollDone(interval time.Duration) {
 			return
 		case <-t.C:
 			if a.h.Done() {
+				if a.final != nil {
+					a.final()
+				}
 				close(a.exit)
 				return
 			}
@@ -916,10 +930,10 @@ func (a *agentAdapter) Exit() <-chan struct{} { return a.exit }
 
 // driverLogFor is the driver's EventLogger of one capsule: it resolves
 // the observe event log at call time (the log exists only after
-// observe.New), and besides the event log
-// it flushes the capsule's memory outbox (memoutbox.go) after every step
-// result — in the background — and at the terminal transition, bounded,
-// so the last step's memories are uploaded before the seal.
+// observe.New), and after every step result and at the terminal
+// transition it REQUESTS a memory outbox flush (memoutbox.go) — a
+// goroutine: Append runs under the driver's lock, so it never waits on
+// the flush or aihub.
 func (d *Daemon) driverLogFor(capsuleDir string) driver.EventLogger {
 	return driverEventLog{d: d, capsuleDir: capsuleDir}
 }
@@ -933,10 +947,8 @@ func (l driverEventLog) Append(wi, kind string, body any) error {
 	if l.capsuleDir != "" {
 		if t, ok := outboxTargetOf(l.capsuleDir); ok {
 			switch kind {
-			case "step_done", "gate_verdict":
-				go l.d.flushOutbox(t)
-			case "terminal":
-				l.d.flushOutboxBounded(t, outboxFlushWait)
+			case "step_done", "gate_verdict", "terminal":
+				l.d.requestFlush(t)
 			}
 		}
 	}

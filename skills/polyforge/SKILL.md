@@ -245,7 +245,7 @@ Five standing rules, binding on every polyforge session:
    missing section is the built-in default policy, never a refusal, and
    `pf init` appends the default section (see `verbs/init.md`). Step
    agents hold no aihub credential path: inside a workflow step
-   (`PF_WI_ID` set) `pf recall` / `pf memory show` go through the daemon,
+   (`PF_WI_ID` and `PF_DAEMON_ID` set) `pf recall` / `pf memory show` go through the daemon,
    `pf remember` queues into the capsule outbox the daemon uploads, and
    every other data-plane verb is refused (DAEMON-403).
    The repo inventory and clone URLs always come from the aihub project

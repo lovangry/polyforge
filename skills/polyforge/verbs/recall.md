@@ -48,8 +48,8 @@ every-word match.
 
 ## Inside a workflow step
 
-A step agent holds no aihub credential path. Inside a step (`PF_WI_ID`
-set) the same `pf recall` (and `pf memory show <id>`) goes to the local
+A step agent holds no aihub credential path. Inside a step (`PF_WI_ID` and
+`PF_DAEMON_ID` set) the same `pf recall` (and `pf memory show <id>`) goes to the local
 daemon (`GET /step/memories/...`), which searches with its own
 credential, scoped to the step's own work item's project: `--project`
 must be that project (another one is refused, DAEMON-403), and no

@@ -28,6 +28,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -41,12 +42,30 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 )
 
-// stepMarkerEnv is the step-process marker (runtime/spawn.go sets it).
-const stepMarkerEnv = "PF_WI_ID"
+// The step-process markers (runtime/spawn.go sets both on every step).
+const (
+	stepMarkerEnv   = "PF_WI_ID"
+	stepDaemonIDEnv = "PF_DAEMON_ID"
+)
 
 // stepWorkItem answers the work item of the step this pf runs in ("" =
-// not inside a step).
-func stepWorkItem() string { return strings.TrimSpace(os.Getenv(stepMarkerEnv)) }
+// not inside a step): both markers must be set. The work item named here
+// only selects step mode — the daemon resolves the real one from the
+// process tree.
+func stepWorkItem() string {
+	wi := strings.TrimSpace(os.Getenv(stepMarkerEnv))
+	if wi == "" || strings.TrimSpace(os.Getenv(stepDaemonIDEnv)) == "" {
+		return ""
+	}
+	return wi
+}
+
+// stepModeNote names what switched step mode on (for an operator shell
+// that inherited the markers by accident).
+func stepModeNote() string {
+	return fmt.Sprintf("step mode: %s=%s and %s=%s are set — unset both if this is not a workflow step",
+		stepMarkerEnv, os.Getenv(stepMarkerEnv), stepDaemonIDEnv, os.Getenv(stepDaemonIDEnv))
+}
 
 // stepAllowed are the aihub-facing verbs a step may run (daemon-mediated).
 var stepAllowed = map[string]bool{"recall": true, "remember": true, "memory": true}
@@ -55,12 +74,13 @@ var stepAllowed = map[string]bool{"recall": true, "remember": true, "memory": tr
 // the verb may run there: every data-plane and management verb other than
 // recall / remember / memory reaches aihub directly.
 func stepRefusal(cmd *Command) error {
-	if stepAllowed[cmd.Name] || (cmd.Group != GroupData && cmd.Group != GroupMgmt) {
+	// doctor reads cli.toml and probes aihub with its key itself
+	if stepAllowed[cmd.Name] || (cmd.Group != GroupData && cmd.Group != GroupMgmt && cmd.Name != "doctor") {
 		return nil
 	}
 	return &api.Error{Code: api.ErrDaemonForbidden, Detail: fmt.Sprintf(
-		"pf %s refused inside a workflow step (%s is set): step agents hold no aihub access — they use `pf recall`, `pf memory show` and `pf remember` only, which the daemon mediates",
-		cmd.Name, stepMarkerEnv)}
+		"pf %s refused inside a workflow step: step agents hold no aihub access — they use `pf recall`, `pf memory show` and `pf remember` only, which the daemon mediates (%s)",
+		cmd.Name, stepModeNote())}
 }
 
 // errStepNoAihub is what the aihub client of a step invocation answers.
@@ -84,6 +104,8 @@ type stepContext struct {
 	Slug       string `json:"slug"`
 	Project    string `json:"project"`
 	CapsuleDir string `json:"capsule_dir"`
+	Step       string `json:"step"`
+	Attempt    int    `json:"attempt"`
 }
 
 func (ctx *Context) stepContext() (stepContext, error) {
@@ -92,7 +114,7 @@ func (ctx *Context) stepContext() (stepContext, error) {
 	if err != nil {
 		return sc, fmt.Errorf("the daemon (the step's memory path) did not answer: %w", err)
 	}
-	if err := json.Unmarshal(raw, &sc); err != nil || sc.CapsuleDir == "" {
+	if err := json.Unmarshal(raw, &sc); err != nil || sc.CapsuleDir == "" || sc.Step == "" {
 		return sc, fmt.Errorf("the daemon's step context is unreadable")
 	}
 	return sc, nil
@@ -161,7 +183,10 @@ func stepRemember(ctx *Context, fs *flag.FlagSet, memType, proj, content string)
 	if wi := stringFlag(fs, "work-item"); wi != "" && wi != sc.WorkItemID && wi != sc.Slug {
 		return fmt.Errorf("remember: a step memory is attributed to its own work item %s (got --work-item %s)", sc.WorkItemID, wi)
 	}
-	m := capsule.OutboxMemory{Type: memType, Title: title, Body: content}
+	if why := capsule.SecretValueDefect(title + "\n" + content); why != "" {
+		return fmt.Errorf("remember: refused — the memory %s", why)
+	}
+	m := capsule.OutboxMemory{Type: memType, Title: title, Body: content, Step: sc.Step, Attempt: sc.Attempt}
 	if tags := stringFlag(fs, "tags"); tags != "" {
 		for _, t := range strings.Split(tags, ",") {
 			if t = strings.TrimSpace(t); t != "" {
@@ -173,14 +198,17 @@ func stepRemember(ctx *Context, fs *flag.FlagSet, memType, proj, content string)
 	if err != nil {
 		return err
 	}
+	dir := filepath.Join(sc.CapsuleDir, filepath.FromSlash(capsule.DirMemoryOutbox))
+	if err := plainDirs(filepath.Dir(dir), dir); err != nil {
+		return fmt.Errorf("remember: %w", err)
+	}
+	if prev := queuedFor(dir, m); prev != "" {
+		return fmt.Errorf("remember: refused — %s already queued this step's memory (%s); a step writes at most one, plus the wrap summary", sc.Step, prev)
+	}
 	var rnd [4]byte
 	_, _ = rand.Read(rnd[:])
 	name := time.Now().UTC().Format("20060102T150405.000000000Z") + "-" + hex.EncodeToString(rnd[:]) + ".md"
 	rel := capsule.DirMemoryOutbox + "/" + name
-	dir := filepath.Join(sc.CapsuleDir, filepath.FromSlash(capsule.DirMemoryOutbox))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
 	tmp := filepath.Join(dir, "."+name+".tmp")
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return err
@@ -196,4 +224,58 @@ func stepRemember(ctx *Context, fs *flag.FlagSet, memType, proj, content string)
 	}
 	fmt.Fprintf(ctx.Stdout, "queued %s (type %s) — the daemon uploads it after this step; the outcome lands in %s\n", rel, memType, capsule.MemoryLogMD)
 	return nil
+}
+
+// plainDirs creates each directory in order, refusing one that exists as
+// anything but a plain directory (a symlink included).
+func plainDirs(dirs ...string) error {
+	for _, d := range dirs {
+		fi, err := os.Lstat(d)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			if err := os.Mkdir(d, 0o755); err != nil {
+				return err
+			}
+		case err != nil:
+			return err
+		case !fi.IsDir() || fi.Mode()&fs.ModeSymlink != 0:
+			return fmt.Errorf("%s is not a plain directory", d)
+		}
+	}
+	return nil
+}
+
+// queuedFor answers the outbox file (new, pending or uploaded) already
+// queued for m's step attempt — any non-wrap memory of the same attempt,
+// or any wrap summary for a wrap — "" when there is none.
+func queuedFor(dir string, m capsule.OutboxMemory) string {
+	for _, sub := range []string{"", capsule.OutboxPending, capsule.OutboxDone} {
+		d := filepath.Join(dir, sub)
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.Type().IsRegular() || !strings.HasSuffix(e.Name(), ".md") {
+				continue
+			}
+			fi, err := e.Info()
+			if err != nil || fi.Size() > capsule.OutboxFileMax {
+				continue
+			}
+			raw, err := os.ReadFile(filepath.Join(d, e.Name()))
+			if err != nil {
+				continue
+			}
+			q, err := capsule.ParseOutboxMemory(raw)
+			if err != nil {
+				continue
+			}
+			wrap := m.Type == "experience.wrap"
+			if (wrap && q.Type == m.Type) || (!wrap && q.Type != "experience.wrap" && q.Step == m.Step && q.Attempt == m.Attempt) {
+				return filepath.ToSlash(filepath.Join(capsule.DirMemoryOutbox, sub, e.Name()))
+			}
+		}
+	}
+	return ""
 }

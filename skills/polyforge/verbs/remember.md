@@ -63,11 +63,12 @@ against the workspace's `memory_policy` (`.polyforge.yaml`; `verbs/init.md`);
 a lesson outside the policy's `record` list carries the `policy-proposal`
 tag and a "建议新增条目：…" line. The workflow's last step writes the work
 item's one `experience.wrap` summary (title `<wi slug>: <what was done>`).
-A step agent holds no aihub credential path: inside a step (`PF_WI_ID`
-set) the same `pf remember` command queues the memory in the capsule's
+A step agent holds no aihub credential path: inside a step (`PF_WI_ID` and
+`PF_DAEMON_ID` set) the same `pf remember` command queues the memory in the capsule's
 `artifacts/memory-outbox/` and prints `queued <path>`; the daemon
 validates it (`--type experience.*`, `--title` required, body ≤ 2 KB, no
-credential-looking content, one per step plus the wrap), skips a
+credential values, one per step attempt plus the wrap — the CLI refuses
+a second one or a credential value at once), skips a
 duplicate title of the same work item, uploads it with its own credential
 attributed to the step's work item and project, and logs the outcome in
 `artifacts/memory-log.md` (an aihub outage retries at the next step end).

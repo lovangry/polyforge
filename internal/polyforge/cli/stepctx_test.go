@@ -26,7 +26,7 @@ func stepEnv(t *testing.T) (map[string]string, string, *reqRecorder, *reqRecorde
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /step/context", func(w http.ResponseWriter, r *http.Request) {
 		drec.record(r)
-		io.WriteString(w, jsonBody(map[string]string{"work_item_id": "wi_st", "slug": "polyforge#7", "project": "polyforge", "capsule_dir": capDir}))
+		io.WriteString(w, jsonBody(map[string]any{"work_item_id": "wi_st", "slug": "polyforge#7", "project": "polyforge", "capsule_dir": capDir, "step": "fix", "attempt": 3}))
 	})
 	mux.HandleFunc("GET /step/memories/search", func(w http.ResponseWriter, r *http.Request) {
 		drec.record(r)
@@ -39,7 +39,7 @@ func stepEnv(t *testing.T) (map[string]string, string, *reqRecorder, *reqRecorde
 	sock := newFakeDaemon(t, mux)
 	arec := &reqRecorder{}
 	srv := newFakeAihub(t, arec, func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, `{}`) })
-	env := map[string]string{"PF_WI_ID": "wi_st", "PF_DAEMON_SOCKET": sock, "PF_SERVER": srv.URL, "PF_API_KEY": "k_should_never_leave"}
+	env := map[string]string{"PF_WI_ID": "wi_st", "PF_DAEMON_ID": "m-test", "PF_DAEMON_SOCKET": sock, "PF_SERVER": srv.URL, "PF_API_KEY": "k_should_never_leave"}
 	return env, capDir, drec, arec
 }
 
@@ -80,8 +80,17 @@ func TestStepRememberWritesTheOutbox(t *testing.T) {
 	}
 	raw, _ := os.ReadFile(files[0])
 	m, err := capsule.ParseOutboxMemory(raw)
-	if err != nil || m.Type != "experience.debug" || m.Title != "sqlite busy under WAL" || len(m.Tags) != 1 || m.Body != "现象→原因→解法\n" {
+	if err != nil || m.Type != "experience.debug" || m.Title != "sqlite busy under WAL" || len(m.Tags) != 1 || m.Body != "现象→原因→解法\n" ||
+		m.Step != "fix" || m.Attempt != 3 {
 		t.Fatalf("outbox file = %+v, %v\n%s", m, err, raw)
+	}
+	// a second memory in the same step attempt is refused at once; the
+	// wrap summary is not counted against it
+	if code, _, stderr := runPf(t, env, "remember", "--project", "polyforge", "--type", "experience.env", "--title", "another", "x"); code != 1 || !strings.Contains(stderr, "already queued this step's memory") {
+		t.Fatalf("second remember: exit %d %s", code, stderr)
+	}
+	if code, _, stderr := runPf(t, env, "remember", "--project", "polyforge", "--type", "experience.wrap", "--title", "polyforge#7: done", "the key lives in ~/.config/polyforge/cli.toml (api_key=${PF_API_KEY})"); code != 0 {
+		t.Fatalf("wrap with a where-it-lives line: exit %d %s", code, stderr)
 	}
 	for _, tc := range []struct {
 		args []string
@@ -92,6 +101,7 @@ func TestStepRememberWritesTheOutbox(t *testing.T) {
 		{[]string{"--type", "experience.debug", "--title", "t", "--project", "other"}, `belongs to project "polyforge"`},
 		{[]string{"--type", "experience.debug", "--title", "t", "--work-item", "wi_other"}, "attributed to its own work item wi_st"},
 		{[]string{"--type", "experience.debug", "--title", "t", "--visibility", "public"}, "project-visible"},
+		{[]string{"--type", "experience.wrap", "--title", "t2"}, "already queued"},
 	} {
 		args := append([]string{"remember", "--project", "polyforge"}, tc.args...)
 		args = append(args, "body")
@@ -128,5 +138,34 @@ func TestStepRefusesOtherAihubVerbs(t *testing.T) {
 	}
 	if code, _, stderr := runPf(t, env, "remember", "--project", "polyforge", "--type", "fact.note", "x"); code != 0 || len(arec.all()) != 1 {
 		t.Fatalf("outside a step: exit %d %s, aihub calls %d", code, stderr, len(arec.all()))
+	}
+}
+
+func TestStepRememberRefusesCredentialValues(t *testing.T) {
+	env, capDir, _, _ := stepEnv(t)
+	for _, body := range []string{"token ghp_abcdefghijklmnopqrstuvwxyz0123", "pem: -----BEGIN OPENSSH PRIVATE KEY-----", "key: Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4zAb7c"} {
+		if code, _, stderr := runPf(t, env, "remember", "--project", "polyforge", "--type", "experience.env", "--title", "t", body); code != 1 || !strings.Contains(stderr, "never the value") {
+			t.Fatalf("%q: exit %d %s", body, code, stderr)
+		}
+	}
+	if files, _ := filepath.Glob(filepath.Join(capDir, filepath.FromSlash(capsule.DirMemoryOutbox), "*.md")); len(files) != 0 {
+		t.Fatalf("a refused memory was queued: %v", files)
+	}
+}
+
+func TestStepModeNeedsBothMarkersAndRefusesDoctor(t *testing.T) {
+	env, _, _, arec := stepEnv(t)
+	code, _, stderr := runPf(t, env, "doctor")
+	if code != 1 || !strings.Contains(stderr, "pf doctor refused inside a workflow step") || !strings.Contains(stderr, "PF_WI_ID=wi_st and PF_DAEMON_ID=m-test are set") {
+		t.Fatalf("doctor in a step: exit %d %s", code, stderr)
+	}
+	if len(arec.all()) != 0 {
+		t.Fatal("doctor in a step reached aihub")
+	}
+	// PF_WI_ID alone does not switch step mode on: recall then goes to
+	// aihub directly (and is refused locally for the missing mapping)
+	env["PF_DAEMON_ID"] = ""
+	if code, _, stderr := runPf(t, env, "recall", "--project", "polyforge", "x"); code != 1 || !strings.Contains(stderr, "no [workspace] mapping") {
+		t.Fatalf("PF_WI_ID alone: exit %d %s", code, stderr)
 	}
 }

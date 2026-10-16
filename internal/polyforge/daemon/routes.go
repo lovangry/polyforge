@@ -605,9 +605,6 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 		return
 	}
 	defer d.releaseSeal(wi)
-	// the memories the run's steps left in the outbox go up before the
-	// teardown seals the capsule (bounded; best effort)
-	d.flushOutboxBounded(outboxTarget{wi: ji.WorkItem, project: ji.Project, capsuleDir: ji.CapsuleDir}, outboxFlushWait)
 	// The agent's death in this close is expected: arm the monitor's
 	// suppression BEFORE the teardown starts, so a fast exit poll can
 	// never win the race against the RTFinished teardown and journal a
@@ -615,6 +612,16 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 	// fence drops the OB message either way — the event log is the
 	// observable lie this closes).
 	d.obs.MarkClosing(wi)
+	// The memories the run's steps left in the outbox go up before the
+	// seal: stop the agent first (no step writes behind the flush), then
+	// the bounded final flush (it closes the outbox), then rt.Stop seals.
+	// rt.Stop's own teardown finds the driver already stopped.
+	if ji.Agent != nil && !ji.Agent.Done() {
+		if err := ji.Agent.Terminate(outboxStopWait); err != nil {
+			fmt.Fprintf(os.Stderr, "daemon: %s: stopping the agent before the close: %v\n", wi, err)
+		}
+	}
+	d.finalFlush(outboxTarget{wi: ji.WorkItem, project: ji.Project, capsuleDir: ji.CapsuleDir}, outboxFlushWait)
 	if err := d.rt.Stop(ctx, wi, reason); err != nil {
 		graceful, ae := d.mapCloseErr(err)
 		if graceful {

@@ -17,12 +17,15 @@ package capsule
 //	type: experience.debug
 //	title: sqlite busy under WAL
 //	tags: [policy-proposal]
+//	step: fix          # the step and dispatch (spawn_n) that wrote it
+//	attempt: 3
 //	---
 //	<body>
 
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -37,6 +40,9 @@ const (
 	OutboxPending  = "pending"
 	OutboxDone     = "done"
 	OutboxRejected = "rejected"
+	// OutboxFileMax bounds an outbox file read (bytes): a larger one is
+	// refused unread.
+	OutboxFileMax = 64 << 10
 )
 
 // OutboxMemory is one outbox file.
@@ -44,7 +50,61 @@ type OutboxMemory struct {
 	Type  string   `yaml:"type"`
 	Title string   `yaml:"title"`
 	Tags  []string `yaml:"tags,omitempty"`
-	Body  string   `yaml:"-"`
+	// Step and Attempt name the step and its dispatch ordinal (spawn_n)
+	// that queued the memory: one memory per step attempt.
+	Step    string `yaml:"step"`
+	Attempt int    `yaml:"attempt"`
+	Body    string `yaml:"-"`
+}
+
+// secretValueRes match likely credential VALUES (never key names: "the
+// key lives in ~/.config/polyforge/cli.toml" or `api_key=${PF_API_KEY}`
+// are what the memory policy asks for, and pass).
+var secretValueRes = []*regexp.Regexp{
+	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`),
+	regexp.MustCompile(`\b(sk|rk)-[A-Za-z0-9_-]{20,}`),
+	regexp.MustCompile(`\b(sk|pk|rk)_(live|test)_[A-Za-z0-9]{16,}`),
+	regexp.MustCompile(`\b(ghp|gho|ghs|ghu|ghr|github_pat)_[A-Za-z0-9_]{20,}`),
+	regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}`),
+	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
+	regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9-]{10,}`),
+	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`),
+}
+
+// longToken is a run that may be a high-entropy token.
+var longToken = regexp.MustCompile(`[A-Za-z0-9_+=-]{32,}`)
+
+// SecretValueDefect answers why text looks like it carries a credential
+// value ("" = it does not): a known key/token shape, a PEM private key,
+// or a long run mixing upper case, lower case and digits (a git sha or a
+// uuid does not mix cases).
+func SecretValueDefect(text string) string {
+	for _, re := range secretValueRes {
+		if re.MatchString(text) {
+			return "looks like it carries a credential value (" + re.String() + ") — name where the secret lives, never the value"
+		}
+	}
+	for _, tok := range longToken.FindAllString(text, -1) {
+		if mixedCase(tok) {
+			return "carries a long high-entropy token — name where the secret lives, never the value"
+		}
+	}
+	return ""
+}
+
+func mixedCase(s string) bool {
+	var up, low, dig bool
+	for _, r := range s {
+		switch {
+		case r >= 'A' && r <= 'Z':
+			up = true
+		case r >= 'a' && r <= 'z':
+			low = true
+		case r >= '0' && r <= '9':
+			dig = true
+		}
+	}
+	return up && low && dig
 }
 
 // Marshal renders the outbox file.

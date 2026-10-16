@@ -5,9 +5,10 @@ package daemon
 // the step-origin guard recognises) `pf recall` and `pf memory show`
 // come here, and the daemon forwards them to aihub with its own machine
 // credential. The work item — and with it the project every search is
-// scoped to — comes from the caller's UDS peer credential
-// (runtime.StepProcessOrigin), never from the request: a step reads its
-// own work item's project and nothing else. Every route is a GET, so the
+// scoped to — comes from the caller's process tree (peerStepOrigin: the
+// journaled step process this daemon spawned among the UDS peer's
+// ancestors), never from the request or the caller's own environment: a
+// step reads its own work item's project and nothing else. Every route is a GET, so the
 // step-origin guard lets it through as a read; a caller that is no step
 // process of this daemon is refused (humans read aihub directly).
 //
@@ -23,10 +24,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
@@ -41,12 +44,23 @@ type memContentReader interface {
 	GetMemoryContent(id string) ([]byte, error)
 }
 
-// stepJob is the work item a step caller belongs to.
+// stepJob is the work item (and dispatch) a step caller belongs to.
 type stepJob struct {
 	WorkItemID string `json:"work_item_id"`
 	Slug       string `json:"slug,omitempty"`
 	Project    string `json:"project"`
 	CapsuleDir string `json:"capsule_dir"`
+	// Step and Attempt are the dispatch the caller runs under (the spawn
+	// journal entry of the step process it descends from).
+	Step    string `json:"step"`
+	Attempt int    `json:"attempt"`
+}
+
+// stepOrigin is a resolved step caller.
+type stepOrigin struct {
+	wi      string
+	step    string
+	attempt int
 }
 
 // stepCaller resolves the request's step process to its live job, or
@@ -56,27 +70,100 @@ func (d *Daemon) stepCaller(w http.ResponseWriter, r *http.Request) (stepJob, bo
 	if origin == nil {
 		origin = d.peerStepOrigin
 	}
-	wi, ok := origin(r)
-	if !ok {
-		writeErr(w, api.ErrDaemonForbidden, r.URL.Path+" serves step agents only (the caller is no step process of this daemon) — outside a step, `pf recall` / `pf memory show` read aihub directly")
+	o, reason := origin(r)
+	if reason != "" {
+		writeErr(w, api.ErrDaemonForbidden, r.URL.Path+": "+reason)
 		return stepJob{}, false
 	}
-	ji, live := d.rt.Info(d.canonWI(wi))
+	ji, live := d.rt.Info(d.canonWI(o.wi))
 	if !live || ji.Project == "" {
-		writeErr(w, api.ErrDaemonNotFound, "work item "+wi+" of the calling step is not running on this daemon")
+		writeErr(w, api.ErrDaemonNotFound, "work item "+o.wi+" of the calling step is not running on this daemon")
 		return stepJob{}, false
 	}
-	return stepJob{WorkItemID: ji.WorkItem, Slug: ji.Slug, Project: ji.Project, CapsuleDir: ji.CapsuleDir}, true
+	return stepJob{WorkItemID: ji.WorkItem, Slug: ji.Slug, Project: ji.Project, CapsuleDir: ji.CapsuleDir,
+		Step: o.step, Attempt: o.attempt}, true
 }
 
-// peerStepOrigin is the production origin: the kernel's peer credential
-// walked up to a step process of this daemon.
-func (d *Daemon) peerStepOrigin(r *http.Request) (string, bool) {
+// peerStepOrigin is the production origin. The caller's own environment
+// is never the authority (any process may set PF_WI_ID): the kernel's
+// peer credential is walked up its ancestry (and process groups) to a
+// step process THIS daemon spawned — the pid of a live job's latest
+// spawn-journal entry that still carries that job's markers. The
+// caller's nearest PF_WI_ID must name the same work item; a mismatch is
+// refused.
+func (d *Daemon) peerStepOrigin(r *http.Request) (stepOrigin, string) {
+	const notStep = "serves step agents only (the caller is no step process of this daemon) — outside a step, `pf recall` / `pf memory show` read aihub directly"
 	cred, ok := requestPeerCred(r.Context())
 	if !ok {
-		return "", false
+		return stepOrigin{}, notStep
 	}
-	return runtime.StepProcessOrigin(cred.pid, d.cfg.MachineID)
+	claimed, ok := runtime.StepProcessOrigin(cred.pid, d.cfg.MachineID)
+	if !ok {
+		return stepOrigin{}, notStep
+	}
+	chain := ancestry(cred.pid)
+	for _, ji := range d.rt.List() {
+		if ji.CapsuleDir == "" {
+			continue
+		}
+		entries, err := capsule.ReadSpawnJournal(ji.CapsuleDir)
+		if err != nil || len(entries) == 0 {
+			continue
+		}
+		e := entries[len(entries)-1]
+		if e.PID <= 1 || !chain[e.PID] {
+			continue
+		}
+		if owner, ok := runtime.StepProcessOrigin(e.PID, d.cfg.MachineID); !ok || owner != ji.WorkItem {
+			continue
+		}
+		if claimed != ji.WorkItem {
+			return stepOrigin{}, fmt.Sprintf("refused: the caller descends from the step process of %s but claims PF_WI_ID=%s", ji.WorkItem, claimed)
+		}
+		return stepOrigin{wi: ji.WorkItem, step: e.StepID, attempt: e.SpawnN}, ""
+	}
+	return stepOrigin{}, notStep + " (no live step process of this daemon is among its ancestors)"
+}
+
+// ancestry answers the pids of pid, its ancestors and their process
+// group leaders (procfs; bounded).
+func ancestry(pid int) map[int]bool {
+	out := map[int]bool{}
+	for cur, i := pid, 0; cur > 1 && i < 64; i++ {
+		out[cur] = true
+		ppid, pgrp, ok := procParent(cur)
+		if !ok {
+			break
+		}
+		if pgrp > 1 {
+			out[pgrp] = true
+		}
+		cur = ppid
+	}
+	return out
+}
+
+// procParent reads the parent pid and process group of pid.
+func procParent(pid int) (ppid, pgrp int, ok bool) {
+	raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0, 0, false
+	}
+	s := string(raw)
+	i := strings.LastIndex(s, ")")
+	if i < 0 || i+2 > len(s) {
+		return 0, 0, false
+	}
+	f := strings.Fields(s[i+2:])
+	if len(f) < 3 {
+		return 0, 0, false
+	}
+	pp, err1 := strconv.Atoi(f[1])
+	pg, err2 := strconv.Atoi(f[2])
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return pp, pg, true
 }
 
 func (d *Daemon) stepContextRoute(w http.ResponseWriter, r *http.Request) {
@@ -127,8 +214,13 @@ func (d *Daemon) stepMemoryRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	notFound := func() { writeErr(w, api.ErrMemNotFound, "memory "+id+" not found in project "+j.Project) }
 	var meta json.RawMessage
 	if err := d.hub.Do("GET", "/api/v1/memories/"+url.PathEscape(id), nil, &meta); err != nil {
+		if !transient(err) {
+			notFound() // whatever aihub says about an id: the step sees not-found
+			return
+		}
 		writeErrOf(w, err)
 		return
 	}
@@ -142,7 +234,7 @@ func (d *Daemon) stepMemoryRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if entry.ProjectID == "" || entry.ProjectID != pid {
-		writeErr(w, api.ErrMemNotFound, "memory "+id+" not found in project "+j.Project)
+		notFound()
 		return
 	}
 	cr, ok := d.hub.(memContentReader)

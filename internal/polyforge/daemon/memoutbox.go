@@ -3,34 +3,44 @@ package daemon
 // memoutbox.go: the upload half of the step agent's memory write-back.
 // Inside a step, `pf remember` writes one file into the capsule's memory
 // outbox (capsule/memoryoutbox.go) — the agent holds no aihub credential
-// path. The daemon flushes the outbox with its own machine credential:
-// after every step result (step_done / gate_verdict, without blocking
-// the driver), at the workflow's terminal transition (bounded wait, so
-// the last step's memories land before the capsule is sealed) and on
-// every operator close (pf wrap / fail / pause, before the teardown).
+// path. The daemon flushes the outbox with its own machine credential.
+//
+// No flush ever runs under a driver or runtime lock: the driver log only
+// REQUESTS one (a goroutine, after step_done / gate_verdict / terminal),
+// and the final flush runs in the agent adapter once the driver has
+// exited — before the adapter reports the exit, so before the observe
+// lane hands the work item to the seal — and in an operator close after
+// the agent is stopped and before rt.Stop seals. The final flush is
+// bounded (outboxFlushWait); when it returns (or times out) the outbox is
+// CLOSED: a flush still in flight makes no further move or log write,
+// and no flush starts, until a new driver handle reopens it (a recovery).
 //
 // One flush, per work item and serialized:
 //
-//  1. judge each new file: type experience.<kind>, a one-line title, a
-//     body of at most outboxBodyMax bytes, plain tags, no credential-
-//     looking content; at most ONE memory per step (per flush) besides
-//     the experience.wrap summary, and one wrap per work item. A refused
-//     file moves to rejected/; an accepted one to pending/.
+//  1. judge each new file: at most OutboxFileMax bytes, type
+//     experience.<kind>, a one-line title, a body of at most
+//     outboxBodyMax bytes, plain tags, no credential value; queued by a
+//     step dispatch of this work item (step + attempt in the frontmatter,
+//     checked against the spawn journal), at most ONE memory per step
+//     attempt besides the experience.wrap summary, one wrap per work
+//     item. A refused file moves to rejected/; an accepted one to pending/.
 //  2. upload each pending file, attributed to the job's work item and
-//     project: a memory of the same work item with the same title is a
-//     duplicate (done/, nothing written); a typed 4xx refusal moves the
-//     file to rejected/; an outage (transport, 5xx) keeps it in pending/
-//     for the next flush and ends this one.
+//     project: a memory of the same work item with the same type and
+//     title is a duplicate (done/, nothing written); a typed 4xx refusal
+//     moves the file to rejected/; an outage (transport, 5xx, 408, 429)
+//     keeps it in pending/ for the next flush and ends this one.
 //
 // Every outcome is one line of artifacts/memory-log.md. A failure never
-// fails a step. A work item wrapped while its memories are still pending
-// (aihub down at the last flush) keeps them in the sealed capsule's
-// pending/ — best effort, there is no flush after the seal.
+// fails a step. A work item sealed while memories are still pending (aihub
+// down at the final flush) keeps them in the sealed capsule's pending/ —
+// best effort, there is no flush after the seal. Symlinked outbox,
+// artifacts or log paths are refused, never followed.
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -38,6 +48,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -52,9 +63,11 @@ const (
 	outboxTitleRunes = 200
 	// outboxMaxTags bounds the tags of one memory.
 	outboxMaxTags = 8
-	// outboxFlushWait bounds how long a terminal transition or a close
-	// waits for the flush (the flush itself goes on in the background).
+	// outboxFlushWait bounds the final flush.
 	outboxFlushWait = 20 * time.Second
+	// outboxStopWait bounds stopping the agent before an operator
+	// close's final flush.
+	outboxStopWait = 10 * time.Second
 	// wrapType is the work item's one summary memory.
 	wrapType = "experience.wrap"
 )
@@ -62,18 +75,6 @@ const (
 var (
 	outboxTypeRe = regexp.MustCompile(`^experience\.[a-z0-9][a-z0-9._-]*$`)
 	outboxTagRe  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
-	// outboxSecretRes are credential-looking contents a memory must never
-	// carry (a guard against accidents: the policy says name where a
-	// secret lives, never its value).
-	outboxSecretRes = []*regexp.Regexp{
-		regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`),
-		regexp.MustCompile(`\b(sk|pk|rk)-[A-Za-z0-9_-]{20,}`),
-		regexp.MustCompile(`\b(ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{20,}`),
-		regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
-		regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9-]{10,}`),
-		regexp.MustCompile(`(?i)\b(api[_-]?key|secret|token|password|passwd)\b["']?\s*[:=]\s*["']?[^\s"']{8,}`),
-		regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/-]{20,}`),
-	}
 )
 
 // outboxTarget is the job an outbox belongs to.
@@ -82,7 +83,7 @@ type outboxTarget struct {
 }
 
 // outboxTargetOf reads the target from the capsule's materialized task
-// definition (no runtime lookup: the driver's event path calls this).
+// definition.
 func outboxTargetOf(capsuleDir string) (outboxTarget, bool) {
 	raw, err := os.ReadFile(filepath.Join(capsuleDir, filepath.FromSlash(capsule.WorkItemJSON)))
 	if err != nil {
@@ -95,17 +96,81 @@ func outboxTargetOf(capsuleDir string) (outboxTarget, bool) {
 	return outboxTarget{wi: doc.ID, project: doc.Project, capsuleDir: capsuleDir}, true
 }
 
-// flushOutboxBounded runs one flush and waits at most wait for it.
-func (d *Daemon) flushOutboxBounded(t outboxTarget, wait time.Duration) {
+// outboxState is one work item's flush state.
+type outboxState struct {
+	run    sync.Mutex // one flush at a time
+	mu     sync.Mutex // guards closed; held across each capsule mutation
+	closed bool
+}
+
+// do runs one capsule mutation unless the outbox is closed; false = closed.
+func (st *outboxState) do(fn func()) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.closed {
+		return false
+	}
+	fn()
+	return true
+}
+
+func (st *outboxState) isClosed() bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.closed
+}
+
+func (d *Daemon) outboxStateOf(wi string) *outboxState {
+	v, _ := d.outboxLocks.LoadOrStore(wi, &outboxState{})
+	return v.(*outboxState)
+}
+
+// requestFlush starts one background flush (never blocks the caller).
+func (d *Daemon) requestFlush(t outboxTarget) {
+	st := d.outboxStateOf(t.wi)
+	if st.isClosed() {
+		return
+	}
+	go d.flushOutbox(t, st)
+}
+
+// finalFlush runs one flush, waits at most wait, then closes the outbox.
+func (d *Daemon) finalFlush(t outboxTarget, wait time.Duration) {
+	st := d.outboxStateOf(t.wi)
+	if st.isClosed() {
+		return
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		d.flushOutbox(t)
+		d.flushOutbox(t, st)
 	}()
 	select {
 	case <-done:
 	case <-time.After(wait):
-		fmt.Fprintf(os.Stderr, "daemon: %s: memory outbox flush still running after %s; continuing without it\n", t.wi, wait)
+		fmt.Fprintf(os.Stderr, "daemon: %s: memory outbox flush still running after %s; the outbox is closed, pending memories stay in the capsule\n", t.wi, wait)
+	}
+	st.mu.Lock()
+	st.closed = true
+	st.mu.Unlock()
+}
+
+// reopenOutbox reopens a work item's outbox for a new driver handle.
+func (d *Daemon) reopenOutbox(wi string) {
+	st := d.outboxStateOf(wi)
+	st.mu.Lock()
+	st.closed = false
+	st.mu.Unlock()
+}
+
+// dropOutbox forgets a finished work item's flush state (it stays closed
+// for any flush still in flight).
+func (d *Daemon) dropOutbox(wi string) {
+	if v, ok := d.outboxLocks.LoadAndDelete(wi); ok {
+		st := v.(*outboxState)
+		st.mu.Lock()
+		st.closed = true
+		st.mu.Unlock()
 	}
 }
 
@@ -115,84 +180,152 @@ type outboxFile struct {
 	mem  capsule.OutboxMemory
 }
 
+// realDir reports whether path is a directory that is no symlink
+// (absent = false, nil).
+func realDir(path string) (bool, error) {
+	fi, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !fi.IsDir() || fi.Mode()&fs.ModeSymlink != 0 {
+		return false, fmt.Errorf("%s is not a plain directory", path)
+	}
+	return true, nil
+}
+
 // flushOutbox judges the new outbox files and uploads the pending ones.
-func (d *Daemon) flushOutbox(t outboxTarget) {
+func (d *Daemon) flushOutbox(t outboxTarget, st *outboxState) {
 	if t.capsuleDir == "" || t.wi == "" || t.project == "" {
 		return
 	}
-	mu, _ := d.outboxLocks.LoadOrStore(t.wi, &sync.Mutex{})
-	mu.(*sync.Mutex).Lock()
-	defer mu.(*sync.Mutex).Unlock()
-	root := filepath.Join(t.capsuleDir, filepath.FromSlash(capsule.DirMemoryOutbox))
-	fresh := outboxNames(root)
-	pending := outboxNames(filepath.Join(root, capsule.OutboxPending))
-	if len(fresh) == 0 && len(pending) == 0 {
+	st.run.Lock()
+	defer st.run.Unlock()
+	if st.isClosed() {
 		return
 	}
-	var log []string
-	defer func() { appendMemoryLog(t, log) }()
+	root := filepath.Join(t.capsuleDir, filepath.FromSlash(capsule.DirMemoryOutbox))
+	for _, dir := range []string{filepath.Dir(root), root} {
+		if ok, err := realDir(dir); err != nil || !ok {
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "daemon: %s: memory outbox refused: %v\n", t.wi, err)
+			}
+			return
+		}
+	}
+	fresh := outboxNames(root)
+	if len(fresh) == 0 && len(outboxNames(filepath.Join(root, capsule.OutboxPending))) == 0 {
+		return
+	}
+	logLine := func(line string) bool { return st.do(func() { appendMemoryLog(t, line) }) }
+	move := func(src, sub string) bool {
+		return st.do(func() { moveOutbox(src, filepath.Join(root, sub)) })
+	}
 
 	known := outboxRead(root, capsule.OutboxDone)
 	known = append(known, outboxRead(root, capsule.OutboxPending)...)
-	wrapSeen, stepTaken := false, false
+	wrapSeen := false
+	taken := map[string]bool{} // step#attempt that already has its memory
 	for _, f := range known {
 		if f.mem.Type == wrapType {
 			wrapSeen = true
+		} else {
+			taken[attemptKey(f.mem)] = true
 		}
 	}
+	dispatches := journalDispatches(t.capsuleDir)
 	for _, name := range fresh {
-		raw, err := os.ReadFile(filepath.Join(root, name))
-		if err != nil {
-			continue
-		}
-		m, perr := capsule.ParseOutboxMemory(raw)
-		reason := ""
-		switch {
-		case perr != nil:
-			reason = perr.Error()
-		default:
+		path := filepath.Join(root, name)
+		m, reason := readOutboxFile(path)
+		if reason == "" {
 			reason = d.outboxDefect(m)
 		}
-		if reason == "" && sameTitle(known, m.Title) {
-			moveOutbox(filepath.Join(root, name), filepath.Join(root, capsule.OutboxDone))
-			log = append(log, fmt.Sprintf("- duplicate %s %s (same title as an earlier memory of this work item)", m.Type, oneLineTitle(m.Title)))
+		if reason == "" && !dispatches[attemptKey(m)] {
+			reason = fmt.Sprintf("step %q attempt %d is no dispatch of this work item (queue memories with `pf remember` inside the step)", m.Step, m.Attempt)
+		}
+		if reason == "" && sameTitle(known, m.Type, m.Title) {
+			if !move(path, capsule.OutboxDone) || !logLine(fmt.Sprintf("- duplicate %s %s (same type and title as an earlier memory of this work item)", m.Type, oneLineTitle(m.Title))) {
+				return
+			}
 			continue
 		}
 		switch {
 		case reason != "":
 		case m.Type == wrapType && wrapSeen:
 			reason = "the work item already has its experience.wrap summary"
-		case m.Type != wrapType && stepTaken:
-			reason = "more than one memory in one step (the policy allows one, plus the wrap summary)"
+		case m.Type != wrapType && taken[attemptKey(m)]:
+			reason = fmt.Sprintf("a second memory from step %s attempt %d (the policy allows one per step, plus the wrap summary)", m.Step, m.Attempt)
 		}
 		if reason != "" {
-			moveOutbox(filepath.Join(root, name), filepath.Join(root, capsule.OutboxRejected))
-			log = append(log, fmt.Sprintf("- rejected %s: %s", name, reason))
+			if !move(path, capsule.OutboxRejected) || !logLine(fmt.Sprintf("- rejected %s: %s", name, reason)) {
+				return
+			}
 			continue
 		}
 		if m.Type == wrapType {
 			wrapSeen = true
 		} else {
-			stepTaken = true
+			taken[attemptKey(m)] = true
 		}
-		moveOutbox(filepath.Join(root, name), filepath.Join(root, capsule.OutboxPending))
+		if !move(path, capsule.OutboxPending) {
+			return
+		}
 		known = append(known, outboxFile{name, m})
 	}
 
 	for _, f := range outboxRead(root, capsule.OutboxPending) {
-		line, keep := d.uploadOutbox(t, f)
-		if line != "" {
-			log = append(log, line)
+		line, sub, outage := d.uploadOutbox(t, f, st)
+		if outage {
+			return // the rest waits for the next flush
 		}
-		if keep {
-			return // an outage: the rest waits for the next flush
+		if !move(filepath.Join(root, capsule.OutboxPending, f.name), sub) || !logLine(line) {
+			return
 		}
 	}
+}
+
+// readOutboxFile reads and parses one outbox file, refusing a symlink or
+// an oversized file unread.
+func readOutboxFile(path string) (capsule.OutboxMemory, string) {
+	fi, err := os.Lstat(path)
+	switch {
+	case err != nil:
+		return capsule.OutboxMemory{}, err.Error()
+	case !fi.Mode().IsRegular():
+		return capsule.OutboxMemory{}, "not a regular file"
+	case fi.Size() > capsule.OutboxFileMax:
+		return capsule.OutboxMemory{}, fmt.Sprintf("the file is %d bytes (at most %d)", fi.Size(), capsule.OutboxFileMax)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return capsule.OutboxMemory{}, err.Error()
+	}
+	m, err := capsule.ParseOutboxMemory(raw)
+	if err != nil {
+		return m, err.Error()
+	}
+	return m, ""
+}
+
+func attemptKey(m capsule.OutboxMemory) string { return fmt.Sprintf("%s#%d", m.Step, m.Attempt) }
+
+// journalDispatches answers the step#attempt keys of the capsule's spawn
+// journal.
+func journalDispatches(capsuleDir string) map[string]bool {
+	out := map[string]bool{}
+	entries, _ := capsule.ReadSpawnJournal(capsuleDir)
+	for _, e := range entries {
+		out[fmt.Sprintf("%s#%d", e.StepID, e.SpawnN)] = true
+	}
+	return out
 }
 
 // outboxDefect answers why a parsed outbox memory is refused ("" = fine).
 func (d *Daemon) outboxDefect(m capsule.OutboxMemory) string {
 	title := strings.TrimSpace(m.Title)
+	body := strings.TrimSuffix(m.Body, "\n")
 	switch {
 	case !outboxTypeRe.MatchString(m.Type):
 		return fmt.Sprintf("type %q is not experience.<kind>", m.Type)
@@ -202,10 +335,10 @@ func (d *Daemon) outboxDefect(m capsule.OutboxMemory) string {
 		return "the title must be one line"
 	case utf8.RuneCountInString(title) > outboxTitleRunes:
 		return fmt.Sprintf("the title exceeds %d characters", outboxTitleRunes)
-	case strings.TrimSpace(m.Body) == "":
+	case strings.TrimSpace(body) == "":
 		return "the body is empty"
-	case len(strings.TrimSuffix(m.Body, "\n")) > outboxBodyMax:
-		return fmt.Sprintf("the body is %d bytes (at most %d)", len(strings.TrimSuffix(m.Body, "\n")), outboxBodyMax)
+	case len(body) > outboxBodyMax:
+		return fmt.Sprintf("the body is %d bytes (at most %d)", len(body), outboxBodyMax)
 	case len(m.Tags) > outboxMaxTags:
 		return fmt.Sprintf("more than %d tags", outboxMaxTags)
 	}
@@ -215,33 +348,32 @@ func (d *Daemon) outboxDefect(m capsule.OutboxMemory) string {
 		}
 	}
 	text := title + "\n" + m.Body
-	for _, re := range outboxSecretRes {
-		if re.MatchString(text) {
-			return "the memory looks like it carries a credential value (name where a secret lives, never the value)"
-		}
+	if why := capsule.SecretValueDefect(text); why != "" {
+		return "the memory " + why
 	}
 	if k := d.cfg.APIKey; k != "" && strings.Contains(text, k) {
-		return "the memory carries a credential value"
+		return "the memory carries the daemon's credential value"
 	}
 	return ""
 }
 
-// uploadOutbox uploads one pending file; keep reports an outage (the
-// file stays pending and the flush stops).
-func (d *Daemon) uploadOutbox(t outboxTarget, f outboxFile) (line string, keep bool) {
-	root := filepath.Join(t.capsuleDir, filepath.FromSlash(capsule.DirMemoryOutbox))
+// uploadOutbox uploads one pending file and answers its log line and the
+// subdirectory it moves to; outage = keep it pending, stop the flush.
+func (d *Daemon) uploadOutbox(t outboxTarget, f outboxFile, st *outboxState) (line, sub string, outage bool) {
+	if st.isClosed() {
+		return "", "", true
+	}
 	title := strings.TrimSpace(f.mem.Title)
 	dup, err := d.sameTitleMemory(t, f.mem.Type, title)
 	if err != nil {
 		if transient(err) {
 			fmt.Fprintf(os.Stderr, "daemon: %s: memory outbox upload deferred: %v\n", t.wi, err)
-			return "", true
+			return "", "", true
 		}
 		dup = ""
 	}
 	if dup != "" {
-		moveOutbox(filepath.Join(root, capsule.OutboxPending, f.name), filepath.Join(root, capsule.OutboxDone))
-		return fmt.Sprintf("- duplicate of %s %s %s", dup, f.mem.Type, oneLineTitle(title)), false
+		return fmt.Sprintf("- duplicate of %s %s %s", dup, f.mem.Type, oneLineTitle(title)), capsule.OutboxDone, false
 	}
 	body := map[string]any{
 		"project":      t.project,
@@ -254,21 +386,22 @@ func (d *Daemon) uploadOutbox(t outboxTarget, f outboxFile) (line string, keep b
 	if len(f.mem.Tags) > 0 {
 		body["tags"] = f.mem.Tags
 	}
+	if st.isClosed() {
+		return "", "", true // the outbox closed while the search ran: nothing is written
+	}
 	var stored api.Memory
 	if err := d.hub.Do("POST", "/api/v1/memories", body, &stored); err != nil {
 		if transient(err) {
 			fmt.Fprintf(os.Stderr, "daemon: %s: memory outbox upload deferred: %v\n", t.wi, err)
-			return "", true
+			return "", "", true
 		}
-		moveOutbox(filepath.Join(root, capsule.OutboxPending, f.name), filepath.Join(root, capsule.OutboxRejected))
-		return fmt.Sprintf("- rejected %s by aihub: %v", f.name, err), false
+		return fmt.Sprintf("- rejected %s by aihub: %v", f.name, err), capsule.OutboxRejected, false
 	}
-	moveOutbox(filepath.Join(root, capsule.OutboxPending, f.name), filepath.Join(root, capsule.OutboxDone))
 	tags := ""
 	if len(f.mem.Tags) > 0 {
 		tags = " [" + strings.Join(f.mem.Tags, ",") + "]"
 	}
-	return fmt.Sprintf("- %s %s%s %s", stored.ID, f.mem.Type, tags, oneLineTitle(title)), false
+	return fmt.Sprintf("- %s %s%s %s", stored.ID, f.mem.Type, tags, oneLineTitle(title)), capsule.OutboxDone, false
 }
 
 // sameTitleMemory answers the id of a memory of the same work item, type
@@ -297,8 +430,7 @@ func (d *Daemon) sameTitleMemory(t outboxTarget, memType, title string) (string,
 	return "", nil
 }
 
-// transient reports an outage-class failure (transport, 5xx, 408, 429):
-// the upload is retried at the next flush.
+// transient reports an outage-class failure (transport, 5xx, 408, 429).
 func transient(err error) bool {
 	var ae *api.Error
 	if !errors.As(err, &ae) {
@@ -308,10 +440,10 @@ func transient(err error) bool {
 	return s >= 500 || s == 408 || s == 429
 }
 
-func sameTitle(files []outboxFile, title string) bool {
+func sameTitle(files []outboxFile, memType, title string) bool {
 	title = strings.TrimSpace(title)
 	for _, f := range files {
-		if strings.EqualFold(strings.TrimSpace(f.mem.Title), title) {
+		if f.mem.Type == memType && strings.EqualFold(strings.TrimSpace(f.mem.Title), title) {
 			return true
 		}
 	}
@@ -320,8 +452,12 @@ func sameTitle(files []outboxFile, title string) bool {
 
 func oneLineTitle(s string) string { return strings.Join(strings.Fields(s), " ") }
 
-// outboxNames lists the *.md files directly in dir, sorted.
+// outboxNames lists the regular *.md files directly in dir, sorted
+// (symlinks are no regular files).
 func outboxNames(dir string) []string {
+	if ok, _ := realDir(dir); !ok {
+		return nil
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -336,26 +472,26 @@ func outboxNames(dir string) []string {
 	return out
 }
 
-// outboxRead parses every file of one outbox subdirectory (unparsable
+// outboxRead parses every file of one outbox subdirectory (unreadable
 // ones skipped).
 func outboxRead(root, sub string) []outboxFile {
 	dir := filepath.Join(root, sub)
 	var out []outboxFile
 	for _, name := range outboxNames(dir) {
-		raw, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			continue
-		}
-		if m, err := capsule.ParseOutboxMemory(raw); err == nil {
+		if m, reason := readOutboxFile(filepath.Join(dir, name)); reason == "" {
 			out = append(out, outboxFile{name, m})
 		}
 	}
 	return out
 }
 
-// moveOutbox moves the file src into dstDir (created on demand).
+// moveOutbox moves the file src into dstDir (created on demand; a
+// symlinked dstDir is refused).
 func moveOutbox(src, dstDir string) {
-	err := os.MkdirAll(dstDir, 0o755)
+	ok, err := realDir(dstDir)
+	if err == nil && !ok {
+		err = os.Mkdir(dstDir, 0o755)
+	}
 	if err == nil {
 		err = os.Rename(src, filepath.Join(dstDir, filepath.Base(src)))
 	}
@@ -364,21 +500,15 @@ func moveOutbox(src, dstDir string) {
 	}
 }
 
-// appendMemoryLog appends lines to the capsule's memory log.
-func appendMemoryLog(t outboxTarget, lines []string) {
-	if len(lines) == 0 {
-		return
-	}
+// appendMemoryLog appends one line to the capsule's memory log (never
+// through a symlink).
+func appendMemoryLog(t outboxTarget, line string) {
 	path := filepath.Join(t.capsuleDir, filepath.FromSlash(capsule.MemoryLogMD))
-	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, 0o644)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "daemon: %s: memory log: %v\n", t.wi, err)
 		return
 	}
 	defer f.Close()
-	stamp := time.Now().UTC().Format(time.RFC3339)
-	for _, l := range lines {
-		fmt.Fprintf(f, "%s (%s)\n", l, stamp)
-	}
+	fmt.Fprintf(f, "%s (%s)\n", line, time.Now().UTC().Format(time.RFC3339))
 }

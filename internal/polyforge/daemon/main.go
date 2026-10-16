@@ -49,6 +49,12 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(argv) > 0 && argv[0] == "ensure" {
 		return Ensure(argv[1:], stdout, stderr)
 	}
+	// a daemon reads cli.toml's api key and talks to aihub with it: never
+	// from inside a workflow step (the step markers are set)
+	if os.Getenv("PF_WI_ID") != "" && os.Getenv("PF_DAEMON_ID") != "" {
+		fmt.Fprintln(stderr, "pf daemon: refused inside a workflow step (PF_WI_ID and PF_DAEMON_ID are set): only a human's session runs the daemon")
+		return 1
+	}
 	fs := flag.NewFlagSet("pf daemon", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	cfgPath := fs.String("config", "", "shared config file: its [workspace] mapping is the capsule-placement source (default ~/.config/polyforge/cli.toml)")

@@ -351,12 +351,15 @@ none is left (`driver/spawn.go`). Every step prompt also carries the shared memo
 `experience.<kind>` memory at the end, judged against the project's memory policy from
 `runtime-state/memory-policy.json`); the workflow's last step adds `workflows/_shared/memory-wrap.md`
 (exactly one `experience.wrap` per work item). Step agents hold no aihub credential path; memory
-access is daemon-mediated: inside a step (`PF_WI_ID` set) `pf recall` / `pf memory show` read through
-the UDS read face `GET /step/memories/search|{id}` (scoped to the calling step's work item and project,
-resolved from the peer credential; `daemon/stepmem.go`), `pf remember` queues a file in
-`artifacts/memory-outbox/` that the daemon validates, dedupes and uploads after each step result, at
-the terminal transition (before the seal) and on an operator close (`daemon/memoutbox.go`; outcomes in
-`artifacts/memory-log.md`, outages retried at the next flush), and every other aihub verb is refused
+access is daemon-mediated: inside a step (`PF_WI_ID` and `PF_DAEMON_ID` set) `pf recall` / `pf memory
+show` read through the UDS read face `GET /step/memories/search|{id}`, scoped to the work item whose
+journaled step process is the caller's ancestor (never the caller's own env) and its project
+(`daemon/stepmem.go`); `pf remember` queues a file (step + attempt recorded) in
+`artifacts/memory-outbox/` that the daemon validates (one per step attempt plus one wrap), dedupes and
+uploads — background flushes after each step result, a bounded final flush after the driver exits and
+before the seal, or after the agent is stopped on an operator close; never under a driver/runtime lock,
+and nothing after the outbox closes (`daemon/memoutbox.go`; outcomes in `artifacts/memory-log.md`,
+outages retried at the next flush); every other aihub verb, `pf doctor` and `pf daemon` are refused
 (DAEMON-403). `cli.toml` stays readable under the shared HOME: a guard against accidents, not malice. Retry shape: first retry resumes the transcript,
 later retries start fresh with the old transcript as read-only reference (`v2-converge.md#§2.3`).
 

@@ -16,9 +16,13 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/silgrid/polyforge/internal/common/capsule"
 )
 
 // stepGet issues one GET over the daemon socket and answers status + body.
@@ -42,7 +46,7 @@ func stepDaemon(t *testing.T, wi string) *testDaemon {
 	t.Helper()
 	td := newTestDaemon(t, nil)
 	td.submitClaim(t, wi)
-	td.stepOriginOf = func(*http.Request) (string, bool) { return wi, true }
+	td.stepOriginOf = func(*http.Request) (stepOrigin, string) { return stepOrigin{wi: wi, step: "fix", attempt: 2}, "" }
 	return td
 }
 
@@ -122,49 +126,100 @@ func TestStepContextAnswersTheCallersJob(t *testing.T) {
 	td := stepDaemon(t, "wi_sm3")
 	code, body := stepGet(t, td.sock, "/step/context")
 	var sc stepJob
-	if code != 200 || json.Unmarshal([]byte(body), &sc) != nil || sc.WorkItemID != "wi_sm3" || sc.Project != "proj" || sc.CapsuleDir == "" {
+	if code != 200 || json.Unmarshal([]byte(body), &sc) != nil || sc.WorkItemID != "wi_sm3" || sc.Project != "proj" || sc.CapsuleDir == "" || sc.Step != "fix" || sc.Attempt != 2 {
 		t.Fatalf("context = %d %s", code, body)
 	}
-	td.stepOriginOf = func(*http.Request) (string, bool) { return "wi_gone", true }
+	td.stepOriginOf = func(*http.Request) (stepOrigin, string) { return stepOrigin{wi: "wi_gone"}, "" }
 	if code, _ := stepGet(t, td.sock, "/step/context"); code != 404 {
 		t.Fatalf("a step of no live job = %d, want 404", code)
 	}
 }
 
 // TestStepMemoryHelperProcess is not a test: re-executed as a child, it
-// GETs one /step path over the socket named in its environment.
+// plays a step process. With STEPMEM_GO set it waits for that file (the
+// parent journals this pid as the step process meanwhile), then runs the
+// caller — itself again in caller mode, with STEPMEM_CALLER_WI as its
+// PF_WI_ID when set — and relays its output.
 func TestStepMemoryHelperProcess(t *testing.T) {
 	sock := os.Getenv("STEPMEM_SOCK")
 	if sock == "" {
 		t.Skip("helper process only")
 	}
-	code, body := stepGet(t, sock, os.Getenv("STEPMEM_PATH"))
+	if goFile := os.Getenv("STEPMEM_GO"); goFile != "" {
+		for i := 0; i < 500; i++ {
+			if _, err := os.Stat(goFile); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		cmd := exec.Command(os.Args[0], "-test.run=^TestStepMemoryHelperProcess$", "-test.count=1")
+		env := []string{"STEPMEM_GO="}
+		if wi := os.Getenv("STEPMEM_CALLER_WI"); wi != "" {
+			env = append(env, "PF_WI_ID="+wi)
+		}
+		cmd.Env = append(os.Environ(), env...)
+		out, _ := cmd.CombinedOutput()
+		fmt.Print(string(out))
+		return
+	}
+	code, body := stepGet(t, sock, "/step/context")
 	fmt.Printf("STEPMEM %d %s\n", code, body)
 }
 
-// TestStepRoutesPassTheGuardForStepsOnly dials the real UDS face from a
-// child process: with the step markers of this daemon (the kernel's peer
-// credential names the child) the read passes the step-origin guard and
-// resolves to the child's work item; without them it is refused.
-func TestStepRoutesPassTheGuardForStepsOnly(t *testing.T) {
+// TestStepRoutesResolveTheSpawnedStep dials the real UDS face from a
+// child process tree. The work item is the one whose journaled step
+// process is the caller's ancestor — never the caller's own PF_WI_ID: a
+// caller claiming another live work item is refused, as is a marked
+// process that descends from no step of this daemon, and an unmarked one.
+func TestStepRoutesResolveTheSpawnedStep(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	td.submitClaim(t, "wi_sm4")
-	run := func(env ...string) string {
+	td.submitClaim(t, "wi_sm5")
+	ji, _ := td.rt.Info("wi_sm4")
+	run := func(journal bool, callerWI string, env ...string) string {
+		goFile := filepath.Join(t.TempDir(), "go")
 		cmd := exec.Command(os.Args[0], "-test.run=^TestStepMemoryHelperProcess$", "-test.count=1")
-		cmd.Env = append(os.Environ(), append([]string{"STEPMEM_SOCK=" + td.sock, "STEPMEM_PATH=/step/context"}, env...)...)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("child: %v\n%s", err, out)
+		cmd.Env = append(os.Environ(), append([]string{"STEPMEM_SOCK=" + td.sock, "STEPMEM_GO=" + goFile, "STEPMEM_CALLER_WI=" + callerWI}, env...)...)
+		var out strings.Builder
+		cmd.Stdout, cmd.Stderr = &out, &out
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
 		}
-		return string(out)
+		if journal {
+			writeJournal(t, ji.CapsuleDir, []capsule.SpawnJournalEntry{{WorkItem: "wi_sm4", StepID: "fix", SpawnN: 7, PID: cmd.Process.Pid}})
+		}
+		if err := os.WriteFile(goFile, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Wait(); err != nil {
+			t.Fatalf("child: %v\n%s", err, out.String())
+		}
+		return out.String()
 	}
-	if out := run("PF_WI_ID=wi_sm4", "PF_DAEMON_ID=m-test"); !strings.Contains(out, "STEPMEM 200") || !strings.Contains(out, `"work_item_id":"wi_sm4"`) {
+	marks := []string{"PF_WI_ID=wi_sm4", "PF_DAEMON_ID=m-test"}
+	if out := run(true, "", marks...); !strings.Contains(out, "STEPMEM 200") || !strings.Contains(out, `"work_item_id":"wi_sm4"`) ||
+		!strings.Contains(out, `"step":"fix"`) || !strings.Contains(out, `"attempt":7`) {
 		t.Fatalf("step child: %s", out)
 	}
-	if out := run(); !strings.Contains(out, "STEPMEM 403") || !strings.Contains(out, "serves step agents only") {
-		t.Fatalf("non-step child: %s", out)
+	if out := run(true, "wi_sm5", marks...); !strings.Contains(out, "STEPMEM 403") || !strings.Contains(out, "claims PF_WI_ID=wi_sm5") {
+		t.Fatalf("a caller claiming another work item: %s", out)
 	}
-	if out := run("PF_WI_ID=wi_sm4", "PF_DAEMON_ID=m-other"); !strings.Contains(out, "STEPMEM 403") {
-		t.Fatalf("another daemon's step child: %s", out)
+	writeJournal(t, ji.CapsuleDir, nil)
+	if out := run(false, "", marks...); !strings.Contains(out, "STEPMEM 403") || !strings.Contains(out, "no live step process") {
+		t.Fatalf("a marked process outside every step: %s", out)
+	}
+	if out := run(true, ""); !strings.Contains(out, "STEPMEM 403") || !strings.Contains(out, "serves step agents only") {
+		t.Fatalf("unmarked child: %s", out)
+	}
+}
+
+// TestDaemonMainRefusedInsideAStep: `pf daemon` reads the machine key;
+// never inside a step.
+func TestDaemonMainRefusedInsideAStep(t *testing.T) {
+	t.Setenv("PF_WI_ID", "wi_x")
+	t.Setenv("PF_DAEMON_ID", "m-x")
+	var stderr strings.Builder
+	if code := Main([]string{"--socket", filepath.Join(t.TempDir(), "s")}, nil, io.Discard, &stderr); code != 1 || !strings.Contains(stderr.String(), "refused inside a workflow step") {
+		t.Fatalf("Main = %d %s", code, stderr.String())
 	}
 }
