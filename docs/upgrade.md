@@ -956,12 +956,19 @@ carries `effort` next to `model`, and the `step_started` event an
 **Upgrade check.** Nothing needs editing: a list without efforts behaves
 as before. Look only for a candidate that already ends in one of the
 seven words — it now means an effort. `pi:<id>:high` hands pi
-`--model <id> --thinking high`, the same as pi's own shorthand did; a
+`--model <id> --thinking high`, the same as pi's own shorthand did
+(unless a model with that full id, `<id>:high`, exists — that id can no
+longer be named, see below); a
 `claude:<id>:<word>` that used to reach claude as a (non-existent) model
 id now runs `<id>` with `--effort <word>`, and with `off` or `minimal`
 it is refused (above). An in-flight work item whose snapshot holds such
 a refused candidate fails its driver start with an error naming the
 step and the candidate (it is not re-read as a pre-#175 bare id).
+
+**Known limit.** A model id that literally ends in an effort word (e.g.
+a model named `foo:max`) cannot be named: the last segment is always
+taken as the effort (`pi:foo:max` is `foo` at `max`), and
+`pi:foo:max:high` is refused as two efforts.
 
 ## Work machines: harnesses reference the release; the daemon is supervised (polyforge#174)
 

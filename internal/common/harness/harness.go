@@ -112,7 +112,7 @@ func (c Candidate) EffortArgs() []string {
 	switch c.Harness {
 	case Claude:
 		return []string{"--effort", c.Effort}
-	case Pi, "":
+	case Pi:
 		return []string{"--thinking", c.Effort}
 	}
 	return nil
