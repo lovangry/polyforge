@@ -306,7 +306,19 @@ type job struct {
 	// end_pending job (see StateEndPending).
 	endNote string
 	endHead string
-	mu      sync.Mutex
+	// endPushGaveUp: the end_pending chain push met a PERMANENT rejection
+	// (hook refusal, non-fast-forward, size limit) — stop pushing, close
+	// without it (the commits stay in the local capsule; in memory only,
+	// a restart re-tries the push once and gives up again).
+	endPushGaveUp bool
+	// sealPushFailNoted: this SEALING series already raised its
+	// push_failed event (one per series, not one per seal retry).
+	sealPushFailNoted bool
+	// awaitingHub: the restart-time session verify could not reach aihub
+	// and is being retried (awaitVerify) — status/watch name it, a close
+	// is answered "waiting for aihub".
+	awaitingHub bool
+	mu          sync.Mutex
 }
 
 // New builds a Runtime. toOB receives RT→Observe messages, fromOB carries
@@ -420,6 +432,19 @@ func (r *Runtime) Close() {
 			close(r.endStop)
 		}
 	})
+}
+
+// closing reports whether Close ran (the daemon is shutting down).
+func (r *Runtime) closing() bool {
+	if r.endStop == nil {
+		return false
+	}
+	select {
+	case <-r.endStop:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *Runtime) jobOf(wi string) *job {
@@ -654,10 +679,6 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 			return berr
 		}
 	}
-	sessionID, err := mintSessionID()
-	if err != nil {
-		return err
-	}
 	// B1: the claim's idempotency key AND the session secret are
 	// journaled durably BEFORE the claim call. A crash anywhere between
 	// the claim and the spawn would otherwise orphan a running session
@@ -665,7 +686,16 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 	// journaled session, replay the SAME claim (same key → same response,
 	// D4) and either finish the start or compensate with
 	// SessionEnd(blocked).
-	key := randomKey()
+	//
+	// A journal entry left by an earlier attempt whose claim answer was
+	// lost (transport error, timeout, hub 5xx — see below) is REUSED
+	// rather than replaced: this start is then a replay of the same claim
+	// (repo review 2026-10-16 B-1), so a claim the hub had committed is
+	// adopted instead of orphaned.
+	sessionID, key, replay, err := r.claimIntent(wi)
+	if err != nil {
+		return err
+	}
 	if err := r.noteClaiming(wi, sessionID, key, manual); err != nil {
 		return fmt.Errorf("runtime: %s: claiming journal write failed (refusing to claim): %w", wi, err)
 	}
@@ -677,12 +707,67 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 	}
 	resp, err := r.hub.SessionClaim(req)
 	if err != nil {
-		// the claim never opened: nothing can dangle, drop the journal
-		// entry so a restart does not replay a dead intention.
-		r.clearClaiming(wi)
-		return err
+		if claimRefused(err) {
+			if replay {
+				// a REPLAY of a claim whose verify matched — the session
+				// is open at the hub under the secret we hold. Dropping
+				// the journal would orphan it: end it blocked instead
+				// (abandonClaim keeps the entry until the close lands).
+				return r.abandonClaim(&job{wi: wi, sessionID: sessionID}, wi, err,
+					"the replayed claim of an open session was refused: "+err.Error())
+			}
+			// the hub answered and refused: the claim never opened,
+			// nothing can dangle — drop the journal entry so neither a
+			// retry nor a restart replays a dead intention.
+			r.clearClaiming(wi)
+			return err
+		}
+		// Transport loss, timeout or a hub 5xx: the claim MAY have been
+		// committed with the answer lost. The journal entry (the only
+		// copy of the secret) is KEPT and the start answers the typed
+		// transient, so the dispatcher requeues with backoff; the retry
+		// replays the same claim (claimIntent), and a restart in between
+		// replays it from the journal (resumeClaiming).
+		return &api.Error{Code: api.ErrDaemonHubUnavailable,
+			Detail: fmt.Sprintf("%s: claim answer lost (claiming journal kept; the retry replays the same claim): %v", wi, err)}
 	}
 	return r.startClaimed(ctx, wi, sessionID, resp, wcfg, manual)
+}
+
+// claimRefused reports whether a SessionClaim error is the hub's own
+// typed refusal (a 4xx envelope): the claim did not open. Anything else —
+// a transport error, a timeout, a 5xx — leaves the outcome unknown.
+func claimRefused(err error) bool {
+	var ae *api.Error
+	return errors.As(err, &ae) && ae.HTTPStatus() < 500
+}
+
+// claimIntent answers the session secret and idempotency key this start
+// claims with (repo review 2026-10-16 B-1). With no journal entry for wi
+// it mints a fresh pair. An entry left by an earlier attempt whose answer
+// was lost is checked first: SessionVerify says the journaled session
+// holds the WI → the claim landed, reuse the pair so the claim is a D4
+// replay that hands the same answer back; verify says it does not → the
+// earlier claim never landed or was ended since (a replay could hand
+// back a stale cached answer) — drop the entry and mint fresh; verify
+// unreachable → the typed transient, entry kept.
+func (r *Runtime) claimIntent(wi string) (sessionID, key string, replay bool, err error) {
+	if rec := r.loadClaiming()[wi]; rec != nil && rec.SessionID != "" && rec.IdempotencyKey != "" {
+		v, verr := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
+		switch {
+		case verr != nil && !claimRefused(verr):
+			return "", "", false, &api.Error{Code: api.ErrDaemonHubUnavailable,
+				Detail: fmt.Sprintf("%s: verify of the journaled claim failed (claiming journal kept; retry later): %v", wi, verr)}
+		case verr == nil && v.Matches:
+			return rec.SessionID, rec.IdempotencyKey, true, nil
+		}
+		r.clearClaiming(wi)
+	}
+	sessionID, err = mintSessionID()
+	if err != nil {
+		return "", "", false, err
+	}
+	return sessionID, randomKey(), false, nil
 }
 
 // startClaimed carries one OPEN claim (fresh or replayed) to a live agent.
@@ -1381,8 +1466,9 @@ func copyTree(src, dst string) error {
 // session is ended server-side (SessionEnd, fenced on our secret). For
 // a terminal reason the scene is made read-only and Observe hears
 // WIFinished; a SessionEnd failure leaves the job in SEALING (persisted
-// with its reason) so a restart finishes the close — never a silent
-// half-seal.
+// with its reason) and the close is retried in the background
+// (retrySeal) — and by a restart's finisher if the daemon stops first —
+// never a silent half-seal.
 func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
@@ -1513,13 +1599,27 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 			// durable, field-diagnosable trace in the daemon events log too:
 			// the pause/wrap close path's seal failure is otherwise visible
 			// only in this process's stderr.
-			if r.cfg.EventTap != nil {
+			// One event per sealing series: a seal retry (retrySeal)
+			// re-runs this push and must not repeat it.
+			j.mu.Lock()
+			noted := j.sealPushFailNoted
+			j.sealPushFailNoted = true
+			j.mu.Unlock()
+			if r.cfg.EventTap != nil && !noted {
 				r.cfg.EventTap(j.wi, "push_failed", map[string]any{
 					"phase": "seal", "reason": reason, "error": perr.Error(),
 				})
 			}
 			finalReason = protocol.FinishBlocked
 			chainOK = false
+		} else {
+			// The final state reached the server: a seal retry (below)
+			// or the restart finisher must not push again — after a
+			// STALE_SESSION the credential is dead and the push could
+			// only fail.
+			j.mu.Lock()
+			j.sealedPush = true
+			j.mu.Unlock()
 		}
 	}
 	// Task-repo uncommitted work (polyforge#167): every close but wrapped
@@ -1531,6 +1631,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	// hash. A STALE_SESSION refusal (this daemon was superseded between
 	// the seal push and here) surfaces as the error below and leaves the
 	// job SEALING, exactly like a hub outage: never a silent half-seal.
+	// The seal retry then finishes it locally (retrySeal).
 	// The status vocabulary is wrapped|failed|blocked — plus "paused",
 	// which the CLI pause path passes through (merge amend: paused routes
 	// to the M3 pause transition; the session is KEPT and clean_pause=true
@@ -1542,7 +1643,18 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 		Note:       note,
 		CleanPause: finalReason == api.StatusPaused,
 	}); err != nil {
-		return fmt.Errorf("runtime: %s: session-end failed (job left sealing): %w", j.wi, err)
+		if st, _ := j.snapshot(); st == StateSealing {
+			// Persist the push outcome and retry the close in the
+			// background (repo review 2026-10-16 B-4): without a retry
+			// lane the job sat SEALING — agent dead, every `pf wrap`
+			// answered "a close is already in progress" — until a
+			// daemon restart ran the finisher.
+			if perr := r.persist(); perr != nil {
+				fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
+			}
+			r.retrySeal(j, note)
+		}
+		return fmt.Errorf("runtime: %s: session-end failed (job left sealing, retrying): %w", j.wi, err)
 	}
 	if err := sealReadOnly(j.capsuleDir); err != nil {
 		// The generation is closed; a chmod failure is a scene-preservation

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -146,17 +147,39 @@ ID  MODE  RUNTIME  LIVE WI  HEARTBEAT AGE  LAST HEARTBEAT  STATE
 }
 
 func TestGoldenMemories(t *testing.T) {
-	items := []api.Memory{
-		{ID: "mem_1", Type: "experience.debug", Content: "first line\nsecond line", UpdatedAt: "t1", Tags: []string{"go"}},
+	title := "a titled lesson"
+	items := []memorySearchHit{
+		{ID: "mem_1", Type: "experience.debug", ContentExcerpt: "first line\nsecond line", UpdatedAt: "t1", Tags: []string{"go"}},
+		{ID: "mem_2", Type: "fact.note", Title: &title, ContentExcerpt: "body", UpdatedAt: "t2"},
+		{ID: "mem_3", Type: "fact.note", UpdatedAt: "t3"},
 	}
 	var b bytes.Buffer
 	renderMemories(&b, items)
 	golden(t, "Memories", b.String(),
-		`ID     TYPE              CONTENT     UPDATED  TAGS
------  ----------------  ----------  -------  ----
-mem_1  experience.debug  first line  t1       go
+		`ID     TYPE              SUMMARY          UPDATED  TAGS
+-----  ----------------  ---------------  -------  ----
+mem_1  experience.debug  first line       t1       go
+mem_2  fact.note         a titled lesson  t2       -
+mem_3  fact.note         -                t3       -
 `)
 }
 
 // int64Ptr is the STEP-AGE / LAST-WORK golden helper (a *int64 field).
 func int64Ptr(v int64) *int64 { return &v }
+
+// A RECOVERING job whose restart-time verify waits for aihub is named as
+// such, not shown as an ordinary recovery (repo review 2026-10-16 B-2).
+func TestStatusNamesJobAwaitingHub(t *testing.T) {
+	var b bytes.Buffer
+	renderStatus(&b, &StatusResponse{Jobs: []StatusJob{
+		{WorkItemID: "wi_a", Status: "recovering", AwaitingHub: true},
+		{WorkItemID: "wi_b", Status: "recovering"},
+	}})
+	out := b.String()
+	if !strings.Contains(out, "recovering (awaiting aihub)") {
+		t.Fatalf("status must name the deferred verify:\n%s", out)
+	}
+	if strings.Count(out, "awaiting aihub") != 1 {
+		t.Fatalf("an ordinary recovery must not read as awaiting aihub:\n%s", out)
+	}
+}

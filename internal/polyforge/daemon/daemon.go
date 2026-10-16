@@ -911,10 +911,13 @@ func (d *Daemon) dispatch() {
 		err := d.rt.Start(d.runCtx, e.WorkItemID)
 		var ae *api.Error
 		if errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable {
-			// The hub could not be reached before the claim: nothing was
-			// claimed, so the accepted submit stays queued and is retried
-			// with backoff (never dropped on a transient blip, never
-			// blocking the other entries). One log line per episode.
+			// The hub could not be reached, or the claim's answer was
+			// lost: the accepted submit stays queued and is retried with
+			// backoff (never dropped on a transient blip, never blocking
+			// the other entries). A claim that may have landed keeps its
+			// claiming-journal entry, so the retry replays the SAME claim
+			// and adopts the session (repo review 2026-10-16 B-1). One
+			// log line per episode.
 			if e.Deferrals == 0 {
 				fmt.Fprintf(os.Stderr, "daemon: start %s (%s) deferred, will retry with backoff: %v\n", e.WorkItemID, e.Intent, err)
 			}

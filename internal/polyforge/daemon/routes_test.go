@@ -17,6 +17,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
+	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
 // TestSubmitAndStatus pins the claim round trip: SubmitResponse shape,
@@ -530,4 +531,78 @@ func TestResumeBlockedHubUnavailableQueuesClaim(t *testing.T) {
 		t.Fatalf("answer = %+v, want resumed+deferred", rr)
 	}
 	td.waitLive(t, wi)
+}
+
+// TestClaimAnswerLostIsRequeuedAndAdopted (repo review 2026-10-16 B-1):
+// the hub commits the claim but its answer is lost in transit. The
+// dispatcher requeues the submit (DAEMON-503 class) instead of dropping
+// it, and the retry replays the SAME claim — the job runs on the session
+// the hub already holds, never a second one.
+func TestClaimAnswerLostIsRequeuedAndAdopted(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	const wi = "wi_b1lost"
+	td.hub.mu.Lock()
+	td.hub.status[wi] = api.StatusQueued
+	td.hub.claimLost = 1
+	td.hub.mu.Unlock()
+	td.submitClaim(t, wi) // waits until the requeued retry is live
+
+	td.hub.mu.Lock()
+	claims := append([]api.SessionClaimRequest(nil), td.hub.claims...)
+	held := td.hub.held[wi]
+	td.hub.mu.Unlock()
+	if len(claims) != 2 {
+		t.Fatalf("claims = %d, want 2 (the lost one + the replay)", len(claims))
+	}
+	if claims[1].SessionID != claims[0].SessionID || claims[1].IdempotencyKey != claims[0].IdempotencyKey {
+		t.Fatalf("the requeued retry must replay the same claim: %+v vs %+v", claims[0], claims[1])
+	}
+	if ji, ok := td.rt.Info(wi); !ok || ji.SessionID != held {
+		t.Fatalf("job session = %+v (ok=%v), want the hub-held session", ji, ok)
+	}
+}
+
+// TestWrapSessionEndBlipRetriesToDone (repo review 2026-10-16 B-4): the
+// wrap's SessionEnd hits a hub blip. The job is SEALING (a repeat wrap is
+// the 409 "close in progress"), the runtime retries the close in the
+// background, and once it lands the WI is done here: a later `pf wrap`
+// answers already_terminal instead of "in progress" forever.
+func TestWrapSessionEndBlipRetriesToDone(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	const wi = "wi_b4wrap"
+	td.submitClaim(t, wi)
+	td.hub.mu.Lock()
+	td.hub.endFails = 1
+	td.hub.mu.Unlock()
+
+	if _, err := td.client.Wrap(wi, ""); err == nil {
+		t.Fatal("the wrap whose SessionEnd failed must surface the failure")
+	}
+	if ji, ok := td.rt.Info(wi); !ok || ji.State != runtime.StateSealing {
+		t.Fatalf("job after the failed close = %+v (ok=%v), want SEALING", ji, ok)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if _, live := td.rt.Info(wi); !live {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the sealing job was never retried to done")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	raw, err := td.client.Wrap(wi, "")
+	if err != nil {
+		t.Fatalf("wrap after the retried close: %v", err)
+	}
+	var cr struct {
+		Outcome string `json:"outcome"`
+		Status  string `json:"status"`
+	}
+	if err := json.Unmarshal(raw, &cr); err != nil {
+		t.Fatal(err)
+	}
+	if cr.Outcome != "already_terminal" || cr.Status != api.StatusWrapped {
+		t.Fatalf("wrap after the retried close = %+v, want already_terminal/wrapped", cr)
+	}
 }

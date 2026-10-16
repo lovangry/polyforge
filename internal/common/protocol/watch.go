@@ -51,6 +51,9 @@ type WatchJob struct {
 	QuestionID         string       `json:"question_id,omitempty"`
 	LastProgressAgoSec *int64       `json:"last_progress_ago_sec,omitempty"`
 	Origin             *WatchOrigin `json:"origin,omitempty"`
+	// AwaitingHub: a RECOVERING job whose restart-time session verify is
+	// waiting for aihub (not an ordinary recovery).
+	AwaitingHub bool `json:"awaiting_hub,omitempty"`
 }
 
 // WatchOrigin mirrors the daemon's job origin record.

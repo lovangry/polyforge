@@ -340,6 +340,12 @@ func CommitPush(o Opts, message string) (string, bool, PushTimings, error) {
 		return "", false, timings, err
 	}
 	env := o.Env()
+	// Auto-heal a foreign commit at the tip BEFORE anything else (both
+	// the dirty and the clean-tree path push HEAD, and aihub's hook
+	// rejects every pushed commit without an integer seq trailer).
+	if err := foldUntrailered(o, env); err != nil {
+		return "", false, timings, err
+	}
 	// Clean-tree check BEFORE committing: git reports "nothing to commit"
 	// on stdout, so the failure cannot be told apart from a real commit
 	// error by the error string. The porcelain listing is the honest
@@ -404,6 +410,95 @@ func CommitPush(o Opts, message string) (string, bool, PushTimings, error) {
 	pushed, pushMS, perr := pushLocked(o)
 	timings.PushMS = pushMS
 	return localSHA, pushed, timings, perr
+}
+
+// EventUntrailedCommitsFolded is the event kind raised when CommitPush
+// folds commits without a seq trailer back into the next chain commit.
+const EventUntrailedCommitsFolded = "untrailered_commits_folded"
+
+// foldUntrailered is the V-2 auto-heal (repo review 2026-10-16). The
+// capsule root's .git pointer (ExternalizeGitDir) makes a step's own
+// `git commit` in the capsule root land on the chain branch with no
+// Polyforge-Seq trailer; aihub's pre-receive rejects every pushed commit
+// without one, so every later publish of that WI would fail forever, and
+// nextSeq would count the foreign commit too. When HEAD is not the newest
+// trailered commit (walking first parents), the branch is soft-reset onto
+// that commit: the foreign commits' content stays staged and is folded
+// into the next chain commit under a proper seq, and an
+// EventUntrailedCommitsFolded event records it.
+//
+// Only commits ABOVE the newest trailered one are ever touched, and none
+// of those can be on the server (the hook refuses them), so the reset
+// never rewrites published history. An unborn branch, or a history with
+// no trailered commit at all, is left alone (nothing safe to reset onto;
+// the hook answers loudly). NOT healed: a step's `git commit --amend` (or
+// any rewrite) of an already-PUSHED trailered commit — the amended tip
+// may still carry a trailer, and the push is then a non-fast-forward the
+// hook refuses; resetting onto the server's tip would be a history
+// rewrite this function never makes. The pointer file itself stays: without it a
+// step's git would walk up into whatever repository encloses the
+// workspace, which is worse.
+func foldUntrailered(o Opts, env []string) error {
+	// The steady state costs one call: HEAD carries its trailer.
+	tip, err := git(env, o.CapsuleDir, "log", "-1",
+		"--format=%(trailers:key="+capsule.SeqTrailer+",valueonly)", "HEAD")
+	if err != nil {
+		return nil // unborn branch: nothing committed, nothing to fold
+	}
+	if integerTrailer(tip) {
+		return nil
+	}
+	out, err := git(env, o.CapsuleDir, "log", "--first-parent",
+		"--format=%H%x1f%(trailers:key="+capsule.SeqTrailer+",valueonly)%x1e", "HEAD")
+	if err != nil {
+		return err
+	}
+	head, onto := "", ""
+	folded := 0
+	for _, rec := range strings.Split(out, "\x1e") {
+		rec = strings.TrimLeft(rec, "\n")
+		if rec == "" {
+			continue
+		}
+		sha, trailer, _ := strings.Cut(rec, "\x1f")
+		if head == "" {
+			head = sha
+		}
+		if integerTrailer(trailer) {
+			onto = sha
+			break
+		}
+		folded++
+	}
+	if folded == 0 || onto == "" {
+		return nil
+	}
+	if _, err := git(env, o.CapsuleDir, "reset", "-q", "--soft", onto); err != nil {
+		return err
+	}
+	if o.EventSink != nil {
+		o.EventSink(EventUntrailedCommitsFolded, map[string]any{
+			"count":       folded,
+			"folded_head": head,
+			"onto":        onto,
+		})
+	}
+	return nil
+}
+
+// integerTrailer applies the hook's own reading of a seq trailer value:
+// all whitespace removed, the rest must be a non-empty run of digits.
+func integerTrailer(v string) bool {
+	v = strings.Join(strings.Fields(v), "")
+	if v == "" {
+		return false
+	}
+	for _, c := range v {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // Head answers the capsule's current HEAD commit SHA ("" with an error
@@ -1318,6 +1413,22 @@ func (a *CarrierAlerts) clear(repo string) {
 	a.mu.Lock()
 	delete(a.m, repo)
 	a.mu.Unlock()
+}
+
+// IsPermanentPushRejection reports a push the server answered and refused
+// for a reason no retry can change: the pre-receive hook declined it (seq
+// trailer, gitlink, blob size limit, session fence) or the ref moved
+// non-fast-forward. A transport failure (unreachable, timeout, auth
+// against a down proxy) is NOT permanent. Matches git's C-locale output
+// as carried in the push error (callers run git under CEnv).
+func IsPermanentPushRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "[remote rejected]") ||
+		strings.Contains(msg, "pre-receive hook declined") ||
+		IsNonFastForward(err, "")
 }
 
 // IsNonFastForward reports a push refused because the remote ref is not an

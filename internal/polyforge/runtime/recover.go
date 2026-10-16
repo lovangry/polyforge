@@ -359,16 +359,18 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 	// check, §7).
 	r.killAgentTree(j)
 	head := ""
+	chainPushed := true // nothing local to push without a capsule
 	if dirExists(j.capsuleDir) {
 		var perr error
 		head, perr = commitDirty(r, j)
+		chainPushed = perr == nil
 		// The re-claim the owner's resume runs restores the task repos
 		// from the carrier: their uncommitted work rides refs/pf-wip
 		// (polyforge#167). Before the verdict — the session credential
 		// dies with it.
 		r.saveTaskWIP(j, true, perr == nil)
 	}
-	r.finishBlocked(j, detail, head)
+	r.finishBlocked(j, detail, head, chainPushed)
 	_ = ctx
 }
 

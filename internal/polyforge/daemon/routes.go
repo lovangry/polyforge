@@ -67,6 +67,10 @@ type statusJob struct {
 	// runs. The attention face (D9) derives the terminal decision
 	// classes from it.
 	StopReason string `json:"stop_reason,omitempty"`
+	// AwaitingHub: the restart-time session verify could not reach aihub
+	// and is being retried — a RECOVERING job waiting for the hub, not an
+	// ordinary recovery (repo review 2026-10-16 B-2).
+	AwaitingHub bool `json:"awaiting_hub,omitempty"`
 }
 
 type queueStats struct {
@@ -171,17 +175,19 @@ func writeAdmissionErr(w http.ResponseWriter, err error) {
 	}
 }
 
-// handler assembles the full route table.
+// handler assembles the full route table behind the step-origin guard.
 func (d *Daemon) handler() http.Handler {
+	return d.refuseStepOrigin(d.routes())
+}
+
+// routes is the bare route table.
+func (d *Daemon) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	// v2 (polyforge#106): answer routes through the driver bridge when
-	// the WI's job carries a bridge Handle; otherwise it refuses.
+	// the WI's job carries a bridge Handle; otherwise it refuses. A step
+	// process never gets here (refuseStepOrigin, polyforge#122).
 	mux.HandleFunc("POST /jobs/{wi}/answer", func(w http.ResponseWriter, r *http.Request) {
 		wi := r.PathValue("wi")
-		if reason := d.answerFromStepProcess(r); reason != "" {
-			writeErr(w, api.ErrDaemonForbidden, reason)
-			return
-		}
 		if h := d.rt.DriverAnswerHandle(wi); h != nil {
 			// driver path: decode the same wire shape, deliver to bridge
 			var payload struct {
@@ -545,6 +551,10 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 		writeErr(w, api.ErrDaemonNotFound, "no local job for "+wi+" on this daemon")
 		return
 	}
+	if ji.AwaitingHub {
+		writeErr(w, api.ErrDaemonConflict, "work item is waiting for aihub: the restart could not verify its session and keeps retrying — it resumes (or closes) once aihub answers; retry then")
+		return
+	}
 	if ji.State == runtime.StateSealing || ji.State == runtime.StateRecovering {
 		writeErr(w, api.ErrDaemonConflict, "work item is "+string(ji.State)+"; a close is already in progress")
 		return
@@ -659,6 +669,7 @@ func (d *Daemon) statusJobs() ([]statusJob, int) {
 			AgentPID:           ji.AgentPID,
 			Origin:             ji.Origin,
 			StopReason:         ji.StopReason,
+			AwaitingHub:        ji.AwaitingHub,
 		}
 		if pi, ok := pending[ji.WorkItem]; ok {
 			sj.QuestionID = pi.QuestionID
@@ -772,14 +783,49 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// answerFromStepProcess is the #122 guard: a question is a human's to
-// answer, so the answer route refuses a request whose UDS peer — the
+// refuseStepOrigin is the step-origin guard on the whole UDS face
+// (v2-converge.md Appendix C(b); repo review 2026-10-16 V-1): the agent
+// executing a work item must never drive the daemon. Every request that
+// is not a read (GET/HEAD — status, watch snapshot, subscriptions,
+// attention stay open) is refused DAEMON-403 when its UDS peer — the
 // kernel's SO_PEERCRED record, never anything from the request body —
-// belongs to a step process tree of this daemon (runtime.StepProcessOrigin:
-// the PF_WI_ID/PF_DAEMON_ID markers on the peer, an ancestor or its
-// process-group leader). A request whose peer credential is unavailable
-// is refused too: the guard fails closed. It answers the refusal reason,
-// "" when the peer may answer.
+// belongs to a step process tree of this daemon
+// (runtime.StepProcessOrigin: the PF_WI_ID/PF_DAEMON_ID markers on the
+// peer, an ancestor or its process-group leader). A request whose peer
+// credential is unavailable is refused too: the guard fails closed.
+// Born as the answer-only #122 guard; an answer keeps its own wording.
+func (d *Daemon) refuseStepOrigin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if reason := d.stepOriginRefusal(r); reason != "" {
+				writeErr(w, api.ErrDaemonForbidden, reason)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// stepOriginRefusal answers the refusal reason for a mutating request
+// from a step process (or from an unidentifiable peer), "" when the peer
+// may proceed.
+func (d *Daemon) stepOriginRefusal(r *http.Request) string {
+	if strings.HasPrefix(r.URL.Path, "/jobs/") && strings.HasSuffix(r.URL.Path, "/answer") {
+		return d.answerFromStepProcess(r)
+	}
+	cred, ok := requestPeerCred(r.Context())
+	if !ok {
+		return fmt.Sprintf("%s %s refused: the caller's identity (UDS peer credential) is unavailable — only a human session may drive the daemon", r.Method, r.URL.Path)
+	}
+	if stepWI, isStep := runtime.StepProcessOrigin(cred.pid, d.cfg.MachineID); isStep {
+		return fmt.Sprintf("%s %s refused: the caller (pid %d) belongs to the step process tree of work item %s — a step agent must never drive the daemon; only a human session may", r.Method, r.URL.Path, cred.pid, stepWI)
+	}
+	return ""
+}
+
+// answerFromStepProcess is the #122 wording of the guard for the answer
+// route: a question is a human's to answer. It answers the refusal
+// reason, "" when the peer may answer.
 func (d *Daemon) answerFromStepProcess(r *http.Request) string {
 	cred, ok := requestPeerCred(r.Context())
 	if !ok {

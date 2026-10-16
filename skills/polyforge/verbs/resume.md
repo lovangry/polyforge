@@ -68,14 +68,16 @@ claim gate.
 
 A work item whose capsule directory was missing at daemon restart, whose
 project had no `[workspace]` mapping, or whose restart-time session verify
-could not reach aihub (the reason note then names the unreachable hub and
-the incomplete verify — there is no local pending state and no background
-retry; the daemon parks the work item and waits for the owner), is set to
+aihub refused (a typed answer, named in the reason note), is set to
 this same `blocked` status (the reason note names the cause; a
 `capsule_missing` / `project_unmapped` / `session_verify_outage` event shows in `pf watch`). Restore the mapping if that was the cause, then `pf resume <id>`:
 it is a fresh re-claim from the aihub capsule chain plus the task-repo carrier
 refs (`refs/pf-task/<name>`); the dead scene (if any) is quarantined, completed
 steps are not re-run, and work published after the last push is lost.
+An aihub that was merely unreachable at restart does NOT block the work
+item: the daemon keeps it `recovering` (visible in `pf status`) and retries
+the verify on its own; it resumes in place once aihub answers — no
+`pf resume` needed.
 
 ## Triggers
 
