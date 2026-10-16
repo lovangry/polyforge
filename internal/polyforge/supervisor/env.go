@@ -16,6 +16,7 @@ package supervisor
 // pi: the step agent dir's auth.json), aihub's key is in cli.toml.
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -43,6 +44,10 @@ var daemonEnvNames = []string{
 	// itself (step agents get no POLYFORGE_* / PF_* of the daemon's
 	// either way: runtime/spawn.go strips them)
 	"POLYFORGE_DATA_DIR", MarkerEnv,
+	// Go toolchain: a Go step keeps its module cache, build cache,
+	// install target, proxy/private-module settings and toolchain pin
+	"GOPATH", "GOROOT", "GOPROXY", "GOPRIVATE", "GONOSUMDB", "GONOPROXY",
+	"GOFLAGS", "GOTOOLCHAIN", "GO111MODULE", "GOCACHE", "GOMODCACHE",
 	// Go coverage output dir of an instrumented test build (inert
 	// otherwise)
 	"GOCOVERDIR",
@@ -51,9 +56,17 @@ var daemonEnvNames = []string{
 // daemonEnvPrefixes are the variable families the daemon carries.
 var daemonEnvPrefixes = []string{"LC_"}
 
+// envNameRe is a portable shell variable name. Anything else is never
+// carried: ensure writes each entry as a `NAME='value'` assignment into
+// the loop script, and a crafted name (e.g. `LC_$(cmd)`) would run.
+var envNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // DaemonEnvAllowed reports whether a daemon started by ensure may carry
-// the variable name.
+// the variable name (an allow-listed, shell-safe name).
 func DaemonEnvAllowed(name string) bool {
+	if !envNameRe.MatchString(name) {
+		return false
+	}
 	for _, n := range daemonEnvNames {
 		if n == name {
 			return true
@@ -68,8 +81,9 @@ func DaemonEnvAllowed(name string) bool {
 }
 
 // DaemonEnv filters environ (KEY=VALUE entries) down to the allow-list,
-// sorted by name, dropping empty and malformed entries. MarkerEnv is
-// filtered like any other name; the caller sets it explicitly.
+// sorted by name. Empty values are kept (a set-but-empty variable stays
+// set); entries without "=", repeated names (the first wins) and
+// MarkerEnv (the caller sets it explicitly) are dropped.
 func DaemonEnv(environ []string) []string {
 	var out []string
 	seen := map[string]bool{}

@@ -271,7 +271,11 @@ func TestEnsureDaemonEnvIsTheCallersAllowList(t *testing.T) {
 	t.Setenv("https_proxy", "http://proxy.invalid:1")
 	t.Setenv("POLYFORGE_DATA_DIR", "/d")
 	t.Setenv("PWD", "/somewhere")
+	t.Setenv("LC_$(touch pwned)", "x") // a crafted name never reaches the script
 	p := &ensurePlan{home: "/home/u"}
+	if strings.Contains(p.loopScript(), "pwned") {
+		t.Fatal("the loop script carries a non-shell variable name")
+	}
 	names := func(env []string) []string {
 		var out []string
 		for _, kv := range env {

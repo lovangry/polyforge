@@ -9,18 +9,29 @@ import (
 func TestDaemonEnvAllowList(t *testing.T) {
 	in := []string{"PATH=/bin", "HOME=/h", "LC_ALL=C", "https_proxy=x", "NO_PROXY=y", "POLYFORGE_DATA_DIR=/d",
 		"ANTHROPIC_AUTH_TOKEN=junk", "FOO_TOKEN=junk", "POLYFORGE_V1_API_KEY=junk", "TMUX=/t", "CLAUDECODE=1",
-		"PF_CHAT_ID=c", MarkerEnv + "=caller", "PATH=/dup", "malformed", "=x"}
+		"PF_CHAT_ID=c", MarkerEnv + "=caller", "PATH=/dup", "malformed", "=x",
+		"LC_$(touch X)=x", "LC_A B=x", "LC_X-Y=x", "TZ=", "GOPATH=/g", "GOMODCACHE=/m", "GOFLAGS=-mod=mod"}
 	var names []string
 	for _, kv := range DaemonEnv(in) {
 		name, _, _ := strings.Cut(kv, "=")
 		names = append(names, name)
 	}
-	want := []string{"HOME", "LC_ALL", "NO_PROXY", "PATH", "POLYFORGE_DATA_DIR", "https_proxy"}
+	want := []string{"GOFLAGS", "GOMODCACHE", "GOPATH", "HOME", "LC_ALL", "NO_PROXY", "PATH", "POLYFORGE_DATA_DIR", "TZ", "https_proxy"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("DaemonEnv names = %v, want %v", names, want)
 	}
-	if got := DaemonEnv(in); !slices.Contains(got, "PATH=/bin") {
-		t.Fatal("the first PATH entry must win")
+	if got := DaemonEnv(in); !slices.Contains(got, "PATH=/bin") || !slices.Contains(got, "TZ=") {
+		t.Fatal("the first PATH entry must win and an empty value is kept")
+	}
+	for _, bad := range []string{"LC_$(touch X)", "LC_A B", "LC_X-Y", "", "1A"} {
+		if DaemonEnvAllowed(bad) {
+			t.Fatalf("a non-shell name %q is allowed", bad)
+		}
+	}
+	for _, k := range []string{"GOPATH", "GOROOT", "GOPROXY", "GOPRIVATE", "GONOSUMDB", "GONOPROXY", "GOFLAGS", "GOTOOLCHAIN", "GO111MODULE", "GOCACHE", "GOMODCACHE"} {
+		if !DaemonEnvAllowed(k) {
+			t.Fatalf("the Go toolchain variable %s is not allowed", k)
+		}
 	}
 }
 

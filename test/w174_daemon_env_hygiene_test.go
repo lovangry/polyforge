@@ -69,7 +69,7 @@ func TestW174EnsureDaemonEnvIsTheCallersAllowList(t *testing.T) {
 	// the supervision marker
 	want := map[string]bool{"HOME": true, "PWD": true, supervisor.MarkerEnv: true}
 	for _, kv := range caller {
-		if name, val, _ := strings.Cut(kv, "="); val != "" && supervisor.DaemonEnvAllowed(name) && name != "PWD" {
+		if name, _, _ := strings.Cut(kv, "="); supervisor.DaemonEnvAllowed(name) && name != "PWD" {
 			want[name] = true
 		}
 	}
