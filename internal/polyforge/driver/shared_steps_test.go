@@ -282,7 +282,7 @@ func TestSharedStepPromptsKeepLaneFacts(t *testing.T) {
 				"`steps.fix.output.regression_test`", "*the artifact that originally failed now passes*"}},
 			"feature-full": {[]string{"Copy `steps.e2e-author.output.scenario_titles`", "(`authored-scenarios`)",
 				"required: [verdict, checks, authored_titles, scenarios]", "the authored acceptance tests (`steps.e2e-author.output.test_files`)",
-				"`fail_reason`\nnames its title and expected vs observed"}},
+				"`fail_reason` names its title and\nexpected vs observed"}},
 		},
 		"review": {
 			"chore": {[]string{"`artifacts/code-summary.md`", "Judge the deletion-type acceptance bar",
@@ -294,8 +294,9 @@ func TestSharedStepPromptsKeepLaneFacts(t *testing.T) {
 		},
 	}
 	common := map[string][]string{
-		"verification": {"command_evidence: [{argv, exit_code, duration_ms}]", "AT LEAST ONE entry", "## Pre-existing failures", "`test_bar`", "`no-untracked-test-files`"},
-		"review":       {"No faked concurrency semantics", "Agent reachability for new entry points", "**Do not run tests or builds.**", "Write `artifacts/review.md`"},
+		"verification": {"command_evidence: [{argv, exit_code, duration_ms}]", "AT LEAST ONE entry", "## Pre-existing failures", "`test_bar`", "`no-untracked-test-files`",
+			"Write `artifacts/verification-report.md`", "which plan step or memo scope item"},
+		"review": {"No faked concurrency semantics", "Agent reachability for new entry points", "**Do not run tests or builds.**", "Write `artifacts/review.md`", "If any of the change's own requirements"},
 	}
 	for stepID, byBundle := range lanes {
 		for bundle, f := range byBundle {

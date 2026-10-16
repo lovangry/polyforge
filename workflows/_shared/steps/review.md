@@ -92,10 +92,9 @@ these present:
 - **No backward-compatibility code.** No compat shims, dual paths, or
   legacy-behavior fallbacks; when behavior changes or is removed, the old shape is
   deleted, not carried alongside.
-- **Spec-forced inventions.** If the change's own requirements ({{scope_source}})
-  themselves force an invented
-  mechanism - e.g. it demands "the loser must be refused" where both
-  serializations are valid, which is what drove a sleep+latch hack - do not pass
+- **Spec-forced inventions.** If any of the change's own requirements
+  ({{scope_source}}) forces an invented mechanism - e.g. it demands "the loser
+  must be refused" where both serializations are valid, which is what drove a sleep+latch hack - do not pass
   the diff for faithfully implementing it: flag it as a blocking finding and
   propose the spec change in that finding instead.
 - **Agent reachability for new entry points.** If the diff adds a new daemon or

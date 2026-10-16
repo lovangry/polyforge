@@ -130,7 +130,8 @@ judgment about design quality belongs here.
    pass verdict - the schema's oneOf rejects that combination as self-contradictory.
 7. If any check fails: `verdict: fail`, and write a precise `fail_reason` — the exact
    failing command, its output excerpt, and which part of `{{build_step}}`'s work it
-   implicates if that is discernible. The schema requires `fail_reason` here. This text
+   implicates — on a lane with a plan or a memo, which plan step or memo scope item — if
+   that is discernible. The schema requires `fail_reason` here. This text
    becomes `{{build_step}}`'s `pending_rewind_input` on the next attempt; vague language
    like "tests failed" without specifics wastes the rewind.
 
@@ -200,4 +201,8 @@ re-dispatched. Your obligations:
 
 ## Output
 
-Emit the final JSON object per the schema above.
+Write `artifacts/verification-report.md` (this step's declared output, read by `review`
+and `deliver`): the verdict, every check with its detail, every pre-existing failure with
+the base commit sha, the `test_bar` commands as run, and the results of the lane checks
+(per-scenario results on a lane with an authored acceptance suite). Then emit the final
+JSON object per the schema above.

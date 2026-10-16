@@ -68,13 +68,16 @@ func ReadStepDefinition(bundleDir, stepID string, vars map[string]string) ([]byt
 // ways: a placeholder without a var and a var no placeholder uses are
 // errors, so a typo cannot ship a half-rendered prompt.
 func RenderStepVars(raw []byte, vars map[string]string) ([]byte, error) {
-	used := map[string]bool{}
+	used, seen := map[string]bool{}, map[string]bool{}
 	var missing []string
 	out := placeholder.ReplaceAllFunc(raw, func(m []byte) []byte {
 		name := string(m[2 : len(m)-2])
 		v, ok := vars[name]
 		if !ok {
-			missing = append(missing, name)
+			if !seen[name] {
+				seen[name] = true
+				missing = append(missing, name)
+			}
 			return m
 		}
 		used[name] = true

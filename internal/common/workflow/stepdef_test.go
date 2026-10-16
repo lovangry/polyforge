@@ -45,7 +45,7 @@ func TestRenderStepVars(t *testing.T) {
 	if err != nil || string(got) != "a one b {{x}}" {
 		t.Fatalf("render = %q, %v", got, err)
 	}
-	if _, err := RenderStepVars([]byte("a {{x}}"), nil); err == nil || !strings.Contains(err.Error(), "undeclared vars [x]") {
+	if _, err := RenderStepVars([]byte("a {{x}} {{x}}"), nil); err == nil || !strings.Contains(err.Error(), "undeclared vars [x] ") {
 		t.Fatalf("missing var: %v", err)
 	}
 	if _, err := RenderStepVars([]byte("a"), map[string]string{"x": "1"}); err == nil || !strings.Contains(err.Error(), "never uses") {

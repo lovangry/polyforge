@@ -33,9 +33,8 @@ steps:
         implementation does not satisfy it — record `fail` with a detailed `detail`. A skip
         is legal only with a non-empty `detail` and does not fail this gate; `review` judges
         it. Record the suite as its own named check (`authored-scenarios`): `fail` if any
-        scenario failed, and write the per-scenario results into
-        `artifacts/verification-report.md`. For a failing authored scenario, `fail_reason`
-        names its title and expected vs observed.
+        scenario failed. For a failing authored scenario, `fail_reason` names its title and
+        expected vs observed.
       never_pre_existing: the authored acceptance tests (`steps.e2e-author.output.test_files`) and any repro check
   - id: review
     context_policy: fresh
