@@ -300,32 +300,38 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 	}
 }
 
-// review nit of B-8: BeginShutdown waits only for claims already CLAIMING.
-// A Start still queued on opMu (behind a long close) is never waited on —
-// it defers itself at the latch — so the shutdown keeps its budget for
-// the WIP snapshots.
-func TestB8BeginShutdownDoesNotWaitOnStartQueuedOnOpMu(t *testing.T) {
+// BeginShutdown waits only for claims already CLAIMING and agent starts
+// under way. A long close of another work item (its session end hung,
+// its lock held) is never waited on, and a Start after the latch defers
+// without claiming — so the shutdown keeps its budget for the WIP
+// snapshots.
+func TestB8BeginShutdownDoesNotWaitOnALongClose(t *testing.T) {
+	setGitIdentity(t)
 	hub := newFakeHub()
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	t.Cleanup(r.Close)
-	r.opMu.Lock() // a long close holds the lock
-	startErr := make(chan error, 1)
-	go func() { startErr <- r.Start(context.Background(), "wi_b8_queued") }()
-	time.Sleep(100 * time.Millisecond) // let it queue on opMu
+	const long, queued = "wi_b8_long", "wi_b8_queued"
+	startRunning(t, r, long)
+	g := hub.hangCall(t, "end", long)
+	stopped := make(chan error, 1)
+	go func() { stopped <- r.Stop(context.Background(), long, protocol.FinishWrapped) }()
+	g.waitEntered(t, "the long close's session end")
+	claims := hub.claimCount()
 	actx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	t0 := time.Now()
 	r.BeginShutdown(actx)
 	if d := time.Since(t0); d > 2*time.Second {
-		t.Fatalf("BeginShutdown waited %s on a Start queued on opMu", d)
+		t.Fatalf("BeginShutdown waited %s on a long close", d)
 	}
-	r.opMu.Unlock()
-	if err := recvErr(t, startErr, "the queued Start"); !IsClaimDeferred(err) {
-		t.Fatalf("the queued Start answered %v, want the deferral", err)
+	if err := r.Start(context.Background(), queued); !IsClaimDeferred(err) {
+		t.Fatalf("a Start after the latch answered %v, want the deferral", err)
 	}
-	if n := hub.claimCount(); n != 0 {
+	if n := hub.claimCount() - claims; n != 0 {
 		t.Fatalf("the deferred Start claimed %d time(s)", n)
 	}
+	g.open()
+	_ = recvErr(t, stopped, "the long close")
 }
 
 // review nit of B-8: a closed claim's partial capsule is quarantined, not

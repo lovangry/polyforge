@@ -329,25 +329,22 @@ func TestB8RestartReplayCloneOutsideOpMu(t *testing.T) {
 	r.Close()
 }
 
-// A failed start's compensation (SessionEnd blocked) runs outside opMu:
-// a hung end holds neither another work item's start nor its close, and
-// a start of the SAME work item meanwhile answers the typed transient
-// instead of replaying the claim being ended.
+// A failed start's compensation (SessionEnd blocked) holds only its own
+// work item's lock: a hung end holds neither another work item's start
+// nor its close, and a start of the SAME work item meanwhile answers the
+// typed transient instead of replaying the claim being ended.
 func TestB8AbandonClaimEndOutsideOpMu(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	t.Cleanup(r.Close)
 	const bad, other = "wi_b8a_bad", "wi_b8a_other"
-	block := make(chan struct{})
-	hub.mu.Lock()
-	hub.endBlockFor = map[string]chan struct{}{bad: block}
-	hub.mu.Unlock()
+	g := hub.hangCall(t, "end", bad)
 	// the claim's task-repo clone fails: an unclonable remote
 	hub.reposFor = map[string][]api.ProjectRepo{bad: {{Name: "app", URL: "/nonexistent/app.git"}}}
 	startBad := make(chan error, 1)
 	go func() { startBad <- r.Start(bg(), bad) }()
-	waitFor(t, "the compensation to reach the hub", func() bool { return r.claimEnding(bad) })
+	g.waitEntered(t, "the compensation")
 
 	within(t, 20*time.Second, "Start of another work item", func() {
 		startRunning(t, r, other)
@@ -364,15 +361,15 @@ func TestB8AbandonClaimEndOutsideOpMu(t *testing.T) {
 			t.Errorf("start during the compensation = %v, want the DAEMON-503 transient", err)
 		}
 	})
-	close(block)
+	g.open()
 	if err := recvErr(t, startBad, "the failed Start"); err == nil {
 		t.Fatal("the failed start answered nil")
 	}
 	if journaled(r, bad) != nil {
 		t.Fatal("the settled compensation kept its journal entry")
 	}
-	if r.claimEnding(bad) {
-		t.Fatal("the ending latch outlived the compensation")
+	if r.Busy(bad) {
+		t.Fatal("the work item's lock outlived the compensation")
 	}
 }
 

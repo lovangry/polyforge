@@ -85,6 +85,14 @@ func (r *Runtime) goRetry(key string, attempt func() bool) {
 // settled (record dropped). See closeBlocked for the push-then-close
 // order.
 func (r *Runtime) endPendingAttempt(j *job) bool {
+	s, ok := r.tryLockWI(j.wi)
+	if !ok {
+		return false // another operation of the work item is under way
+	}
+	defer r.unlockWI(j.wi, s)
+	if r.jobOf(j.wi) != j {
+		return true // settled or replaced meanwhile
+	}
 	if !r.closeBlocked(j, true) {
 		return false
 	}
@@ -171,11 +179,18 @@ func (r *Runtime) restartEndPending(j *job) {
 }
 
 // retryClaimEnd keeps retrying the compensation SessionEnd(blocked) of a
-// failed start (abandonClaim): the claiming-journal entry stays until the
-// hub accepts the close, in-process here and — after a crash — through the
-// journal replay at the next daemon start.
+// failed start (abandonClaim): the claiming-journal entry stays, marked
+// ending, until the hub accepts the close, in-process here — each attempt
+// under the work item's lock — and, after a crash, at the next daemon
+// start (endClaimAtRestart).
 func (r *Runtime) retryClaimEnd(journalKey, wi, secret, note string) {
+	r.markClaimEnding(journalKey, secret, note)
 	r.goRetry("claim:"+wi, func() bool {
+		s, ok := r.tryLockWI(wi)
+		if !ok {
+			return false // another operation of the work item is under way
+		}
+		defer r.unlockWI(wi, s)
 		if !r.endBlockedAtHub(wi, secret, note, "") {
 			return false
 		}

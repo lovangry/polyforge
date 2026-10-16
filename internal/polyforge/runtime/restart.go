@@ -143,12 +143,13 @@ func (r *Runtime) requireMidflightCapsule(wi, project, dir string) error {
 // reconciliation (a running WI whose capsule lives on another machine is
 // that machine's business).
 //
-// Locking (B-8): Restart seeds the records under opMu (local work only),
-// then reconciles them on a lane that holds opMu except around every
-// network step — the journal replays' verify and claim, each record's
-// session verify and attach (hubUnlocked / offLock), a close's or a
-// recovery's pushes and SessionEnd, a claim's compensation end (offLock /
-// claimEndOffLock). A seeded record is latched busy until the lane
+// Locking: Restart seeds the records under opMu (local work only), then
+// reconciles them on a lane: the journal replays hold no lock but a
+// placeholder's or a compensation's work item lock; each record is
+// reconciled under its work item's lock and opMu, released around every
+// network step — the record's session verify and attach (hubUnlocked /
+// offLock), a close's or a recovery's pushes and SessionEnd (offLock). A
+// seeded record is latched busy until the lane
 // reaches it, so no door acts on an unreconciled record: its Stop and
 // resume answer DAEMON-409; while the reconciliation runs every Start
 // answers DAEMON-503 and the deferred verifies wait (restarting).
@@ -317,16 +318,14 @@ func (r *Runtime) RestartAttach(wi string) bool {
 // clones. opMu is held except around the network steps.
 func (r *Runtime) reconcile(ctx context.Context, st *stateFile) error {
 	defer r.endRestarting()
-	r.opMu.Lock()
 	// B1 journal replay FIRST, before the state.json records: a journaled
 	// start (crash between the claim call and the spawn) must win over any
 	// stale record of the same WI — the replay carries the secret the
 	// record may predate. resumeClaiming's sessionIsRecorded guard keeps
 	// the crash-past-registration window honest (see claiming.go). The
 	// replays it answered sit CLAIMING in the table; their clones start
-	// once the records are reconciled, outside opMu (runReplays, B-8).
+	// once the records are reconciled, outside every lock (runReplays).
 	replays := r.resumeClaiming(ctx)
-	r.opMu.Unlock()
 	for _, rec := range st.Jobs {
 		if rec.SessionID == "" {
 			continue

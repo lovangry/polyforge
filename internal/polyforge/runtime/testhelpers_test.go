@@ -79,7 +79,7 @@ type fakeHub struct {
 	// until its channel is closed.
 	endBlockFor map[string]chan struct{}
 	// gates parks one kind of hub call ("probe", "verify", "claim",
-	// "attach") for one work item (canonical id) until released — a hung
+	// "attach", "end") for one work item (canonical id) until released — a hung
 	// hub for that call alone (installed with hangCall).
 	gates map[string]*hubGate
 }
@@ -120,11 +120,29 @@ func (g *hubGate) waitEntered(t *testing.T, what string) {
 	}
 }
 
+// hangCallAs is hangCall for the calls naming wi under exactly this
+// spelling (a slug's probe, not the canonical id's).
+func (h *fakeHub) hangCallAs(t *testing.T, kind, spelling string) *hubGate {
+	t.Helper()
+	g := &hubGate{entered: make(chan struct{}), release: make(chan struct{})}
+	h.mu.Lock()
+	if h.gates == nil {
+		h.gates = map[string]*hubGate{}
+	}
+	h.gates["as:"+kind+":"+spelling] = g
+	h.mu.Unlock()
+	t.Cleanup(g.open)
+	return g
+}
+
 // park holds a kind call of idOrSlug while its gate is installed and
 // closed (called before the fake takes its own lock).
 func (h *fakeHub) park(kind, idOrSlug string) {
 	h.mu.Lock()
-	g := h.gates[kind+":"+h.canonicalID(idOrSlug)]
+	g := h.gates["as:"+kind+":"+idOrSlug]
+	if g == nil {
+		g = h.gates[kind+":"+h.canonicalID(idOrSlug)]
+	}
 	h.mu.Unlock()
 	if g == nil {
 		return
@@ -297,6 +315,7 @@ func (h *fakeHub) SessionVerify(wi, sessionID string) (*api.SessionVerifyRespons
 }
 
 func (h *fakeHub) SessionEnd(wi string, req api.SessionEndRequest) error {
+	h.park("end", wi)
 	h.mu.Lock()
 	block := h.endBlock
 	blockWI := h.endBlockFor[h.canonicalID(wi)]
