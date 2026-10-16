@@ -57,7 +57,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// state. Refuse instead with the loud bounded-fail verdict naming
 	// the WI and the missing path: the operator restores the capsule,
 	// then unblocks (M2 — the human is the only remediation door).
-	if err := r.requireMidflightCapsule(j.wi, j.project, j.slug, j.capsuleDir); err != nil {
+	if err := r.requireMidflightCapsule(j.wi, j.project, j.capsuleDir); err != nil {
 		if r.cfg.EventTap != nil {
 			r.cfg.EventTap(j.wi, "missing_midflight_capsule", map[string]any{
 				"capsule_dir": j.capsuleDir,

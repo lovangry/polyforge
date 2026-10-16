@@ -828,24 +828,6 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		r.saveManualModels(id, manual)
 	} else {
 		manual = r.loadManualModels(id)
-		if len(manual) > 0 {
-			if _, nerr := workspace.NormalizeModels(manual); nerr != nil {
-				// polyforge#175: a list recorded before the candidate
-				// format (bare ids) can never dispatch; keeping it would
-				// block every re-claim of this work item. Drop it loudly
-				// and fall back to the yaml/bundle chain.
-				fmt.Fprintf(os.Stderr, "runtime: %s: dropping the recorded pf submit --models list %v: %v — the yaml/bundle chain governs (resubmit with --models <harness>:<model>,... to pin one)\n", id, manual, nerr)
-				if r.cfg.EventTap != nil {
-					r.cfg.EventTap(id, EvManualModelsDropped, map[string]any{
-						"models": manual,
-						"note":   "recorded pf submit --models list is not <harness>:<model> (polyforge#175); dropped, the yaml/bundle chain governs",
-						"error":  nerr.Error(),
-					})
-				}
-				r.clearManualModels(id)
-				manual = nil
-			}
-		}
 	}
 	j := &job{
 		wi:                 id,
@@ -1035,11 +1017,6 @@ func (r *Runtime) LoadWorkspace(project string) (*workspace.Config, error) {
 	return wcfg, nil
 }
 
-// EvManualModelsDropped is the runtime event of a recorded manual
-// `--models` list dropped at re-claim because it predates the
-// `<harness>:<model>` format (polyforge#175).
-const EvManualModelsDropped = "manual_models_dropped"
-
 // CheckBundle is the polyforge#175 pre-claim bundle read: the installed
 // bundle's candidates must all be `<harness>:<model>` (and it may carry
 // no `harness` key). A refusal is the typed DAEMON-414 naming the file
@@ -1157,19 +1134,7 @@ func (r *Runtime) prepareCapsule(j *job) error {
 	// together, so the fresh clone can never meet a previous session's
 	// HEAD/index (a stale git-dir reused under a fresh worktree made
 	// every later push non-fast-forward).
-	//
-	// A capsule claimed before the readable naming (polyforge#144) sits at
-	// the id-named sibling capsules/<wi> with the same id-keyed git-dir:
-	// on a re-claim into capsules/<project>-<seq> that old worktree and
-	// the git-dir are the unit, so they move aside together.
-	gitDir := o.GitDir
-	if old := filepath.Join(filepath.Dir(o.CapsuleDir), j.wi); old != o.CapsuleDir && dirExists(old) {
-		if err := quarantineCapsule(old, gitDir); err != nil {
-			return err
-		}
-		gitDir = ""
-	}
-	if err := quarantineCapsule(o.CapsuleDir, gitDir); err != nil {
+	if err := quarantineCapsule(o.CapsuleDir, o.GitDir); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(o.GitDir), 0o755); err != nil {

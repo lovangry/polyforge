@@ -240,7 +240,9 @@ into the new `capsules/<project>-<seq>` directory (cloned from its capsule
 chain, as every re-claim is); its old `capsules/<wi_id>` worktree and the
 id-keyed external git-dir `<data-dir>/git/<wi_id>.git` are moved aside
 together, as one unit, to `capsules/<wi_id>.quarantined.<ts>` and
-`git/<wi_id>.git.quarantined.<ts>` (never deleted). Apart from that
+`git/<wi_id>.git.quarantined.<ts>` (never deleted). (That one-time
+quarantine of the id-named sibling is gone since the v1→v2 compat
+cleanup — see "Compat shims removed" at the end.) Apart from that
 re-claim, the daemon never looks for an id-named directory again:
 `pf ship` and `pf watch` of a closed work item find only
 `<workspace>/capsules/<project>-<seq>`, and there is no "accept both
@@ -777,21 +779,9 @@ projects is claimed on that machine. The five shipped bundles are
 already rewritten (every candidate `pi:` — they ran on pi before).
 
 In-flight work items are unaffected: their candidate lists were
-snapshotted at claim time in the daemon's `state.json`; a record written
-before this version (bare ids plus the #159 `step_harness`) is read with
-each bare id on that step's old harness (pi when none), keeping exactly
-the candidates the step walked before, so recovery continues. A
-`pf submit --models` list given before the upgrade to a work item that
-is later re-claimed on the same machine (the daemon keeps it in
-`manual-models.json`, e.g. `pf resume` of a blocked work item) still has
-bare ids: the re-claim drops it — one stderr line and a
-`manual_models_dropped` event name the list — and the step chains fall
-back to the yaml/bundle levels. To pin a manual chain again, submit the
-work item with a prefixed `--models` once it is queued. One edge
-case changes harness: an in-flight step whose #159 harness was `claude`
-but which had **no** candidate list (Claude Code's own default model)
-recovers on pi's default model — the new format cannot express "claude
-with its default model"; give such a step a `claude:` candidate.
+snapshotted at claim time in the daemon's `state.json`. (The read-compat
+for records and `--models` lists written before this version is gone
+since the v1→v2 compat cleanup — see "Compat shims removed" at the end.)
 
 ### Before / after
 
@@ -1138,3 +1128,29 @@ checkout, and the old name no longer exists there. Before deploying:
   the first claim. Let them finish before the upgrade, or cancel them and
   file again with `--bundle autopilot`.
 
+## Compat shims removed (decision 2026-10-16 G5)
+
+The remaining v1→v2 / pre-#175 read-compat code is deleted ("v2 keeps
+no backward-compatibility code"). **Before upgrading a work machine,
+let every work item it holds finish, or at least close it**: `pf ops
+status` must list no job. A machine that still holds a record from
+before polyforge#175 or #144 fails it loudly instead of converting it:
+
+- a `state.json` record whose `step_candidates` are bare ids (pre-#175,
+  with or without the #159 `step_harness`): the ids are no longer
+  prefixed on read; the driver refuses to start the work item, naming
+  the candidate. Resubmit the work item.
+- a `pf submit --models` list recorded in `manual-models.json` before
+  #175 (bare ids): a re-claim no longer drops it (the
+  `manual_models_dropped` event is gone); the driver refuses it by name
+  and the claim ends blocked.
+  Resubmit with a prefixed `--models` list.
+- a `state.json` record without `capsule_dir`: restart no longer derives
+  a directory name from the slug; the work item is a missing capsule
+  (blocked, as any missing capsule).
+- a re-claim no longer looks for, or quarantines, an id-named
+  `capsules/<wi_id>` sibling from before #144; remove such leftovers by
+  hand.
+- capsules materialized by older daemons keep their (now unused)
+  `agents/` directory and the marker's `adapters` key; both are ignored
+  (decision 2026-10-16 G4).
