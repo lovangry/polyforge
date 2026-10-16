@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 )
@@ -334,7 +335,7 @@ func TestConfigResidualAuthTokenRefused(t *testing.T) {
 }
 
 // TestConfigDaemonTable (decision 2026-10-16 G2): the [daemon] table
-// loads its five knobs verbatim; every invalid value is a typed
+// loads its five knobs; every invalid value is a typed
 // DaemonKeyError naming the key and the line; a flat key after the
 // header belongs to the table (TOML) and is refused there.
 func TestConfigDaemonTable(t *testing.T) {
@@ -347,7 +348,7 @@ func TestConfigDaemonTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := DaemonSettings{StepTimeout: "45m", StallWindow: "10m", HarnessRoot: "/srv/h", OperatorAgentDir: "/srv/pi/agent", MaxConcurrentJobs: 6}
+	want := DaemonSettings{StepTimeout: 45 * time.Minute, StallWindow: 10 * time.Minute, HarnessRoot: "/srv/h", OperatorAgentDir: "/srv/pi/agent", MaxConcurrentJobs: 6}
 	if cfg.Daemon != want {
 		t.Fatalf("daemon table = %+v, want %+v", cfg.Daemon, want)
 	}

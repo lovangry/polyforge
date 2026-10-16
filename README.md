@@ -489,11 +489,12 @@ trust store. The capsule commit itself still reads the global config, so
 `user.name` / `user.email` must be set for the daemon user; task-repo git
 (inside `repos/<name>`) also still uses the global config.
 
-Production starts the daemon only through `pf daemon ensure`, so a flag
-counts in production only if ensure passes it. Ensure passes the fixed
-launch flags (`--config`, `-machine-id`, `-data-dir`, `-socket`,
-`-workflows-dir`) and, verbatim, every key set in the `[daemon]` table of
-`cli.toml` (decision 2026-10-16 G2):
+Production starts the daemon only through `pf daemon ensure`, which
+passes only the fixed launch flags (`--config`, `-machine-id`,
+`-data-dir`, `-socket`, `-workflows-dir`). The five production knobs come
+from the `[daemon]` table of the `--config` file, which the daemon reads
+itself (decision 2026-10-16 G2). Precedence: an explicit command-line
+flag (tests/dev) > the `[daemon]` table > the built-in default.
 
 ```toml
 # ~/.config/polyforge/cli.toml — after the flat keys (every key below a
@@ -507,17 +508,19 @@ max_concurrent_jobs = 6              # --max-concurrent-jobs: unquoted integer >
 ```
 
 Every key is optional (absent = the daemon default). The file is
-validated on load by every `pf` command: a bad value, an unknown key or a
-duplicate is refused naming the file, the line and the key
-(`config …: line N: [daemon] step_timeout: "soon" is not a Go duration`),
-and `pf daemon ensure` starts nothing. Edit the table, then restart the
-daemon (`pf ops shutdown`, wait, `pf daemon ensure`) for it to apply.
+validated on load by every `pf` command, by ensure and by the daemon (the
+same check): a bad value, an unknown key or a duplicate is refused naming
+the file, the line and the key (`config …: line N: [daemon] step_timeout:
+"soon" is not a Go duration`); ensure starts nothing and the daemon exits
+78. Edit the table, then restart the daemon (`pf ops shutdown`, wait,
+`pf daemon ensure`) for it to apply.
 
-`max_concurrent_jobs` is the job cap at the daemon's FIRST boot only: the
-daemon persists its cap in `<data-dir>/daemon-state.json` (on `pf ops max N`
-and on every graceful shutdown), and a persisted cap wins over the flag
-at every later boot. To change the cap of a daemon that has run before,
-use `pf ops max N` (it applies at once and persists).
+Job cap: an explicit `pf ops max N` applies at once and is persisted in
+`<data-dir>/daemon-state.json`; it wins over `max_concurrent_jobs` until
+`pf ops max --reset`, which returns to the configured cap (the table,
+else `--max-concurrent-jobs`, else 4) and clears the persisted value.
+Nothing else persists the cap. `pf ops max` shows `(set by pf ops max …)`
+when an explicit cap is in force.
 
 Every other flag is test/dev-only: nothing in production sets it, and it
 is listed for running `pf daemon` by hand. The only environment variable
@@ -539,7 +542,7 @@ gone; a value in the environment is ignored.
 | `--claude-bin PATH` | `claude_bin` | `claude` | Claude Code binary for steps whose harness is `claude` (run as `claude -p --bare`). The daemon never manages its credentials: the `<harness-root>/claude-config/settings.json` env block is the authority layer. |
 | `--operator-agent-dir DIR` | `[daemon] operator_agent_dir` | `~/.pi/agent` | SOURCE of the dedicated step agent dir — a credential surface: the daemon copies the minimal set (`auth.json`, `models.json`, `agents/`, `extensions/subagent/`) from here into `<harness-root>/step-agent`, and every pi step runs against that copy — the operator's own packages and settings never reach a step. A configured source without a readable `auth.json` refuses the start. |
 | `--harness-root DIR` | `[daemon] harness_root` | `<data-dir>` | Parent root of the step harness dirs: `<DIR>/step-agent` (dedicated agent dir), `/step-agent-sessions` (pi sessions) and `/claude-config` (claude config dir; its settings.json env block is the credential authority layer). The former `--harness-sessions-root` was renamed — old deployments fail loudly at startup. |
-| `--max-concurrent-jobs N` | `[daemon] max_concurrent_jobs` | `4` | Cap on concurrently running jobs at first boot; afterwards the persisted `pf ops max N` setting wins (see above). |
+| `--max-concurrent-jobs N` | `[daemon] max_concurrent_jobs` | `4` | Configured cap on concurrently running jobs; an explicit `pf ops max N` wins until `pf ops max --reset` (see above). |
 | `--display-name NAME` | test/dev-only | hostname | Daemon display name shown by `pf ops status`. |
 | `--pi-bin PATH` | test/dev-only | `pi` | Harness binary the agent processes are derived from. |
 | `--git-remote-base URL` | test/dev-only | `<server>/git` | aihub bare-repo base URL for the capsule revision chain. |
@@ -637,7 +640,7 @@ any claim. Upgrading from the pre-#169 shape: see
 Supervision bounds (v2-converge 2.4) — Go duration strings (e.g. `700ms`,
 `5m`), no environment fallbacks. Omitting a flag, or passing `0`, keeps
 the default listed here. In production only T and N are settable, through
-the `cli.toml` `[daemon]` table (see `pf daemon` flags above); the other
+the `cli.toml` `[daemon]` table, which the daemon reads itself (see `pf daemon` flags above); the other
 four are test/dev-only. The only per-step override in
 `workflow.md` is `budget.wall_minutes` (an estimate: T becomes
 `max(3 x wall_minutes, --step-timeout)`); X and Y are global only — the

@@ -10,11 +10,14 @@ package daemon
 
 import (
 	"bytes"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/silgrid/polyforge/internal/polyforge/cli"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 	"github.com/silgrid/polyforge/internal/testenv"
 )
@@ -73,5 +76,41 @@ func TestHarnessRootPassThrough(t *testing.T) {
 	def := boot(Config{DataDir: t.TempDir()})
 	if def.HarnessRoot != def.DataDir {
 		t.Fatalf("the default harness root %q is not the data dir %q", def.HarnessRoot, def.DataDir)
+	}
+}
+
+// TestApplyDaemonTablePrecedence (decision 2026-10-16 G2): an explicit
+// command-line flag > the cli.toml [daemon] table > the built-in default.
+func TestApplyDaemonTablePrecedence(t *testing.T) {
+	table := cli.DaemonSettings{StepTimeout: 45 * time.Minute, StallWindow: -time.Second,
+		HarnessRoot: "/t/root", OperatorAgentDir: "/t/op", MaxConcurrentJobs: 6}
+	parse := func(args ...string) (time.Duration, time.Duration, string, string, int) {
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		st := fs.Duration("step-timeout", 0, "")
+		sw := fs.Duration("stall-window", 0, "")
+		hr := fs.String("harness-root", "", "")
+		op := fs.String("operator-agent-dir", "", "")
+		mx := fs.Int("max-concurrent-jobs", 0, "")
+		if err := fs.Parse(args); err != nil {
+			t.Fatal(err)
+		}
+		applyDaemonTable(fs, table, st, sw, hr, op, mx)
+		return *st, *sw, *hr, *op, *mx
+	}
+	st, sw, hr, op, mx := parse()
+	if st != 45*time.Minute || sw != -time.Second || hr != "/t/root" || op != "/t/op" || mx != 6 {
+		t.Fatalf("table not applied: %v %v %q %q %d", st, sw, hr, op, mx)
+	}
+	st, sw, hr, op, mx = parse("-step-timeout", "5m", "-stall-window", "0", "-harness-root", "/f/root",
+		"-operator-agent-dir", "/f/op", "-max-concurrent-jobs", "2")
+	if st != 5*time.Minute || sw != 0 || hr != "/f/root" || op != "/f/op" || mx != 2 {
+		t.Fatalf("explicit flags must beat the table: %v %v %q %q %d", st, sw, hr, op, mx)
+	}
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	st0, sw0 := fs.Duration("step-timeout", 0, ""), fs.Duration("stall-window", 0, "")
+	hr0, op0, mx0 := fs.String("harness-root", "", ""), fs.String("operator-agent-dir", "", ""), fs.Int("max-concurrent-jobs", 0, "")
+	applyDaemonTable(fs, cli.DaemonSettings{}, st0, sw0, hr0, op0, mx0)
+	if *st0 != 0 || *sw0 != 0 || *hr0 != "" || *op0 != "" || *mx0 != 0 {
+		t.Fatal("an empty table must leave the built-in defaults")
 	}
 }

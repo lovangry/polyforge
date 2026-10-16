@@ -176,6 +176,10 @@ type jobQueue struct {
 	// ones (there is no separate running set to drift).
 	occupied func() map[string]bool
 	maxConc  int
+	// maxExplicit marks maxConc as set by an explicit `pf ops max N` (the
+	// only cap that is persisted); false = the configured cap
+	// (--max-concurrent-jobs / cli.toml [daemon] / default).
+	maxExplicit bool
 	// now is the clock (tests inject one); nil means time.Now.
 	now func() time.Time
 	// persist, when non-nil, atomically rewrites the queue file from the
@@ -202,6 +206,44 @@ func (q *jobQueue) SetMaxConcurrent(n int) error {
 	defer q.mu.Unlock()
 	q.maxConc = n
 	return nil
+}
+
+// SetExplicitMax is `pf ops max N`: the cap that is persisted and wins
+// over the configured one until ResetMax.
+func (q *jobQueue) SetExplicitMax(n int) error {
+	if err := q.SetMaxConcurrent(n); err != nil {
+		return err
+	}
+	q.mu.Lock()
+	q.maxExplicit = true
+	q.mu.Unlock()
+	return nil
+}
+
+// ResetMax is `pf ops max --reset`: back to the configured cap.
+func (q *jobQueue) ResetMax(configured int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.maxConc, q.maxExplicit = configured, false
+}
+
+// ExplicitMax answers the explicit `pf ops max` cap, 0 when none is set.
+func (q *jobQueue) ExplicitMax() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if !q.maxExplicit {
+		return 0
+	}
+	return q.maxConc
+}
+
+// MaxSource answers where the effective cap comes from: "ops" (an
+// explicit `pf ops max`) or "config".
+func (q *jobQueue) MaxSource() string {
+	if q.ExplicitMax() > 0 {
+		return "ops"
+	}
+	return "config"
 }
 
 func (q *jobQueue) MaxConcurrent() int {
@@ -408,8 +450,10 @@ func (q *jobQueue) Take() *qEntry {
 }
 
 // ---------------------------------------------------------------------------
-// The daemon's own state file: auto switch + concurrency only (the 04 §4.1
-// shape minus jobs[], which is Runtime's state.json). Same atomic-write
+// The daemon's own state file: auto switch + the EXPLICIT `pf ops max`
+// cap only (the 04 §4.1 shape minus jobs[], which is Runtime's
+// state.json). A configured cap is never persisted (decision 2026-10-16
+// G2): max_concurrent_jobs absent/0 = use the configured cap. Same atomic-write
 // discipline as every daemon-side state file.
 
 const daemonStateFile = "daemon-state.json"
@@ -417,7 +461,7 @@ const daemonStateFile = "daemon-state.json"
 type daemonState struct {
 	Version           int  `json:"version"`
 	Auto              bool `json:"auto"`
-	MaxConcurrentJobs int  `json:"max_concurrent_jobs"`
+	MaxConcurrentJobs int  `json:"max_concurrent_jobs,omitempty"`
 }
 
 func (d *Daemon) statePath() string {
@@ -442,8 +486,11 @@ func (d *Daemon) loadDaemonState() error {
 	d.modes.mu.Lock()
 	d.modes.auto = st.Auto
 	d.modes.mu.Unlock()
+	// A persisted cap is an explicit `pf ops max` — including one an
+	// older daemon wrote on every shutdown (treated as explicit; `pf ops
+	// max --reset` returns to the configured cap).
 	if st.MaxConcurrentJobs > 0 {
-		if err := d.q.SetMaxConcurrent(st.MaxConcurrentJobs); err != nil {
+		if err := d.q.SetExplicitMax(st.MaxConcurrentJobs); err != nil {
 			return err
 		}
 	}
@@ -454,7 +501,7 @@ func (d *Daemon) persistDaemonState() error {
 	st := daemonState{
 		Version:           1,
 		Auto:              d.modes.Auto(),
-		MaxConcurrentJobs: d.q.MaxConcurrent(),
+		MaxConcurrentJobs: d.q.ExplicitMax(),
 	}
 	blob, err := json.MarshalIndent(&st, "", "  ")
 	if err != nil {

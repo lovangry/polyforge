@@ -58,36 +58,35 @@ type Config struct {
 	// hard-deleted, ruling 2: a residual key now fails the unknown-key
 	// parse with the startup error it deserved.
 	ClaudeBin string
-	// Daemon is the [daemon] table: the production daemon knobs
-	// `pf daemon ensure` passes on the daemon argv (decision 2026-10-16
-	// G2). Validated on load; the zero value = every daemon default.
+	// Daemon is the [daemon] table: the production daemon knobs the
+	// daemon reads from its --config file (decision 2026-10-16 G2).
+	// Validated on load by every pf command and the daemon alike; the
+	// zero value = every daemon default.
 	Daemon DaemonSettings
 }
 
-// DaemonSettings is the cli.toml [daemon] table. An empty field is
-// unset (the daemon's own default applies). Every value is validated on
-// load and kept in the spelling the file used, so ensure passes it
-// verbatim.
+// DaemonSettings is the cli.toml [daemon] table. A zero field is unset
+// (the daemon's own default applies); an explicit daemon command-line
+// flag (tests/dev) beats the table. Every value is validated on load.
 type DaemonSettings struct {
 	// StepTimeout is T, the cumulative step runtime bound (Go duration,
-	// > 0; daemon default 90m) → --step-timeout.
-	StepTimeout string
+	// > 0; daemon default 90m); flag --step-timeout.
+	StepTimeout time.Duration
 	// StallWindow is N, the driver-stalled-between-steps bound (Go
-	// duration, non-zero; negative disables; daemon default 10m) →
+	// duration, non-zero; negative disables; daemon default 10m); flag
 	// --stall-window.
-	StallWindow string
+	StallWindow time.Duration
 	// HarnessRoot is the parent of the step harness dirs (absolute path;
-	// daemon default <data-dir>) → --harness-root.
+	// daemon default <data-dir>); flag --harness-root.
 	HarnessRoot string
 	// OperatorAgentDir is the source of the step agent dir's credential
 	// and model files (absolute path; daemon default ~/.pi/agent; a set
-	// value without a readable auth.json refuses the daemon start) →
+	// value without a readable auth.json refuses the daemon start); flag
 	// --operator-agent-dir.
 	OperatorAgentDir string
-	// MaxConcurrentJobs is the job cap the daemon starts with on its
-	// FIRST boot (>= 1; 0 = unset, daemon default 4) →
-	// --max-concurrent-jobs. Once the daemon has persisted its own
-	// setting (`pf ops max N`, or any graceful shutdown), that wins.
+	// MaxConcurrentJobs is the configured job cap (>= 1; 0 = unset,
+	// daemon default 4); flag --max-concurrent-jobs. An explicit
+	// `pf ops max N` (persisted until `pf ops max --reset`) wins over it.
 	MaxConcurrentJobs int
 }
 
@@ -139,12 +138,12 @@ func parseDaemonTable(file string, kvs []daemonKV) (DaemonSettings, error) {
 				if d <= 0 {
 					return s, refuse("must be > 0")
 				}
-				s.StepTimeout = v
+				s.StepTimeout = d
 			} else {
 				if d == 0 {
 					return s, refuse("must be non-zero (a negative value disables the stall check; remove the key for the default)")
 				}
-				s.StallWindow = v
+				s.StallWindow = d
 			}
 		case "harness_root", "operator_agent_dir":
 			v, err := parseQuotedValue(kv.val, kv.line)

@@ -291,11 +291,13 @@ func TestW174EnsureIdempotentCanonicalArgv(t *testing.T) {
 	}
 }
 
-// TestW174EnsurePassesDaemonTable (decision 2026-10-16 G2): the
-// cli.toml [daemon] table reaches the supervised daemon's argv verbatim
-// and takes effect — the step agent dir is built under harness_root from
-// operator_agent_dir, and the job cap is the configured one.
-func TestW174EnsurePassesDaemonTable(t *testing.T) {
+// TestW174DaemonHonoursDaemonTable (decision 2026-10-16 G2): the daemon
+// reads the cli.toml [daemon] table itself — ensure's argv stays the
+// fixed canonical one — and the table takes effect: the step agent dir
+// is built under harness_root from operator_agent_dir and the job cap is
+// the configured one. A daemon started by hand with an explicit flag
+// overrides the table.
+func TestW174DaemonHonoursDaemonTable(t *testing.T) {
 	e := w174NewEnv(t, true)
 	root := filepath.Join(e.home, "harness root")
 	opDir := filepath.Join(e.home, "operator-agent")
@@ -315,27 +317,68 @@ func TestW174EnsurePassesDaemonTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	opsMax := func() string {
+		cmd := exec.Command(e.pf, "--config", e.cfg, "ops", "max")
+		cmd.Env = e.env()
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("pf ops max: %v %s", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
 	if code, out, errOut := e.ensure(t); code != 0 {
 		t.Fatalf("ensure: exit %d\nstdout %s\nstderr %s", code, out, errOut)
 	}
 	pid := e.oneDaemon(t, 5*time.Second)
-	argv := w174Argv(pid)
-	joined := strings.Join(argv, "\x00")
-	for _, want := range [][]string{
-		{"-step-timeout", "45m"}, {"-stall-window", "7m"}, {"-harness-root", root},
-		{"-operator-agent-dir", opDir}, {"-max-concurrent-jobs", "6"},
-	} {
-		if !strings.Contains(joined, strings.Join(want, "\x00")) {
-			t.Fatalf("daemon argv %q lacks %q", argv, want)
+	argv := strings.Join(w174Argv(pid), " ")
+	for _, banned := range []string{"-step-timeout", "-stall-window", "-harness-root", "-operator-agent-dir", "-max-concurrent-jobs"} {
+		if strings.Contains(argv, banned) {
+			t.Fatalf("ensure argv %q carries %q: the daemon reads the table itself", argv, banned)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(root, "step-agent", "auth.json")); err != nil {
 		t.Fatalf("the step agent dir was not built under harness_root from operator_agent_dir: %v", err)
 	}
-	cmd := exec.Command(e.pf, "ops", "max")
-	cmd.Env = append(e.env(), "PF_DAEMON_SOCKET="+e.sock)
-	if out, err := cmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "max: 6" {
-		t.Fatalf("pf ops max does not report the configured cap: %v\n%s", err, out)
+	if got := opsMax(); got != "max: 6" {
+		t.Fatalf("pf ops max = %q, want the configured cap 6", got)
+	}
+
+	// stop the supervised daemon; a hand-started one with an explicit
+	// flag overrides the table
+	stop := exec.Command(e.pf, "--config", e.cfg, "ops", "shutdown")
+	stop.Env = e.env()
+	if out, err := stop.CombinedOutput(); err != nil {
+		t.Fatalf("pf ops shutdown: %v %s", err, out)
+	}
+	waitUntil(t, 30*time.Second, "the supervised daemon did not end", func() bool {
+		return len(e.daemons()) == 0 && len(e.sessions()) == 0
+	})
+	dev := exec.Command(e.pf, "daemon", "--config", e.cfg, "-data-dir", e.data, "-socket", e.sock,
+		"-workflows-dir", filepath.Join(e.data, "release", "current", "workflows"), "-max-concurrent-jobs", "2")
+	dev.Env = e.env()
+	var devLog bytes.Buffer
+	dev.Stdout, dev.Stderr = &devLog, &devLog
+	if err := dev.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- dev.Wait() }()
+	t.Cleanup(func() {
+		_ = dev.Process.Kill()
+		<-done
+	})
+	waitUntil(t, 15*time.Second, "the hand-started daemon never answered", e.answers)
+	if got := opsMax(); got != "max: 2" {
+		t.Fatalf("pf ops max = %q, want the explicit flag's 2 over the table's 6\n%s", got, devLog.String())
+	}
+	stop = exec.Command(e.pf, "--config", e.cfg, "ops", "shutdown")
+	stop.Env = e.env()
+	_ = stop.Run()
+	select {
+	case <-done:
+		done <- nil // let the cleanup's receive return
+	case <-time.After(30 * time.Second):
+		t.Fatal("the hand-started daemon did not exit on pf ops shutdown")
 	}
 }
 

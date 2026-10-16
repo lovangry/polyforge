@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/polyforge/cli"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -417,4 +418,73 @@ func TestBundleCandidateFormatRefusedBeforeEnqueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	td.waitLive(t, "wi_a1")
+}
+
+// TestMaxCapPersistedOnlyWhenExplicit (decision 2026-10-16 G2): only an
+// explicit `pf ops max N` is persisted; a daemon that never had one
+// writes no cap (so the next boot takes the configured one); --reset
+// returns to the configured cap and clears the persisted one; a cap an
+// older daemon persisted is read as explicit.
+func TestMaxCapPersistedOnlyWhenExplicit(t *testing.T) {
+	dir := t.TempDir()
+	boot := func(configured int) *Daemon {
+		d := &Daemon{cfg: Config{DataDir: dir, MaxConcurrent: configured}, modes: NewModeCtl(),
+			q: NewJobQueue(configured, func() map[string]bool { return nil })}
+		if err := d.loadDaemonState(); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	readState := func() string {
+		raw, _ := os.ReadFile(filepath.Join(dir, daemonStateFile))
+		return string(raw)
+	}
+	d := boot(5)
+	if err := d.persistDaemonState(); err != nil { // a graceful shutdown
+		t.Fatal(err)
+	}
+	if strings.Contains(readState(), "max_concurrent_jobs") {
+		t.Fatalf("a configured cap was persisted: %s", readState())
+	}
+	if d = boot(6); d.q.MaxConcurrent() != 6 || d.q.MaxSource() != "config" {
+		t.Fatalf("the next boot must take the configured cap, got %d (%s)", d.q.MaxConcurrent(), d.q.MaxSource())
+	}
+	if err := d.q.SetExplicitMax(2); err != nil {
+		t.Fatal(err)
+	}
+	_ = d.persistDaemonState()
+	if d = boot(6); d.q.MaxConcurrent() != 2 || d.q.MaxSource() != "ops" {
+		t.Fatalf("an explicit cap must survive restarts, got %d (%s)", d.q.MaxConcurrent(), d.q.MaxSource())
+	}
+	d.q.ResetMax(d.cfg.MaxConcurrent)
+	_ = d.persistDaemonState()
+	if d.q.MaxConcurrent() != 6 || strings.Contains(readState(), "max_concurrent_jobs") {
+		t.Fatalf("reset: cap %d state %s", d.q.MaxConcurrent(), readState())
+	}
+	// an older daemon's every-shutdown cap: explicit
+	if err := os.WriteFile(filepath.Join(dir, daemonStateFile), []byte(`{"version":1,"auto":false,"max_concurrent_jobs":3}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if d = boot(6); d.q.MaxConcurrent() != 3 || d.q.MaxSource() != "ops" {
+		t.Fatalf("a legacy persisted cap must read as explicit, got %d (%s)", d.q.MaxConcurrent(), d.q.MaxSource())
+	}
+}
+
+// TestOpsMaxResetRoute: POST /ops/config max (explicit, source "ops"),
+// max_reset (back to the configured cap, source "config"), and the two
+// together refused.
+func TestOpsMaxResetRoute(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	seven := 7
+	raw, err := td.client.OpsConfig(cli.OpsConfigRequest{Max: &seven})
+	if err != nil || !strings.Contains(string(raw), `"max":7`) || !strings.Contains(string(raw), `"max_source":"ops"`) {
+		t.Fatalf("explicit max: %s %v", raw, err)
+	}
+	raw, err = td.client.OpsConfig(cli.OpsConfigRequest{MaxReset: true})
+	if err != nil || !strings.Contains(string(raw), `"max":4`) || !strings.Contains(string(raw), `"max_source":"config"`) {
+		t.Fatalf("reset: %s %v", raw, err)
+	}
+	if _, err := td.client.OpsConfig(cli.OpsConfigRequest{Max: &seven, MaxReset: true}); err == nil {
+		t.Fatal("max together with max_reset must be refused")
+	}
 }

@@ -79,7 +79,7 @@ type Config struct {
 	// session store) and <harness-root>/claude-config (claude's config
 	// dir: settings.json — the single credential authority layer —
 	// plus projects/ and debug/). Resolved as --harness-root (cli.toml
-	// [daemon] harness_root via ensure) > DataDir; the Dir() derivations and
+	// [daemon] harness_root) > DataDir; the Dir() derivations and
 	// stepagentdir.go hold the map.
 	HarnessRoot string
 	// OperatorAgentDir is the SOURCE of the dedicated step agent

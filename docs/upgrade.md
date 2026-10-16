@@ -1158,32 +1158,36 @@ before polyforge#175 or #144 fails it loudly instead of converting it:
 
 ## Daemon knobs move into cli.toml (decision 2026-10-16 G2)
 
-The daemon is started only by `pf daemon ensure`, whose argv used to be
-fixed, so the daemon's tuning flags and `POLYFORGE_*` variables never
-reached a production daemon. Five knobs now live in a `[daemon]` table of
-`cli.toml`, and ensure passes each key that is set to the daemon argv
-verbatim:
+The daemon is started only by `pf daemon ensure`, whose argv is fixed,
+so the daemon's tuning flags and `POLYFORGE_*` variables never reached a
+production daemon. Five knobs now live in a `[daemon]` table of
+`cli.toml`; the daemon reads it from its `--config` file (ensure's argv
+is unchanged). Precedence: an explicit daemon command-line flag
+(tests/dev) > the table > the built-in default.
 
 ```toml
 [daemon]                              # after the flat keys
-step_timeout = "45m"                  # --step-timeout (T), Go duration > 0
-stall_window = "10m"                  # --stall-window (N), non-zero; negative disables
-harness_root = "/srv/polyforge/h"     # --harness-root, absolute path
-operator_agent_dir = "/home/u/.pi/agent"  # --operator-agent-dir, absolute path
-max_concurrent_jobs = 6               # --max-concurrent-jobs, integer >= 1
+step_timeout = "45m"                  # T, Go duration > 0
+stall_window = "10m"                  # N, non-zero; negative disables
+harness_root = "/srv/polyforge/h"     # absolute path
+operator_agent_dir = "/home/u/.pi/agent"  # absolute path
+max_concurrent_jobs = 6               # integer >= 1
 ```
 
-- Every `pf` command validates the table on load: a bad value, an unknown
-  key or a duplicate refuses with `config <file>: line N: [daemon] <key>:
-  <reason>`, and `pf doctor`'s `config` row shows it. Nothing else in
-  the file changed.
+- Every `pf` command, ensure and the daemon validate the table on load: a
+  bad value, an unknown key or a duplicate refuses with `config <file>:
+  line N: [daemon] <key>: <reason>` (ensure starts nothing, the daemon
+  exits 78), and `pf doctor`'s `config` row shows it.
 - A change applies at the next daemon start: `pf ops shutdown`, wait
   until `pf ops status` fails, `pf daemon ensure`.
-- **`max_concurrent_jobs` is the first-boot cap only.** The daemon
-  persists its cap in `<data-dir>/daemon-state.json` on `pf ops max N` and
-  on every graceful shutdown, and a persisted cap wins over the flag. On
-  a machine whose daemon has already run, the table value has no effect;
-  use `pf ops max N` there.
+- **Job cap.** `pf ops max N` is now an explicit cap: persisted in
+  `<data-dir>/daemon-state.json`, it wins over `max_concurrent_jobs` until
+  `pf ops max --reset` returns to the configured cap. Nothing else
+  persists the cap any more (older daemons wrote it on every graceful
+  shutdown). **Migration:** a `max_concurrent_jobs` already in an existing
+  `daemon-state.json` is read as explicit, so the cap stays what it was;
+  run `pf ops max --reset` once to let the table (or the default 4)
+  govern.
 - **Removed environment fallbacks**: `POLYFORGE_MACHINE_ID`,
   `POLYFORGE_DISPLAY_NAME`, `POLYFORGE_HARNESS_ROOT`,
   `POLYFORGE_OPERATOR_AGENT_DIR`, `POLYFORGE_RECALL_TOPK`. They only

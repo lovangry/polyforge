@@ -163,6 +163,9 @@ type AnswerPayload struct {
 type OpsConfigRequest struct {
 	Auto *bool `json:"auto,omitempty"`
 	Max  *int  `json:"max,omitempty"`
+	// MaxReset drops an explicit `pf ops max` cap: the configured one
+	// (cli.toml [daemon] max_concurrent_jobs, else 4) applies again.
+	MaxReset bool `json:"max_reset,omitempty"`
 }
 
 // SubmitResponse is the claim-family answer.
@@ -264,9 +267,10 @@ type JobOrigin struct {
 
 // QueueStats is the local job queue counters.
 type QueueStats struct {
-	Pending       int `json:"pending"`
-	Running       int `json:"running"`
-	MaxConcurrent int `json:"max_concurrent"`
+	Pending       int    `json:"pending"`
+	Running       int    `json:"running"`
+	MaxConcurrent int    `json:"max_concurrent"`
+	MaxSource     string `json:"max_source,omitempty"` // "ops" | "config"
 }
 
 // ---------------------------------------------------------------------------

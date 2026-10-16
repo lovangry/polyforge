@@ -7,10 +7,12 @@ package daemon
 // graceful shutdown sequence.
 //
 // Production starts the daemon only through `pf daemon ensure`, whose
-// argv carries the fixed launch flags plus the cli.toml [daemon] table
-// (step-timeout, stall-window, harness-root, operator-agent-dir,
-// max-concurrent-jobs; decision 2026-10-16 G2). Every other flag below is
-// test/dev-only: nothing in production sets it.
+// argv carries only the fixed launch flags. The five production knobs
+// (step timeout, stall window, harness root, operator agent dir, job cap)
+// come from the --config file's [daemon] table (decision 2026-10-16 G2):
+// an explicit command-line flag (tests/dev) > the table > the built-in
+// default (applyDaemonTable). Every other flag below is test/dev-only:
+// nothing in production sets it.
 //
 // polyforge#113: there is NO launch-time workspace and NO project scope
 // anymore. The [workspace."<path>"] mapping in the shared config (the
@@ -61,7 +63,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	harnessRoot := fs.String("harness-root", "", "parent root of the step harness state dirs: <harness-root>/step-agent (dedicated step agent dir), /step-agent-sessions (pi sessions) and /claude-config (claude config dir: settings.json, projects/, debug/) (cli.toml [daemon] harness_root; default <data-dir>). polyforge#171 unified the three dirs under one root; the former --harness-sessions-root (the pi sessions dir itself) was renamed so an old deployment fails loudly instead of silently moving its harness state")
 	operatorAgentDir := fs.String("operator-agent-dir", "", "SOURCE of the dedicated step agent directory's minimal set — model service credentials, model configuration and subagent definitions are copied from here into <harness-root>/step-agent (cli.toml [daemon] operator_agent_dir; default ~/.pi/agent). A configured source without a readable auth.json refuses the start")
 	gitRemoteBase := fs.String("git-remote-base", "", "test/dev-only: aihub bare-repo base URL (default <server>/git)")
-	maxConcurrent := fs.Int("max-concurrent-jobs", 0, "job cap at first boot (cli.toml [daemon] max_concurrent_jobs; default 4); the persisted pf ops max setting wins once it exists")
+	maxConcurrent := fs.Int("max-concurrent-jobs", 0, "configured job cap (cli.toml [daemon] max_concurrent_jobs; default 4); an explicit pf ops max N wins until pf ops max --reset")
 	recallTopK := fs.Int("recall-topk", 0, "test/dev-only: claim-time memory snapshot hit count (default 10, max 50)")
 	auto := fs.Bool("auto", false, "test/dev-only (production: pf ops auto on|off): auto-pull: the daemon claims ready-queue work itself (default off; unset keeps the persisted switch)")
 	// Supervision bounds (v2-converge 2.4): Go duration strings, no env
@@ -88,6 +90,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "pf daemon: %v\n", err)
 		return ExitNeedsOperator
 	}
+	applyDaemonTable(fs, shared.Daemon, stepTimeout, stallWindow, harnessRoot, operatorAgentDir, maxConcurrent)
 	if *socket == "" {
 		*socket = shared.DaemonSocket
 	}
@@ -230,6 +233,29 @@ type needsOperatorError struct{ err error }
 
 func (e *needsOperatorError) Error() string { return e.err.Error() }
 func (e *needsOperatorError) Unwrap() error { return e.err }
+
+// applyDaemonTable fills each knob the command line did not set
+// explicitly from the config's [daemon] table (already validated by
+// cli.LoadConfig); an unset table key leaves the built-in default.
+func applyDaemonTable(fs *flag.FlagSet, t cli.DaemonSettings, stepTimeout, stallWindow *time.Duration, harnessRoot, operatorAgentDir *string, maxConcurrent *int) {
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if !set["step-timeout"] && t.StepTimeout != 0 {
+		*stepTimeout = t.StepTimeout
+	}
+	if !set["stall-window"] && t.StallWindow != 0 {
+		*stallWindow = t.StallWindow
+	}
+	if !set["harness-root"] && t.HarnessRoot != "" {
+		*harnessRoot = t.HarnessRoot
+	}
+	if !set["operator-agent-dir"] && t.OperatorAgentDir != "" {
+		*operatorAgentDir = t.OperatorAgentDir
+	}
+	if !set["max-concurrent-jobs"] && t.MaxConcurrentJobs > 0 {
+		*maxConcurrent = t.MaxConcurrentJobs
+	}
+}
 
 // resolveAuto maps -auto to the initial auto switch (nil = unspecified:
 // the persisted switch wins).

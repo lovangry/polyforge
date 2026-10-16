@@ -81,6 +81,8 @@ type queueStats struct {
 	Pending       int `json:"pending"`
 	Running       int `json:"running"`
 	MaxConcurrent int `json:"max_concurrent"`
+	// MaxSource: "ops" (an explicit pf ops max) or "config".
+	MaxSource string `json:"max_source"`
 }
 
 type statusResponse struct {
@@ -111,6 +113,9 @@ type statusResponse struct {
 type opsConfigResponse struct {
 	Auto bool `json:"auto"`
 	Max  int  `json:"max"`
+	// MaxSource is where Max comes from: "ops" (explicit pf ops max) or
+	// "config" (cli.toml [daemon] / flag / default).
+	MaxSource string `json:"max_source"`
 }
 
 type closeResponse struct {
@@ -725,22 +730,30 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 			Pending:       d.q.LenPending(),
 			Running:       running,
 			MaxConcurrent: d.q.MaxConcurrent(),
+			MaxSource:     d.q.MaxSource(),
 		},
 	})
 }
 
-// opsConfigRoute is POST /ops/config {"auto":bool?,"max":int?}: the one
-// switch and the one number. At least one must be present.
+// opsConfigRoute is POST /ops/config {"auto":bool?,"max":int?,
+// "max_reset":bool?}: the one switch and the one number. At least one
+// must be present; max and max_reset exclude each other. max is an
+// explicit cap (persisted); max_reset returns to the configured cap.
 func (d *Daemon) opsConfigRoute(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Auto *bool `json:"auto"`
-		Max  *int  `json:"max"`
+		Auto     *bool `json:"auto"`
+		Max      *int  `json:"max"`
+		MaxReset bool  `json:"max_reset"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	if req.Auto == nil && req.Max == nil {
-		writeErr(w, api.ErrDaemonBadInput, "ops config requires auto and/or max")
+	if req.Auto == nil && req.Max == nil && !req.MaxReset {
+		writeErr(w, api.ErrDaemonBadInput, "ops config requires auto, max and/or max_reset")
+		return
+	}
+	if req.Max != nil && req.MaxReset {
+		writeErr(w, api.ErrDaemonBadInput, "ops config: max and max_reset exclude each other")
 		return
 	}
 	if req.Max != nil && *req.Max < 1 {
@@ -761,13 +774,16 @@ func (d *Daemon) opsConfigRoute(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.Max != nil {
-		if err := d.q.SetMaxConcurrent(*req.Max); err != nil {
+		if err := d.q.SetExplicitMax(*req.Max); err != nil {
 			writeErr(w, api.ErrDaemonBadInput, err.Error())
 			return
 		}
 	}
+	if req.MaxReset {
+		d.q.ResetMax(d.cfg.MaxConcurrent)
+	}
 	d.persistModeQuietly()
-	writeJSON(w, http.StatusOK, opsConfigResponse{Auto: d.modes.Auto(), Max: d.q.MaxConcurrent()})
+	writeJSON(w, http.StatusOK, opsConfigResponse{Auto: d.modes.Auto(), Max: d.q.MaxConcurrent(), MaxSource: d.q.MaxSource()})
 }
 
 func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {

@@ -398,7 +398,7 @@ var cmdOps = &Command{
 	Summary: "Daemon ops: local job status, auto-pull switch, max concurrent jobs, graceful shutdown; end-session recovery",
 	Usage: "pf ops status\n" +
 		"pf ops auto [on|off]    # off = only explicit pf submit; on = the daemon also pulls the ready queue itself (bare = show)\n" +
-		"pf ops max [N]          # max concurrent jobs on this machine, N >= 1 (bare = show)\n" +
+		"pf ops max [N|--reset]  # max concurrent jobs on this machine, N >= 1, persisted; --reset = back to cli.toml [daemon] max_concurrent_jobs (bare = show)\n" +
 		"pf ops shutdown         # graceful shutdown (quiesce); the restart loop ends with it — start again with `pf daemon ensure`\n" +
 		"pf ops end-session <wi> --reason <text>  # admin/maintainer: force-end a stuck holder's session (WI -> queued; then `pf submit <wi>` anywhere)",
 	Setup: func(fs *flag.FlagSet) {},
@@ -485,19 +485,27 @@ func opsAuto(ctx *Context, d *DaemonClient, args []string) error {
 	return fmt.Errorf("ops auto: expected on|off")
 }
 
-// opsMax handles `pf ops max [N]`.
+// opsMax handles `pf ops max [N|--reset]`.
 func opsMax(ctx *Context, d *DaemonClient, args []string) error {
 	switch len(args) {
 	case 0:
-		return opsShow(ctx, d, func(s *StatusResponse) string { return fmt.Sprintf("max: %d", s.Queue.MaxConcurrent) })
+		return opsShow(ctx, d, func(s *StatusResponse) string {
+			if s.Queue.MaxSource == "ops" {
+				return fmt.Sprintf("max: %d (set by pf ops max; pf ops max --reset returns to the configured cap)", s.Queue.MaxConcurrent)
+			}
+			return fmt.Sprintf("max: %d", s.Queue.MaxConcurrent)
+		})
 	case 1:
+		if args[0] == "--reset" {
+			return opsApply(ctx, d, OpsConfigRequest{MaxReset: true})
+		}
 		n, err := strconv.Atoi(args[0])
 		if err != nil || n < 1 {
-			return fmt.Errorf("ops max: N must be an integer >= 1")
+			return fmt.Errorf("ops max: N must be an integer >= 1 (or --reset)")
 		}
 		return opsApply(ctx, d, OpsConfigRequest{Max: &n})
 	}
-	return fmt.Errorf("ops max: expected a single N")
+	return fmt.Errorf("ops max: expected a single N or --reset")
 }
 
 func onOff(b bool) string {
@@ -544,20 +552,23 @@ warns. The canonical argv: --config, -machine-id (the recorded
 <data-dir>/daemon-id, else m-<short hostname>), -data-dir
 ($POLYFORGE_DATA_DIR or ~/.local/share/polyforge), -socket (the
 config's daemon_socket), -workflows-dir (<data-dir>/release/current/
-workflows unless --workflows-dir), then one flag per key set in the
-config's [daemon] table, passed verbatim (decision 2026-10-16 G2):
+workflows unless --workflows-dir) — nothing else. The production knobs
+live in the config's [daemon] table, which the daemon reads itself from
+--config (decision 2026-10-16 G2); an explicit command-line flag
+(tests/dev) beats the table, the table beats the built-in default:
 
   [daemon]
   step_timeout = "45m"          # --step-timeout (Go duration, > 0)
   stall_window = "10m"          # --stall-window (non-zero; negative disables)
   harness_root = "/abs/path"    # --harness-root
   operator_agent_dir = "/abs"   # --operator-agent-dir
-  max_concurrent_jobs = 6       # --max-concurrent-jobs (first boot only:
-                                #   a persisted pf ops max wins afterwards)
+  max_concurrent_jobs = 6       # --max-concurrent-jobs (an explicit
+                                #   pf ops max N wins until pf ops max --reset)
 
-Every pf command validates the table on load (a bad value names the
-file, line and key). A config without a [workspace] mapping is refused
-(the daemon would refuse to start). pf ops shutdown
+Every pf command, ensure and the daemon validate the table on load (a bad
+value names the file, line and key). A change applies at the next daemon
+start. A config without a [workspace] mapping is refused (the daemon
+would refuse to start). pf ops shutdown
 stops the daemon for good: the loop ends with the clean exit.
 
 pf daemon [--flag value] ... runs the local polyforge daemon in the
@@ -576,7 +587,7 @@ workspace flag and no default project: the mapping is the only source.
 pf doctor checks the mapping and the connectivity faces.
 
 Launch flags. Production sets only what pf daemon ensure passes (the
-fixed launch flags and the [daemon] table above); a flag marked
+fixed launch flags) plus the [daemon] table above; a flag marked
 test/dev-only is never set in production. The daemon reads no
 POLYFORGE_* variable except POLYFORGE_DATA_DIR (the --data-dir default).
 
@@ -632,10 +643,9 @@ POLYFORGE_* variable except POLYFORGE_DATA_DIR (the --data-dir default).
   --git-remote-base URL
       test/dev-only: aihub bare-repo base URL (default <server>/git)
   --max-concurrent-jobs N
-      max concurrent jobs on this machine at FIRST boot
-      ([daemon] max_concurrent_jobs; default 4); once the daemon has
-      persisted its cap (pf ops max N, or any graceful shutdown) the
-      persisted value wins
+      configured max concurrent jobs on this machine ([daemon]
+      max_concurrent_jobs; default 4). An explicit pf ops max N is
+      persisted and wins over it until pf ops max --reset
   --recall-topk N
       test/dev-only: claim-time memory snapshot hit count
       (default 10, max 50)
@@ -646,8 +656,8 @@ POLYFORGE_* variable except POLYFORGE_DATA_DIR (the --data-dir default).
       test/dev-only: machines heartbeat cadence (default 60s; 0 disables)
 
 Supervision flags (v2-converge 2.4; Go duration strings; omitted or 0 keeps
-the default; production sets only --step-timeout and --stall-window, via
-the [daemon] table — the other four are test/dev-only; the only
+the default; production sets only T and N, via the [daemon] table
+(step_timeout, stall_window) — the other four are test/dev-only; the only
 per-step override is workflow.md budget.wall_minutes, an estimate:
 T = max(3 x wall_minutes, --step-timeout); X and Y are global):
 
