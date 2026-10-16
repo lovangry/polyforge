@@ -390,7 +390,7 @@ func (d *Daemon) attentionClass(j statusJob) string {
 		return "failed"
 	}
 	if d.obs != nil {
-		ring := d.obs.Events().SinceAfter(j.WorkItemID, 0)
+		ring := d.obs.Events().Recent(j.WorkItemID)
 		for i := len(ring) - 1; i >= 0; i-- {
 			switch ring[i].Kind {
 			case "step_dead", "candidates_exhausted",
@@ -470,11 +470,7 @@ func (d *Daemon) lastSeq(wi string) int64 {
 	if d.obs == nil {
 		return 0
 	}
-	ring := d.obs.Events().SinceAfter(wi, 0)
-	if len(ring) == 0 {
-		return 0
-	}
-	return ring[len(ring)-1].Seq
+	return d.obs.Events().LastSeq(wi)
 }
 
 // ---------------------------------------------------------------------------

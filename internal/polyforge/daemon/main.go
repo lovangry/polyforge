@@ -17,6 +17,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -79,7 +80,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	shared, err := cli.LoadConfig(*cfgPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "pf daemon: %v\n", err)
-		return 1
+		return ExitNeedsOperator
 	}
 	if *socket == "" {
 		*socket = shared.DaemonSocket
@@ -104,7 +105,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			where = cli.DefaultConfigPath()
 		}
 		fmt.Fprintf(stderr, "pf daemon: refusing to start: no workspace mapping is configured — add at least one [workspace.\"<path>\"] section with a projects = [\"...\"] list to %s; the daemon places capsules at <workspace>/capsules/<project>-<seq> per the claim's project (`pf doctor` checks the mapping)\n", where)
-		return 1
+		return ExitNeedsOperator
 	}
 
 	home, _ := os.UserHomeDir()
@@ -128,7 +129,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	id, err := ResolveDaemonID(*dataDir, *machineID, explicitID)
 	if err != nil {
 		fmt.Fprintf(stderr, "pf daemon: refusing to start: %v\n", err)
-		return 1
+		return ExitNeedsOperator
 	}
 	*machineID = id
 	if *displayName == "" {
@@ -192,8 +193,10 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	d, err := New(cfg)
 	if err != nil {
+		// every New failure is configuration or on-disk state (a missing
+		// workspace, an unreadable state file, a missing agent dir)
 		fmt.Fprintf(stderr, "pf daemon: %v\n", err)
-		return 1
+		return ExitNeedsOperator
 	}
 
 	// SIGTERM/SIGINT run the same bounded graceful sequence the
@@ -216,10 +219,28 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	if err := d.Run(context.Background()); err != nil {
 		fmt.Fprintf(stderr, "pf daemon: %v\n", err)
+		var no *needsOperatorError
+		if errors.As(err, &no) {
+			return ExitNeedsOperator
+		}
 		return 1
 	}
 	return 0
 }
+
+// ExitNeedsOperator is the daemon's exit status for a startup failure
+// only an operator can fix — configuration, identity, workspace, on-disk
+// state, a failed restart reconciliation (EX_CONFIG). The ensure
+// supervision loop ends on it instead of restarting into the same
+// failure every few seconds (repo review 2026-10-16 B-14); the next
+// `pf daemon ensure` starts a fresh loop once the cause is fixed.
+const ExitNeedsOperator = 78
+
+// needsOperatorError marks a Run error as ExitNeedsOperator-class.
+type needsOperatorError struct{ err error }
+
+func (e *needsOperatorError) Error() string { return e.err.Error() }
+func (e *needsOperatorError) Unwrap() error { return e.err }
 
 // resolveHarnessRoot is the polyforge#171 resolution order for the
 // harness-root override: the --harness-root flag wins over the

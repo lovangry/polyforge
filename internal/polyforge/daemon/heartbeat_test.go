@@ -139,3 +139,14 @@ func TestHeartbeatFailureBackoffAndRecovery(t *testing.T) {
 		t.Fatalf("shutdown: %v", err)
 	}
 }
+
+// review nit on B-25: the clamp is exact for a cap that is not a power
+// of two.
+func TestCappedBackoffNonPowerOfTwoCap(t *testing.T) {
+	base := time.Second
+	for streak, want := range []time.Duration{1, 2, 4, 8, 10, 10, 10} {
+		if got := cappedBackoff(base, streak, 10); got != want*time.Second {
+			t.Fatalf("cappedBackoff(1s, %d, 10) = %s, want %s", streak, got, want*time.Second)
+		}
+	}
+}

@@ -125,14 +125,30 @@ func rateLimitBackoff(streak int) time.Duration {
 	return d
 }
 
+// The audit-only interruption causes a driver relaunch or a daemon
+// restart archives on the in-flight step (applyInterruptedLocked): not
+// dispatch outcomes, never counted failures.
+const (
+	FailDriverRelaunch = "driver_relaunch"
+	FailDaemonRestart  = "daemon_restart"
+)
+
 // trailingCause counts the step's trailing consecutive attempts of one
 // failure cause (the archived attempts are the authority, like the
 // candidate pointer): a dispatch that died of anything else — or a
-// delivered result — ends the streak and the backoff starts over.
+// delivered result — ends the streak and the backoff starts over. The
+// audit-only interruption entries a driver relaunch or daemon restart
+// archives are not dispatch outcomes and are skipped: a restart must not
+// reset the D7 backoff or the upstream-transient retry bound (repo
+// review 2026-10-16 B-22).
 func trailingCause(attempts []capsule.Attempt, cause string) int {
 	n := 0
 	for i := len(attempts) - 1; i >= 0; i-- {
-		if attempts[i].FailureCause != cause {
+		a := attempts[i]
+		if a.Cause == CauseInfraFailure && (a.FailureCause == FailDriverRelaunch || a.FailureCause == FailDaemonRestart) {
+			continue
+		}
+		if a.FailureCause != cause {
 			break
 		}
 		n++
@@ -192,6 +208,22 @@ type ExitedError struct {
 	TurnOK    bool   // the last signal was a normally ended turn (no error)
 	Detail    string // envelope defect, when one was left behind
 }
+
+// EnvelopeDefectError is a dispatch wait cut short (a supervisor verdict,
+// shutdown) while the drop path held an UNUSABLE envelope: the step did
+// write a result, and the defect must reach the failure record and the
+// retry prompt instead of reading as "no envelope" (repo review
+// 2026-10-16 B-12). It unwraps to the cancellation cause.
+type EnvelopeDefectError struct {
+	Defect error
+	Cause  error
+}
+
+func (e *EnvelopeDefectError) Error() string {
+	return fmt.Sprintf("%v (unusable result envelope: %v)", e.Cause, e.Defect)
+}
+
+func (e *EnvelopeDefectError) Unwrap() error { return e.Cause }
 
 func (e *ExitedError) Error() string {
 	msg := fmt.Sprintf("driver: step %s spawn %d exited without a result (code %d", e.Step, e.SpawnN, e.ExitCode)
@@ -522,6 +554,12 @@ func (d *Driver) awaitDispatch(ctx context.Context, run StepRun, stepID string, 
 				if r.res != nil && r.err == nil {
 					return r.res, nil, nil // the envelope landed first: the dispatch delivered
 				}
+				var ed *EnvelopeDefectError
+				if errors.As(r.err, &ed) {
+					// the step wrote an envelope the light checks refused: name
+					// it in the failure record, not just "no result"
+					dead.Evidence = strings.TrimSpace(dead.Evidence + "; unusable result envelope: " + ed.Defect.Error())
+				}
 				return nil, r.err, &dead
 			}
 		}
@@ -710,16 +748,10 @@ func (d *Driver) applyStepFailedLocked(req TransitionRequest, info *appliedInfo)
 		f.Cause = FailExitModel
 	}
 	dec := d.decideFailureLocked(req.StepID, st, f)
-	seq := 0
-	for _, a := range st.Attempts {
-		if a.AttemptSeq > seq {
-			seq = a.AttemptSeq
-		}
-	}
 	st.Attempts = append(st.Attempts, capsule.Attempt{
 		Cause:         CauseInfraFailure,
 		FailureCause:  f.Cause,
-		AttemptSeq:    seq + 1,
+		AttemptSeq:    nextAttemptSeq(st),
 		StartedAt:     st.StepStartedAt,
 		InterruptedAt: d.stamp(),
 		Detail:        f.Detail,

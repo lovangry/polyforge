@@ -188,6 +188,12 @@ func Evaluate(sub protocol.ChatSub, snap *protocol.WatchSnapshot) Result {
 	}
 	cur := map[string]bool{}
 	fire := func(key string, r Rule) {
+		if cur[key] {
+			// execution.json and the hub status can name the same class
+			// (completed+wrapped, failed_gate+failed, blocked+blocked):
+			// one decision per poll (repo review 2026-10-16 B-9).
+			return
+		}
 		cur[key] = true
 		if !have[key] {
 			res.Decisions = append(res.Decisions, Decision{WI: snap.WorkItem, Slug: snap.Slug, Class: r.Class, Phrase: r.Phrase, Key: key})

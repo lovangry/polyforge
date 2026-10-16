@@ -197,3 +197,19 @@ func asAPIError(err error, target **api.Error) bool {
 	}
 	return ok
 }
+
+// repo review 2026-10-16 B-25/V-13: a gitlink under repos/ means the
+// capsule .gitignore lost its line; the refusal must point there and
+// never tell anyone to delete a task repo's .git (its only history).
+func TestGitlinkRemedyNeverDeletesATaskRepo(t *testing.T) {
+	r := gitlinkRemedy("repos/app")
+	if !strings.Contains(r, "/repos/") || !strings.Contains(r, ".gitignore") || !strings.Contains(r, "Do NOT delete") {
+		t.Fatalf("task-repo remedy = %q", r)
+	}
+	if strings.Contains(r, "git rm --cached") || strings.Contains(r, "delete its .git") {
+		t.Fatalf("task-repo remedy must not offer the destructive recipe: %q", r)
+	}
+	if g := gitlinkRemedy("poison"); !strings.Contains(g, "git rm --cached") || !strings.Contains(g, "disposable") {
+		t.Fatalf("residue remedy = %q", g)
+	}
+}

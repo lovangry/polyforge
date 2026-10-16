@@ -368,3 +368,28 @@ func TestAttentionAllDecisionClasses(t *testing.T) {
 		t.Fatalf("the hub-canceled held record must reach the owner: %+v", items)
 	}
 }
+
+// TestLastSeqAndAttentionPastHistoryCap (repo review 2026-10-16 B-5):
+// a WI with more than HistoryCap events still reports its true last seq
+// and its newest decision-class event — the old path answered both from
+// the durable files, truncated at HistoryCap (oldest first).
+func TestLastSeqAndAttentionPastHistoryCap(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	wi := "wi_" + "longlog"
+	ev := td.obs.Events()
+	n := observe.HistoryCap + 10
+	for i := 0; i < n-1; i++ {
+		if err := ev.Append(wi, "t_event", nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ev.Append(wi, "step_dead", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := td.lastSeq(wi); got != int64(n) {
+		t.Fatalf("lastSeq = %d, want %d", got, n)
+	}
+	if got := td.attentionClass(statusJob{WorkItemID: wi, Status: "running"}); got != "step_dead" {
+		t.Fatalf("attention class = %q, want the newest event step_dead", got)
+	}
+}

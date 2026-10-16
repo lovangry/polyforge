@@ -44,6 +44,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
@@ -495,7 +496,7 @@ func deliveryContract(p promptParts) string {
 	}
 	if p.RequiresHumanAnswer {
 		b.WriteString("\nHuman answer: this step requires a human answer before completion: return `needs_input` first; " +
-			"a `completed` envelope without an answer in this round is rejected.\n")
+			"a `completed` or `gate_failed` envelope without an answer in this round is rejected.\n")
 	}
 	if p.HumanAnswerIfAsked {
 		b.WriteString("\nHuman questions: every question this step raises is answered by a human only — " +
@@ -874,8 +875,14 @@ func (r *stepRun) exited(defect error) error {
 }
 
 func (r *stepRun) Wait(ctx context.Context) (*StepResult, error) {
+	var lastDefect error
 	for {
 		res, defect := r.collect()
+		if res == nil {
+			// the CURRENT drop's defect (nil once it was removed or is
+			// mid-rewrite): a stale defect is never reported
+			lastDefect = defect
+		}
 		if res != nil {
 			if err := r.archive(res); err != nil {
 				_ = r.handle.Terminate(teardownBound)
@@ -911,6 +918,9 @@ func (r *stepRun) Wait(ctx context.Context) (*StepResult, error) {
 		}
 		select {
 		case <-ctx.Done():
+			if lastDefect != nil {
+				return nil, &EnvelopeDefectError{Defect: lastDefect, Cause: ctx.Err()}
+			}
 			return nil, ctx.Err()
 		case <-time.After(r.poll):
 		}
@@ -993,7 +1003,7 @@ parsed:
 	}
 	if res.StepID != r.sp.StepID {
 		return nil, fmt.Errorf("%w: envelope names step %q, dispatch is %q",
-			ErrIdentityMismatch, res.StepID, r.sp.StepID)
+			ErrIdentityMismatch, clipAgentText(res.StepID), r.sp.StepID)
 	}
 	if res.WIID == "" {
 		res.WIID = r.wiID
@@ -1006,7 +1016,7 @@ parsed:
 			ErrStaleSpawn, res.SpawnN, r.sp.SpawnN)
 	}
 	if !res.Outcome.Valid() {
-		return nil, fmt.Errorf("driver: envelope outcome %q is not in the closed set", res.Outcome)
+		return nil, fmt.Errorf("driver: envelope outcome %q is not in the closed set", clipAgentText(string(res.Outcome)))
 	}
 	return &res, nil
 }
@@ -1023,4 +1033,22 @@ func (r *stepRun) archive(res *StepResult) error {
 	}
 	path := filepath.Join(r.capsuleRoot, capsule.DirArtifacts, "steps", r.sp.StepID, spawnTokenDir(r.sp.SpawnN), "result.json")
 	return atomicfile.Write(path, blob, 0o644)
+}
+
+// maxQuotedAgentText bounds agent-written text quoted into a defect: the
+// defect travels into step_dead evidence, the events log and the retry
+// prompt.
+const maxQuotedAgentText = 256
+
+// clipAgentText cuts agent-written text to maxQuotedAgentText bytes (on
+// a rune boundary), marking the cut.
+func clipAgentText(s string) string {
+	if len(s) <= maxQuotedAgentText {
+		return s
+	}
+	cut := maxQuotedAgentText
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "...(truncated)"
 }

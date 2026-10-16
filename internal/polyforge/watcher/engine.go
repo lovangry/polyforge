@@ -91,6 +91,12 @@ func Run(ctx context.Context, api API, opts Options) error {
 		paused     bool
 		lastNotice time.Time
 		attended   bool
+		// unacked holds the lines already printed whose ack failed (repo
+		// review 2026-10-16 B-23): the daemon still holds the old cursor,
+		// so the next cycle re-derives the same decisions — they are not
+		// printed again, only their acks retried, until an ack round
+		// fully succeeds.
+		unacked = map[string]bool{}
 	)
 	for {
 		if opts.ParentAlive != nil && !opts.ParentAlive() {
@@ -101,6 +107,14 @@ func Run(ctx context.Context, api API, opts Options) error {
 		}
 		lines, batch, err := cycle(api, &opts, &attended)
 		if err != nil {
+			// The attention notice is marked shown by the daemon when it is
+			// fetched: a cycle that fails after fetching it still prints it
+			// (repo review 2026-10-16 B-25, the WA-4 item).
+			for _, l := range batch.out {
+				if _, werr := fmt.Fprintln(opts.Out, l); werr != nil {
+					return werr
+				}
+			}
 			if !paused || opts.Now().Sub(lastNotice) >= time.Minute {
 				fmt.Fprintf(opts.Err, "polyforge watch: %s (%s); retrying in %s\n", pausedText(err), shortErr(err), backoff)
 				lastNotice = opts.Now()
@@ -119,24 +133,36 @@ func Run(ctx context.Context, api API, opts Options) error {
 		}
 		backoff = time.Second
 		writeStatus(&opts, lines)
-		if len(batch.out) > 0 {
+		printed := 0
+		for _, l := range batch.out {
+			if unacked[l] {
+				continue
+			}
+			if _, werr := fmt.Fprintln(opts.Out, l); werr != nil {
+				return werr // stdout gone: nobody is listening
+			}
+			printed++
+		}
+		// Ack only after the lines are out: a crash between print and
+		// ack re-delivers (at-least-once), never loses.
+		var ackErr error
+		for _, a := range batch.acks {
+			if aerr := api.Ack(a); aerr != nil && ackErr == nil {
+				ackErr = aerr
+			}
+		}
+		if ackErr != nil {
+			if len(unacked) == 0 {
+				fmt.Fprintf(opts.Err, "polyforge watch: ack failed (%s); retrying without re-printing\n", shortErr(ackErr))
+			}
 			for _, l := range batch.out {
-				if _, werr := fmt.Fprintln(opts.Out, l); werr != nil {
-					return werr // stdout gone: nobody is listening
-				}
-			}
-			// Ack only after the lines are out: a crash between print and
-			// ack re-delivers (at-least-once), never loses.
-			for _, a := range batch.acks {
-				_ = api.Ack(a)
-			}
-			if opts.WaitDecision {
-				return nil
+				unacked[l] = true
 			}
 		} else {
-			for _, a := range batch.acks {
-				_ = api.Ack(a)
-			}
+			unacked = map[string]bool{}
+		}
+		if printed > 0 && opts.WaitDecision {
+			return nil
 		}
 		opts.Sleep(ctx, opts.Poll)
 	}
@@ -217,6 +243,7 @@ func cycle(d API, o *Options, attended *bool) ([]string, batch, error) {
 			b.out = append(b.out, AttentionLine(wis))
 		}
 	}
+	attention := append([]string(nil), b.out...)
 	now := o.Now()
 	var lines []string
 	for _, sub := range subs.Subscriptions {
@@ -237,7 +264,9 @@ func cycle(d API, o *Options, attended *bool) ([]string, batch, error) {
 		if err != nil {
 			var ae *api.Error
 			if !errors.As(err, &ae) {
-				return nil, batch{}, err // transport: the daemon went away mid-cycle
+				// transport: the daemon went away mid-cycle; only the
+				// already-fetched (and daemon-marked) attention line survives
+				return nil, batch{out: attention}, err
 			}
 			lines = append(lines, safeID(api.DisplayName(sub.Slug, sub.WI))+" unavailable ("+ae.Code+")")
 			continue

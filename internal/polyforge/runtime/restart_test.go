@@ -99,12 +99,17 @@ func TestRestartReconciliationMatrix(t *testing.T) {
 					}
 					assertNoRT(t, toOB)
 				case v.status == api.StatusBlocked:
-					// M2: nothing revived, record kept; crash orphans (and only
-					// they) are reaped — the sleeper carries the WI marker
+					// M2: nothing revived; crash orphans (and only they) are
+					// reaped — the sleeper carries the WI marker — and the
+					// record is dropped so a re-claim is not refused as
+					// "already active" (repo review 2026-10-16 B-6)
 					if local {
 						waitDead(t, pid)
-						if recs := loadRecords(t, r); len(recs) != 1 || recs[0].WorkItemID != wi {
-							t.Fatalf("blocked record must be kept, got %+v", recs)
+						if recs := loadRecords(t, r); len(recs) != 0 {
+							t.Fatalf("blocked record must be dropped, got %+v", recs)
+						}
+						if r.jobOf(wi) != nil {
+							t.Fatal("blocked job must not stay in the job table")
 						}
 					}
 					if sp.callCount() != 0 {
@@ -523,7 +528,7 @@ func TestRestartVerifyRefusedParksBlocked(t *testing.T) {
 }
 
 // A blocked verdict reaps the crash orphans named only by the spawn
-// journal (record pid 0), while keeping the record and reviving nothing.
+// journal (record pid 0), drops the record and revives nothing.
 func TestRestartBlockedReapsJournaledOrphansOnly(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
@@ -545,8 +550,8 @@ func TestRestartBlockedReapsJournaledOrphansOnly(t *testing.T) {
 	}
 	waitDead(t, pid)
 	mustBeAlive(t, bystander)
-	if recs := loadRecords(t, r); len(recs) != 1 || recs[0].WorkItemID != wi {
-		t.Fatalf("blocked record must be kept, got %+v", recs)
+	if recs := loadRecords(t, r); len(recs) != 0 {
+		t.Fatalf("blocked record must be dropped, got %+v", recs)
 	}
 	if sp.callCount() != 0 {
 		t.Fatal("blocked must not spawn")

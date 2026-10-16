@@ -839,3 +839,34 @@ func TestSpawnStepWiresHarnessTranslatorOntoTheLink(t *testing.T) {
 		t.Fatalf("an error-turn exit is model-class, got %q", cause)
 	}
 }
+
+// review nit on B-12: agent-written text quoted into a defect is bounded,
+// and a drop that disappeared (or is mid-rewrite) clears the old defect.
+func TestStepRunDefectIsBoundedAndNeverStale(t *testing.T) {
+	ad, _, capDir := spawnEnv(t)
+	writeCapsuleFile(t, capDir, "artifacts/fix-summary.md", "s")
+	run, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 9})
+	if err != nil {
+		t.Fatalf("SpawnStep: %v", err)
+	}
+	drop := "runtime-state/pending-results/9.json"
+	writeCapsuleFile(t, capDir, drop, `{"outcome":"`+strings.Repeat("x", 5000)+`"}`)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	_, werr := run.Wait(ctx)
+	cancel()
+	var ed *EnvelopeDefectError
+	if !errors.As(werr, &ed) || len(ed.Defect.Error()) > 600 {
+		t.Fatalf("defect must be reported and bounded: %v", werr)
+	}
+	// within ONE wait: the defect is seen, then the drop goes away
+	go func() {
+		time.Sleep(60 * time.Millisecond)
+		_ = os.Remove(filepath.Join(capDir, drop))
+	}()
+	ctx, cancel = context.WithTimeout(context.Background(), 300*time.Millisecond)
+	_, werr = run.Wait(ctx)
+	cancel()
+	if errors.As(werr, &ed) {
+		t.Fatalf("a removed drop must not report its old defect: %v", werr)
+	}
+}

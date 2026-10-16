@@ -81,16 +81,18 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	switch capsuleWorkflowStatus(j.capsuleDir) {
 	case capsule.WorkflowStatusCompleted:
 		fmt.Fprintf(os.Stderr, "runtime: %s: driver workflow completed — wrapping (recovery cause %q is the completion signal, not a death)\n", j.wi, cause)
-		// alreadyPushed: the C3 engine already committed and pushed the
-		// terminal execution.json version (every transition bumps Version
-		// and publishes); the final push here would only race it.
-		if err := r.stopOp(ctx, j, protocol.FinishWrapped, false, true, ""); err != nil {
+		// The ordinary seal push runs (repo review 2026-10-16 B-7): the
+		// driver does no git, and the observe flush that would carry the
+		// terminal execution.json may have failed or timed out. On a clean
+		// tree CommitPush only re-pushes HEAD; a failed push degrades the
+		// close to blocked like every other terminal close.
+		if err := r.stopOp(ctx, j, protocol.FinishWrapped, false, ""); err != nil {
 			fmt.Fprintf(os.Stderr, "runtime: %s: terminal wrap failed (record kept for the next restart): %v\n", j.wi, err)
 		}
 		return
 	case capsule.WorkflowStatusFailedGate, capsule.WorkflowStatusFailedRewindExhausted:
 		fmt.Fprintf(os.Stderr, "runtime: %s: driver workflow failed (%s) — closing failed (recovery cause %q)\n", j.wi, capsuleWorkflowStatus(j.capsuleDir), cause)
-		if err := r.stopOp(ctx, j, protocol.FinishFailed, false, true, ""); err != nil {
+		if err := r.stopOp(ctx, j, protocol.FinishFailed, false, ""); err != nil {
 			fmt.Fprintf(os.Stderr, "runtime: %s: terminal fail close failed (record kept for the next restart): %v\n", j.wi, err)
 		}
 		return
