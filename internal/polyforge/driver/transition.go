@@ -193,7 +193,7 @@ func (d *Driver) transition(req TransitionRequest) error {
 	if d.degraded {
 		// checked BEFORE anything is applied or written: a latched driver
 		// must not keep mutating memory and disk while reporting the
-		// transition blocked (repo review 2026-10-16 B-18)
+		// transition blocked
 		return fmt.Errorf("driver: degraded (post-rename fsync previously failed); transitions blocked until restart")
 	}
 
@@ -229,7 +229,7 @@ func (d *Driver) transition(req TransitionRequest) error {
 	d.wakeLoopLocked()
 	if d.cfg.Link != nil {
 		// the commit boundary: the supervisor pushes the capsule on this
-		// notice (it no longer polls execution.json)
+		// notice (it does not poll execution.json)
 		d.cfg.Link.Fact(supervise.ExecCommitted{Version: d.exec.Version, Step: d.exec.CurrentStep})
 	}
 	return nil
@@ -446,9 +446,9 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 		st.Status = capsule.StepDone
 		st.Output = out
 		// Commit point: archive the accepted attempt (the step's attempt
-		// ledger; the candidate pointer recomputes over it).
-		// (repo review 2026-10-16 B-25: the injected clock and the
-		// max-seq rule every other ledger entry uses)
+		// ledger; the candidate pointer recomputes over it), with the
+		// injected clock and the max-seq rule every other ledger entry
+		// uses.
 		st.Attempts = append(st.Attempts, capsule.Attempt{
 			Cause:      "accepted",
 			AttemptSeq: nextAttemptSeq(st),

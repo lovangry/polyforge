@@ -195,9 +195,8 @@ func closeName(raw []byte, arg string) string {
 	return api.DisplayName(ans.Slug, arg)
 }
 
-// patchCleanPause PATCHes the work item with the additive clean_pause
-// field (the aihub server accepts-and-ignores unknown PATCH keys until
-// Lane A implements the pause face).
+// patchCleanPause PATCHes the work item's clean_pause field (a
+// patchable field: the operator resume face, reference.md §3.3).
 func patchCleanPause(ctx *Context, wiID string, value bool) error {
 	_, err := ctx.aihub().PatchWorkItem(wiID, map[string]any{"clean_pause": value})
 	return err
@@ -224,10 +223,7 @@ func patchCleanPause(ctx *Context, wiID string, value bool) error {
 //     matches, status paused, clean_pause cleared), re-attaches it
 //     (SessionAttach) and continues the current step IN PLACE — the
 //     exact semantics attaching after a restart has, the pending-question
-//     re-pose included; until this fix the cleared flag was observable
-//     only by the startup reconciliation, so a LIVE holder never picked
-//     the resume up (the old "next start" copy was that design's
-//     self-description). A daemon that does not hold the work item
+//     re-pose included. A daemon that does not hold the work item
 //     (DAEMON-404) or an unreachable socket keeps the holder-machine
 //     guidance (end-session + submit when the holder is gone); a typed
 //     mid-flight failure answers BLOCKED (the missing-capsule /
@@ -368,7 +364,7 @@ var cmdWrap = &Command{
 		if err != nil {
 			var ae *api.Error
 			if reason == "fail" && errors.As(err, &ae) && ae.Code == api.ErrDaemonNotFound {
-				// C9 (audit-subtraction pass B): a WI parked blocked has no
+				// A WI parked blocked has no
 				// local job to fail. The owner's moves are exactly two —
 				// continue with `pf resume`, abandon with `pf cancel` — and
 				// this command does neither: it says so, touches nothing

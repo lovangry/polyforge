@@ -128,7 +128,7 @@ func main() {
 		"session": drv.sessionArg,
 		"model":   pinnedModelOf(),
 		"wi":      drv.wi,
-		// v4 acceptance ledger (audit-subtraction pass B): the derivation's
+		// v4 acceptance ledger: the derivation's
 		// full argv and the agent-directory override the launcher passed, so
 		// the e2e suite can pin the step agent's launch configuration
 		// (PI_CODING_AGENT_DIR present, --no-extensions absent) through the
@@ -291,7 +291,7 @@ func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 // process (pid-matched, appended right after fork — before the initial
 // prompt) carries the session handle, the derivation counter and the
 // transcript path. The deleted PF_SESSION_HANDLE / PF_SPAWN_N env
-// injections (audit subtraction pass B) are re-sourced from here.
+// injections are re-sourced from here.
 type spawnJournalEntry struct {
 	PID           int    `json:"pid"`
 	Step          string `json:"step_id"`

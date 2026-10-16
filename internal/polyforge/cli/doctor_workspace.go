@@ -17,7 +17,10 @@ import (
 //
 //   - "workspace layout": root entries outside the convention and
 //     non-generated entries under .polyforge/, each named with its
-//     suggested destination. Read-only: nothing is moved or deleted.
+//     suggested destination; and a CLAUDE.md whose polyforge-managed
+//     block lacks the layout section (`pf init <ws>` adds it — a
+//     workspace without CLAUDE.md is not flagged). Read-only: nothing is
+//     moved or deleted.
 //   - "workspace scratch": scratch/ entries whose newest change (mtime or ctime) is
 //     older than 14 days. By default they are only REPORTED (warn);
 //     `pf doctor --prune-scratch` removes them and lists what it removed.
@@ -55,8 +58,13 @@ func capRows(rows []string) []string {
 // workspaceLayoutCheck warns about entries outside the convention.
 func workspaceLayoutCheck(wss []string) doctorCheck {
 	c := doctorCheck{Name: docChLayout}
-	var rows, errs []string
+	var rows, noLayout, errs []string
 	for _, ws := range existingWorkspaces(wss) {
+		if exists, has, err := workspace.LayoutSection(ws); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", filepath.Join(ws, workspace.NotesFile), err))
+		} else if exists && !has {
+			noLayout = append(noLayout, ws)
+		}
 		strays, err := workspace.StrayEntries(ws)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", ws, err))
@@ -67,9 +75,12 @@ func workspaceLayoutCheck(wss []string) doctorCheck {
 		}
 	}
 	switch {
-	case len(rows) > 0 || len(errs) > 0:
+	case len(rows) > 0 || len(noLayout) > 0 || len(errs) > 0:
 		c.Status = "warn"
 		var parts []string
+		for _, ws := range noLayout {
+			parts = append(parts, fmt.Sprintf("%s has no <!-- polyforge:layout --> section in its polyforge-managed block — run `pf init %s` to add it", filepath.Join(ws, workspace.NotesFile), ws))
+		}
 		if len(rows) > 0 {
 			parts = append(parts, fmt.Sprintf("%d entr(ies) outside the workspace layout: %s — share documents through aihub (`pf file edit <wi> --content @f` while the work item is open, else `pf remember --project <p> --type doc.design|doc.review|doc.decision|doc.audit [--work-item <wi>] @f`), move disposable output to scratch/; nothing was moved or deleted",
 				len(rows), strings.Join(capRows(rows), "; ")))

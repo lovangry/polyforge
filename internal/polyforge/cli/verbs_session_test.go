@@ -64,9 +64,8 @@ func TestResumeFlagClearSemantics(t *testing.T) {
 	}
 }
 
-// TestWrapFailOnBlockedPrintsResumeOrCancelHint (C9, audit-subtraction
-// pass B): `pf wrap --fail` on a WI with no local job (the parked-blocked
-// shape — the daemon answers the wrap probe with DAEMON-404) prints the
+// TestWrapFailOnBlockedPrintsResumeOrCancelHint: `pf wrap --fail` on a
+// WI with no local job (the parked-blocked shape — the daemon answers the wrap probe with DAEMON-404) prints the
 // dedicated resume-or-cancel hint, exits non-zero (the wrap did not
 // happen) and touches NOTHING else: no hub door, no termination — the owner continues with `pf resume` or abandons with
 // `pf cancel`. A plain wrap on the same shape stays the typed error.

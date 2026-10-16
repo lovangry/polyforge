@@ -76,8 +76,10 @@ The blocked WI has exactly two exits: `pf resume` (continue = resume-blocked + a
 Create refuses these keys (at any nesting depth) with `CORE-400 EXECUTION_STATE_REJECTED` (`core/workitem.go`
 `executionStateKeys`): `current_step step_id step_attempt_id attempt review_round review_rounds
 review_verdict progress workflow_status steps rewind_stats budget_consumed command_count
-step_start_refs pending_question`. Execution state lives only in the capsule's `execution.json`
-(§7.3). The one daemon-written key is `blocked_seal` (§3.5).
+step_start_refs pending_question blocked_seal`. Execution state lives only in the capsule's `execution.json`
+(§7.3). `blocked_seal` is not execution state but is reserved: aihub itself writes it when a
+daemon's session-end reports `blocked` with a head (§3.5), through a direct update that bypasses
+this create-time check; a create cannot plant one.
 
 ## 3. Sessions and fencing <!-- §3 -->
 

@@ -355,7 +355,7 @@ func (l *EventLog) SinceAfter(wi string, after int64) []protocol.EventEntry {
 
 // LastSeq is the highest seq ever appended for wi (0 = none) — the
 // monotonic counter itself, so it stays exact past HistoryCap and never
-// touches the durable files (repo review 2026-10-16 B-5).
+// touches the durable files.
 func (l *EventLog) LastSeq(wi string) int64 {
 	l.mu.Lock()
 	defer l.mu.Unlock()

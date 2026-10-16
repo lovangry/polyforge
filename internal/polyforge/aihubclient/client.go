@@ -116,7 +116,7 @@ func (c *Client) Queue(project string) ([]api.WorkItem, error) {
 }
 
 // ---------------------------------------------------------------------------
-// CLI-facing endpoints (v1 CLI lane additions).
+// CLI-facing endpoints.
 //
 // These return the RAW response body (json.RawMessage) so the CLI's
 // --json mode can pass the server payload through verbatim; the human
@@ -217,8 +217,8 @@ func (c *Client) DependenciesRaw(idOrSlug string) (json.RawMessage, error) {
 
 // SearchExcerptRunes is the content excerpt length SearchMemories asks
 // for: the search answer is memory.Entry rows (no body), and the server
-// only attaches content_excerpt when the caller names a length (repo
-// review 2026-10-16 B-10 — without it the recall table had no text).
+// only attaches content_excerpt when the caller names a length (without
+// it the recall table has no text).
 const SearchExcerptRunes = 120
 
 // SearchMemories runs the memory retrieval (06 §5.1). q is required;

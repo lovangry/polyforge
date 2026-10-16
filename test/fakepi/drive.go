@@ -230,8 +230,8 @@ type driveEnv struct {
 
 // newDriveEnv assembles the executor from the spawn identity (the capsule
 // spawn journal's entry for THIS process — pid-matched; the deleted
-// PF_SESSION_HANDLE / PF_SPAWN_N env injections are re-sourced from there,
-// audit subtraction pass B) + the plan file.
+// PF_SESSION_HANDLE / PF_SPAWN_N env injections are re-sourced from there)
+// + the plan file.
 // A missing plan parks the agent loudly (the scenario fails on its own
 // bounded wait — never a silent no-op).
 func newDriveEnv() *driveEnv {

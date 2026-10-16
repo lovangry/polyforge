@@ -793,8 +793,8 @@ func (s *Server) hDeps(w http.ResponseWriter, r *http.Request, idn *identity) {
 
 // depsView renders the dependency edges of wiID. A query failure is a
 // typed 5xx envelope via writeErr — never a false "no edges" answer
-// (audit B12: the empty lists stay reserved for a genuinely edge-free
-// work item). Answers nil after writing the error envelope.
+// (the empty lists stay reserved for a genuinely edge-free work item).
+// Answers nil after writing the error envelope.
 func (s *Server) depsView(w http.ResponseWriter, wiID string) *core.Deps {
 	deps, err := s.WIs.Dependencies(wiID)
 	if err != nil {
@@ -1154,9 +1154,7 @@ func (s *Server) hSearchMemory(w http.ResponseWriter, r *http.Request, idn *iden
 	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	excerpt, _ := strconv.Atoi(q.Get("excerpt"))
-	// project= narrows the search to one project (audit B5): the
-	// parameter used to be silently dropped, so every search spanned
-	// every project the caller could read. It is resolved, then
+	// project= narrows the search to one project. It is resolved, then
 	// read-gated with the same non-leaking not-found shape the rest of
 	// the read face uses (an unresolvable and an inaccessible project
 	// answer identically), and applied in the candidate predicate IN
@@ -1214,7 +1212,7 @@ func (s *Server) hSearchRun(w http.ResponseWriter, match, query, memType string,
 				return false
 			}
 		}
-		// The requested project (B5) narrows the membership-filtered
+		// The requested project narrows the membership-filtered
 		// candidate set further; an empty value keeps the union.
 		if project != "" && e.ProjectID != project {
 			return false

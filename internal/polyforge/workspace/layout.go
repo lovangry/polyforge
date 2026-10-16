@@ -17,6 +17,7 @@ package workspace
 //
 // `pf init` creates scratch/ and writes the convention into CLAUDE.md
 // (Init); `pf doctor` warns about entries outside it (StrayEntries) and
+// about a CLAUDE.md without the layout section (LayoutSection), and
 // reports — or, with --prune-scratch, removes — stale scratch entries
 // (StaleScratch / PruneScratch). Nothing here moves or deletes anything
 // except PruneScratch, and that only inside scratch/.
@@ -409,6 +410,33 @@ func writeAtomic(path string, data []byte, mode fs.FileMode) error {
 	}
 	ok = true
 	return nil
+}
+
+// LayoutSection reports whether the workspace's CLAUDE.md exists and,
+// when it does, whether its polyforge-managed block carries the layout
+// section (the same placement rule as upsertLayout: a layout marker
+// outside the managed block does not count). A missing CLAUDE.md is
+// (false, false, nil): there is nothing `pf init` would be repairing. A
+// managed block without its closing marker is an error, as in Init.
+func LayoutSection(root string) (exists, has bool, err error) {
+	raw, err := os.ReadFile(filepath.Join(root, NotesFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	text := string(raw)
+	i := strings.Index(text, managedOpenP)
+	if i < 0 {
+		return true, false, nil
+	}
+	j := strings.Index(text[i:], managedClose)
+	if j < 0 {
+		// the same refusal pf init answers: suggesting it would not help
+		return true, false, fmt.Errorf("the polyforge-managed block has no closing %s — fix the file by hand", managedClose)
+	}
+	return true, strings.Contains(text[i:i+j], layoutOpen), nil
 }
 
 // upsertLayout answers the CLAUDE.md text with the layout section in

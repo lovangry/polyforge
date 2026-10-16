@@ -351,7 +351,7 @@ func (d *Driver) Run(ctx context.Context) error {
 			// already torn down; this is the dispatch's one failure record.
 			var ed *EnvelopeDefectError
 			if errors.As(werr, &ed) {
-				// the step DID write an envelope (B-12): the retry prompt
+				// the step DID write an envelope: the retry prompt
 				// names the defect instead of "you wrote no envelope"
 				d.mu.Lock()
 				d.priorRejection[stepID] = fmt.Sprintf("dispatch %d: %v", n, ed.Defect)

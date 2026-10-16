@@ -17,7 +17,10 @@
 #      version from the origin tags; refuse unless every commit that entered
 #      main since the previous release tag came through a merged PR (the
 #      PR-only check below);
-#   2. test gate (GOWORK=off make test, includes the long e2e);
+#   2. design-doc cross-reference gate (docs/design/polyforge-vnext/tools/
+#      check-xrefs.py, the Makefile's `xrefs` check; python3 is REQUIRED here -
+#      unlike `make xrefs`, a release never skips it), then the test gate
+#      (GOWORK=off make test, includes the long e2e);
 #   3. build the binaries (GOWORK=off make release
 #      VERSION=<tag>) -> aihub-linux-amd64, pf-linux-amd64; build the image from
 #      deploy/Dockerfile tagged ghcr.io/silgrid/aihub:<tag>;
@@ -59,6 +62,8 @@
 # was pushed, the script prints recovery instructions and does NOT undo anything.
 #
 # Environment overrides (mainly for the fake-env tests):
+#   RELEASE_XREFS_CMD   xrefs gate command        (default: python3 -I
+#                       docs/design/polyforge-vnext/tools/check-xrefs.py)
 #   RELEASE_TEST_CMD    test gate command         (default: GOWORK=off make test)
 #   RELEASE_BUILD_CMD   build command; sees TAG; must leave
 #                       artifacts/release-$TAG/aihub and .../pf
@@ -68,6 +73,9 @@
 #   RELEASE_REMOTE      git remote                (default: origin)
 #   RELEASE_BRANCH      branch HEAD must equal    (default: main)
 #   DOCKER_CONFIG       docker config dir (ghcr login check; default ~/.docker)
+# Each *_CMD override, when non-empty, runs via sh -c INSTEAD of its default;
+# unset or empty keeps the default. They are independent: RELEASE_TEST_CMD
+# replaces only the test gate, the xrefs gate still runs.
 set -eu
 
 REMOTE="${RELEASE_REMOTE:-origin}"
@@ -304,7 +312,15 @@ fi
 WHY=$(pr_only_check "$PREVTAG" "$(tag_commit "$LS" "$PREVTAG")" "$COMMIT")
 [ -z "$WHY" ] || die "refusing to release: $WHY; nothing built or published"
 
-# 2. test gate.
+# 2. xrefs gate, then the test gate.
+echo "release: running the design-doc cross-reference check"
+XREFS="docs/design/polyforge-vnext/tools/check-xrefs.py"
+if [ -n "${RELEASE_XREFS_CMD:-}" ]; then
+  sh -c "$RELEASE_XREFS_CMD" || die "design-doc cross-reference check failed (RELEASE_XREFS_CMD); fix the references (make xrefs) and release again; nothing built or published"
+else
+  command -v python3 >/dev/null 2>&1 || die "python3 not found: the release gate runs $XREFS and does not skip it; nothing built or published"
+  python3 -I "$XREFS" || die "design-doc cross-reference check failed ($XREFS); fix the references (make xrefs) and release again; nothing built or published"
+fi
 echo "release: running test gate"
 if [ -n "${RELEASE_TEST_CMD:-}" ]; then sh -c "$RELEASE_TEST_CMD"; else GOWORK=off make test; fi
 
