@@ -70,6 +70,9 @@ type fakeHub struct {
 	// answers its err, after committing the claim when afterCommit is
 	// set (the answer-lost-in-transit shape, repo review B-1).
 	claimFaults []claimFault
+	// endBlock, when non-nil, parks every SessionEnd until it is closed
+	// (a hung hub).
+	endBlock chan struct{}
 }
 
 type claimFault struct {
@@ -229,6 +232,12 @@ func (h *fakeHub) SessionVerify(wi, sessionID string) (*api.SessionVerifyRespons
 }
 
 func (h *fakeHub) SessionEnd(wi string, req api.SessionEndRequest) error {
+	h.mu.Lock()
+	block := h.endBlock
+	h.mu.Unlock()
+	if block != nil {
+		<-block
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	id := h.canonicalID(wi)

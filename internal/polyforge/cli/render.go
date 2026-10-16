@@ -409,7 +409,11 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 				origin += ":" + j.Origin.ChatID
 			}
 		}
-		row := []string{api.DisplayName(j.Slug, j.WorkItemID), j.Status, sess, spawn, pid, question, stepAge, lastWork}
+		status := j.Status
+		if j.AwaitingHub {
+			status += " (awaiting aihub)"
+		}
+		row := []string{api.DisplayName(j.Slug, j.WorkItemID), status, sess, spawn, pid, question, stepAge, lastWork}
 		if showOrigin {
 			row = append(row, origin)
 		}

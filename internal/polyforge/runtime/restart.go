@@ -705,6 +705,7 @@ func (r *Runtime) awaitVerify(ctx context.Context, rec *jobRecord, cause error) 
 		// already refuse or route a close correctly meanwhile).
 		j.state = StateRecovering
 	}
+	j.awaitingHub = true
 	j.mu.Unlock()
 	fmt.Fprintf(os.Stderr, "runtime: %s: session verify failed at restart (aihub unreachable) — record kept, retrying the verify: %v\n", rec.WorkItemID, cause)
 	if r.cfg.EventTap != nil {
@@ -721,6 +722,11 @@ func (r *Runtime) awaitVerify(ctx context.Context, rec *jobRecord, cause error) 
 func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bool {
 	r.opMu.Lock()
 	defer r.opMu.Unlock()
+	if ctx.Err() != nil || r.closing() {
+		// shutting down: nothing may be recovered or spawned now — the
+		// record persists and the next restart verifies afresh.
+		return true
+	}
 	if r.jobOf(j.wi) != j || j.liveAgent() {
 		return true // closed, replaced or resumed by another door meanwhile
 	}
@@ -731,8 +737,14 @@ func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bo
 			fmt.Fprintf(os.Stderr, "runtime: %s: deferred session verify failed (will retry): %v\n", j.wi, err)
 			return false
 		}
+		j.mu.Lock()
+		j.awaitingHub = false
+		j.mu.Unlock()
 		r.blockUnrecoverable(ctx, rec, &SessionVerifyOutageError{WI: rec.WorkItemID, Err: err})
 	} else {
+		j.mu.Lock()
+		j.awaitingHub = false
+		j.mu.Unlock()
 		if wasRunning {
 			j.mu.Lock()
 			if j.state == StateRecovering {

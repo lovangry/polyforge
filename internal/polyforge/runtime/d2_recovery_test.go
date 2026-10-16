@@ -138,7 +138,7 @@ func TestBoundedFailSessionEndFailureKeepsRecordAndRetries(t *testing.T) {
 }
 
 // Bug 5, daemon-start half: a restarted daemon retries an end_pending
-// record's close before anything else.
+// record's close (on the background lane — repo review 2026-10-16).
 func TestRestartRetriesEndPendingRecord(t *testing.T) {
 	hub := newFakeHub()
 	r, j, _ := endPendingRuntime(t, hub)
@@ -159,6 +159,10 @@ func TestRestartRetriesEndPendingRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = toOB2
+	// the restart only schedules the retry (never a synchronous push
+	// under opMu before the socket serves): wait for the lane
+	waitFor(t, "the end_pending close to be replayed", func() bool { return hub.endCount() > 0 })
+	waitRetryIdle(t, r2)
 	if hub.endCount() != 1 || hub.lastEnd().Status != api.StatusBlocked {
 		t.Fatalf("restart must replay the blocked close, got %+v", hub.lastEnd())
 	}
@@ -327,6 +331,8 @@ func TestEndPendingWithGoneCapsuleStillRetries(t *testing.T) {
 	if err := r2.Restart(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, "the end_pending close to be replayed", func() bool { return hub.endCount() > 0 })
+	waitRetryIdle(t, r2)
 	if hub.endCount() < 1 || hub.lastEnd().Status != api.StatusBlocked || hub.lastEnd().Note != "boom" {
 		t.Fatalf("the blocked close must still be retried, got %+v", hub.lastEnd())
 	}

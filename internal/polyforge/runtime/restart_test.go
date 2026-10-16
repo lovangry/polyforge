@@ -451,8 +451,8 @@ func TestRestartVerifyOutageKeepsRecordAndResumes(t *testing.T) {
 		t.Fatalf("Restart must survive an unreachable aihub per record: %v", err)
 	}
 	waitDead(t, pid) // orphans reaped before anything else
-	if ji, ok := r.Info(wi); !ok || ji.State != StateRecovering {
-		t.Fatalf("the deferred job = %+v (ok=%v), want RECOVERING", ji, ok)
+	if ji, ok := r.Info(wi); !ok || ji.State != StateRecovering || !ji.AwaitingHub {
+		t.Fatalf("the deferred job = %+v (ok=%v), want RECOVERING awaiting the hub", ji, ok)
 	}
 	if recs := loadRecords(t, r); len(recs) != 1 || recs[0].SessionID != rec.SessionID {
 		t.Fatalf("the record (the only copy of the secret) must be kept, got %+v", recs)
@@ -475,7 +475,7 @@ func TestRestartVerifyOutageKeepsRecordAndResumes(t *testing.T) {
 	if hub.endCount() != 0 {
 		t.Fatalf("the resume must not close the session, got %+v", hub.lastEnd())
 	}
-	if ji, _ := r.Info(wi); ji.CapsuleDir != rec.CapsuleDir || ji.SessionID != rec.SessionID {
+	if ji, _ := r.Info(wi); ji.CapsuleDir != rec.CapsuleDir || ji.SessionID != rec.SessionID || ji.AwaitingHub {
 		t.Fatalf("the WI must resume in its own capsule under its own session, got %+v", ji)
 	}
 	if out, err := exec.Command("git", "--git-dir", rec.GitDir, "cat-file", "-e", local).CombinedOutput(); err != nil {

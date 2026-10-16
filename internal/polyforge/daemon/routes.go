@@ -67,6 +67,10 @@ type statusJob struct {
 	// runs. The attention face (D9) derives the terminal decision
 	// classes from it.
 	StopReason string `json:"stop_reason,omitempty"`
+	// AwaitingHub: the restart-time session verify could not reach aihub
+	// and is being retried — a RECOVERING job waiting for the hub, not an
+	// ordinary recovery (repo review 2026-10-16 B-2).
+	AwaitingHub bool `json:"awaiting_hub,omitempty"`
 }
 
 type queueStats struct {
@@ -547,6 +551,10 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 		writeErr(w, api.ErrDaemonNotFound, "no local job for "+wi+" on this daemon")
 		return
 	}
+	if ji.AwaitingHub {
+		writeErr(w, api.ErrDaemonConflict, "work item is waiting for aihub: the restart could not verify its session and keeps retrying — it resumes (or closes) once aihub answers; retry then")
+		return
+	}
 	if ji.State == runtime.StateSealing || ji.State == runtime.StateRecovering {
 		writeErr(w, api.ErrDaemonConflict, "work item is "+string(ji.State)+"; a close is already in progress")
 		return
@@ -661,6 +669,7 @@ func (d *Daemon) statusJobs() ([]statusJob, int) {
 			AgentPID:           ji.AgentPID,
 			Origin:             ji.Origin,
 			StopReason:         ji.StopReason,
+			AwaitingHub:        ji.AwaitingHub,
 		}
 		if pi, ok := pending[ji.WorkItem]; ok {
 			sj.QuestionID = pi.QuestionID

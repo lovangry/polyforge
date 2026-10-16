@@ -306,7 +306,19 @@ type job struct {
 	// end_pending job (see StateEndPending).
 	endNote string
 	endHead string
-	mu      sync.Mutex
+	// endPushGaveUp: the end_pending chain push met a PERMANENT rejection
+	// (hook refusal, non-fast-forward, size limit) — stop pushing, close
+	// without it (the commits stay in the local capsule; in memory only,
+	// a restart re-tries the push once and gives up again).
+	endPushGaveUp bool
+	// sealPushFailNoted: this SEALING series already raised its
+	// push_failed event (one per series, not one per seal retry).
+	sealPushFailNoted bool
+	// awaitingHub: the restart-time session verify could not reach aihub
+	// and is being retried (awaitVerify) — status/watch name it, a close
+	// is answered "waiting for aihub".
+	awaitingHub bool
+	mu          sync.Mutex
 }
 
 // New builds a Runtime. toOB receives RT→Observe messages, fromOB carries
@@ -420,6 +432,19 @@ func (r *Runtime) Close() {
 			close(r.endStop)
 		}
 	})
+}
+
+// closing reports whether Close ran (the daemon is shutting down).
+func (r *Runtime) closing() bool {
+	if r.endStop == nil {
+		return false
+	}
+	select {
+	case <-r.endStop:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *Runtime) jobOf(wi string) *job {
@@ -667,7 +692,7 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 	// rather than replaced: this start is then a replay of the same claim
 	// (repo review 2026-10-16 B-1), so a claim the hub had committed is
 	// adopted instead of orphaned.
-	sessionID, key, err := r.claimIntent(wi)
+	sessionID, key, replay, err := r.claimIntent(wi)
 	if err != nil {
 		return err
 	}
@@ -683,6 +708,14 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 	resp, err := r.hub.SessionClaim(req)
 	if err != nil {
 		if claimRefused(err) {
+			if replay {
+				// a REPLAY of a claim whose verify matched — the session
+				// is open at the hub under the secret we hold. Dropping
+				// the journal would orphan it: end it blocked instead
+				// (abandonClaim keeps the entry until the close lands).
+				return r.abandonClaim(&job{wi: wi, sessionID: sessionID}, wi, err,
+					"the replayed claim of an open session was refused: "+err.Error())
+			}
 			// the hub answered and refused: the claim never opened,
 			// nothing can dangle — drop the journal entry so neither a
 			// retry nor a restart replays a dead intention.
@@ -718,23 +751,23 @@ func claimRefused(err error) bool {
 // earlier claim never landed or was ended since (a replay could hand
 // back a stale cached answer) — drop the entry and mint fresh; verify
 // unreachable → the typed transient, entry kept.
-func (r *Runtime) claimIntent(wi string) (sessionID, key string, err error) {
+func (r *Runtime) claimIntent(wi string) (sessionID, key string, replay bool, err error) {
 	if rec := r.loadClaiming()[wi]; rec != nil && rec.SessionID != "" && rec.IdempotencyKey != "" {
 		v, verr := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
 		switch {
 		case verr != nil && !claimRefused(verr):
-			return "", "", &api.Error{Code: api.ErrDaemonHubUnavailable,
+			return "", "", false, &api.Error{Code: api.ErrDaemonHubUnavailable,
 				Detail: fmt.Sprintf("%s: verify of the journaled claim failed (claiming journal kept; retry later): %v", wi, verr)}
 		case verr == nil && v.Matches:
-			return rec.SessionID, rec.IdempotencyKey, nil
+			return rec.SessionID, rec.IdempotencyKey, true, nil
 		}
 		r.clearClaiming(wi)
 	}
 	sessionID, err = mintSessionID()
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
-	return sessionID, randomKey(), nil
+	return sessionID, randomKey(), false, nil
 }
 
 // startClaimed carries one OPEN claim (fresh or replayed) to a live agent.
@@ -1566,7 +1599,13 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 			// durable, field-diagnosable trace in the daemon events log too:
 			// the pause/wrap close path's seal failure is otherwise visible
 			// only in this process's stderr.
-			if r.cfg.EventTap != nil {
+			// One event per sealing series: a seal retry (retrySeal)
+			// re-runs this push and must not repeat it.
+			j.mu.Lock()
+			noted := j.sealPushFailNoted
+			j.sealPushFailNoted = true
+			j.mu.Unlock()
+			if r.cfg.EventTap != nil && !noted {
 				r.cfg.EventTap(j.wi, "push_failed", map[string]any{
 					"phase": "seal", "reason": reason, "error": perr.Error(),
 				})

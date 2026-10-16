@@ -82,35 +82,63 @@ func (r *Runtime) goRetry(key string, attempt func() bool) {
 }
 
 // endPendingAttempt is one retry of an end_pending job's close; true =
-// settled (record dropped). The local chain is pushed FIRST, with the
-// session credential that dies with the close (repo review 2026-10-16
-// B-2): boundedFail commits the dirty capsule before the verdict, and
-// when that push failed (the hub was unreachable — the same outage that
-// parked the close here) the commits would otherwise stay local forever
-// while the hub's blocked WI is re-claimed elsewhere from the remote
-// chain. A failed push is retried like the close itself, unless the
-// session no longer holds the WI (then nothing can be pushed under it and
-// the close is settled exactly as endBlockedAtHub settles it).
+// settled (record dropped). See closeBlocked for the push-then-close
+// order.
 func (r *Runtime) endPendingAttempt(j *job) bool {
-	j.mu.Lock()
-	secret, note, head, chain := j.sessionID, j.endNote, j.endHead, j.git
-	j.mu.Unlock()
-	if dirExists(j.capsuleDir) && dirExists(chain.GitDir) {
-		if _, perr := gitops.Push(chain); perr != nil {
-			if v, verr := r.hub.SessionVerify(j.wi, secret); verr == nil && !v.Matches {
-				fmt.Fprintf(os.Stderr, "runtime: %s: end_pending chain push failed (%v) and the session no longer holds the work item (status %s) — settled without it\n", j.wi, perr, v.Status)
-				r.settleEndPending(j)
-				return true
-			}
-			fmt.Fprintf(os.Stderr, "runtime: %s: end_pending chain push failed (will retry before the close): %v\n", j.wi, perr)
-			return false
-		}
-	}
-	if !r.endBlockedAtHub(j.wi, secret, note, head) {
+	if !r.closeBlocked(j, true) {
 		return false
 	}
 	r.settleEndPending(j)
 	return true
+}
+
+// closeBlocked sends one job's SessionEnd(blocked), pushing the local
+// chain FIRST when push is set, with the session credential that dies
+// with the close (repo review 2026-10-16 B-2): boundedFail commits the
+// dirty capsule before the verdict, and when that push failed (most often
+// the same outage that fails the close) the commits would otherwise stay
+// local while the hub's blocked WI is re-claimed from the remote chain.
+// Reports whether the close is SETTLED. Push outcomes:
+//
+//   - landed → the close goes out;
+//   - transient failure → not settled (retried on the lane), unless the
+//     session no longer holds the WI (its credential is dead: nothing can
+//     be pushed under it; settled, exactly as endBlockedAtHub settles);
+//   - PERMANENT rejection (hook refusal, non-fast-forward, size limit) →
+//     no retry can land it: stop pushing, raise push_failed with the
+//     local head and the reason (the commits stay in the local capsule),
+//     and close without it.
+func (r *Runtime) closeBlocked(j *job, push bool) bool {
+	j.mu.Lock()
+	secret, note, head, chain, gaveUp := j.sessionID, j.endNote, j.endHead, j.git, j.endPushGaveUp
+	j.mu.Unlock()
+	if push && !gaveUp && dirExists(j.capsuleDir) && dirExists(chain.GitDir) {
+		if _, perr := gitops.Push(chain); perr != nil {
+			if !gitops.IsPermanentPushRejection(perr) {
+				if v, verr := r.hub.SessionVerify(j.wi, secret); verr == nil && !v.Matches {
+					fmt.Fprintf(os.Stderr, "runtime: %s: blocked-close chain push failed (%v) and the session no longer holds the work item (status %s) — settled without it\n", j.wi, perr, v.Status)
+					return true
+				}
+				fmt.Fprintf(os.Stderr, "runtime: %s: blocked-close chain push failed (will retry before the close): %v\n", j.wi, perr)
+				return false
+			}
+			j.mu.Lock()
+			j.endPushGaveUp = true
+			j.mu.Unlock()
+			local, _ := gitops.Head(chain)
+			fmt.Fprintf(os.Stderr, "runtime: %s: blocked-close chain push permanently rejected — closing without it (local head %s stays in the capsule): %v\n", j.wi, local, perr)
+			if r.cfg.EventTap != nil {
+				r.cfg.EventTap(j.wi, "push_failed", map[string]any{
+					"phase":      "blocked-close",
+					"permanent":  true,
+					"local_head": local,
+					"error":      perr.Error(),
+					"note":       "the hub permanently refused the chain push; the blocked close goes out without it and the unpushed commits stay in the local capsule",
+				})
+			}
+		}
+	}
+	return r.endBlockedAtHub(j.wi, secret, note, head)
 }
 
 // settleEndPending drops an end_pending job whose close is settled.
@@ -129,13 +157,13 @@ func (r *Runtime) retryEndPending(j *job) {
 	r.goRetry("job:"+j.wi, func() bool { return r.endPendingAttempt(j) })
 }
 
-// restartEndPending is the daemon-start half: one synchronous attempt, and
-// the background retry when the hub is still not reachable.
+// restartEndPending is the daemon-start half: it only SCHEDULES the
+// background retry. Restart holds opMu before the socket serves, and the
+// attempt pushes the chain first (unbounded network work) — a synchronous
+// attempt there could hang the daemon's startup on a hung hub.
 func (r *Runtime) restartEndPending(j *job) {
-	fmt.Fprintf(os.Stderr, "runtime: %s: end_pending record — retrying the blocked close\n", j.wi)
-	if !r.endPendingAttempt(j) {
-		r.retryEndPending(j)
-	}
+	fmt.Fprintf(os.Stderr, "runtime: %s: end_pending record — retrying the blocked close in the background\n", j.wi)
+	r.retryEndPending(j)
 }
 
 // retryClaimEnd keeps retrying the compensation SessionEnd(blocked) of a
@@ -155,12 +183,15 @@ func (r *Runtime) retryClaimEnd(journalKey, wi, secret, note string) {
 // finishBlocked is the tail of boundedFail: the close verdict goes to the
 // hub; success drops the job, failure parks it end_pending (durable) and
 // retries. Observe is released either way — the driver is already dead.
-func (r *Runtime) finishBlocked(j *job, detail, head string) {
+//
+// chainPushed reports whether boundedFail's own commit+push landed; when
+// it did not, the close goes through closeBlocked's push-then-close, so a
+// hub blip never lets SessionEnd(blocked) land with unpushed commits.
+func (r *Runtime) finishBlocked(j *job, detail, head string, chainPushed bool) {
 	j.mu.Lock()
 	j.endNote, j.endHead = detail, head
-	secret := j.sessionID
 	j.mu.Unlock()
-	settled := r.endBlockedAtHub(j.wi, secret, detail, head)
+	settled := r.closeBlocked(j, !chainPushed)
 	next := StateDone
 	if !settled {
 		next = StateEndPending
@@ -259,6 +290,9 @@ func (r *Runtime) finishSealLocally(j *job, reason string, cause error) {
 		fmt.Fprintf(os.Stderr, "runtime: %s: sealing job could not reach DONE: %v\n", j.wi, err)
 	}
 	r.dropJob(j)
+	if reason != protocol.FinishBlocked {
+		r.clearManualModels(j.wi) // as the ordinary terminal close does
+	}
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}

@@ -246,6 +246,9 @@ type StatusJob struct {
 	LastWorkAgoSec *int64 `json:"last_work_ago_sec,omitempty"`
 	// Origin is how the job was submitted (may be absent).
 	Origin *JobOrigin `json:"origin,omitempty"`
+	// AwaitingHub: a RECOVERING job whose restart-time session verify is
+	// waiting for aihub (rendered "recovering (awaiting aihub)").
+	AwaitingHub bool `json:"awaiting_hub,omitempty"`
 }
 
 // JobOrigin mirrors the daemon-side origin record.

@@ -202,13 +202,15 @@ func (r *Runtime) resumeClaiming(ctx context.Context) {
 				fmt.Fprintf(os.Stderr, "runtime: %s: claiming entry kept (aihub claim replay failed): %v\n", wi, err)
 				continue
 			}
-			// The claim face refuses the replay (the session was taken
-			// over, ended, or the server disagrees): the entry names an
-			// intention that can no longer be honored — drop it rather
-			// than looping forever. The restart reconciliation still
-			// covers anything aihub records as ours.
-			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay refused, entry dropped: %v\n", wi, err)
-			r.clearClaiming(wi)
+			// The claim face refuses the replay of a session the verify
+			// just proved is still ours: the intention can no longer be
+			// honored, but the session is OPEN at the hub under the
+			// secret only this entry holds — end it blocked with that
+			// secret (abandonClaim; the entry stays until the close
+			// lands) rather than dropping the only copy.
+			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay refused, ending the open session blocked: %v\n", wi, err)
+			r.abandonClaim(&job{wi: rec.WorkItemID, sessionID: rec.SessionID}, wi, err,
+				"the replayed claim of an open session was refused at restart: "+err.Error())
 			continue
 		}
 		// The claim is already open server-side, so this is the one place
