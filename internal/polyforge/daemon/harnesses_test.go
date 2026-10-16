@@ -170,3 +170,18 @@ func TestClaudeConfigFacts(t *testing.T) {
 	}
 	_ = dirs
 }
+
+// TestClaudeVersionAtLeast: the claude version check is a minimum, not an
+// allowlist (decision 2026-10-16 G15) — the verified version and anything
+// newer pass; older or unparsable versions do not (a doctor warning).
+func TestClaudeVersionAtLeast(t *testing.T) {
+	for v, want := range map[string]bool{
+		"2.1.296": true, "2.1.297": true, "2.2.0": true, "3.0.0": true, "2.1.296.1": true, "10.0.0": true,
+		"2.1.295": false, "2.0.999": false, "1.9.999": false, "2.1": false,
+		"": false, "abc": false, "2.1.x": false, "v2.1.296": false, "2..1": false,
+	} {
+		if got := claudeVersionAtLeast(v, minClaudeVersion); got != want {
+			t.Errorf("claudeVersionAtLeast(%q) = %v, want %v", v, got, want)
+		}
+	}
+}

@@ -13,10 +13,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/harness"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
@@ -31,6 +29,13 @@ type JobState string
 //	RUNNING → PAUSED                          (operator pause close, Finding 2)
 //	PAUSED → RUNNING                          (restart attach/resume, M3)
 //	PAUSED → DONE                             (later close of a retained record)
+//	CLAIMING → RUNNING                        (the claim's agent started)
+//
+// CLAIMING is the in-memory placeholder of a start whose claim landed and
+// whose capsule clone/materialize runs outside opMu (repo review
+// 2026-10-16 B-8). It occupies the work item's slot and refuses a second
+// start, but it is never persisted: the claiming journal is its durable
+// form, and every way out of it other than RUNNING drops the record.
 //
 // Every other edge is illegal and transition() refuses it.
 const (
@@ -51,6 +56,8 @@ const (
 	// and retries the close (in-process with backoff, and at every daemon
 	// start) until the hub accepts it. Only then is the record dropped.
 	StateEndPending JobState = "end_pending"
+	// StateClaiming: see the state-machine comment above (B-8).
+	StateClaiming JobState = "claiming"
 )
 
 var legalEdges = map[JobState][]JobState{
@@ -59,6 +66,7 @@ var legalEdges = map[JobState][]JobState{
 	StateRecovering: {StateRunning, StateSealing, StateDone, StateEndPending},
 	StateEndPending: {StateDone},
 	StatePaused:     {StateRunning, StateDone},
+	StateClaiming:   {StateRunning},
 }
 
 // can reports whether s → to is a legal edge of the state machine.
@@ -188,11 +196,6 @@ type jobRecord struct {
 	// rather than read back from the agent-writable capsule.json. Each
 	// candidate is `<harness>:<model>` (polyforge#175).
 	StepCandidates map[string][]string `json:"step_candidates,omitempty"`
-	// LegacyStepHarness is READ-ONLY compat (polyforge#175): a record
-	// written before #175 carries bare candidate ids plus this optional
-	// per-step harness (#159). jobFromRecord rewrites such a record's
-	// bare ids to `<step_harness or pi>:<id>`; it is never written.
-	LegacyStepHarness map[string]string `json:"step_harness,omitempty"`
 }
 
 // Origin kinds.
@@ -275,61 +278,8 @@ func jobFromRecord(rec *jobRecord) *job {
 		origin:               rec.Origin,
 		endNote:              rec.EndNote,
 		endHead:              rec.EndHead,
-		stepCandidates:       legacyCandidates(rec.WorkItemID, rec.StepCandidates, rec.LegacyStepHarness),
+		stepCandidates:       rec.StepCandidates,
 	}
-}
-
-// legacyCandidates is the polyforge#175 read-compat of a pre-#175
-// claim-time snapshot, so an in-flight work item recovers across the
-// upgrade: a candidate that is not `<harness>:<model>` is a bare id of
-// that era and runs on the record's old per-step harness (#159
-// step_harness), else pi. The step keeps exactly the list it walked
-// before the upgrade — #159 skipped the ids its harness did not serve
-// (claude: `claude-…` without `/`; pi: every other id) — so the
-// recorded model-class failures still index the same candidates. A
-// current record passes through unchanged. A #159 claude step left
-// with no candidate (claude's own default model) cannot be expressed in
-// the new format and recovers on pi's default model — said once on
-// stderr.
-func legacyCandidates(wi string, cands map[string][]string, stepHarness map[string]string) map[string][]string {
-	var out map[string][]string
-	if cands != nil {
-		out = make(map[string][]string, len(cands))
-	}
-	for step, list := range cands {
-		if list == nil {
-			out[step] = nil
-			continue
-		}
-		h := harness.Of(stepHarness[step])
-		conv := make([]string, 0, len(list))
-		for _, id := range list {
-			if c, err := harness.ParseCandidate(id); err == nil {
-				conv = append(conv, c.String())
-				continue
-			}
-			// a harness-prefixed candidate the current rules refuse (an
-			// effort its harness does not take, polyforge#176) is not a
-			// bare id of the old era: it passes through unchanged, so the
-			// driver's start check refuses it by name instead of it being
-			// re-prefixed into a different candidate
-			if h0, _, ok := strings.Cut(id, ":"); ok && harness.Valid(strings.TrimSpace(h0)) {
-				conv = append(conv, id)
-				continue
-			}
-			claudeID := strings.HasPrefix(id, "claude-") && !strings.Contains(id, "/")
-			if claudeID == (h == harness.Claude) {
-				conv = append(conv, h+":"+id)
-			}
-		}
-		out[step] = conv
-	}
-	for step, h := range stepHarness {
-		if h == harness.Claude && len(out[step]) == 0 {
-			fmt.Fprintf(os.Stderr, "runtime: %s: step %s ran on claude with its default model before polyforge#175; it recovers on pi's default model (no claude: candidate to keep)\n", wi, step)
-		}
-	}
-	return out
 }
 
 // loadState reads state.json; a missing file is an empty state (first

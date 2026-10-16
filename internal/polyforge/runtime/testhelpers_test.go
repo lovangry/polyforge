@@ -50,6 +50,8 @@ type fakeHub struct {
 	ends       []api.SessionEndRequest
 	end        map[string]error  // wi → end-error scripting (per wi)
 	repos      []api.ProjectRepo // claim-served task-repo inventory (nil = none)
+	// reposFor overrides repos per work item (canonical id).
+	reposFor map[string][]api.ProjectRepo
 	// canonical maps an id-or-slug form (e.g. "proj#7") to the canonical
 	// work-item id the claim answer carries (F2 tests); nil entry = the
 	// input echoes itself (the pre-F2 behavior).
@@ -119,12 +121,16 @@ func (h *fakeHub) itemFor(id string) api.WorkItem {
 }
 
 func (h *fakeHub) claimResponse(wi, sessionID string) *api.SessionClaimResponse {
+	repos := h.repos
+	if rs, ok := h.reposFor[wi]; ok {
+		repos = rs
+	}
 	return &api.SessionClaimResponse{
 		Claim: api.SessionClaim{
 			WorkItemID:         wi,
 			SessionFingerprint: api.SessionFingerprint(sessionID),
 			BundleName:         "demo-bundle",
-			Repos:              h.repos,
+			Repos:              repos,
 		},
 		WorkItem: h.itemFor(wi),
 	}

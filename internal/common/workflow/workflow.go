@@ -15,6 +15,29 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// SharedDir is the sibling of the bundles under a workflows dir that holds
+// the step definitions several bundles share: workflows/_shared/steps/<id>.md.
+// It is not a bundle (no workflow.md); materialization copies it next to
+// the bundle so the capsule resolves the same files.
+const SharedDir = "_shared"
+
+// StepDefinitionPath answers the step definition file for stepID in the
+// bundle at bundleDir: the bundle's own steps/<id>.md when it exists (the
+// bundle's file always wins), else the shared ../_shared/steps/<id>.md
+// when that exists, else the bundle's own path (so the caller's read
+// error names the expected location).
+func StepDefinitionPath(bundleDir, stepID string) string {
+	own := filepath.Join(bundleDir, "steps", stepID+".md")
+	if _, err := os.Stat(own); !os.IsNotExist(err) {
+		return own
+	}
+	shared := filepath.Join(filepath.Dir(bundleDir), SharedDir, "steps", stepID+".md")
+	if _, err := os.Stat(shared); err == nil {
+		return shared
+	}
+	return own
+}
+
 // ---------------------------------------------------------------------------
 // Minimal frontmatter read surface (the F4 lane: candidate-chain
 // consumption): the fields that drive model selection — workflow-level

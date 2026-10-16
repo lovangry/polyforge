@@ -1,7 +1,6 @@
 ---
 name: review
 description: Human-judgment gate over the completed bug fix - does the change remove the confirmed root cause, without breaking adjacent behavior, and is the evidence chain (repro -> cause -> fix -> verified) coherent?
-tools: [read, bash]
 output:
   type: object
   required: [verdict]

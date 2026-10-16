@@ -14,12 +14,13 @@ import (
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/common/workflow"
 )
 
 // shippedStepDef reads one shipped step definition file.
 func shippedStepDef(t *testing.T, bundle, step string) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "workflows", bundle, "steps", step+".md"))
+	raw, err := os.ReadFile(workflow.StepDefinitionPath(filepath.Join("..", "..", "..", "workflows", bundle), step))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,13 +31,9 @@ func shippedStepDef(t *testing.T, bundle, step string) string {
 // a bundle whose contract cannot be checked must fail here, not validate
 // silently against nothing at run time.
 func TestShippedStepOutputSchemasCompile(t *testing.T) {
-	defs, err := filepath.Glob(filepath.Join("..", "..", "..", "workflows", "*", "steps", "*.md"))
-	if err != nil || len(defs) == 0 {
-		t.Fatalf("no shipped step definitions found: %v", err)
-	}
-	for _, def := range defs {
-		bundleDir := filepath.Dir(filepath.Dir(def))
-		step := strings.TrimSuffix(filepath.Base(def), ".md")
+	for _, bs := range shippedBundleSteps(t) {
+		bundleDir, step := bs[0], bs[1]
+		def := bs[0] + "/" + step
 		s, err := loadStepOutputSchema(bundleDir, step)
 		if err != nil {
 			t.Fatalf("%s: %v", def, err)
@@ -244,13 +241,8 @@ var shippedSamples = map[string]string{
 // schema (the compile test proves the schema loads; this one proves it
 // accepts what the step document asks for).
 func TestShippedStepSchemasAcceptKnownGoodOutputs(t *testing.T) {
-	defs, err := filepath.Glob(filepath.Join("..", "..", "..", "workflows", "*", "steps", "*.md"))
-	if err != nil || len(defs) == 0 {
-		t.Fatalf("no shipped step definitions found: %v", err)
-	}
-	for _, def := range defs {
-		bundleDir := filepath.Dir(filepath.Dir(def))
-		step := strings.TrimSuffix(filepath.Base(def), ".md")
+	for _, bs := range shippedBundleSteps(t) {
+		bundleDir, step := bs[0], bs[1]
 		key := filepath.Base(bundleDir) + "/" + step
 		sample, ok := shippedSamples[key]
 		if !ok {

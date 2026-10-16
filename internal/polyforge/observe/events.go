@@ -78,6 +78,12 @@ const (
 	// fetch. Denial MUST surface as this event, never as silent idling; transport-class
 	// losses (network/5xx) stay silent idle, unchanged.
 	EvQueueFetchDenied = "queue_fetch_denied"
+	// EvRetiredEnvIgnored (machine-level, no work item; decision
+	// 2026-10-16 G2): a retired POLYFORGE_* variable is set in the
+	// daemon's environment with a value that differs from what the daemon
+	// resolved — it is no longer read, so harness state would otherwise
+	// move without a word.
+	EvRetiredEnvIgnored = "retired_env_ignored"
 	// EvSessionSuperseded is the v1.5 M4 verdict record: the periodic
 	// session revalidation learned another daemon holds this work item
 	// (matches=false). Payload carries the CURRENT holder's public

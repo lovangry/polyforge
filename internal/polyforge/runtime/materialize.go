@@ -4,11 +4,12 @@ package runtime
 // SET with a completion marker, ported from v0's 03 §4.5 semantics
 // (v0/internal/capsule/materialize.go, git history):
 //
-//   - the full bundle tree lands under workflows/<bundle>/ and the
-//     step definitions (the bundle's steps/) under agents/;
+//   - the full bundle tree lands under workflows/<bundle>/ (the driver
+//     reads step definitions from workflows/<bundle>/steps/ directly);
+//     the shared step definitions (workflows/_shared/, when the checkout
+//     has them) land beside it under workflows/_shared/;
 //   - the completion marker sync/materialized.json records the pinned
-//     bundle identity (name), the adapter set and the full
-//     targets list, written ATOMICALLY AFTER the last target rename and
+//     bundle identity (name) and the full targets list, written ATOMICALLY AFTER the last target rename and
 //     removed BEFORE the first live mutation — the ONLY "snapshot is
 //     complete" signal any consumer may trust.
 //
@@ -36,6 +37,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/common/workflow"
 )
 
 const (
@@ -50,12 +52,11 @@ const (
 )
 
 // materializeMarkerRecord is the content of the completion marker. The
-// field set is v0's: the pinned bundle identity, the adapter set the
-// snapshot was materialized for, the full targets list the
-// trust gate walks, and the completion timestamp.
+// field set: the pinned bundle identity, the full targets list the
+// trust gate walks, and the completion timestamp. Markers written by
+// older daemons also carry an "adapters" key; it is ignored on parse.
 type materializeMarkerRecord struct {
-	BundleName string   `json:"bundle_name"`
-	Adapters   []string `json:"adapters"`
+	BundleName string `json:"bundle_name"`
 	// Targets lists every materialized file's capsule-relative path
 	// (slash-separated). The trust gate walks this list: a marker whose
 	// recorded target is missing on disk is not a complete snapshot.
@@ -63,32 +64,12 @@ type materializeMarkerRecord struct {
 	CompletedAt string   `json:"completed_at"`
 }
 
-// sameAdapterSet compares two adapter lists as sets (order is an
-// artifact of the caller, not of the snapshot).
-func sameAdapterSet(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	seen := map[string]int{}
-	for _, x := range a {
-		seen[x]++
-	}
-	for _, y := range b {
-		seen[y]--
-		if seen[y] < 0 {
-			return false
-		}
-	}
-	return true
-}
-
 // materializationComplete is the trust gate (v0 03 §4.5): it reports
 // whether the materialized snapshot is COMPLETE for THIS job's pinned
 // identity and therefore trustworthy. A parseable marker alone proves
 // nothing — the gate additionally requires:
 //
-//   - the marker's recorded identity (bundle name, adapter set)
-//     matches the job's pin — a snapshot materialized for a different
+//   - the marker's recorded identity (bundle name) matches the job's pin — a snapshot materialized for a different
 //     bundle is not this WI's snapshot;
 //   - every recorded target actually exists on disk (a deleted file
 //     means the snapshot is torn or vandalized, whatever the marker
@@ -117,9 +98,6 @@ func (r *Runtime) materializationComplete(j *job) bool {
 	if m.BundleName != j.bundleName {
 		return false
 	}
-	if !sameAdapterSet(m.Adapters, []string{r.cfg.Harness}) {
-		return false
-	}
 	if len(m.Targets) == 0 {
 		return false // a marker that records no target set is not a completion
 	}
@@ -142,6 +120,9 @@ func (r *Runtime) materializationComplete(j *job) bool {
 func (r *Runtime) materializeBundle(j *job) error {
 	if r.cfg.WorkflowsDir == "" || j.bundleName == "" {
 		return nil
+	}
+	if j.bundleName == workflow.SharedDir {
+		return fmt.Errorf("runtime: %s: %q holds the shared step definitions and is not a workflow bundle", j.wi, workflow.SharedDir)
 	}
 	src := filepath.Join(r.cfg.WorkflowsDir, j.bundleName)
 	if !dirExists(src) {
@@ -179,15 +160,17 @@ func (r *Runtime) materializeBundleSet(j *job, src string) error {
 		os.RemoveAll(stage)
 		return err
 	}
-	// The workflow tree (already staged above) is always a swap piece;
-	// the step definitions live under steps/ and are staged to the
-	// capsule's agents/ dir (the Go driver reads them directly — no
-	// harness discovery copy). A bundle without steps/ simply has no
-	// second piece.
+	// The workflow tree is the one swap piece: the driver reads the step
+	// definitions from workflows/<bundle>/steps/ (an agents/ dir left by
+	// an older daemon in a recovered capsule is inert and untouched).
 	pieces := []string{wfRel}
-	if dirExists(filepath.Join(src, "steps")) {
-		pieces = append(pieces, capsule.DirAgents) // capsule dir name unchanged (steps/ content)
-		if err := copyTree(filepath.Join(src, "steps"), filepath.Join(stage, filepath.FromSlash(capsule.DirAgents))); err != nil {
+	// The shared step definitions (workflows/_shared/) ride along beside
+	// the bundle: the driver falls back to them for any step the bundle
+	// carries no own steps/<id>.md for.
+	if shared := filepath.Join(filepath.Dir(src), workflow.SharedDir); dirExists(shared) {
+		sharedRel := capsule.DirWorkflows + "/" + workflow.SharedDir
+		pieces = append(pieces, sharedRel)
+		if err := copyTree(shared, filepath.Join(stage, filepath.FromSlash(sharedRel))); err != nil {
 			os.RemoveAll(stage)
 			return err
 		}
@@ -230,7 +213,6 @@ func (r *Runtime) materializeBundleSet(j *job, src string) error {
 	// (tmp+fsync+rename, the same contract as every capsule state file).
 	blob, merr := json.MarshalIndent(materializeMarkerRecord{
 		BundleName:  j.bundleName,
-		Adapters:    []string{r.cfg.Harness},
 		Targets:     targets,
 		CompletedAt: nowStamp(),
 	}, "", "  ")

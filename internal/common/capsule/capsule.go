@@ -19,7 +19,6 @@ import "encoding/json"
 
 // Capsule directory layout (relative to capsule root).
 const (
-	DirAgents       = "agents"        // materialized step-agent definitions
 	DirArtifacts    = "artifacts"     // step outputs; release trees under artifacts/release-*/
 	DirLogs         = "logs"          // daemons logs, step journals
 	DirRepos        = "repos"         // task repo checkouts (own git histories)
@@ -30,6 +29,9 @@ const (
 	SessionJSON     = "session.json"  // session/harness state
 	WorkItemJSON    = "runtime-state/work-item.json"
 	ExecutionJSON   = "runtime-state/execution.json"
+	// RecalledMemoriesJSON is the claim-time memory snapshot the daemon
+	// writes and the driver renders into every step prompt.
+	RecalledMemoriesJSON = "runtime-state/recalled-memories.json"
 )
 
 // GitignoreContent is the .gitignore written at capsule init (ruling C1).

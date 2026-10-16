@@ -1,7 +1,6 @@
 ---
 name: grill
 description: Interactive front-loaded checkpoint for a quick fix - clarify the ask with the requester, then commit the answers to a micro-spec memo that fix implements directly.
-tools: [read, bash]
 output:
   type: object
   required: [qa_log, memo_path, scope_points]

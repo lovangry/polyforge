@@ -1,7 +1,6 @@
 ---
 name: release
 description: Cut a release from the freshly fetched origin default-branch head by running the repo's own release procedure (.polyforge/release.sh), after precondition checks. A release WI without a procedure is an error, never a defer.
-tools: [read, bash]
 output:
   type: object
   required: [verdict]

@@ -1,7 +1,6 @@
 ---
 name: spec
 description: Write the spec artifact — OpenSpec-grammar requirements and scenarios, scope, non-goals, and acceptance criteria — grounded in the grill Q&A.
-tools: [read, bash]
 output:
   type: object
   required: [spec_path, requirement_titles]

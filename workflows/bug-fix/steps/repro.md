@@ -1,7 +1,6 @@
 ---
 name: repro
 description: Reproduce the reported failure as a scripted repro or a failing test, and record the exact commands, environment, and observed-vs-expected evidence before anyone theorizes about the cause.
-tools: [read, edit, bash]
 output:
   type: object
   required: [repro_path, reproduces]

@@ -224,9 +224,22 @@ var gitTimed = func(timeout time.Duration, env []string, dir string, args ...str
 	return runGit(timeout, env, dir, args...)
 }
 
+// gitTimedCtx is gitTimed under a caller context too (the claim lane's
+// carrier fetches, B-8): cancelling ctx kills the process group. A var
+// for the same test seam.
+var gitTimedCtx = func(ctx context.Context, timeout time.Duration, env []string, dir string, args ...string) (string, error) {
+	return runGitCtx(ctx, timeout, env, dir, args...)
+}
+
 // runGit runs git once; timeout 0 = unbounded.
 func runGit(timeout time.Duration, env []string, dir string, args ...string) (string, error) {
-	ctx := context.Background()
+	return runGitCtx(context.Background(), timeout, env, dir, args...)
+}
+
+// runGitCtx is runGit under a caller context as well: cancelling ctx
+// kills the git process group like the timeout does (the claim lane's
+// capsule clone, which a stop or a shutdown must be able to abort).
+func runGitCtx(ctx context.Context, timeout time.Duration, env []string, dir string, args ...string) (string, error) {
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -245,7 +258,11 @@ func runGit(timeout time.Duration, env []string, dir string, args ...string) (st
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil && ctx.Err() != nil {
-		err = fmt.Errorf("timed out after %s: %w", timeout, err)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("timed out after %s: %w", timeout, err)
+		} else {
+			err = fmt.Errorf("canceled: %w", err)
+		}
 	}
 	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
@@ -823,18 +840,14 @@ var carrierFlags = []string{
 	"-c", "http.proxy=",
 }
 
-// carrierSource validates the task repo repos/<name> and reads its HEAD.
+// carrierSourceT validates the task repo repos/<name> and reads its HEAD
+// within timeout.
 // reposDir is already symlink-resolved. It answers the repo's object
 // directory and the HEAD commit SHA ("" = unborn: nothing to carry), or a
 // refusal reason. The repo must own its storage outright
 // (carrierLayoutRefusal), and git must resolve the repo to exactly its
 // own .git. The calls only READ (rev-parse); none of them pushes or
 // holds the credential.
-func carrierSource(reposDir, name string) (objects, sha, reason string) {
-	return carrierSourceT(reposDir, name, carrierCheckTimeout)
-}
-
-// carrierSourceT is carrierSource with an explicit per-call timeout.
 func carrierSourceT(reposDir, name string, timeout time.Duration) (objects, sha, reason string) {
 	dir := filepath.Join(reposDir, name)
 	gitDir := filepath.Join(dir, ".git")
@@ -1062,13 +1075,14 @@ func EventDetail(s string) string {
 // the per-WI lock, mirroring Clone — the claim lane is single-threaded
 // per WI, but the invariant (one git face per WI at a time) stays
 // mechanical, not remembered.
-func FetchTaskRef(o Opts, dir, name string) (string, error) {
-	return fetchCarrierRef(o, dir, TaskRefName(name))
+func FetchTaskRef(ctx context.Context, o Opts, dir, name string) (string, error) {
+	return fetchCarrierRef(ctx, o, dir, TaskRefName(name))
 }
 
 // fetchCarrierRef is FetchTaskRef for any carrier-lane ref (the task
 // carrier or the WIP ref): ("", nil) when the hub holds no such ref.
-func fetchCarrierRef(o Opts, dir, ref string) (string, error) {
+// Cancelling ctx kills the remote calls (the claim lane, B-8).
+func fetchCarrierRef(ctx context.Context, o Opts, dir, ref string) (string, error) {
 	if o.RemoteURL == "" {
 		return "", nil // no capsule remote: nowhere a carrier could exist
 	}
@@ -1082,13 +1096,13 @@ func fetchCarrierRef(o Opts, dir, ref string) (string, error) {
 	env := hubEnv(o, false, additions)
 	// ls-remote --exit-code answers 2 when no ref matches: the
 	// language-independent "no carrier yet" signal (never git's message).
-	if _, err := gitTimed(o.bound(chainRemoteTimeout), env, dir, "ls-remote", "--exit-code", o.RemoteURL, ref); err != nil {
+	if _, err := gitTimedCtx(ctx, o.bound(chainRemoteTimeout), env, dir, "ls-remote", "--exit-code", o.RemoteURL, ref); err != nil {
 		if exitCode(err) == 2 {
 			return "", nil // no carrier recorded yet: first claim, nothing to restore
 		}
 		return "", err
 	}
-	if _, err := gitTimed(o.bound(chainRemoteTimeout), env, dir, "fetch", "--quiet", "--no-tags", o.RemoteURL, ref); err != nil {
+	if _, err := gitTimedCtx(ctx, o.bound(chainRemoteTimeout), env, dir, "fetch", "--quiet", "--no-tags", o.RemoteURL, ref); err != nil {
 		return "", err
 	}
 	out, err := git(env, dir, "rev-parse", "FETCH_HEAD")
@@ -1120,7 +1134,10 @@ func refCasRejected(out string) bool {
 
 // Clone materializes a fresh capsule worktree from the aihub bare repo
 // (fresh-derivation path of the recovery engine). Takes the per-WI lock.
-func Clone(o Opts) error {
+// Cancelling ctx kills the clone (repo review 2026-10-16 B-8: the claim
+// lane runs it outside the runtime's global lock, and a stop or a
+// shutdown during the claim aborts it).
+func Clone(ctx context.Context, o Opts) error {
 	release := Lock(o.WorkItemID)
 	defer release()
 	additions, cleanup, err := credentialEnv(o)
@@ -1129,7 +1146,7 @@ func Clone(o Opts) error {
 	}
 	defer cleanup()
 	env := hubEnv(o, false, additions)
-	_, err = gitTimed(chainRemoteTimeout, env, "", "clone", o.RemoteURL, o.CapsuleDir)
+	_, err = runGitCtx(ctx, chainRemoteTimeout, env, "", "clone", o.RemoteURL, o.CapsuleDir)
 	return err
 }
 

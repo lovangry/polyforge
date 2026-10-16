@@ -5,8 +5,7 @@ package runtime
 // and its daemon-private state record verbatim, an unprefixed candidate
 // or a retired `harness` key in the workspace yaml refuses BEFORE the
 // claim (DAEMON-414), a bundle with an unprefixed candidate ends the
-// claim blocked naming the file and step, and a pre-#175 state record
-// (bare ids + the #159 step_harness) still rehydrates for recovery.
+// claim blocked naming the file and step.
 
 import (
 	"context"
@@ -127,58 +126,6 @@ func TestBundleUnprefixedCandidateBlocksClaim(t *testing.T) {
 	}
 }
 
-// Ruling 4: a pre-#175 state record (bare ids, optional #159
-// step_harness) rehydrates prefixed — the old step harness, else pi —
-// keeping exactly the list each step walked before the upgrade.
-func TestLegacyStateRecordRehydratesPrefixed(t *testing.T) {
-	blob := `{"work_item_id":"wi_old","state":"running",
-		"step_candidates":{"fix":["sub2api-glm/glm-5.3","claude-opus-5-5","claude-sonnet-5"],"grill":["sub2api-glm/glm-5.3","claude-opus-5-5"],"spec":[]},
-		"step_harness":{"fix":"claude","grill":"pi"}}`
-	var rec jobRecord
-	if err := json.Unmarshal([]byte(blob), &rec); err != nil {
-		t.Fatal(err)
-	}
-	got := jobFromRecord(&rec).stepCandidates
-	want := map[string][]string{
-		"fix":   {"claude:claude-opus-5-5", "claude:claude-sonnet-5"},
-		"grill": {"pi:sub2api-glm/glm-5.3"},
-		"spec":  {},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("legacy rehydrate %v, want %v", got, want)
-	}
-	// a pre-#159 record (no step_harness at all): every id on pi
-	if err := json.Unmarshal([]byte(`{"work_item_id":"wi_older","step_candidates":{"code":["a/b","c/d"]}}`), &rec); err != nil {
-		t.Fatal(err)
-	}
-	rec.LegacyStepHarness = nil
-	if got := jobFromRecord(&rec).stepCandidates["code"]; !reflect.DeepEqual(got, []string{"pi:a/b", "pi:c/d"}) {
-		t.Fatalf("pre-#159 rehydrate %v", got)
-	}
-	// and the record written back carries the prefixed ids, no step_harness
-	out, _ := json.Marshal(jobFromRecord(&rec).record())
-	if strings.Contains(string(out), "step_harness") || !strings.Contains(string(out), `"pi:a/b"`) {
-		t.Fatalf("rewritten record %s", out)
-	}
-}
-
-// The documented edge of the read-compat: a #159 claude step with no
-// candidate list (claude's default model) has nothing to prefix and
-// recovers on pi's default model.
-func TestLegacyClaudeStepWithoutListHasNoChain(t *testing.T) {
-	var rec jobRecord
-	if err := json.Unmarshal([]byte(`{"work_item_id":"wi_e","step_candidates":{"fix":[]},"step_harness":{"fix":"claude","review":"claude"}}`), &rec); err != nil {
-		t.Fatal(err)
-	}
-	got := jobFromRecord(&rec).stepCandidates
-	if l, ok := got["fix"]; !ok || len(l) != 0 {
-		t.Fatalf("fix %v", got)
-	}
-	if _, ok := got["review"]; ok {
-		t.Fatalf("review gained a list: %v", got)
-	}
-}
-
 // polyforge#176: `<harness>:<model>[:<effort>]` on the claim path — an
 // effort chain rides the job snapshot verbatim (canonical form), and an
 // effort a harness does not accept refuses before the claim from the
@@ -240,15 +187,42 @@ func TestEffortRefusesBeforeClaim(t *testing.T) {
 	}
 }
 
-// A recorded harness-prefixed candidate the current rules refuse is not
-// mistaken for a pre-#175 bare id: it rehydrates unchanged (the driver
-// then refuses it by name) rather than being re-prefixed.
-func TestLegacyRehydrateKeepsRefusedPrefixedCandidate(t *testing.T) {
+// Pre-#175 shapes are no longer converted (decision 2026-10-16 G5): a
+// state record's bare candidate ids — with or without the #159
+// step_harness — and a manual --models list of bare ids reach the job
+// VERBATIM, so the driver's start check refuses each by name ("<id>"
+// needs a harness prefix, naming the claim-time list; pinned by
+// driver.TestNewRefusesUnprefixedCandidates) instead of the daemon
+// re-prefixing it into a different candidate.
+func TestPre175ShapesReachTheDriverVerbatim(t *testing.T) {
 	var rec jobRecord
-	if err := json.Unmarshal([]byte(`{"work_item_id":"wi_e","step_candidates":{"fix":["claude:m:off","pi:a/b:high"]}}`), &rec); err != nil {
+	if err := json.Unmarshal([]byte(`{"work_item_id":"wi_old","state":"running",
+		"step_candidates":{"fix":["claude-opus-5-5","sub2api-glm/glm-5.3"]},
+		"step_harness":{"fix":"claude"}}`), &rec); err != nil {
 		t.Fatal(err)
 	}
-	if got := jobFromRecord(&rec).stepCandidates["fix"]; !reflect.DeepEqual(got, []string{"claude:m:off", "pi:a/b:high"}) {
-		t.Fatalf("rehydrate %v", got)
+	if got := jobFromRecord(&rec).stepCandidates["fix"]; !reflect.DeepEqual(got, []string{"claude-opus-5-5", "sub2api-glm/glm-5.3"}) {
+		t.Fatalf("a pre-#175 record was converted: %v", got)
+	}
+
+	hub := newFakeHub()
+	r, ws := newManualRuntime(t, hub)
+	writeWorkspaceYaml(t, ws, w079ValidYaml)
+	r.saveManualModels("wi_bare", []string{"m/one"})
+	if err := r.Start(context.Background(), "wi_bare"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Stop(context.Background(), "wi_bare", protocol.FinishWrapped) })
+	j := r.jobOf("wi_bare")
+	if j == nil {
+		t.Fatal("no job")
+	}
+	for step, list := range j.stepCandidates {
+		if !reflect.DeepEqual(list, []string{"m/one"}) {
+			t.Fatalf("step %s: the pre-#175 manual list was not passed verbatim: %v", step, list)
+		}
+	}
+	if got := r.loadManualModels("wi_bare"); !reflect.DeepEqual(got, []string{"m/one"}) {
+		t.Fatalf("the recorded manual list was dropped: %v", got)
 	}
 }

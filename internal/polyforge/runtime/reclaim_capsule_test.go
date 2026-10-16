@@ -5,6 +5,7 @@ package runtime
 // for a WI with published progress never degrades into a local init.
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -75,7 +76,7 @@ func TestPrepareCapsuleReclaimQuarantinesGitDirAndPushes(t *testing.T) {
 
 	j2 := &job{wi: j.wi, capsuleDir: j.capsuleDir, git: j.git, sessionFingerprint: "fp-new"}
 	j2.git.Fingerprint = "fp-new"
-	if err := r.prepareCapsule(j2); err != nil {
+	if err := r.prepareCapsule(context.Background(), j2); err != nil {
 		t.Fatalf("prepareCapsule: %v", err)
 	}
 	if got := headOf(t, j2.git); got != remoteTip {
@@ -122,7 +123,7 @@ func TestPrepareCapsuleCloneFailurePublishedRefusesInit(t *testing.T) {
 	}
 	j2 := reclaimJob(t, "wi_clone_fail", "fp-new")
 	j2.git.RemoteURL = bare
-	err := r.prepareCapsule(j2)
+	err := r.prepareCapsule(context.Background(), j2)
 	var ae *api.Error
 	if !errors.As(err, &ae) || ae.Code != api.ErrDaemonCapsuleClone {
 		t.Fatalf("want typed %s error, got %T: %v", api.ErrDaemonCapsuleClone, err, err)
@@ -144,7 +145,7 @@ func TestPrepareCapsuleCloneFailureRefusesInit(t *testing.T) {
 			r := &Runtime{}
 			j := reclaimJob(t, "wi_clone_"+name, "fp")
 			j.git.RemoteURL = remote
-			err := r.prepareCapsule(j)
+			err := r.prepareCapsule(context.Background(), j)
 			var ae *api.Error
 			if !errors.As(err, &ae) || ae.Code != api.ErrDaemonCapsuleClone {
 				t.Fatalf("want typed %s error, got %T: %v", api.ErrDaemonCapsuleClone, err, err)
@@ -162,7 +163,7 @@ func TestPrepareCapsuleNoRemoteRefusesLoudly(t *testing.T) {
 	r := &Runtime{}
 	j := reclaimJob(t, "wi_fresh", "fp")
 	j.git.RemoteURL = ""
-	err := r.prepareCapsule(j)
+	err := r.prepareCapsule(context.Background(), j)
 	var ae *api.Error
 	if err == nil || !errors.As(err, &ae) || ae.Code != api.ErrDaemonCapsuleClone {
 		t.Fatalf("a no-remote claim must refuse with the typed clone error, got %v", err)

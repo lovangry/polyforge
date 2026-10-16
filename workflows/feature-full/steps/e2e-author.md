@@ -1,7 +1,6 @@
 ---
 name: e2e-author
 description: Author end-to-end acceptance scenarios for the spec's NEW behaviour before code runs, commit them, and prove every scenario red (assertion-level) against the pre-implementation tree in the same step.
-tools: [read, edit, bash]
 output:
   type: object
   required: [scenarios_path, scenario_titles, baseline]

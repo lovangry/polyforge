@@ -64,7 +64,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -84,6 +83,9 @@ type MissingCapsuleError struct {
 }
 
 func (e *MissingCapsuleError) Error() string {
+	if e.Dir == "" {
+		return fmt.Sprintf("work item %s: its state record names no capsule directory (written before records carried capsule_dir) — the daemon derives none; `pf resume %s` re-claims it from the capsule chain, or give up with `pf cancel %s`", e.WI, e.WI, e.WI)
+	}
 	return fmt.Sprintf("work item %s: mid-flight capsule missing at %s — it is NOT recoverable from the remote (unpublished local state would be lost); restore the capsule to that path manually, then `pf resume %s` (or restart the daemon); or give up with `pf cancel %s`", e.WI, e.Dir, e.WI, e.WI)
 }
 
@@ -120,24 +122,15 @@ func (e *SessionVerifyOutageError) Error() string {
 // work item this daemon proceeds with (the #103 guard, carried onto the
 // mapping): the record's project MUST be mapped (an unmapped mid-flight
 // project fails loudly, naming it — never relocated, never rebuilt), and
-// its capsule directory must exist. The persisted record's CapsuleDir is
-// the truth (in-flight capsules keep their homes across mapping
-// re-adds and across the capsule-name change: a capsule claimed under
-// the old id-named layout keeps its recorded path); a record without it
-// falls back to the CURRENT naming under the project's mapped workspace:
-// api.PathName of the record's slug, i.e. <project>-<seq> (the id name
-// only for a record that carries no slug). One name is built; nothing
-// else is probed.
-func (r *Runtime) requireMidflightCapsule(wi, project, slug, recordedDir string) error {
-	ws, merr := r.cfg.Mapping.WorkspaceFor(project)
-	if merr != nil {
+// its recorded capsule directory must exist. The persisted record's
+// CapsuleDir is the truth (in-flight capsules keep their homes across
+// mapping re-adds and capsule-name changes); a record without one is a
+// missing capsule — nothing is derived or probed.
+func (r *Runtime) requireMidflightCapsule(wi, project, dir string) error {
+	if _, merr := r.cfg.Mapping.WorkspaceFor(project); merr != nil {
 		return &UnmappedMidflightError{WI: wi, Project: project}
 	}
-	dir := recordedDir
-	if dir == "" {
-		dir = filepath.Join(ws, "capsules", api.PathName(slug, wi))
-	}
-	if dirExists(dir) {
+	if dir != "" && dirExists(dir) {
 		return nil
 	}
 	return &MissingCapsuleError{WI: wi, Dir: dir}
@@ -241,7 +234,7 @@ func (r *Runtime) attachPaused(ctx context.Context, rec *jobRecord, cause, detai
 	}
 	// Guard BEFORE the hub call (#103/#113): a missing capsule must not
 	// first flip the WI to running server-side and only then fail.
-	if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.Slug, rec.CapsuleDir); err != nil {
+	if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
 		return err
 	}
 	if _, err := r.hub.SessionAttach(rec.WorkItemID, api.SessionAttachRequest{
@@ -427,7 +420,7 @@ func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job, rec
 	// capsule is absent at its mapped base is the typed hard failure —
 	// the recovery engine must never see it and re-materialize or
 	// re-derive against a scene that is not there.
-	if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.Slug, rec.CapsuleDir); err != nil {
+	if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
 		return err
 	}
 	// crash orphans die BEFORE anything is re-dispatched (single writer)
@@ -533,7 +526,7 @@ func (r *Runtime) restartVerified(ctx context.Context, rec *jobRecord, v *api.Se
 			// base (#103/#113): a miss BLOCKS this WI alone at
 			// aihub (v2 §6) — never a rebuild-from-remote, never a daemon
 			// abort.
-			if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.Slug, rec.CapsuleDir); err != nil {
+			if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
 				r.blockUnrecoverable(ctx, rec, err)
 				return nil
 			}
@@ -567,7 +560,7 @@ func (r *Runtime) restartVerified(ctx context.Context, rec *jobRecord, v *api.Se
 					// (#103): absent at the active base, the wrap/fail
 					// intent must not be "replayed" out of thin air — the
 					// WI is blocked instead.
-					if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.Slug, rec.CapsuleDir); err != nil {
+					if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
 						r.blockUnrecoverable(ctx, rec, err)
 						return nil
 					}

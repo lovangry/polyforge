@@ -79,7 +79,6 @@ func (d *Daemon) recordSubmitRejected(e qEntry, err error) {
 	}
 	body := map[string]any{
 		"error":        err.Error(),
-		"intent":       e.Intent,
 		"submitted_at": e.SubmittedAt.UTC().Format(time.RFC3339Nano),
 	}
 	var ae *api.Error
@@ -93,13 +92,12 @@ func (d *Daemon) recordSubmitRejected(e qEntry, err error) {
 }
 
 func (d *Daemon) dropReplay(e qEntry, reason string) {
-	fmt.Fprintf(os.Stderr, "daemon: submit replay: %s (%s) dropped: %s\n", e.WorkItemID, e.Intent, reason)
+	fmt.Fprintf(os.Stderr, "daemon: submit replay: %s dropped: %s\n", e.WorkItemID, reason)
 	if d.obs == nil {
 		return
 	}
 	body := map[string]any{
 		"reason":       reason,
-		"intent":       e.Intent,
 		"submitted_at": e.SubmittedAt.UTC().Format(time.RFC3339Nano),
 	}
 	if e.Origin.Kind != "" {
@@ -111,8 +109,6 @@ func (d *Daemon) dropReplay(e qEntry, reason string) {
 // replaySubmitQueue re-enqueues the submits the previous process accepted
 // but never started (v2 §5). It runs strictly after rt.Restart (which
 // replayed the B1 claiming journal), before the face serves:
-//   - only plain `claim` intents replay; resume is dropped with
-//     a submit_dropped event (a stale intent must never fire later);
 //   - the WI is read from aihub first: anything but queued (claimed
 //     elsewhere, terminal, paused, blocked) is dropped;
 //   - a WI the runtime already holds (the journal replay adopted it, or a
@@ -123,10 +119,6 @@ func (d *Daemon) replaySubmitQueue() {
 	entries := d.loadPersistedQueue()
 	for _, e := range entries {
 		if e.WorkItemID == "" {
-			continue
-		}
-		if e.Intent != "claim" {
-			d.dropReplay(e, fmt.Sprintf("intent %q is not replayed (only plain claim submits are)", e.Intent))
 			continue
 		}
 		if e.Origin.Kind == runtime.OriginAuto && !d.modes.Auto() {

@@ -39,13 +39,15 @@ mapping exists): a restart loop in tmux session `polyforge-daemon` runs it
 with `-workflows-dir release/current/workflows` and revives it within ~5s
 after a crash; after a container/machine restart (tmux does not survive
 one) the next pi or Claude Code session runs the same ensure. An upgrade
-shuts the daemon down gracefully (the loop ends with that clean exit —
+first downloads, verifies and fetches everything, refuses (changing nothing)
+while the daemon runs jobs — wait, `pf pause` them, or re-run with
+`PF_INSTALL_FORCE=1` in front of `bash` — then shuts the daemon down gracefully (the loop ends with that clean exit —
 `pf ops shutdown` always stops for good, only failures are restarted — except
 exit 78, below),
 swaps the binary, then ensures again; meanwhile it holds the ensure lock,
 so a harness session starting mid-upgrade starts nothing. A daemon already running with a different workflows
 dir, or without its loop, is reported, never auto-restarted. Finally it
-verifies connectivity. If the machine's daemon id is new to aihub, an admin
+runs `pf doctor`. If the machine's daemon id is new to aihub, an admin
 registers it afterwards — the installer prints a note to that effect pointing
 at `pf ops status`, which shows the daemon's id. Re-running the same command upgrades
 and is idempotent. Daily use from a session is natural language via the
@@ -225,7 +227,7 @@ One row per sub-package, exactly as `internal/` exists today:
 | `internal/common/protocol` | The in-machine contracts: Runtime↔Observe messages and the pf CLI↔daemon UDS HTTP API surface. |
 | `internal/common/harness` | The closed step-harness set (`pi` \| `claude`) and the one model-candidate format `<harness>:<model>`. |
 | `internal/common/spawn` | Process-derivation contract shared by the runtime (daemon assembly) and the driver (step-process spawning). |
-| `internal/common/workflow` | The minimal workflow-bundle frontmatter read surface (defaults + per-step `model_candidates`) that drives model and harness selection. No digest contract: the bundle digest chain was deleted (polyforge#149). |
+| `internal/common/workflow` | The minimal workflow-bundle frontmatter read surface (defaults + per-step `model_candidates`) that drives model and harness selection, and the step-definition lookup: a bundle's own `steps/<id>.md` wins, else the shared `workflows/_shared/steps/<id>.md` (`_shared` is not a bundle; it is materialized beside the bundle). No digest contract: the bundle digest chain was deleted (polyforge#149). |
 | `internal/aihub/core` | aihub persistent layer: SQLite store (single writer, WAL), the work-item state machine, claim/session arbitration (one live session per WI, its hashed push secret and public fingerprint), the ready queue and the admin face. |
 | `internal/aihub/git` | aihub git surface: per-WI bare-repo lifecycle, the git-http-backend smart-protocol proxy, session-secret auth (only the WI's live session secret pushes; session-fingerprint fencing) and the pre-receive hook enforcing the capsule-chain invariants. |
 | `internal/aihub/memory` | Core-side memory store: FTS5-trigram full-text search, authoritative `memory.md` files and the reconcile procedure. |
@@ -307,26 +309,13 @@ work item filed against the project-agnostic `release` workflow bundle
 "发版" files that WI). If the goal names a bump (`major`, `minor`, `patch`) it is
 passed verbatim to the repo's procedure; otherwise the repo default applies.
 
-The bundle has three steps, each `gate: true`, fresh context, with command
-evidence required; a failure terminates the WI (published tags, releases and
-images are immutable, so there is no rewind into a re-release):
-
-1. `release` - fetches and resets the capsule clone to origin's default-branch
-   head, records the pre-release remote tag list, checks the procedure supports
-   `--verify`, then runs `.polyforge/release.sh [bump]` (which runs the repo's
-   test gate itself). No procedure in the capsule is a FAIL; two repos carrying
-   one is `PF-RELEASE-AMBIGUOUS_OWNER`. If origin's head already carries a
-   release tag (`v*`), or a re-dispatch finds a remote tag its earlier
-   attempt's pre-release list lacks, the step is a FAIL
-   `PF-RELEASE-ALREADY_RELEASED`, never a second release.
-2. `verify` - a fresh judge that trusts nothing from step 1: release commit vs
-   origin head, the new tag exists and points at it, every older tag is
-   unchanged, release notes are non-empty, then `.polyforge/release.sh --verify
-   <version>`. Only a pass writes the verified version that `deploy` reads.
-3. `deploy` - runs `.polyforge/deploy.sh <version> --confirm <version>` for the
-   verified version only (never "latest"). A project with no `deploy.sh`
-   defers (it releases without deploying). The procedure ends with production
-   on the new version or rolled back; a rollback is a step FAIL.
+The bundle runs three gate steps — `release` (`.polyforge/release.sh [bump]`),
+an independent `verify` (`release.sh --verify <version>`; only a pass writes the
+version `deploy` reads) and `deploy` (`.polyforge/deploy.sh <version> --confirm
+<version>`; a project without `deploy.sh` releases without deploying). A failure
+terminates the WI: published tags, releases and images are immutable, so there
+is no rewind into a re-release. The step-by-step checks and failure codes are in
+[workflows/release/workflow.md](workflows/release/workflow.md) and its steps.
 
 A failed `deploy` ends the WI failed with production on the old version (rolled
 back, or refused before touching it). Redeploy the already-verified version by
@@ -345,56 +334,18 @@ dispatches):
 - `.polyforge/deploy.sh <version> --confirm <version>` deploys exactly that
   version; production ends on it or rolled back, rollback exits non-zero.
 
-This repository's own procedures: `release.sh` (vX.Y.Z, bump `major|minor|patch`,
-default `minor`) refuses a dirty tree or a HEAD that is not the fetched
-`origin/main` or a HEAD that already carries a release tag on origin, refuses unless
-every commit that entered `main` since the previous release tag came through a merged
-PR (main's first-parent history must be merge commits that `gh api
-repos/<repo>/commits/<sha>/pulls` names as a merged PR's merge commit — the shape
-the workflows' `deliver` step produces with `gh pr merge --merge`), and takes the
-version floor from the highest semver among the ORIGIN tags only (an unreadable
-`ls-remote` is fatal) — these cheap refusals run first; only then does it run
-`make test` (including the e2e suite, ~20 minutes), build the two
-binaries and the `ghcr.io/silgrid/aihub:<tag>` image, claims the version by
-pushing the git tag (fails if it exists: nothing is published), pushes the
-image, writes `aihub-image.digest` after the push, then `SHA256SUMS` and
-`gh release create` with the four assets (`aihub-linux-amd64`, `pf-linux-amd64`,
-`aihub-image.digest`, `SHA256SUMS`). `aihub-image.digest` holds the bare image digest
-`sha256:<64 hex>`; `deploy.sh` looks for `ghcr.io/silgrid/aihub@<that digest>` among
-the pulled image's repo digests. `release.sh --verify <version>` also requires the
-version to be strictly greater than every other tag on origin and runs the same
-PR-only check over previous-tag..version. It never deletes or
-overwrites a tag, release or image; a failure after the tag push burns the version
-(cut the next one).
-
-`deploy.sh` deploys the aihub service host: it requires `--confirm <version>`
-equal to the version argument (no prompt), takes a server-side lock for the
-whole mutating part (fails fast if another deploy holds it), runs on a machine
-with `gh` and `docker` logged in to the private `ghcr.io/silgrid/aihub` - the
-server never holds GitHub credentials. Machine preconditions (checked in its
-preflight; when the release bundle's `deploy` step runs it, they apply to the
-step's machine): a running docker daemon, `gh` with GHCR read access, root
-BatchMode ssh to `AIHUB_HOST`, `rsync`, a writable `BACKUP_ROOT` (default
-`/data/polyforge-backups`), and the target tag — for a downgrade also the running
-one — in the LOCAL repo (`git fetch --tags origin`). Steps: ONLINE verified full backup; pull
-`ghcr.io/silgrid/aihub:<tag>`, check the repo digest against the release's
-`aihub-image.digest` (itself checked via `SHA256SUMS`), `docker save | ssh
-docker load`, verify the image ID on the server and tag it
-`polyforge/aihub:<tag>`; edit only the aihub service of the server's compose
-file; then the switch window — the old container stops (graceful drain), the
-versions' upgrade SQL under `deploy/sql/` runs (one transaction per script;
-there is no startup auto-migration, see [docs/upgrade.md](docs/upgrade.md)),
-and just that container is recreated (seconds of downtime, measured and
-printed); post-swap checks. If post-swap verification fails or the service does
-not come back, it AUTOMATICALLY rolls the compose image back to
-`polyforge/aihub:<old>`, recreates, verifies the old version answers and prints
-`ROLLED BACK` (the applied versions' `rollback.sql` runs first, in descending
-order, so the old binary never sees the new schema; distinct non-zero exit; if the rollback itself fails it prints
-loud manual instructions). Data restore stays manual (it needs a stop).
-`--dry-run` shows the plan and the compose diff; `--force` is a human-only
-override. Deploying a work machine is re-running `tools/install.sh`. It is a
-deployment pipeline, not a release system (`07-deployment-pilot.md §1.1/§6.3`,
-`00-architecture.md §3.3`).
+This repository's own procedures are the authority for everything they do —
+the version scheme, the PR-only check, the test gate, the artifacts, the
+deploy lock, backups, the upgrade-SQL switch window, automatic rollback and the
+machine preconditions: read the header comments of
+[.polyforge/release.sh](.polyforge/release.sh) and
+[.polyforge/deploy.sh](.polyforge/deploy.sh). In short:
+`release.sh` (vX.Y.Z, default bump `minor`) publishes `aihub-linux-amd64`,
+`pf-linux-amd64`, `aihub-image.digest`, `SHA256SUMS` and
+`ghcr.io/silgrid/aihub:<tag>`; `deploy.sh` promotes that image onto the aihub
+service host with seconds of downtime (no startup auto-migration, see
+[docs/upgrade.md](docs/upgrade.md)). Deploying a work machine is re-running
+`tools/install.sh`.
 
 ```
  RELEASE: a WI on the `release` bundle (no platform release code)
@@ -487,30 +438,75 @@ with every inherited `GIT_*` variable stripped. So `http.proxy`,
 is stripped too, an aihub behind an internal CA needs that CA in the system
 trust store. The capsule commit itself still reads the global config, so
 `user.name` / `user.email` must be set for the daemon user; task-repo git
-(inside `repos/<name>`) also still uses the global config. Every setting is a flag; where an environment variable is listed
-the flag wins over it, and the shared CLI config file
-(`~/.config/polyforge/cli.toml`, or `--config`) is the last fallback for
-the `PF_*` entries.
+(inside `repos/<name>`) also still uses the global config.
 
-| Flag | Env | Default | Controls |
+Production starts the daemon only through `pf daemon ensure`, which
+passes only the fixed launch flags (`--config`, `-machine-id`,
+`-data-dir`, `-socket`, `-workflows-dir`). The five production knobs come
+from the `[daemon]` table of the `--config` file, which the daemon reads
+itself (decision 2026-10-16 G2). Precedence: an explicit command-line
+flag (tests/dev) > the `[daemon]` table > the built-in default.
+
+```toml
+# ~/.config/polyforge/cli.toml — after the flat keys (every key below a
+# [daemon] header belongs to the table)
+[daemon]
+step_timeout = "45m"                 # --step-timeout: Go duration, > 0
+stall_window = "10m"                 # --stall-window: Go duration, non-zero; negative disables
+harness_root = "/srv/polyforge/h"    # --harness-root: absolute path
+operator_agent_dir = "/home/u/.pi/agent"  # --operator-agent-dir: absolute path
+max_concurrent_jobs = 6              # --max-concurrent-jobs: unquoted integer >= 1
+```
+
+Every key is optional (absent = the daemon default). The file is
+validated on load by every `pf` command, by ensure and by the daemon (the
+same check): a bad value, an unknown key or a duplicate is refused naming
+the file, the line and the key (`config …: line N: [daemon] step_timeout:
+"soon" is not a Go duration`); ensure starts nothing and the daemon exits
+78. Edit the table, then restart the daemon (`pf ops shutdown`, wait,
+`pf daemon ensure`) for it to apply.
+
+Job cap: an explicit `pf ops max N` applies at once and is persisted in
+`<data-dir>/daemon-state.json`; it wins over `max_concurrent_jobs` until
+`pf ops max --reset`, which returns to the configured cap (an explicit
+`--max-concurrent-jobs`, else the table, else 4) and clears the persisted
+value. Nothing else persists the cap. A cap an older daemon persisted (it
+wrote one at every graceful shutdown) counts as persisted too: the daemon
+logs once at boot when a persisted cap overrides a different configured
+one, and `pf ops max` shows `(persisted cap — pf ops max --reset …)`
+while one is in force.
+
+Every other flag is test/dev-only: nothing in production sets it, and it
+is listed for running `pf daemon` by hand. The only environment variable
+the daemon reads besides the `PF_*` CLI ones is `POLYFORGE_DATA_DIR` (the
+`--data-dir` default; ensure reads it too). The former
+`POLYFORGE_MACHINE_ID`, `POLYFORGE_DISPLAY_NAME`, `POLYFORGE_HARNESS_ROOT`,
+`POLYFORGE_OPERATOR_AGENT_DIR` and `POLYFORGE_RECALL_TOPK` fallbacks are
+gone; a value in the environment is ignored. Because harness state must
+never move silently (polyforge#171), the daemon warns at boot when one of
+the two harness variables is set to a value differing from what it
+resolved (stderr, a `retired_env_ignored` event, `env_warnings` in
+`GET /status`), and `pf doctor`'s `retired env` row warns too.
+
+| Flag | Production source | Default | Controls |
 | --- | --- | --- | --- |
-| `--config PATH` | — | `~/.config/polyforge/cli.toml` | Shared CLI config file read for the `PF_*` settings. |
-| `--socket PATH` | `PF_DAEMON_SOCKET` | `/run/polyforge.sock` | Unix socket the daemon's UDS HTTP face listens on. |
-| `--server URL` | `PF_SERVER` | — | aihub base URL the daemon talks to. |
-| `--api-key KEY` | `PF_API_KEY` | — | Machine aihub credential (never reaches an agent env). |
-| `--machine-id ID` | `POLYFORGE_MACHINE_ID` | `m-<hostname>` | Machine identity claims and leases are recorded under; recorded in `<data-dir>/daemon-id` on first start, after which that file wins (a differing value refuses to start). |
-| `--display-name NAME` | `POLYFORGE_DISPLAY_NAME` | hostname | Daemon display name shown by `pf ops status`. |
-| `--data-dir DIR` | `POLYFORGE_DATA_DIR` | `~/.local/share/polyforge` | Daemon state, events log and derived data. |
-| `--workflows-dir DIR` | — | `./workflows` | Workflow-bundle checkout the in-process Go driver loads step definitions from (`pf daemon ensure` passes `<data-dir>/release/current/workflows`). |
-| `--pi-bin PATH` | — | `pi` | Harness binary the agent processes are derived from. |
-| `--claude-bin PATH` | — (config `claude_bin`) | `claude` | Claude Code binary for steps whose harness is `claude` (run as `claude -p --bare`). The daemon never manages its credentials: the `<harness-root>/claude-config/settings.json` env block is the authority layer. |
-| `--operator-agent-dir DIR` | `POLYFORGE_OPERATOR_AGENT_DIR` | `~/.pi/agent` | SOURCE of the dedicated step agent dir: the daemon copies the minimal set (`auth.json`, `models.json`, `agents/`, `extensions/subagent/`) from here into `<harness-root>/step-agent`, and every pi step runs against that copy — the operator's own packages and settings never reach a step. A configured source without a readable `auth.json` refuses the start. |
-| `--harness-root DIR` | `POLYFORGE_HARNESS_ROOT` | `<data-dir>` | Parent root of the step harness dirs: `<DIR>/step-agent` (dedicated agent dir), `/step-agent-sessions` (pi sessions) and `/claude-config` (claude config dir; its settings.json env block is the credential authority layer). The former `--harness-sessions-root` was renamed — old deployments fail loudly at startup. |
-| `--git-remote-base URL` | — | `<server>/git` | aihub bare-repo base URL for the capsule revision chain. |
-| `--max-concurrent-jobs N` | — | `4` | Cap on concurrently running jobs (also `pf ops max N`). |
-| `--recall-topk N` | `POLYFORGE_RECALL_TOPK` | `10` (max 50) | Claim-time memory snapshot hit count. |
-| `--auto` | — | off | Auto-pull: the daemon also claims ready-queue work itself; an explicit `--auto` / `--auto=false` overrides the persisted switch (also `pf ops auto on\|off`). |
-| `--heartbeat-every D` | — | `60s` | Machines heartbeat cadence (`0` disables). |
+| `--config PATH` | ensure | `~/.config/polyforge/cli.toml` | Shared CLI config file: the `PF_*` fallbacks, `claude_bin` and the `[workspace]` mapping. |
+| `--socket PATH` | ensure (`daemon_socket` / `PF_DAEMON_SOCKET`) | `/run/polyforge.sock` | Unix socket the daemon's UDS HTTP face listens on. |
+| `--server URL` | `server` / `PF_SERVER` | — | aihub base URL the daemon talks to. |
+| `--api-key KEY` | `api_key` / `PF_API_KEY` | — | Machine aihub credential (never reaches an agent env). |
+| `--machine-id ID` | ensure (recorded id, else `m-<short hostname>`) | `m-<hostname>` | Machine identity claims and leases are recorded under; recorded in `<data-dir>/daemon-id` on first start, after which that file wins (a differing value refuses to start). |
+| `--data-dir DIR` | ensure (`POLYFORGE_DATA_DIR`) | `~/.local/share/polyforge` | Daemon state, events log and derived data. |
+| `--workflows-dir DIR` | ensure | `./workflows` | Workflow-bundle checkout the in-process Go driver loads step definitions from (`pf daemon ensure` passes `<data-dir>/release/current/workflows`). |
+| `--claude-bin PATH` | `claude_bin` | `claude` | Claude Code binary for steps whose harness is `claude` (run as `claude -p --bare`). The daemon never manages its credentials: the `<harness-root>/claude-config/settings.json` env block is the authority layer. |
+| `--operator-agent-dir DIR` | `[daemon] operator_agent_dir` | `~/.pi/agent` | SOURCE of the dedicated step agent dir — a credential surface: the daemon copies the minimal set (`auth.json`, `models.json`, `agents/`, `extensions/subagent/`) from here into `<harness-root>/step-agent`, and every pi step runs against that copy — the operator's own packages and settings never reach a step. A configured source without a readable `auth.json` refuses the start. |
+| `--harness-root DIR` | `[daemon] harness_root` | `<data-dir>` | Parent root of the step harness dirs: `<DIR>/step-agent` (dedicated agent dir), `/step-agent-sessions` (pi sessions) and `/claude-config` (claude config dir; its settings.json env block is the credential authority layer). The former `--harness-sessions-root` was renamed — old deployments fail loudly at startup. |
+| `--max-concurrent-jobs N` | `[daemon] max_concurrent_jobs` | `4` | Configured cap on concurrently running jobs; an explicit `pf ops max N` wins until `pf ops max --reset` (see above). |
+| `--display-name NAME` | test/dev-only | hostname | Daemon display name shown by `pf ops status`. |
+| `--pi-bin PATH` | test/dev-only | `pi` | Harness binary the agent processes are derived from. |
+| `--git-remote-base URL` | test/dev-only | `<server>/git` | aihub bare-repo base URL for the capsule revision chain. |
+| `--recall-topk N` | test/dev-only | `10` (max 50) | Claim-time memory snapshot hit count. |
+| `--auto` | test/dev-only (`pf ops auto on\|off`) | off | Auto-pull: the daemon also claims ready-queue work itself; an explicit `--auto` / `--auto=false` overrides the persisted switch. |
+| `--heartbeat-every D` | test/dev-only | `60s` | Machines heartbeat cadence (`0` disables). |
 
 The workspace mapping (polyforge#113) replaces the retired workspace and
 project launch surfaces: the `[workspace."<path>"]` sections of the
@@ -537,6 +533,7 @@ locally only:
 <workspace>/
   .polyforge.yaml   human-written model candidates
   CLAUDE.md         workspace notes (polyforge-managed block + the human part)
+  go.work(.sum)     optional Go workspace tying the .repo/ clones together
   .repo/<repo>/     clones for humans and interactive agents
   capsules/<wi>/    work item workspaces (daemon-managed)
   .polyforge/       polyforge-generated files only — no documents (legacy v1 repo-map/, watchers/ are tolerated)
@@ -556,14 +553,18 @@ days — a `scratch` that is a symlink is never scanned or pruned — and `pf do
 removes them, listing each. Step agents are unaffected: they work inside
 their capsule.
 
-Per-project model candidates. A workspace root may carry a
+**Per-project model candidates (`.polyforge.yaml`).** This part (down to
+the docs/upgrade.md pointer) is the one authority for the workspace yaml's shape,
+candidate syntax and precedence; the routing skill's fragments, `pf
+submit --models` and docs/upgrade.md point here. A workspace root may carry a
 `.polyforge.yaml` whose only section is `steps` (strict: unknown keys at
 any level, duplicate keys, type mismatches, empty model ids and a
 per-step key that is no step id of the daemon's installed workflows, a
 project the cli.toml mapping does not route to this workspace, and
 duplicate model ids in one list are load errors; a step entry's only key is `models`; the pre-#169
 top-level `models:` section and the old `projects:` / `workflow_defaults:`
-shapes fail loudly):
+shapes fail loudly; YAML merge keys (`<<`) are refused — share a list with
+anchors, `models: &x [...]` / `{ models: *x }`):
 
 ```yaml
 # Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
@@ -576,11 +577,17 @@ steps:
 ```
 
 Every candidate — here, in a bundle's `model_candidates` and in
-`pf submit --models` — is `<harness>:<model>` with harness `pi` or
-`claude` (polyforge#175; split on the first `:`, the prefix mandatory). A
+`pf submit --models` — is `<harness>:<model>[:<effort>]` with harness `pi` or
+`claude` (polyforge#175; split on the first `:`, the prefix mandatory; no
+prefix, an unknown prefix or an empty model refuses). A
 chain may mix harnesses; a switch onto a candidate of another harness
 starts a fresh session with the previous transcript as read-only
-reference.
+reference. A step with no list (or an empty one) runs pi's own default
+model. The optional effort (polyforge#176) is the last segment only
+when it is one of `off minimal low medium high xhigh max` —
+`pi:ollama/llama3:8b` keeps `:8b` in the model id; pi gets it as
+`--thinking <effort>` (all seven), claude as `--effort <effort>`
+(`low`…`max`; `off`/`minimal` refuse); no effort, no flag.
 
 For a step of the claimed project the list is, highest first: the work
 item's manual `pf submit <id> --models pi:a,claude:b` list (every step; kept by this
@@ -596,25 +603,28 @@ skips that project and logs once) and nothing is claimed, so the work item
 stays queued for other machines. Repo lists and clone URLs always come from
 the aihub project registry. `pf doctor` reports the same refusal (an
 unknown per-step key and a leftover `models:` section included) before
-any claim. Upgrading from the pre-#169 shape: see
-[docs/upgrade.md](docs/upgrade.md).
+any claim. An edit takes effect on the next claim with no daemon restart
+(the file is read fresh before every claim). Upgrading from the pre-#169
+shape: see [docs/upgrade.md](docs/upgrade.md).
 
 Supervision bounds (v2-converge 2.4) — Go duration strings (e.g. `700ms`,
-`5m`), flags only (no environment fallbacks). Omitting a flag, or passing
-`0`, keeps the default listed here. The only per-step override in
+`5m`), no environment fallbacks. Omitting a flag, or passing `0`, keeps
+the default listed here. In production only T and N are settable, through
+the `cli.toml` `[daemon]` table, which the daemon reads itself (see `pf daemon` flags above); the other
+four are test/dev-only. The only per-step override in
 `workflow.md` is `budget.wall_minutes` (an estimate: T becomes
 `max(3 x wall_minutes, --step-timeout)`); X and Y are global only — the
 former `silence_minutes` / `tool_minutes` keys were deleted (polyforge#147)
 and an old bundle that still carries them has them silently ignored.
 
-| Flag | Env | Default | Controls |
+| Flag | Production source | Default | Controls |
 | --- | --- | --- | --- |
-| `--silence-window D` | — | `10m` (token-level harness) / `30m` (message-level) | X: no real work signal after dispatch (`harness_silent`), or no model output while waiting for the model (`model_hung`). UI chatter never counts as work. |
-| `--tool-window D` | — | `30m` | Y: one tool running longer than this is `tool_hung`. |
-| `--step-timeout D` | — | `90m` | T: cumulative step runtime across all its dispatches (`step_timeout_long_task` / `step_timeout_slow_model`). |
-| `--stall-window D` | — | `10m` | N: the driver between steps (not waiting on a human) for longer than this is `driver_stalled`; a negative value disables it. |
-| `--model-error-grace D` | — | `1m` | Grace after a turn ENDS with no result file: ended on a model error is `model_error` (switch candidate); ended normally is `ended_without_result` (same-model retry). |
-| `--revalidate-every D` | — | `5m` | M4 periodic session-revalidation cadence for RUNNING jobs; `0`/omitted keeps the 5m default, a negative value disables revalidation. |
+| `--silence-window D` | test/dev-only | `10m` (token-level harness) / `30m` (message-level) | X: no real work signal after dispatch (`harness_silent`), or no model output while waiting for the model (`model_hung`). UI chatter never counts as work. |
+| `--tool-window D` | test/dev-only | `30m` | Y: one tool running longer than this is `tool_hung`. |
+| `--step-timeout D` | `[daemon] step_timeout` | `90m` | T: cumulative step runtime across all its dispatches (`step_timeout_long_task` / `step_timeout_slow_model`). |
+| `--stall-window D` | `[daemon] stall_window` | `10m` | N: the driver between steps (not waiting on a human) for longer than this is `driver_stalled`; a negative value disables it. |
+| `--model-error-grace D` | test/dev-only | `1m` | Grace after a turn ENDS with no result file: ended on a model error is `model_error` (switch candidate); ended normally is `ended_without_result` (same-model retry). |
+| `--revalidate-every D` | test/dev-only | `5m` | M4 periodic session-revalidation cadence for RUNNING jobs; `0`/omitted keeps the 5m default, a negative value disables revalidation. |
 
 Before starting ANY implementation or review lane: recall the v0 lessons
 ledger (`docs/design/polyforge-vnext/v0-lessons-ledger.md`, now including
@@ -628,43 +638,8 @@ Minimal external dependencies: pure-Go SQLite (modernc.org/sqlite), yaml.v3, gol
 
 ## `pf recall` — memory search
 
-Searches a project's memories on the aihub memory face (trigram-indexed
-full-text search):
-
-    pf recall --project P <query> [--type T] [--tags a,b] [--limit N]
-
-`<query>` is required (positional or `--q`); so is `--project` — there
-is no default project anymore (polyforge#113), and the value is
-validated against the `[workspace]` mapping: an unmapped project, or no
-mapping at all, fails locally naming the mapped projects, and nothing is
-sent (`pf remember` applies the same check; owner ruling 2026-10-16). aihub
-additionally gates memory by project membership: a search answers only
-projects the caller can read, and `project=` naming an unknown or unreadable
-project answers the same `CORE-404`; reading a memory needs read access,
-writing one needs the writer role. Flags:
-
-- `--limit N` — max results. **Default 20** when the flag is omitted
-  (the CLI's product choice, sent explicitly); values must satisfy
-  `1 ≤ N ≤ 200` — anything else fails loudly before a request is sent
-  (`pf: recall: --limit must be 1..200`). The endpoint's own default of
-  50 is a wire backstop for other callers, not this verb's contract.
-- `--type T` — memory type filter, exactly three legal forms:
-  - exact — `--type experience.debug` matches only that type;
-  - prefix — `--type experience.*` matches every type under the
-    `experience.` prefix (`experience.debug`, `experience.approach`, …;
-    `fact.*` does not match `experience.*` types);
-  - all — `--type *` is equivalent to omitting the flag.
-
-  Any other `*` placement (`*.debug`, `exp*rience`, `experience*`) is
-  rejected locally with no request sent. The
-  `GET /api/v1/memories/search` face interprets a trailing `.*` the same way.
-- `--tags a,b` — comma-separated tag filter (a hit carries all of them).
-
-Examples:
-
-    pf recall --project polyforge flaky build
-    pf recall --project polyforge --type 'experience.*' --limit 50 flaky build
-    pf recall --project polyforge --type fact.note --tags postgres,backoff "retry ladder"
+`pf help recall` prints the usage; the flags, the `--project` mapping check
+and the failure codes are in [skills/polyforge/verbs/recall.md](skills/polyforge/verbs/recall.md).
 
 ## Contributing & filing work items
 

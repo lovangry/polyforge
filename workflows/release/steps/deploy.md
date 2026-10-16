@@ -1,7 +1,6 @@
 ---
 name: deploy
 description: Deploy exactly the version the verify step passed (never "latest") by running the repo's own deploy procedure with an explicit confirmation. A project with no deploy procedure defers; a rollback is a step failure.
-tools: [read, bash]
 output:
   type: object
   required: [verdict]

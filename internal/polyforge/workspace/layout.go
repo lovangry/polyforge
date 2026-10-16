@@ -57,6 +57,9 @@ var rootAllowed = map[string]bool{
 	NotesFile:         true,
 	"CLAUDE.local.md": true,
 	"AGENTS.md":       true,
+	// A Go workspace file at the root ties the .repo/ clones together.
+	"go.work":     true,
+	"go.work.sum": true,
 }
 
 // generatedAllowed are the entries tolerated under .polyforge/. Both are

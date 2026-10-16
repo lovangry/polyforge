@@ -226,8 +226,5 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 		}
 	}()
 
-	// Advance the spawn counter (the driver derivation is ordinal N+1).
-	_ = drv // the runtime advances its own counter via the job
-
 	return h, nil
 }

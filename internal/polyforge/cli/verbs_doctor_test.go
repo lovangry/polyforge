@@ -324,8 +324,8 @@ func TestDoctorWorkspaceYamlReportsUnknownStepKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _, doc = doctorStatus(t, env, "--json", "doctor")
-	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "fail" || !strings.Contains(detail, "`models:` was replaced by `steps:`") {
-		t.Fatalf("legacy models: section: %s %q, want fail with the migration message", st, detail)
+	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "fail" || !strings.Contains(detail, `unknown top-level key "models"`) {
+		t.Fatalf("legacy models: section: %s %q, want fail naming the unknown key", st, detail)
 	}
 
 	if err := os.WriteFile(yaml, []byte("steps:\n  ghost:\n    fix: { models: [pi:b] }\n"), 0o600); err != nil {
@@ -354,5 +354,23 @@ func TestDoctorWorkspaceYamlReportsUnknownStepKeys(t *testing.T) {
 	_, _, doc = doctorStatus(t, env, "--json", "doctor")
 	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "warn" || !strings.Contains(detail, "daemon is unreachable") {
 		t.Fatalf("daemon unreachable: %s %q, want warn naming it", st, detail)
+	}
+}
+
+// TestRetiredEnvCheck (decision 2026-10-16 G2): doctor warns about a
+// retired harness variable in its own shell and relays the daemon's.
+func TestRetiredEnvCheck(t *testing.T) {
+	none := func(string) string { return "" }
+	if c := retiredEnvCheck(none, nil); c.Status != "pass" {
+		t.Fatalf("clean env: %+v", c)
+	}
+	c := retiredEnvCheck(func(k string) string {
+		if k == "POLYFORGE_OPERATOR_AGENT_DIR" {
+			return "/op"
+		}
+		return ""
+	}, []string{"POLYFORGE_HARNESS_ROOT=/x is set but no longer read"})
+	if c.Status != "warn" || !strings.Contains(c.Detail, `[daemon] operator_agent_dir = "/op"`) || !strings.Contains(c.Detail, "daemon: POLYFORGE_HARNESS_ROOT=/x") {
+		t.Fatalf("retired env check = %+v", c)
 	}
 }

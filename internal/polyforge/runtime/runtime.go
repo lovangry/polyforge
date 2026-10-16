@@ -69,12 +69,7 @@ type Config struct {
 	DataDir       string // state.json + external git-dirs live here
 	GitRemoteBase string // e.g. https://aihub.example/git → <base>/<wi>.git
 	WorkflowsDir  string // daemon checkout's workflows/ (materialization source)
-	// Harness is the adapter whose agent definitions the capsule
-	// materializes (pi: the subagent extension's agents/). It is NOT the
-	// step harness — that is per model candidate (polyforge#175: the
-	// `<harness>:` prefix of each candidate).
-	Harness string
-	PiBin   string // harness binary (default "pi")
+	PiBin         string // harness binary (default "pi")
 	// ClaudeBin is the Claude Code binary (default "claude"; cli.toml
 	// claude_bin / --claude-bin), used by steps whose harness is claude.
 	ClaudeBin string
@@ -83,8 +78,8 @@ type Config struct {
 	// agent dir), <harness-root>/step-agent-sessions (the pi steps'
 	// session store) and <harness-root>/claude-config (claude's config
 	// dir: settings.json — the single credential authority layer —
-	// plus projects/ and debug/). Resolved as --harness-root >
-	// POLYFORGE_HARNESS_ROOT > DataDir; the Dir() derivations and
+	// plus projects/ and debug/). Resolved as --harness-root (cli.toml
+	// [daemon] harness_root) > DataDir; the Dir() derivations and
 	// stepagentdir.go hold the map.
 	HarnessRoot string
 	// OperatorAgentDir is the SOURCE of the dedicated step agent
@@ -130,11 +125,6 @@ type Config struct {
 }
 
 func (c *Config) fill() {
-	// The harness adapter defaults to the only one that exists today
-	// (the pi spawner).
-	if c.Harness == "" {
-		c.Harness = "pi"
-	}
 	if c.OperatorAgentDir == "" {
 		c.OperatorAgentDir = OperatorAgentDirDefault()
 		c.OperatorAgentDirExplicit = false
@@ -188,9 +178,18 @@ type Runtime struct {
 
 	// opMu serializes the mutating operations (Start/Stop/recover/Restart):
 	// the message loop and the daemon's direct calls share it, so the state
-	// machine never sees two drivers at once.
+	// machine never sees two drivers at once. Start releases it while the
+	// claimed capsule is cloned and materialized (repo review 2026-10-16
+	// B-8): the job sits CLAIMING in the table meanwhile, and the lock is
+	// taken again to install the agent or settle the claim.
 	opMu      sync.Mutex
 	statePath string
+
+	// claimsAborted latches the shutdown's AbortClaims (under mu): once
+	// latched, a new Start answers DAEMON-410 without claiming and a
+	// CLAIMING one is cancelled and deferred, leaving its claiming-journal
+	// entry for the next daemon start.
+	claimsAborted bool
 
 	// The durable-close retry lane (endpending.go): WIs whose
 	// SessionEnd(blocked) retry goroutine is running (one per WI), and
@@ -268,9 +267,6 @@ type job struct {
 	// not part of the persisted job record.
 	repos []api.ProjectRepo
 
-	// workspaceYaml is the claim's pre-claim-validated .polyforge.yaml
-	// (nil when the workspace carries none). In-memory only.
-	workspaceYaml *workspace.Config
 	// stepCandidates is the polyforge#79 claim-time compose: the
 	// per-step post-precedence candidate lists (step id → list; a
 	// present-empty entry governs and means no switchable chain). In-
@@ -316,7 +312,28 @@ type job struct {
 	// and is being retried (awaitVerify) — status/watch name it, a close
 	// is answered "waiting for aihub".
 	awaitingHub bool
-	mu          sync.Mutex
+	// claim is the CLAIMING placeholder's lane (B-8); nil otherwise.
+	claim *claimLane
+	mu    sync.Mutex
+}
+
+// claimLane is the bookkeeping of one start between its claim and its
+// agent (state CLAIMING): the context the clone/materialize runs under,
+// a close the operator requested meanwhile and its outcome. ctx, cancel
+// and done are fixed at creation; closeReq and closeErr are guarded by
+// the job's mu.
+type claimLane struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	// answer is the claim answer (the sealed-head guard reads it).
+	answer api.SessionClaim
+	// done closes once the claim settled (RUNNING, closed, abandoned or
+	// deferred); a Stop that requested a close waits on it.
+	done chan struct{}
+	// closeReq is the close a Stop asked for (wrapped|failed|paused);
+	// closeErr its outcome, valid once done is closed.
+	closeReq string
+	closeErr error
 }
 
 // New builds a Runtime. toOB receives RT→Observe messages, fromOB carries
@@ -373,6 +390,12 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 		return // unknown WI: nothing to fence on, drop
 	}
 	state, spawn := j.snapshot()
+	if state == StateClaiming {
+		// no monitor watches a CLAIMING job (it has no agent yet): any
+		// message for it is stale — never let it quarantine or drop the
+		// placeholder (B-8)
+		return
+	}
 	// Finding 1(a) (v1.5 review, MAJOR): OBSuperseded is a SESSION-level
 	// verdict, not a derivation-level one — it is EXEMPT from the
 	// spawn-equality fence. The exact loss the fence used to cause: a
@@ -451,11 +474,16 @@ func (r *Runtime) jobOf(wi string) *job {
 	return r.jobs[wi]
 }
 
-// persist rewrites state.json from the live job set.
+// persist rewrites state.json from the live job set. A CLAIMING
+// placeholder is never written: its durable form is the claiming journal
+// (B-8), which the next start replays.
 func (r *Runtime) persist() error {
 	r.mu.Lock()
 	recs := make([]*jobRecord, 0, len(r.jobs))
 	for _, j := range r.jobs {
+		if st, _ := j.snapshot(); st == StateClaiming {
+			continue
+		}
 		recs = append(recs, j.record())
 	}
 	r.mu.Unlock()
@@ -629,13 +657,39 @@ func mintSessionID() (string, error) {
 // call (B1): a crash between journal and call is recoverable by replay,
 // a crash after the call by verify — the ambiguous-claim window is
 // closed from both sides.
+//
+// Locking (B-8): opMu is held for the pre-claim checks, the claim, the
+// journal and the CLAIMING placeholder, released for the capsule clone
+// and the materialize, and taken again to install the agent (or to
+// settle the claim: an operator close, a shutdown deferral, the blocked
+// compensation). Start still returns only once the claim settled.
 func (r *Runtime) Start(ctx context.Context, wi string) error {
+	if r.abortedClaims() {
+		return claimDeferredError(wi)
+	}
 	r.opMu.Lock()
-	defer r.opMu.Unlock()
+	j, err := r.claimLocked(ctx, wi)
+	r.opMu.Unlock()
+	if err != nil {
+		return err
+	}
+	// The claim landed and the job sits CLAIMING in the table: the clone
+	// and the materialize run WITHOUT opMu (repo review 2026-10-16 B-8),
+	// so one slow or hung clone no longer freezes the stops, pauses,
+	// resumes, recoveries and claims of every other work item.
+	return r.runClaim(ctx, wi, j, true)
+}
+
+// claimLocked is Start's locked first half (opMu held): the pre-claim
+// checks, the journaled claim and the CLAIMING placeholder.
+func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
 	manual := r.takeModels(wi) // always consumed: a refused start must not leak it
+	if r.abortedClaims() {
+		return nil, claimDeferredError(wi)
+	}
 	if j := r.jobOf(wi); j != nil {
 		if st, _ := j.snapshot(); st != StatePaused {
-			return fmt.Errorf("runtime: %s already active (state %s)", wi, st)
+			return nil, fmt.Errorf("runtime: %s already active (state %s)", wi, st)
 		}
 		// Finding 2 (v1.5 review): a RETAINED paused record is not an
 		// active run — the start may proceed over it (startClaimed drops
@@ -656,25 +710,25 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 		var ae *api.Error
 		if errors.As(perr, &ae) && ae.HTTPStatus() < 500 {
 			// the hub answered and refused (unknown WI, forbidden): final
-			return fmt.Errorf("runtime: %s: work-item probe refused (not claiming): %w", wi, perr)
+			return nil, fmt.Errorf("runtime: %s: work-item probe refused (not claiming): %w", wi, perr)
 		}
 		// transport loss or a hub 5xx: typed transient, the caller retries
-		return &api.Error{Code: api.ErrDaemonHubUnavailable,
+		return nil, &api.Error{Code: api.ErrDaemonHubUnavailable,
 			Detail: fmt.Sprintf("%s: work-item probe failed (not claiming; retry later): %v", wi, perr)}
 	}
 	if probe == nil || probe.ProjectName == "" {
-		return fmt.Errorf("runtime: %s: work-item probe answered no project (not claiming)", wi)
+		return nil, fmt.Errorf("runtime: %s: work-item probe answered no project (not claiming)", wi)
 	}
 	wcfg, werr := r.LoadWorkspace(probe.ProjectName)
 	if werr != nil {
-		return werr
+		return nil, werr
 	}
 	// polyforge#175: a bundle whose candidates are not `<harness>:<model>`
 	// is a local defect too — refuse before the claim so the work item
 	// stays queued (startClaimed re-checks as the backstop).
 	if probe.BundleName != nil {
 		if berr := r.CheckBundle(wi, *probe.BundleName); berr != nil {
-			return berr
+			return nil, berr
 		}
 	}
 	// B1: the claim's idempotency key AND the session secret are
@@ -692,10 +746,10 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 	// adopted instead of orphaned.
 	sessionID, key, replay, err := r.claimIntent(wi)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := r.noteClaiming(wi, sessionID, key, manual); err != nil {
-		return fmt.Errorf("runtime: %s: claiming journal write failed (refusing to claim): %w", wi, err)
+		return nil, fmt.Errorf("runtime: %s: claiming journal write failed (refusing to claim): %w", wi, err)
 	}
 	req := api.SessionClaimRequest{
 		WorkItemID:     wi,
@@ -711,14 +765,14 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 				// is open at the hub under the secret we hold. Dropping
 				// the journal would orphan it: end it blocked instead
 				// (abandonClaim keeps the entry until the close lands).
-				return r.abandonClaim(&job{wi: wi, sessionID: sessionID}, wi, err,
+				return nil, r.abandonClaim(&job{wi: wi, sessionID: sessionID}, wi, err,
 					"the replayed claim of an open session was refused: "+err.Error())
 			}
 			// the hub answered and refused: the claim never opened,
 			// nothing can dangle — drop the journal entry so neither a
 			// retry nor a restart replays a dead intention.
 			r.clearClaiming(wi)
-			return err
+			return nil, err
 		}
 		// Transport loss, timeout or a hub 5xx: the claim MAY have been
 		// committed with the answer lost. The journal entry (the only
@@ -726,10 +780,10 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 		// transient, so the dispatcher requeues with backoff; the retry
 		// replays the same claim (claimIntent), and a restart in between
 		// replays it from the journal (resumeClaiming).
-		return &api.Error{Code: api.ErrDaemonHubUnavailable,
+		return nil, &api.Error{Code: api.ErrDaemonHubUnavailable,
 			Detail: fmt.Sprintf("%s: claim answer lost (claiming journal kept; the retry replays the same claim): %v", wi, err)}
 	}
-	return r.startClaimed(ctx, wi, sessionID, resp, wcfg, manual)
+	return r.claimPlaceholder(ctx, wi, sessionID, resp, wcfg, manual)
 }
 
 // claimRefused reports whether a SessionClaim error is the hub's own
@@ -788,6 +842,20 @@ func (r *Runtime) claimIntent(wi string) (sessionID, key string, replay bool, er
 // slug-built push remote answers 404) and a glob character. The submitted
 // spelling is registered as an alias so lookups by it still resolve.
 func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *api.SessionClaimResponse, wcfg *workspace.Config, manual []string) error {
+	j, err := r.claimPlaceholder(ctx, wi, sessionID, resp, wcfg, manual)
+	if err != nil {
+		return err
+	}
+	return r.runClaim(ctx, wi, j, false)
+}
+
+// claimPlaceholder is the locked post-claim bookkeeping (opMu held): the
+// canonical id, the replaced paused record, the manual models, the job
+// itself, its capsule placement and the per-step compose — then the job
+// enters the table as the CLAIMING placeholder (B-8) with the context
+// its clone/materialize runs under. Every refusal here compensates
+// (abandonClaim) before any placeholder exists.
+func (r *Runtime) claimPlaceholder(ctx context.Context, wi, sessionID string, resp *api.SessionClaimResponse, wcfg *workspace.Config, manual []string) (*job, error) {
 	c := resp.Claim
 	// canonical id resolution (F2): the claim answer's work item is the
 	// authority; the claim's own WorkItemID and the answered record's ID
@@ -812,7 +880,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		// stale.
 		if existing.state != StatePaused {
 			r.clearClaiming(wi)
-			return fmt.Errorf("runtime: %s already active (state %s)", id, existing.state)
+			return nil, fmt.Errorf("runtime: %s already active (state %s)", id, existing.state)
 		}
 		r.dropJob(existing)
 		// the alias registered above died with the record; re-note it so
@@ -827,7 +895,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		// the server computed a different fingerprint for our secret: the
 		// answer belongs to another session (a stale idempotency cache on
 		// the server side). Refuse rather than adopt someone else's claim.
-		return fmt.Errorf("runtime: %s: claim answer fingerprint %s does not match this session (%s)", id, c.SessionFingerprint, fp)
+		return nil, fmt.Errorf("runtime: %s: claim answer fingerprint %s does not match this session (%s)", id, c.SessionFingerprint, fp)
 	}
 	// The manual `pf submit --models` list is daemon-local: a submit that
 	// carries one records it under the daemon's data dir; a re-claim
@@ -838,24 +906,6 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		r.saveManualModels(id, manual)
 	} else {
 		manual = r.loadManualModels(id)
-		if len(manual) > 0 {
-			if _, nerr := workspace.NormalizeModels(manual); nerr != nil {
-				// polyforge#175: a list recorded before the candidate
-				// format (bare ids) can never dispatch; keeping it would
-				// block every re-claim of this work item. Drop it loudly
-				// and fall back to the yaml/bundle chain.
-				fmt.Fprintf(os.Stderr, "runtime: %s: dropping the recorded pf submit --models list %v: %v — the yaml/bundle chain governs (resubmit with --models <harness>:<model>,... to pin one)\n", id, manual, nerr)
-				if r.cfg.EventTap != nil {
-					r.cfg.EventTap(id, EvManualModelsDropped, map[string]any{
-						"models": manual,
-						"note":   "recorded pf submit --models list is not <harness>:<model> (polyforge#175); dropped, the yaml/bundle chain governs",
-						"error":  nerr.Error(),
-					})
-				}
-				r.clearManualModels(id)
-				manual = nil
-			}
-		}
 	}
 	j := &job{
 		wi:                 id,
@@ -863,7 +913,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		slug:               resp.WorkItem.Slug,
 		sessionID:          sessionID,
 		sessionFingerprint: fp,
-		state:              StateRunning,
+		state:              StateClaiming,
 		git: gitops.Opts{
 			WorkItemID: id,
 			// §1.6 fencing-on-use backup layer: the PUBLIC fingerprint.
@@ -891,7 +941,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	capDir, rerr := r.capsuleDirForProject(j.project, api.PathName(j.slug, id))
 	if rerr != nil {
 		err2 := unmappedProjectError(j.project)
-		return r.abandonClaim(j, wi, err2, err2.Detail)
+		return nil, r.abandonClaim(j, wi, err2, err2.Detail)
 	}
 	j.capsuleDir = capDir
 	j.git.CapsuleDir = capDir
@@ -900,21 +950,56 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	// polyforge#79: the workspace yaml was loaded and validated BEFORE the
 	// claim (Start / the journal replay); compose the per-step candidates
 	// for the claimed project from that snapshot.
-	j.workspaceYaml = wcfg
 	// polyforge#175: a bundle whose candidates are not `<harness>:<model>`
 	// (or that still declares a `harness` key) is a load error naming the
 	// file and the step; the claim ends blocked with it.
 	fm, ferr := r.readBundleFrontmatter(j.bundleName)
 	if ferr != nil {
-		return r.abandonClaim(j, wi, ferr, ferr.Error())
+		return nil, r.abandonClaim(j, wi, ferr, ferr.Error())
 	}
 	j.stepCandidates = workspace.ComposeCandidates(fm, wcfg, j.project, j.manualModels)
 
-	if err := r.prepareCapsule(j); err != nil {
-		return r.abandonClaim(j, wi, err, "prepare capsule: "+err.Error())
+	cctx, cancel := context.WithCancel(ctx)
+	j.claim = &claimLane{ctx: cctx, cancel: cancel, done: make(chan struct{}), answer: c}
+	r.mu.Lock()
+	r.jobs[id] = j
+	aborted := r.claimsAborted
+	r.mu.Unlock()
+	if aborted {
+		cancel() // a shutdown latched while this claim ran: do not even clone
 	}
-	if err := r.verifySealedHead(j, c); err != nil {
-		return r.abandonClaim(j, wi, err, err.Error())
+	return j, nil
+}
+
+// runClaim carries a CLAIMING job to a live agent. The capsule clone, the
+// sealed-head guard and the materialize run under the claim's own
+// context; with unlocked set the caller does NOT hold opMu and runClaim
+// takes it only to settle (Start, B-8) — otherwise the caller holds it
+// throughout (the restart's journal replay).
+func (r *Runtime) runClaim(ctx context.Context, wi string, j *job, unlocked bool) error {
+	note, sceneErr := r.claimScene(j)
+	if unlocked {
+		r.opMu.Lock()
+		defer r.opMu.Unlock()
+	}
+	return r.finishClaim(ctx, wi, j, sceneErr, note)
+}
+
+// claimScene lays the claimed capsule out: clone (or reuse this
+// session's own husk), the cross-daemon sealed-head guard, the spawn
+// counter seed and the materialize (task-repo clones included). It runs
+// without opMu on Start's lane and touches nothing but this job's own
+// scene. A failure answers the error and the close note.
+func (r *Runtime) claimScene(j *job) (note string, err error) {
+	ctx := j.claim.ctx
+	if err := ctx.Err(); err != nil {
+		return err.Error(), err
+	}
+	if err := r.prepareCapsule(ctx, j); err != nil {
+		return "prepare capsule: " + err.Error(), err
+	}
+	if err := r.verifySealedHead(j, j.claim.answer); err != nil {
+		return err.Error(), err
 	}
 	// B2 spawn_n source: a FRESHLY CLAIMED capsule may carry another
 	// session's spawn journal (the re-claim/attach clone path — the
@@ -932,8 +1017,61 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		if errors.As(err, &ae) && ae.Code == api.ErrDaemonSpawnFail && ae.Detail != "" {
 			note = ae.Detail
 		}
-		return r.abandonClaim(j, wi, err, note)
+		return note, err
 	}
+	return "", nil
+}
+
+// finishClaim settles a CLAIMING job (opMu held). In order: a close the
+// operator requested meanwhile is honoured (closeClaim); a shutdown
+// (AbortClaims, or the start's own context ending) DEFERS the claim — the
+// placeholder goes, the claiming-journal entry stays, and the next daemon
+// start replays it, so a cancelled clone never turns the work item
+// blocked; a scene failure is the D5 blocked compensation; otherwise the
+// engine starts and the job turns RUNNING.
+func (r *Runtime) finishClaim(ctx context.Context, wi string, j *job, sceneErr error, note string) error {
+	cl := j.claim
+	var closeErr error
+	defer func() {
+		cl.cancel()
+		j.mu.Lock()
+		cl.closeErr = closeErr
+		j.mu.Unlock()
+		close(cl.done)
+	}()
+	j.mu.Lock()
+	closeReq := cl.closeReq
+	j.mu.Unlock()
+	if closeReq != "" {
+		// the close's own outcome goes to the Stop that asked for it; the
+		// start answers the settled close either way (never a retry: a
+		// failed session-end is the blocked-close retry's business)
+		closeErr = r.closeClaim(wi, j, closeReq)
+		return fmt.Errorf("%w: %s (%s)", ErrClaimClosed, j.wi, closeReq)
+	}
+	if r.abortedClaims() || ctx.Err() != nil {
+		r.dropJob(j)
+		fmt.Fprintf(os.Stderr, "runtime: %s: claim deferred by the shutdown (claiming journal kept; the next start replays it)\n", j.wi)
+		return claimDeferredError(wi)
+	}
+	if sceneErr != nil {
+		r.dropJob(j)
+		return r.abandonClaim(j, wi, sceneErr, note)
+	}
+	if r.jobOf(j.wi) != j {
+		// defensive: nothing but finishClaim drops a placeholder, but an
+		// agent must never be installed for a job the table no longer
+		// holds — end the session blocked instead.
+		err := fmt.Errorf("runtime: %s: the claim's placeholder left the job table before its agent started", j.wi)
+		return r.abandonClaim(j, wi, err, err.Error())
+	}
+	return r.installClaim(ctx, wi, j)
+}
+
+// installClaim starts the execution engine for a materialized CLAIMING
+// job and turns it RUNNING (opMu held).
+func (r *Runtime) installClaim(ctx context.Context, wi string, j *job) error {
+	id := j.wi
 	// v2: the Go driver replaces the WI-Agent spawn. The daemon binds
 	// bridge.Start as AgentStarter at assembly; the driver owns the step
 	// state machine from here on. There is no second engine to fall back
@@ -942,6 +1080,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	starter := r.cfg.AgentStarter
 	if starter == nil {
 		err2 := fmt.Errorf("runtime misassembly: no execution engine bound (Config.AgentStarter is nil) — the legacy in-package WI-Agent engine was deleted (polyforge#106); the daemon binds the driver bridge starter unconditionally at assembly")
+		r.dropJob(j)
 		return r.abandonClaim(j, wi, err2, err2.Error())
 	}
 	{
@@ -969,6 +1108,7 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 			StepCandidates: j.stepCandidates,
 		})
 		if err2 != nil {
+			r.dropJob(j)
 			return r.abandonClaim(j, wi, err2, "driver start: "+err2.Error())
 		}
 		// Bind the handle as the job's agent so the supervision and answer
@@ -987,9 +1127,9 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 		j.agentStartedAt = h.StartedAt()
 		j.mu.Unlock()
 	}
-	r.mu.Lock()
-	r.jobs[id] = j
-	r.mu.Unlock()
+	if err := j.transition(StateRunning); err != nil {
+		return err // unreachable: only finishClaim (opMu held) leaves CLAIMING
+	}
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", id, err)
 	}
@@ -1045,10 +1185,11 @@ func (r *Runtime) LoadWorkspace(project string) (*workspace.Config, error) {
 	return wcfg, nil
 }
 
-// EvManualModelsDropped is the runtime event of a recorded manual
-// `--models` list dropped at re-claim because it predates the
-// `<harness>:<model>` format (polyforge#175).
-const EvManualModelsDropped = "manual_models_dropped"
+// EvClaimPausedEndedBlocked is the runtime event of a pf pause that
+// landed while the claim was still materializing (B-8): there is no
+// scene to retain a paused record for, so the session ended blocked and
+// `pf resume` re-claims the work item.
+const EvClaimPausedEndedBlocked = "claim_paused_ended_blocked"
 
 // CheckBundle is the polyforge#175 pre-claim bundle read: the installed
 // bundle's candidates must all be `<harness>:<model>` (and it may carry
@@ -1058,6 +1199,12 @@ const EvManualModelsDropped = "manual_models_dropped"
 func (r *Runtime) CheckBundle(wi, bundle string) error {
 	if bundle == "" {
 		return nil
+	}
+	if bundle == workflow.SharedDir {
+		return &api.Error{
+			Code:   api.ErrDaemonWorkspaceYaml,
+			Detail: fmt.Sprintf("the workflow bundle of %s refused the claim before it was made (the work item stays queued): %q holds the shared step definitions and is not a workflow bundle", wi, workflow.SharedDir),
+		}
 	}
 	if _, ferr := r.readBundleFrontmatter(bundle); ferr != nil {
 		return &api.Error{
@@ -1154,7 +1301,7 @@ func (r *Runtime) verifySealedHead(j *job, c api.SessionClaim) error {
 //	  crashed-Start husk (or attach-resume scene): reuse in place;
 //	anything else (another session's scene, a sealed close, a pre-v1.5
 //	  capsule with no marker) → quarantine, never reuse.
-func (r *Runtime) prepareCapsule(j *job) error {
+func (r *Runtime) prepareCapsule(ctx context.Context, j *job) error {
 	o := j.git
 	pointer := filepath.Join(o.CapsuleDir, ".git")
 	if isRegularFile(pointer) && dirExists(o.GitDir) &&
@@ -1167,19 +1314,7 @@ func (r *Runtime) prepareCapsule(j *job) error {
 	// together, so the fresh clone can never meet a previous session's
 	// HEAD/index (a stale git-dir reused under a fresh worktree made
 	// every later push non-fast-forward).
-	//
-	// A capsule claimed before the readable naming (polyforge#144) sits at
-	// the id-named sibling capsules/<wi> with the same id-keyed git-dir:
-	// on a re-claim into capsules/<project>-<seq> that old worktree and
-	// the git-dir are the unit, so they move aside together.
-	gitDir := o.GitDir
-	if old := filepath.Join(filepath.Dir(o.CapsuleDir), j.wi); old != o.CapsuleDir && dirExists(old) {
-		if err := quarantineCapsule(old, gitDir); err != nil {
-			return err
-		}
-		gitDir = ""
-	}
-	if err := quarantineCapsule(o.CapsuleDir, gitDir); err != nil {
+	if err := quarantineCapsule(o.CapsuleDir, o.GitDir); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(o.GitDir), 0o755); err != nil {
@@ -1194,7 +1329,7 @@ func (r *Runtime) prepareCapsule(j *job) error {
 		return &api.Error{Code: api.ErrDaemonCapsuleClone,
 			Detail: fmt.Sprintf("capsule clone failed: no remote URL is configured for %s — aihub always supplies one at claim; refusing a local init", j.wi)}
 	}
-	if err := gitops.Clone(o); err != nil {
+	if err := gitops.Clone(ctx, o); err != nil {
 		// aihub creates the bare repo at claim, so a clone failure is
 		// never "nothing published yet": refuse loudly (the caller
 		// abandons the claim) rather than init locally and restart the
@@ -1277,7 +1412,7 @@ func quarantineCapsule(capsuleDir, gitDir string) error {
 // injected-failure test).
 var renameFn = os.Rename
 
-// materialize lays out the capsule: workflows/, agents/,
+// materialize lays out the capsule: workflows/,
 // capsule.json, session.json, .gitignore and the runtime-state/ tree.
 // The bundle is materialized as ONE atomic set with a completion marker
 // (F7, materialize.go; no digest verification — the digest chain is
@@ -1286,7 +1421,7 @@ var renameFn = os.Rename
 // written, so the recorded baselines are the true claim-time SHAs.
 func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	for _, d := range []string{
-		capsule.DirAgents, capsule.DirArtifacts, capsule.DirLogs, capsule.DirRepos,
+		capsule.DirArtifacts, capsule.DirLogs, capsule.DirRepos,
 		capsule.DirRuntimeState, capsule.DirSession, capsule.DirWorkflows,
 		filepath.Join(capsule.DirLogs, "session"),
 	} {
@@ -1358,8 +1493,8 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	// plus a notice, never a failed spawn (see recall.go).
 	r.writeRecalledMemories(j)
 	// F7: the bundle copy is ONE atomic set with a completion marker
-	// (materialize.go): the bundle lands under workflows/<bundle> and
-	// agents/, and sync/materialized.json gates every later consumer.
+	// (materialize.go): the bundle lands under workflows/<bundle>, and
+	// sync/materialized.json gates every later consumer.
 	return r.materializeBundle(j)
 }
 
@@ -1467,14 +1602,156 @@ func copyTree(src, dst string) error {
 // with its reason) and the close is retried in the background
 // (retrySeal) — and by a restart's finisher if the daemon stops first —
 // never a silent half-seal.
+//
+// A job still CLAIMING (B-8: its capsule clone/materialize runs outside
+// opMu) has no agent and no scene to seal: the close cancels the clone
+// and waits for the claim lane to settle it (closeClaim) — opMu is not
+// held while waiting.
 func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 	r.opMu.Lock()
-	defer r.opMu.Unlock()
 	j := r.resolveJob(wi)
 	if j == nil {
+		r.opMu.Unlock()
 		return fmt.Errorf("runtime: %s: no active job", wi)
 	}
+	if done := j.requestClaimClose(reason); done != nil {
+		r.opMu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return fmt.Errorf("runtime: %s: close requested during the claim; still settling: %w", j.wi, ctx.Err())
+		}
+		j.mu.Lock()
+		err := j.claim.closeErr
+		j.mu.Unlock()
+		return err
+	}
+	defer r.opMu.Unlock()
 	return r.stopOp(ctx, j, reason, false, "")
+}
+
+// requestClaimClose records a close on a CLAIMING job and cancels its
+// clone/materialize; it answers the channel that closes once the claim
+// lane settled, or nil when the job is not CLAIMING. The first request
+// wins. Caller holds opMu (so the state cannot leave CLAIMING meanwhile).
+func (j *job) requestClaimClose(reason string) <-chan struct{} {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.state != StateClaiming || j.claim == nil {
+		return nil
+	}
+	if j.claim.closeReq == "" {
+		j.claim.closeReq = reason
+	}
+	j.claim.cancel()
+	return j.claim.done
+}
+
+// closeClaim ends a CLAIMING job's session on the operator's request
+// (opMu held): the agent never started and nothing was produced, so
+// there is no seal push — the session is ended with the requested
+// verdict and the placeholder dropped. A pause has no retained record to
+// attach to (no capsule was materialized for it), so it closes BLOCKED:
+// the session is cleared and `pf resume` re-claims the work item. A
+// failed close is never left dangling: the durable blocked-close retry
+// takes it (the claiming-journal entry stays until the hub accepts).
+func (r *Runtime) closeClaim(wi string, j *job, reason string) error {
+	r.dropJob(j)
+	status := reason
+	note := "closed by the operator while the claim was materializing (the agent never started)"
+	if reason == protocol.FinishPaused {
+		status = api.StatusBlocked
+		note = "paused by the operator while the claim was materializing (the agent never started); pf resume re-claims it"
+		if r.cfg.EventTap != nil {
+			r.cfg.EventTap(j.wi, EvClaimPausedEndedBlocked, map[string]any{
+				"session_fingerprint": j.sessionFingerprint,
+				"note":                note,
+			})
+		}
+	}
+	// The (partly) materialized scene never ran an agent and belongs to a
+	// session that ends here: move it aside now rather than leave it for
+	// the next claim's prepareCapsule to find.
+	if err := quarantineCapsule(j.capsuleDir, j.git.GitDir); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: quarantine of the closed claim's capsule failed (scene left in place): %v\n", j.wi, err)
+	}
+	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
+		SessionID: j.sessionID,
+		Status:    status,
+		Note:      note,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: session-end(%s) of the claim failed (claiming entry kept; retrying a blocked close): %v\n", j.wi, status, err)
+		r.retryClaimEnd(wi, j.wi, j.sessionID, note)
+		return fmt.Errorf("runtime: %s: the claim was stopped but its session-end failed (retrying a blocked close in the background): %w", j.wi, err)
+	}
+	r.clearClaiming(wi)
+	if status != api.StatusBlocked {
+		r.clearManualModels(j.wi)
+	}
+	return nil
+}
+
+func (r *Runtime) abortedClaims() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.claimsAborted
+}
+
+// claimDeferredError is the typed answer of a start the shutdown stopped
+// (DAEMON-410): nothing turned blocked; a claim that landed stays in the
+// claiming journal and the next daemon start replays it.
+// It unwraps to that *api.Error, so the faces answer it as such.
+func claimDeferredError(wi string) error {
+	return &claimDeferred{&api.Error{Code: api.ErrDaemonGone,
+		Detail: fmt.Sprintf("%s: the daemon is shutting down; the start is deferred (a landed claim stays in the claiming journal and resumes at the next start)", wi)}}
+}
+
+type claimDeferred struct{ ae *api.Error }
+
+func (e *claimDeferred) Error() string { return e.ae.Error() }
+func (e *claimDeferred) Unwrap() error { return e.ae }
+
+// ErrClaimClosed is the Start answer of a claim an operator close (Stop
+// during CLAIMING) settled: the start is over and must not be retried.
+var ErrClaimClosed = errors.New("runtime: the claim was closed by the operator before its agent started")
+
+// IsClaimDeferred reports whether a Start error is the shutdown deferral.
+func IsClaimDeferred(err error) bool {
+	var cd *claimDeferred
+	return errors.As(err, &cd)
+}
+
+// AbortClaims is the shutdown's first runtime step (B-8): latch so no new
+// Start claims, cancel every CLAIMING job's clone/materialize, and wait —
+// bounded by ctx — for those claims to settle. A cancelled claim is
+// deferred, never blocked: its journal entry stays for the next daemon
+// start. Only claims that already sit CLAIMING are waited for: a Start
+// still queued on opMu (or on a hub call before its claim) defers itself
+// at the latch check and is never waited on, so a long close holding
+// opMu cannot eat the shutdown budget. opMu is not taken here.
+func (r *Runtime) AbortClaims(ctx context.Context) {
+	r.mu.Lock()
+	r.claimsAborted = true
+	var lanes []*claimLane
+	for _, j := range r.jobs {
+		j.mu.Lock()
+		if j.state == StateClaiming && j.claim != nil {
+			lanes = append(lanes, j.claim)
+		}
+		j.mu.Unlock()
+	}
+	r.mu.Unlock()
+	for _, cl := range lanes {
+		cl.cancel()
+	}
+	for i, cl := range lanes {
+		select {
+		case <-cl.done:
+		case <-ctx.Done():
+			fmt.Fprintf(os.Stderr, "runtime: shutdown: %d claim(s) still settling at the wait's end\n", len(lanes)-i)
+			return
+		}
+	}
 }
 
 // supersedeOp is the OBSuperseded response (v1.5 M4 + m3): the periodic
@@ -1819,20 +2096,4 @@ func (r *Runtime) CanonicalID(wi string) string {
 		return id
 	}
 	return wi
-}
-
-// CapsuleDirFor returns the capsule directory of a WI: the live job's
-// own recorded dir (routed by its project at claim time, polyforge#113);
-// "" when the WI holds no live job — a route caller for a non-live WI
-// has no capsule to address.
-func (r *Runtime) CapsuleDirFor(wi string) string {
-	id := r.Resolve(wi)
-	if id == "" {
-		id = wi
-	}
-	j := r.jobOf(id)
-	if j == nil {
-		return ""
-	}
-	return j.capsuleDir
 }

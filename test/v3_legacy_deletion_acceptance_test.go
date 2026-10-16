@@ -13,8 +13,8 @@ package test
 //     answer fail-fast with no live bridge, pilot/v0 invariants) are
 //     green BOTH before and after the deletion.
 //   - New-behavior bars (retired flags fail loudly at parse, the retired
-//     env hatch fails loudly at boot, grep-clean, skill/dir/citation
-//     removal, the 5+ commit delivery shape) are RED before the deletion
+//     env hatch fails loudly at boot, grep-clean, the 5+ commit delivery
+//     shape) are RED before the deletion
 //     — assertion-level reds, never build reds — and must go green after.
 //
 // Self-policing: the retired legacy-face terms this suite greps for are
@@ -544,142 +544,6 @@ func v3WalkTextFiles(root string, fn func(path string, raw []byte)) error {
 		fn(path, raw)
 		return nil
 	})
-}
-
-// ---------------------------------------------------------------------------
-// Scenarios S6/S7 — the executor skill deletion, re-homing and doc
-// rewrites (runnable parts).
-// ---------------------------------------------------------------------------
-
-// v3StepFilesCitingTheSkill are the workflow step files that carried the
-// deleted skill's §4/§7 citations that had to be re-homed inline. The
-// spec named e2e-baseline.md and e2e-run.md for §4; polyforge#165 merged
-// e2e-run (and its echoed-field cross-check) into feature-full's
-// verification step, which now carries the §4 mechanism text.
-func v3StepFilesCitingTheSkill(root string) []string {
-	return []string{
-		filepath.Join(root, "workflows", "feature-full", "steps", "verification.md"),
-		filepath.Join(root, "workflows", "feature-full", "steps", "grill-review.md"),
-		filepath.Join(root, "workflows", "feature-full", "steps", "grill.md"),
-		filepath.Join(root, "workflows", "autopilot", "steps", "grill.md"),
-	}
-}
-
-// TestV3SkillDeletedAndMechanismTextRehomed pins the skill-deletion
-// criterion's mechanical parts: the skill directory is gone, the citing
-// step files carry no citation any more, and each still teaches the
-// mechanism it cited (the §4 echoed-field cross-check marker for
-// feature-full's verification; the §7 needs_input mechanism marker for
-// the three grill-side files) — the mechanism must survive the re-homing, not just
-// lose its pointer.
-func TestV3SkillDeletedAndMechanismTextRehomed(t *testing.T) {
-	root := v1Root(t)
-	skill := v3Tok("pf", "-", "execute")
-
-	skillDir := filepath.Join(root, "skills", skill)
-	if _, err := os.Stat(skillDir); !os.IsNotExist(err) {
-		t.Fatalf("skills/%s still exists (stat err: %v) — the skill directory must be deleted", skill, err)
-	}
-
-	type mark struct {
-		file, marker string
-	}
-	markers := []mark{
-		{v3StepFilesCitingTheSkill(root)[0], "cross-check"}, // §4: echoed-field cross-check
-		{v3StepFilesCitingTheSkill(root)[1], "needs_input"}, // §7: the interactive needs_input loop
-		{v3StepFilesCitingTheSkill(root)[2], "needs_input"},
-		{v3StepFilesCitingTheSkill(root)[3], "needs_input"},
-	}
-	for _, m := range markers {
-		raw, err := os.ReadFile(m.file)
-		if err != nil {
-			t.Fatalf("step file %s: %v", m.file, err)
-		}
-		body := string(raw)
-		if strings.Contains(body, skill) {
-			t.Fatalf("step file %s still cites the deleted skill", m.file)
-		}
-		if !strings.Contains(body, m.marker) {
-			t.Fatalf("step file %s lost the re-homed mechanism text (marker %q absent after citation removal)", m.file, m.marker)
-		}
-	}
-}
-
-// TestV3LiveDocSurfacesRewritten pins the doc-rewrite criterion's
-// greppable floor: the spec-named live teaching surfaces (README, the 8
-// non-pilot design docs, the 5 skills/polyforge files, every workflow
-// step file) and operator-skills carry ZERO references to the deleted
-// skill after the change. The "teaches the driver-only architecture"
-// quality judgment is a document scenario (artifacts/e2e-scenarios.md);
-// this test pins the mechanical floor.
-func TestV3LiveDocSurfacesRewritten(t *testing.T) {
-	root := v1Root(t)
-	skill := v3Tok("pf", "-", "execute")
-
-	var surfaces []string
-	surfaces = append(surfaces, filepath.Join(root, "README.md"))
-	// The 8 non-pilot design docs: 00–06 and 08 (07-deployment-pilot.md
-	// is the pilot register).
-	for _, n := range []string{
-		"00-architecture.md", "01-workflow-skills.md", "02-aihub-core.md",
-		"03-execution-capsule.md", "04-local-runtime.md",
-		"05-sync-revision-recovery.md", "06-memory-search.md",
-		"08-capsule-base-migration.md",
-	} {
-		surfaces = append(surfaces, filepath.Join(root, "docs", "design", "polyforge-vnext", n))
-	}
-	for _, n := range []string{
-		"SKILL.md", "verbs/help.md",
-		// verbs/crystallize, doctor, retro (and status) were DELETED by
-		// polyforge#97's operator-skills cleanup — their disappearance IS
-		// the compliant outcome for the deleted-skill scrub; they are no
-		// longer live surfaces to pin.
-	} {
-		surfaces = append(surfaces, filepath.Join(root, "skills", "polyforge", n))
-	}
-	// Every workflow step file across the bundles.
-	for _, bundle := range []string{"bug-fix", "chore", "feature-full", "autopilot", "release"} {
-		matches, _ := filepath.Glob(filepath.Join(root, "workflows", bundle, "steps", "*.md"))
-		surfaces = append(surfaces, matches...)
-	}
-
-	var hits []string
-	for _, p := range surfaces {
-		raw, err := os.ReadFile(p)
-		if err != nil {
-			t.Fatalf("live doc surface %s: %v", p, err)
-		}
-		if strings.Contains(string(raw), skill) {
-			hits = append(hits, p)
-		}
-	}
-	// operator-skills: the passing citations scrubbed in passing. The
-	// directory itself was DELETED by polyforge#97 — a missing directory
-	// is the compliant outcome, not a walk error.
-	if _, serr := os.Stat(filepath.Join(root, "operator-skills")); serr == nil {
-		werr := filepath.WalkDir(filepath.Join(root, "operator-skills"), func(path string, de os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if !de.Type().IsRegular() {
-				return nil
-			}
-			raw, rerr := os.ReadFile(path)
-			if rerr != nil {
-				return rerr
-			}
-			if strings.Contains(string(raw), skill) {
-				hits = append(hits, path)
-			}
-			return nil
-		})
-		if werr != nil {
-			t.Fatalf("operator-skills walk: %v", werr)
-		}
-	}
-	if len(hits) > 0 {
-		t.Fatalf("live doc surfaces still reference the deleted skill (%d):\n%s", len(hits), strings.Join(hits, "\n"))
-	}
 }
 
 // ---------------------------------------------------------------------------

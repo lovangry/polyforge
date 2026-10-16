@@ -163,7 +163,6 @@ func (info PIDInfo) Alive() bool {
 type StatusSink struct {
 	Primary  string
 	Fallback string
-	used     string
 }
 
 // Write replaces the file with one line per entry and answers the path
@@ -184,7 +183,6 @@ func (s *StatusSink) Write(lines []string) (string, error) {
 			}
 			continue
 		}
-		s.used = p
 		return p, nil
 	}
 	if firstErr == nil {

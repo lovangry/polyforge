@@ -1,7 +1,6 @@
 ---
 name: fix
 description: Remove the confirmed root cause - implement the change that eliminates the diagnosed condition, keep the build green, and encode the corrected behavior where the project expects tests.
-tools: [read, edit, bash]
 output:
   type: object
   required: [commits, build_status, root_cause_addressed, regression_test]
@@ -82,15 +81,3 @@ Emit the final JSON object per the schema above: every commit made (at least one
 schema rejects an empty list), the final build
 status, whether the root cause itself is addressed, and a prose summary for the next
 reader.
-
-## Handoff duty
-
-This step declares `handoff: true`. Before writing your result envelope:
-1. Write a handoff file at `artifacts/handoff-<step-id>.md` summarizing what
-   the next inherit step needs to know (decisions made, constraints
-   discovered, what was produced, where to find details).
-2. That path IS the contract: the next inherit step reads the file by the
-   path convention `artifacts/handoff-<step-id>.md`. There is no digest, no
-   byte count and no envelope field to fill in — the result envelope is the
-   minimal contract (outcome + output; needs_input adds question_id and
-   question), so write the file and leave the envelope lean.

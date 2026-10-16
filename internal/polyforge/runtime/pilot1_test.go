@@ -371,8 +371,7 @@ func TestSealNeverOverwritesStepOneTranscript(t *testing.T) {
 	initGitCapsule(t, j)
 	installOldAgent(t, sp, j)
 
-	t.Setenv("HOME", t.TempDir()) // the default harness session store
-	storeDir := filepath.Join(PiSessionsRootDefault(), piSessionDirName(j.capsuleDir))
+	storeDir := filepath.Join(r.cfg.StepAgentSessionsDir(), piSessionDirName(j.capsuleDir))
 	if err := os.MkdirAll(storeDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

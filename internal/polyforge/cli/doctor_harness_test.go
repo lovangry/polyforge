@@ -34,7 +34,11 @@ func TestClaudeHarnessCheck(t *testing.T) {
 		{"daemon down", steps, false, nil, "skip", "daemon is unreachable"},
 		{"older daemon", steps, true, map[string]HarnessStatus{}, "warn", "no harness status"},
 		{"binary missing", steps, true, map[string]HarnessStatus{"claude": {Bin: "claude"}}, "fail", "does not resolve"},
-		{"unverified version", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.Version, h.Verified = "9.9.9", false; return h }()}, "warn", "9.9.9 is not in the verified set"},
+		{"unverified version", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus {
+			h := ok
+			h.Version, h.Verified, h.MinVersion = "2.1.1", false, "2.1.296"
+			return h
+		}()}, "warn", "version 2.1.1 is older than 2.1.296 or unparsable"},
 		{"no credential variable", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.AuthTokenEnv = "unset"; return h }()}, "warn", "must live under the claude-config dir"},
 		{"base url set", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.BaseURLEnv = "set"; return h }()}, "warn", "ANTHROPIC_BASE_URL is set"},
 		{"settings token set", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus {

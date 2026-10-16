@@ -63,7 +63,7 @@ func TestStartStopEndToEnd(t *testing.T) {
 	// capsule layout materialized
 	for _, rel := range []string{
 		capsule.CapsuleJSON, capsule.SessionJSON, ".gitignore",
-		capsule.DirAgents, capsule.DirWorkflows, capsule.DirRuntimeState, capsule.DirSession,
+		capsule.DirWorkflows, capsule.DirRuntimeState, capsule.DirSession,
 	} {
 		if _, err := os.Stat(filepath.Join(capDir, filepath.FromSlash(rel))); err != nil {
 			t.Fatalf("materialized %s missing: %v", rel, err)

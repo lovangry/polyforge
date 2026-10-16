@@ -592,30 +592,3 @@ func jsonOrEmpty(v []string) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
-
-func rawString(raw map[string]any, key string) (string, bool) {
-	v, ok := raw[key]
-	if !ok {
-		return "", false
-	}
-	s, ok := v.(string)
-	return s, ok
-}
-
-func rawStrings(raw map[string]any, key string) ([]string, bool) {
-	v, ok := raw[key]
-	if !ok {
-		return nil, false
-	}
-	list, ok := v.([]any)
-	if !ok {
-		return nil, false
-	}
-	out := make([]string, 0, len(list))
-	for _, it := range list {
-		if s, ok := it.(string); ok {
-			out = append(out, s)
-		}
-	}
-	return out, true
-}

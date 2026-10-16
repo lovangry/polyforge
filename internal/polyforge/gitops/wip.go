@@ -47,6 +47,7 @@ package gitops
 // config, its object store) and never records untracked files.
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -643,6 +644,6 @@ func dropWIPRef(o Opts, env []string, ref string, credAdditions []string) {
 // refs/pf-wip/<name> into the task worktree at dir (a fresh daemon-made
 // clone, like FetchTaskRef) and answers the WIP commit SHA; ("", nil)
 // when the hub holds no WIP for this repo.
-func FetchTaskWIP(o Opts, dir, name string) (string, error) {
-	return fetchCarrierRef(o, dir, TaskWIPRefName(name))
+func FetchTaskWIP(ctx context.Context, o Opts, dir, name string) (string, error) {
+	return fetchCarrierRef(ctx, o, dir, TaskWIPRefName(name))
 }

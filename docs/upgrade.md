@@ -200,21 +200,24 @@ no default). The upgrade is always the deploy.sh window SQL described
 above — applied transactionally, probe-guarded and rolled back
 automatically by the same tool when the deploy fails.
 
-## Delivery notes (polyforge#149, audit subtraction C)
+## Externally visible changes of polyforge#149 (audit subtraction C)
 
-One row per deletion: the audit item, the commit (the message identifies
-the plan unit) and the externally visible change.
+The deletions themselves are in the commits (`git show aff1909 abd463c
+e34202a 146b053 1c5e7a3 0cde108 8919250 b267598`); what callers notice:
 
-| audit item | what was removed | externally visible change |
-|---|---|---|
-| **C1** — delivery ledger removed end-to-end | `core/ship_ledger.go` + its tests, the `wi_ship_ledger` DDL, the `POST /work-items/{id}/ship-ledger` route + `hRecordShipLedger` + `Server.Ships`, `api.ShipLedgerRequest/Entry`, `ErrDaemonShipLedger` (DAEMON-514), `aihubclient.RecordShipLedger`, the daemon Hub method and the ship-bridge record call (`git show aff1909`) | the ledger endpoint answers 404; the ship bridge no longer records anything — delivery truth is the git branch |
-| **C9** — terminate-blocked door removed whole-chain | the `POST /work-items/{id}/terminate-blocked` route + handler, `core.TerminateBlocked`, `aihubclient.TerminateBlockedWorkItem`, the `pf wrap --fail` blocked-specific CLI branch, the daemon parked-close terminate special case (`git show abd463c`) | blocked work items recover ONLY via continue (`pf resume`) or abandon (`pf cancel`); `pf wrap --fail` on a parked WI fails (no door) |
-| **C12** — session_owner removed | the `work_items.session_owner` DDL column and every core read/write/scan, the `SessionClaimRequest/AttachRequest/SessionClaim.Owner` wire fields, the `SessionSnapshot` view field, the CLI render owner display, the runtime Owner initializers (`git show e34202a`) | no session answer or view carries an owner field; the machine id (`session_machine`) stays |
-| **B9** — bundle digest chain removed, name kept | the `work_items.bundle_digest` DDL column, the create-request digest field, the `WorkItem/SessionClaim` digest fields, the `bundleRef` stand-in, the PATCH digest half + whitelist entry, every carrier `BundleDigest` field (capsule, bridge, daemon, driver, runtime) and materialize's verification branch (CAP-405) + `nameDerivedDigest`/`bundleEntries` (`git show 146b053`) | create/PATCH carry the name only; a PATCH body with a digest key is refused CORE-400; materialization never verifies digests |
-| dead-code (with C1/B9's schema halves) — dead tables, columns, endpoint, header | `core_meta`, `projects.scenario`/`identifier_hash`, `work_items.workflow_budget_baseline`, `api.WorkItem.BudgetBaseline`, the `memories/rebuild-index` route + `hRebuildIndex`, the `X-API-Key` fallback, the phantom "owner" role comment (`git show 1c5e7a3`) | a fresh database has none of the dead shapes; X-API-Key no longer authenticates (Bearer only); the memory rebuild runs at boot only |
-| waiting_on dead branches (kept-face of the rewind-fix Requirement) | only the `gate` and `runtime:*` branches of `validWaitingOn`; `owner` and `dependency:<slug>` stay live (`git show 0cde108`) | PATCH `waiting_on='gate'`/`'runtime:*'` is refused CORE-400; the optional cleanup SQL above is bounded to those values |
-| **D3** — goal limit counts characters | `MaxGoalBytes` → `MaxGoalRunes`; create and PATCH checks switch to rune counting (`git show 8919250`) | a 500-character CJK goal (1500 bytes) is accepted; 501 characters is refused |
-| **D5** — owner is the reporter, gate scope pinned | no production change (code was already reporter-based); behavior pinned by the new server-suite test (`git show b267598`) | the reporter may continue/abandon only; ForceEnd stays admin/maintainer (no widening) |
+- the `POST /work-items/{id}/ship-ledger` endpoint answers 404 (delivery
+  truth is the git branch);
+- blocked work items recover only via `pf resume` or `pf cancel`; `pf
+  wrap --fail` on a parked WI fails (the terminate-blocked door is gone);
+- no session answer or view carries an owner field (`session_machine`
+  stays);
+- create/PATCH carry the bundle name only; a PATCH body with a digest key
+  is refused CORE-400;
+- `X-API-Key` no longer authenticates (Bearer only); the memory index
+  rebuild runs at boot only;
+- PATCH `waiting_on='gate'` / `'runtime:*'` is refused CORE-400 (`owner`
+  and `dependency:<slug>` stay);
+- the goal limit counts characters (500), not bytes.
 
 ## Work machines: readable capsule directories and ship branches (polyforge#144)
 
@@ -240,7 +243,9 @@ into the new `capsules/<project>-<seq>` directory (cloned from its capsule
 chain, as every re-claim is); its old `capsules/<wi_id>` worktree and the
 id-keyed external git-dir `<data-dir>/git/<wi_id>.git` are moved aside
 together, as one unit, to `capsules/<wi_id>.quarantined.<ts>` and
-`git/<wi_id>.git.quarantined.<ts>` (never deleted). Apart from that
+`git/<wi_id>.git.quarantined.<ts>` (never deleted). (That one-time
+quarantine of the id-named sibling is gone since the v1→v2 compat
+cleanup — see "Compat shims removed" at the end.) Apart from that
 re-claim, the daemon never looks for an id-named directory again:
 `pf ship` and `pf watch` of a closed work item find only
 `<workspace>/capsules/<project>-<seq>`, and there is no "accept both
@@ -329,7 +334,6 @@ The workspace yaml is now keyed by **step id**, under a new top-level
 `steps:` section:
 
 ```yaml
-# Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
 steps:
   <project>:
     default:   { models: [...] }
@@ -345,9 +349,9 @@ see "Per-step harness" below); any other key is refused, naming it. YAML anchors
 
 **No backward compatibility — edit all three workspace files together
 with the deploy.** A file that still has the top-level `models:` section
-is refused at every claim (DAEMON-414: "top-level `models:` was replaced
-by `steps:` (polyforge#169) — move models.<project>.<key>: [...] to
-steps.<project>.<key>.models: [...] (see docs/upgrade.md)"), the work
+is refused at every claim (DAEMON-414: `unknown top-level key "models"
+(only `steps`)`; earlier versions added a migration hint, dropped by
+decision 2026-10-16 G10 once every workspace was rewritten), the work
 item stays queued, and `pf doctor` reports the same under `workspace
 yaml`. Deploying this version therefore requires rewriting osp-ws,
 gmi-ws and yf-ws's `.polyforge.yaml` (below) at the same time; until a
@@ -401,166 +405,21 @@ in autopilot).
 
 ### The three workspaces
 
-(These lists are the #169 rewrite; since polyforge#175 every candidate
-also needs its `pi:` / `claude:` prefix — see that section's rewrite.)
-
-All three declare only `default` and `code` today, in the old `models:`
-shape. Besides the shape change, the old `code:` (a kind) covered every
-kind:code step; as a step id it governs only the `code` step
-(feature-full, chore). To keep today's behaviour, give each old kind:code
-step id (`code`, `fix`, `repro`, `deliver`, `release`, `deploy`) the same
-list through a YAML anchor. Note that today the `code` list also
-overrides `release` and `deploy`'s own bundle pins
-(`[sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5]`); dropping
-those two keys lets the bundle pins govern instead. Replace each file's
-header precedence comment (it states the pre-#164 order `project <kind>
-> project default > workflow step model_candidates`) with the line below.
-
-osp-ws (`/root/code/aicoding/osp-ws/.polyforge.yaml`):
-
-```yaml
-# Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
-steps:
-  polyforge:
-    default: { models: &osp-default [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra] }
-    code: { models: &osp-code [sub2api-glm/glm-5.3, sub2api-glm/glm-5.3-flash, sub2api-claude/pi-claude-opus-5] }
-    fix: { models: *osp-code }
-    repro: { models: *osp-code }
-    deliver: { models: *osp-code }
-    release: { models: *osp-code }
-    deploy: { models: *osp-code }
-  pi:
-    default: { models: *osp-default }
-    code: { models: *osp-code }
-    fix: { models: *osp-code }
-    repro: { models: *osp-code }
-    deliver: { models: *osp-code }
-    release: { models: *osp-code }
-    deploy: { models: *osp-code }
-  tsshd:
-    default: { models: *osp-default }
-    code: { models: *osp-code }
-    fix: { models: *osp-code }
-    repro: { models: *osp-code }
-    deliver: { models: *osp-code }
-    release: { models: *osp-code }
-    deploy: { models: *osp-code }
-```
-
-gmi-ws (`/root/code/aicoding/gmi-ws/.polyforge.yaml`):
-
-```yaml
-# Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
-steps:
-  ieops:
-    default: { models: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra] }
-    code: { models: &gmi-code [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-    fix: { models: *gmi-code }
-    repro: { models: *gmi-code }
-    deliver: { models: *gmi-code }
-    release: { models: *gmi-code }
-    deploy: { models: *gmi-code }
-```
-
-(gmi-ws's code list equals the release bundle's own `release`/`deploy`
-pins, so dropping those two keys changes nothing there. Also remove its
-2026-10-14 header note that flash "stays eligible for lighter kinds via
-the other chains": kinds no longer exist; flash is eligible wherever a
-list naming it governs.)
-
-yf-ws (`/root/code/aicoding/yf-ws/.polyforge.yaml`):
-
-```yaml
-# Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
-steps:
-  yingfang:
-    default: { models: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5, sub2api-openai/gpt-6-astra] }
-    code: { models: &yf-code [sub2api-glm/glm-5.3-flash, sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-    fix: { models: *yf-code }
-    repro: { models: *yf-code }
-    deliver: { models: *yf-code }
-    release: { models: *yf-code }
-    deploy: { models: *yf-code }
-```
-
-(yf-ws's header also says "a project default overrides even steps that
-pin their own models" — untrue since polyforge#164; drop it with the old
-precedence comment.)
-
-Run `pf doctor` after the edit: `workspace yaml` must pass.
+The #169 rewrite of osp-ws, gmi-ws and yf-ws is superseded: use the
+prefixed lists in "Rewriting the three workspaces" under polyforge#175
+below (they carry both the `steps:` shape and the `pi:` / `claude:`
+prefixes). The precedence line for a file header is in the README's
+"Per-project model candidates" paragraphs.
 
 ## Per-step harness: pi or Claude Code (polyforge#159)
 
 > **Superseded in part by polyforge#175** — see "Model candidates name
-> their harness: `<harness>:<model>`" below. The `harness` key (yaml and
-> bundle), the separate harness chain, the id-shape compatibility rule
-> and the "model/harness mismatch" refusal described in this section
-> are **removed**: every candidate now carries its harness as a
-> mandatory `pi:` / `claude:` prefix, and a step's chain may cross
-> harnesses. What a claude step runs, its credentials and `claude_bin`
-> below still hold.
-
-A step can now run on **Claude Code** instead of pi. The choice is a
-second per-step property next to `models`, in the same `steps:` entries:
-
-```yaml
-# Models: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
-# Harness: steps.<project>.<step-id>.harness > bundle step harness > steps.<project>.default.harness > bundle defaults.harness > pi
-steps:
-  polyforge:
-    default: { models: [sub2api-glm/glm-5.3, sub2api-claude/pi-claude-opus-5] }
-    review:  { models: [claude-opus-5-5, claude-sonnet-5], harness: claude }
-```
-
-- `harness` is a plain string, `pi` or `claude` (closed set; anything
-  else — `claude-code`, a list, a number — refuses the claim with
-  DAEMON-414 naming `steps.<project>.<key>.harness`). Omitted everywhere
-  = pi: **no existing file needs an edit**, every step keeps running on
-  pi exactly as before.
-- An entry may carry `harness` alone (`fix: { harness: claude }`); its
-  model list then falls through the model chain as usual.
-- The two properties resolve **independently**, each down its own chain
-  (first present level wins). There is no per-work-item harness:
-  `pf submit --models` sets the candidates of every step, each step keeps
-  its own harness. A bundle may declare `harness` on a step or under
-  `defaults` (the shipped bundles do not).
-- Like the candidates, the harness is resolved at claim time and kept by
-  the daemon (state.json); a yaml edit governs the next claim, never an
-  in-flight work item.
-
-### Which models a harness can run (compatibility) — removed by polyforge#175
-
-Read off the model id, no registry:
-
-| harness | model ids it runs |
-|---|---|
-| `claude` | official Claude ids: a `claude-` prefix and no `/` (`claude-opus-5-5`, `claude-sonnet-5`); aliases such as `opus` / `sonnet` are not accepted |
-| `pi` | every other id — the `provider/model` form (`sub2api-glm/glm-5.3`, `anthropic/claude-…`) |
-
-One list may mix both kinds: each step walks only the ids its harness
-runs, in order, and the model fallback (D7: switch on auth / billing /
-unknown model, same-model retry on rate limit / 5xx) skips the others.
-A step whose harness runs **none** of a non-empty candidate list is a
-configuration error: it refuses every claim of the project with
-DAEMON-414 before anything is claimed (the work item stays queued),
-e.g.
-
-```
-model/harness mismatch: polyforge/bug-fix/review: harness claude (steps.polyforge.review.harness) cannot serve any of [sub2api-glm/glm-5.3, …] (steps.polyforge.default.models)
-```
-
-So setting `harness: claude` without giving the step claude ids is
-caught at once (above). An empty or absent list is not a mismatch: the
-CLI's own default model runs. A `pf submit --models` list is checked the
-same way against the work item's bundle at submit time (and, for a work
-item without a bundle at submit, at claim time).
-
-**Behavior change for bare `claude-…` ids.** Before #159 every id ran on
-pi; a bare `claude-…` id (no `provider/` prefix) in a list now routes to
-Claude Code. If such an id is the only candidate of a pi step, the claim
-is refused (above) unless the step's harness is `claude`; in a mixed list
-pi simply skips it. Provider-qualified ids (`anthropic/claude-…`,
-`sub2api-claude/…`) stay on pi.
+> their harness: `<harness>:<model>`" below. #159's `harness` key (yaml
+> and bundle), its separate harness chain, the id-shape compatibility
+> rule and the "model/harness mismatch" refusal are **removed**: a step
+> runs on Claude Code when its candidate carries the `claude:` prefix.
+> What a claude step runs, its credentials and `claude_bin` below still
+> hold.
 
 ### What a claude step runs
 
@@ -601,12 +460,13 @@ claude_bin = "/root/.local/bin/claude"     # default: claude on the daemon's PAT
 
 `pf doctor` adds a `harness claude` check whenever any step resolves to
 claude: the binary must resolve on the daemon's PATH (else fail); the
-version should be a verified one (2.1.296); when no credential is
+version should be at least the verified minimum (2.1.296 — newer
+passes, older or unparsable warns); when no credential is
 visible — neither the daemon env nor the claude-config
 `settings.json` env block (the daemon reports set/unset, never a
 value) — it warns too. Credential values are never shown. The check
 lists every claude step with the level its harness and models came
-from. `workspace yaml` now also runs the compatibility check above.
+from.
 
 ## CC harness auth + directory unification (polyforge#171, #159 closeout)
 
@@ -624,7 +484,8 @@ derive from one root.
   transcript sync, so the flag was renamed instead: the new daemon
   refuses the old value with the unknown-flag error.
 
-- `--harness-root` (env `POLYFORGE_HARNESS_ROOT`, default
+- `--harness-root` (env `POLYFORGE_HARNESS_ROOT` — removed since, see
+  "Daemon knobs move into cli.toml" at the end; default
   `<data-dir>`, higher than DataDir) is now the PARENT root of the
   three harness dirs:
 
@@ -777,21 +638,9 @@ projects is claimed on that machine. The five shipped bundles are
 already rewritten (every candidate `pi:` — they ran on pi before).
 
 In-flight work items are unaffected: their candidate lists were
-snapshotted at claim time in the daemon's `state.json`; a record written
-before this version (bare ids plus the #159 `step_harness`) is read with
-each bare id on that step's old harness (pi when none), keeping exactly
-the candidates the step walked before, so recovery continues. A
-`pf submit --models` list given before the upgrade to a work item that
-is later re-claimed on the same machine (the daemon keeps it in
-`manual-models.json`, e.g. `pf resume` of a blocked work item) still has
-bare ids: the re-claim drops it — one stderr line and a
-`manual_models_dropped` event name the list — and the step chains fall
-back to the yaml/bundle levels. To pin a manual chain again, submit the
-work item with a prefixed `--models` once it is queued. One edge
-case changes harness: an in-flight step whose #159 harness was `claude`
-but which had **no** candidate list (Claude Code's own default model)
-recovers on pi's default model — the new format cannot express "claude
-with its default model"; give such a step a `claude:` candidate.
+snapshotted at claim time in the daemon's `state.json`. (The read-compat
+for records and `--models` lists written before this version is gone
+since the v1→v2 compat cleanup — see "Compat shims removed" at the end.)
 
 ### Before / after
 
@@ -1055,7 +904,8 @@ polyforge artifacts still installed — the v1 aihub bridge as a pi package
 Claude skills (`using-polyforge`, `pf-*`) and v1 Claude plugins — and
 print one command line that first backs them up into
 `~/polyforge-v1-backup-<timestamp>/`, then removes them. Nothing is
-removed automatically. Restart the harness sessions afterwards.
+removed automatically. Restart the harness sessions afterwards. The
+check is migration hygiene and is removed at v3.0.
 
 ## Workspace runtime-artifact layout (polyforge#177)
 
@@ -1138,3 +988,120 @@ checkout, and the old name no longer exists there. Before deploying:
   the first claim. Let them finish before the upgrade, or cancel them and
   file again with `--bundle autopilot`.
 
+
+## Bundle simplification: shared step files and dead keys removed (decision 2026-10-16 G1/G10)
+
+**Shared step definitions (G1).** `deliver.md` now exists once, at
+`workflows/_shared/steps/deliver.md`. The driver reads a bundle's own
+`steps/<id>.md` when it has one and falls back to
+`workflows/_shared/steps/<id>.md` when it does not; the daemon copies
+`workflows/_shared/` into every new capsule beside the bundle. `_shared`
+is not a bundle: a work item bound to it is refused before the claim.
+**The `pf` binary and the workflows checkout must move together.** An
+older binary running against the new checkout cannot find the shared
+`deliver.md`, so every delivery lane fails at its `deliver` step.
+`tools/install.sh` swaps both together; do not update only the checkout
+under `release/current`.
+
+**Dead bundle keys removed (G10).** Step files no longer carry `tools:`.
+Seven steps whose handoff file nobody read no longer declare
+`handoff: true`. The release bundle's inert `rewind: 1/1` is gone. The
+evidence rule changed: the step id `verification` no longer implies
+`requires_command_evidence`. The four delivery bundles now declare it
+explicitly, so new claims behave as before.
+
+**Gap for work items claimed before this release:** when the same daemon
+recovers such a work item, it reuses that capsule's own copy of the old
+`workflow.md`, where `verification` does not declare the flag. Its
+verification step therefore no longer requires command evidence. Deploy
+when no claimed work item still has `verification` ahead of it (check
+with `pf queue` and `pf watch`), or accept that those few runs skip the
+evidence gate. A work item claimed fresh after the upgrade gets the new
+bundle and is not affected.
+
+## Compat shims removed (decision 2026-10-16 G5)
+
+The remaining v1→v2 / pre-#175 read-compat code is deleted ("v2 keeps
+no backward-compatibility code"). **Before upgrading a work machine,
+let every work item it holds finish, or at least close it**: `pf ops
+status` must list no job. A machine that still holds a record from
+before polyforge#175 or #144 fails it loudly instead of converting it:
+
+- a `state.json` record whose `step_candidates` are bare ids (pre-#175,
+  with or without the #159 `step_harness`): the ids are no longer
+  prefixed on read; the driver refuses to start the work item, naming
+  the candidate. Resubmit the work item.
+- a `pf submit --models` list recorded in `manual-models.json` before
+  #175 (bare ids): a re-claim no longer drops it (the
+  `manual_models_dropped` event is gone); the driver refuses it by name
+  and the claim ends blocked.
+  Resubmit with a prefixed `--models` list.
+- a `state.json` record without `capsule_dir`: restart no longer derives
+  a directory name from the slug; the work item is a missing capsule
+  (blocked, as any missing capsule).
+- a re-claim no longer looks for, or quarantines, an id-named
+  `capsules/<wi_id>` sibling from before #144; remove such leftovers by
+  hand.
+- capsules materialized by older daemons keep their (now unused)
+  `agents/` directory and the marker's `adapters` key; both are ignored
+  (decision 2026-10-16 G4).
+
+## Daemon knobs move into cli.toml (decision 2026-10-16 G2)
+
+The daemon is started only by `pf daemon ensure`, whose argv is fixed,
+so the daemon's tuning flags and `POLYFORGE_*` variables never reached a
+production daemon. Five knobs now live in a `[daemon]` table of
+`cli.toml`; the daemon reads it from its `--config` file (ensure's argv
+is unchanged). Precedence: an explicit daemon command-line flag
+(tests/dev) > the table > the built-in default.
+
+```toml
+[daemon]                              # after the flat keys
+step_timeout = "45m"                  # T, Go duration > 0
+stall_window = "10m"                  # N, non-zero; negative disables
+harness_root = "/srv/polyforge/h"     # absolute path
+operator_agent_dir = "/home/u/.pi/agent"  # absolute path
+max_concurrent_jobs = 6               # integer >= 1
+```
+
+- Every `pf` command, ensure and the daemon validate the table on load: a
+  bad value, an unknown key or a duplicate refuses with `config <file>:
+  line N: [daemon] <key>: <reason>` (ensure starts nothing, the daemon
+  exits 78), and `pf doctor`'s `config` row shows it.
+- A change applies at the next daemon start: `pf ops shutdown`, wait
+  until `pf ops status` fails, `pf daemon ensure`.
+- **Job cap.** `pf ops max N` is now an explicit cap: persisted in
+  `<data-dir>/daemon-state.json`, it wins over `max_concurrent_jobs` until
+  `pf ops max --reset` returns to the configured cap. Nothing else
+  persists the cap any more (older daemons wrote it on every graceful
+  shutdown). **Migration:** a `max_concurrent_jobs` already in an existing
+  `daemon-state.json` is read as explicit, so the cap stays what it was;
+  run `pf ops max --reset` once to let the table (or the default 4)
+  govern. Since practically every machine carries such a cap, the daemon
+  logs one line at boot when the persisted cap differs from the
+  configured one, naming `pf ops max --reset`.
+- **Downgrade:** binaries older than this version refuse a `[daemon]`
+  table (`unknown section`) — every `pf` command and the daemon fail to
+  load the config. Remove the `[daemon]` table from `cli.toml` **before**
+  downgrading below this version, including a `deploy.sh --force`
+  rollback or an `install.sh` run pinned to an older release.
+- **Removed environment fallbacks**: `POLYFORGE_MACHINE_ID`,
+  `POLYFORGE_DISPLAY_NAME`, `POLYFORGE_HARNESS_ROOT`,
+  `POLYFORGE_OPERATOR_AGENT_DIR`, `POLYFORGE_RECALL_TOPK`. They only
+  ever worked when the tmux server happened to carry them. A machine
+  that relied on `POLYFORGE_HARNESS_ROOT` or
+  `POLYFORGE_OPERATOR_AGENT_DIR` must move the value into the table
+  **before** restarting the daemon, or the daemon falls back to
+  `<data-dir>` / `~/.pi/agent`. So that this never happens silently, the
+  daemon warns at boot when `POLYFORGE_HARNESS_ROOT` or
+  `POLYFORGE_OPERATOR_AGENT_DIR` is set to a value differing from what it
+  resolved (stderr in `daemon.log`, a machine-level
+  `retired_env_ignored` event, and `env_warnings` in `GET /status`), and
+  `pf doctor`'s `retired env` row warns about the daemon's report and
+  about either variable set in your own shell. `POLYFORGE_DATA_DIR` stays
+  (ensure and the daemon both read it).
+- The other daemon flags (`--silence-window`, `--tool-window`,
+  `--model-error-grace`, `--revalidate-every`, `--heartbeat-every`,
+  `--pi-bin`, `--git-remote-base`, `--recall-topk`, `--display-name`,
+  `--auto`) stay, documented as test/dev-only: nothing in production
+  sets them.

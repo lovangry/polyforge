@@ -28,7 +28,7 @@ the daemon lives.
 ```
 pf ops status                                        # local jobs + auto/max + queue counters
 pf ops auto [on|off]                                 # bare: show; on: pull the ready queue itself; off: explicit pf submit only
-pf ops max [N]                                       # bare: show; N >= 1: max concurrent jobs
+pf ops max [N|--reset]                               # bare: show; N >= 1: explicit cap (persisted); --reset: back to the configured cap
 pf ops shutdown                                      # graceful shutdown
 pf ops end-session <wi> --reason <text>              # force-end a stuck holder's session (aihub-direct)
 pf daemon ensure                                     # START: the daemon under its tmux restart loop (no-op when it answers)
@@ -49,6 +49,16 @@ retry that verb ONCE. A non-zero exit carries the reason (no `[workspace]`
 mapping, missing release workflows, the daemon log tail) — relay it and
 run `pf doctor`. `pf ops shutdown` stops the daemon for good: its clean
 exit ends the restart loop as well; `pf daemon ensure` starts it again.
+
+The daemon's other production knobs are not ops verbs: they live in the
+`[daemon]` table of `cli.toml` (`step_timeout`, `stall_window`,
+`harness_root`, `operator_agent_dir`, `max_concurrent_jobs`), which the
+daemon reads itself; a change applies at the next daemon start
+(`pf ops shutdown`, then `pf daemon ensure`). Job cap: `pf ops max N` is
+an explicit cap — immediate, persisted, and it wins over the table's
+`max_concurrent_jobs` until `pf ops max --reset` returns to the
+configured cap. Bare `pf ops max` says `(persisted cap — pf ops max --reset …)` while an
+explicit cap is in force.
 
 `pf ops auto off` is more than the switch: the queue's not-yet-started
 `origin=auto` entries are REMOVED at the same time (from memory and from
