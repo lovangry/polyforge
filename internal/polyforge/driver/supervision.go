@@ -128,11 +128,19 @@ func rateLimitBackoff(streak int) time.Duration {
 // trailingCause counts the step's trailing consecutive attempts of one
 // failure cause (the archived attempts are the authority, like the
 // candidate pointer): a dispatch that died of anything else — or a
-// delivered result — ends the streak and the backoff starts over.
+// delivered result — ends the streak and the backoff starts over. The
+// audit-only interruption entries a driver relaunch or daemon restart
+// archives are not dispatch outcomes and are skipped: a restart must not
+// reset the D7 backoff or the upstream-transient retry bound (repo
+// review 2026-10-16 B-22).
 func trailingCause(attempts []capsule.Attempt, cause string) int {
 	n := 0
 	for i := len(attempts) - 1; i >= 0; i-- {
-		if attempts[i].FailureCause != cause {
+		a := attempts[i]
+		if a.Cause == CauseInfraFailure && (a.FailureCause == "driver_relaunch" || a.FailureCause == "daemon_restart") {
+			continue
+		}
+		if a.FailureCause != cause {
 			break
 		}
 		n++

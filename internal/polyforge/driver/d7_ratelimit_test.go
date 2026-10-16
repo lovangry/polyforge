@@ -95,6 +95,10 @@ func TestD7RateLimitStreakResetsOnAnotherCause(t *testing.T) {
 		{"three", []capsule.Attempt{att(FailRateLimited), att(FailRateLimited), att(FailRateLimited)}, 3},
 		{"interrupted", []capsule.Attempt{att(FailRateLimited), att(FailExitOther), att(FailRateLimited)}, 1},
 		{"trailing other", []capsule.Attempt{att(FailRateLimited), att(FailExitModel)}, 0},
+		// repo review 2026-10-16 B-22: a relaunch/restart audit entry is not
+		// a dispatch outcome and must not reset the ladder
+		{"across a restart", []capsule.Attempt{att(FailRateLimited), att(FailRateLimited), att("daemon_restart")}, 2},
+		{"across a relaunch", []capsule.Attempt{att(FailRateLimited), att("driver_relaunch"), att(FailRateLimited)}, 2},
 	}
 	for _, tc := range cases {
 		if got := rateLimitStreak(tc.in); got != tc.want {
