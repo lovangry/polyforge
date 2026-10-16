@@ -1,7 +1,7 @@
 # wrap — close a running work item as terminal
 
 Execution-plane verb: routed to the local daemon (the wrap route). `wrap`
-is a terminal outcome: the generation closes for good, the capsule is
+is a terminal outcome: the session ends for good, the capsule is
 sealed read-only and pushed, and no re-claim happens automatically.
 
 **Closes arbitrate.** The human path is this verb (or `pause`); the
@@ -10,7 +10,7 @@ Exactly one close wins: the daemon's seal guard makes the late arrival
 answer `DAEMON-409` while the first close is in flight, and a close that
 finds the work item already terminal answers gracefully
 (`already_terminal`), never a hard error. The winner performs the final
-commit+push and ends the generation exactly once.
+commit+push and ends the session exactly once.
 
 ## Triggers
 
@@ -28,14 +28,14 @@ pf wrap <id> --fail   # close with reason=fail  → terminal failure
 No other outcomes exist on this verb. `--fail` is the owner's failed
 verdict on a RUNNING job. It is not a door into a parked workflow: a
 work item parked blocked is continued with `pf resume <id>` or abandoned
-with `pf cancel <id>`, and `pf wrap --fail` on one just says so.
+with `pf cancel <id>`, and `pf wrap --fail` on one is refused (`DAEMON-409`).
 
 ## Success
 
-Human mode: `wrap requested for <slug>` (or `fail requested for <slug>`) plus
-the daemon's raw answer (`--json`: the raw answer alone — `sealed`, or
+Human mode: `wrap requested for <slug>` (or `fail requested for <slug>`);
+`--json` prints the daemon's raw answer instead — `sealed`, or
 `already_terminal` with the server-side status when the work item had
-already closed). After the close lands, the work item is terminal
+already closed. After the close lands, the work item is terminal
 (`wrapped` / `failed`) and disappears from the local jobs list. A second
 wrap answers the graceful `already_terminal` shape, not an error.
 
@@ -44,10 +44,10 @@ wrap answers the graceful `already_terminal` shape, not an error.
 | Code | When | What to tell the user |
 |---|---|---|
 | `DAEMON-404` | No local job and the work item is not blocked or terminal on the server | It is not running here — check `pf watch <id> --once`; if it runs elsewhere, wrap it there. |
-| (no code) `the workflow is parked blocked …` | A close of a workflow parked blocked on an incomplete result (polyforge#116): a parked workflow never completed, so there is nothing to seal — a `wrap` (success), a `--fail`, or a `pause` of a parked workflow is all refused; there is no hub verdict door for a parked `--fail` (the terminate door is deleted, polyforge#149) | Use `pf resume <id>` to continue it, or `pf cancel <id>` to abandon it — those are the only two exits of a parked workflow. |
+| `DAEMON-409` `the workflow is parked blocked …` | A close of a workflow parked blocked on an incomplete result (polyforge#116): a parked workflow never completed, so there is nothing to seal — a `wrap` (success), a `--fail`, or a `pause` of a parked workflow is all refused; there is no hub verdict door for a parked `--fail` (the terminate door is deleted, polyforge#149) | Use `pf resume <id>` to continue it, or `pf cancel <id>` to abandon it — those are the only two exits of a parked workflow. |
 | `DAEMON-404` with `<id> has no running job on this daemon; if it is parked blocked …` | `--fail` on a work item with no local job (most often one parked blocked on an incomplete result, polyforge#116). The CLI makes NO hub call, terminates nothing and exits non-zero (the wrap did not happen): a parked workflow has exactly two owner moves, and neither of them is this verb | Continue it with `pf resume <id>`, or abandon it with `pf cancel <id>`. The work item stays blocked until one of those runs. |
 | `DAEMON-409` | A close is already in progress for this job — another pause/wrap, or a mid-recovery state | Wait for the in-flight close to settle, then check `pf watch <id> --once`; the work item is being closed exactly once either way. |
-| `CORE-*` passthrough (e.g. `CORE-403`, `CORE-409`) | The server-side end-generation was refused | The typed Core verdict arrives verbatim — typically the generation is no longer yours to end; act per its detail. |
+| `CORE-*` passthrough (e.g. `CORE-403`, `CORE-409`) | The server-side session end was refused | The typed Core verdict arrives verbatim — typically the session is no longer this daemon's to end; act per its detail. |
 | `DAEMON-500` | The close failed on the daemon side | The job is left mid-seal, recorded as such; the next daemon start finishes the close. Check the daemon log before retrying. |
 | `dial unix …` | Daemon not running | Nothing is executing here — run `pf daemon ensure`, then retry once (or check `--socket`). |
 

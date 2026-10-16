@@ -1,6 +1,7 @@
 # 01 — Workflow 与 Skills：frontmatter schema、执行语义与预算
 
-> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+> **ARCHIVED（repo review 2026-10-16 G-1）— 本文大部分描述已删除的机制：WI Agent 物化、创建时 digest 固化、`WF-*` 码、requests/tokens 预算（§4.1/§4.4/§6.6 已按代码更正）。标有 ARCHIVED 横幅的节 do not build from this；未标横幅的节也只作历史与溯源参考。现行设计权威：[v2-converge.md](v2-converge.md)、[wi-kind-contract.md](wi-kind-contract.md)、[08-capsule-base-migration.md](08-capsule-base-migration.md)；与代码冲突时一律以代码为准。**
+> Most of this document describes deleted mechanisms. Sections bannered ARCHIVED must not be built from; the live authority is v2-converge.md plus the code.
 
 | 权威项 | 值 |
 |---|---|
@@ -12,11 +13,11 @@
 
 ### 1.1 范围 <!-- §1.1 -->
 
-- 【polyforge#106 修订】skill 的权威布局与内容边界（§2.1/§3）：路由 skill（`skills/polyforge/`）与 step skill（`workflows/<bundle>/agents/*.md`，即 step agent 定义文件）；原 agent 侧执行 skill 已随 WI-Agent 引擎删除，workflow 的执行引擎是 Daemon 内的 Go driver。
-- `workflow.md` 的两段构成（§4.1/§4.4）：YAML frontmatter 是本 WI 执行图的**唯一结构 schema**（steps 顺序/id/interactive/gate/on_fail/budget/model_candidates，及 workflow 级声明），达到「任一 frontmatter 可据此机械校验」的程度；Markdown 正文是流程级说明，由 WI Agent（wi agent）第 0 步加载。
+- 【polyforge#106 修订】skill 的权威布局与内容边界（§2.1/§3）：路由 skill（`skills/polyforge/`）与 step skill（`workflows/<bundle>/steps/<id>.md`，即 step 定义文件；polyforge#106 起由 driver 直接读取）；原 agent 侧执行 skill 已随 WI-Agent 引擎删除，workflow 的执行引擎是 Daemon 内的 Go driver。
+- `workflow.md` 的两段构成（§4.1/§4.4）：YAML frontmatter 是本 WI 执行图的**唯一结构 schema**（steps 顺序与九个 step 键：id/gate/handoff/requires_human_answer/requires_command_evidence/context_policy/model_candidates/on_fail/budget.wall_minutes，及 workflow 级 `defaults.model_candidates`/`rewind`），达到「任一 frontmatter 可据此机械校验」的程度；Markdown 正文是流程级说明，不参与结构校验。
 - bundle 引用规则（§4.5：引用即 `bundle_name`，digest 链已删）与 bundle 的加载期结构校验（§4.1：工作机 driver 加载已物化 bundle 时执行；Core 侧落库只有 `bundle_name`，权威见 `02-aihub-core.md#§4.4`/`#§4.5`）。
-- model_candidates 的声明与切换语义（§4.1/§6.3）；grill（interactive，位于 spec 之前 + spec 产物的总结性确认问答）与 e2e-author（§4.2/§4.3）；参考流程 grill → spec → grill-review → plan → e2e-author → code → verification → review → deliver（review 可处于流程中的任意位置，§4.2；polyforge#165 起 9 步）。
-- 预算（budget）声明的层次与超预算行为（§6.6）。
+- model_candidates 的声明与切换语义（§4.1/§6.3）；grill（人工问答，位于 spec 之前 + spec 产物的总结性确认问答）与 e2e-author（§4.2/§4.3）；参考流程 grill → spec → grill-review → plan → e2e-author → code → verification → review → deliver（review 可处于流程中的任意位置，§4.2；polyforge#165 起 9 步）。
+- 预算（budget）：只剩 step 级 `budget.wall_minutes`，是 T 的估计值（§6.6）。
 - 执行语义（§6）：顺序成功路径、业务 gate FAIL 的有界 on_fail rewind、基础设施失败在当前 step 原地 resume（按候选顺序有界切换模型候选），以及驱动主循环对「全部完成」与「失败终止」两类终态的显式区分。
 
 ### 1.2 非目标 <!-- §1.2 -->
@@ -35,22 +36,22 @@
 
 **三类 skill（skill 层定稿，本节为唯一权威布局）**：
 
-- **路由 skill**：`skills/polyforge/`，构成 = `SKILL.md`（路由清单与装配入口）+ `verbs/` 下按用户动词拆分的 13 个 fragment（`ship` (removed by polyforge#166: delivery is the workflows' deliver step. The driver checks the deliver step's recorded commands and the delivered history after the fact and escalates violations to a human; prevention rests on the step contract and the machine's local pre-push hook.) 为基线修订 polyforge#37 所加，分流表 `00-architecture.md#§5.1`）。它是用户 harness 的**唯一安装面**：只读用户请求、判定意图、把请求转发给本机 Daemon（`00-architecture.md#§3.1`），不解析 workflow、不触碰执行现场、不保存状态、**永不执行 workflow**——用户在 Interactive 模式下只提交意图、观察、回答（`00-architecture.md#§3.4a`）。
+- **路由 skill**：`skills/polyforge/`，构成 = `SKILL.md`（路由清单与装配入口）+ `verbs/` 下的 fragment：13 个路由动词各一个，另有 doctor/help/init 与 `ship.md`（交付已改为 workflow 的 deliver step，polyforge#166，该文件只说明这一点）——以目录为准）。它是用户 harness 的**唯一安装面**：只读用户请求、判定意图、把请求转发给本机 Daemon（`00-architecture.md#§3.1`），不解析 workflow、不触碰执行现场、不保存状态、**永不执行 workflow**——用户只提交意图、观察、回答。
 - 【polyforge#106 修订】**执行 skill 已删除**：workflow 的驱动主循环（§6.5）不在任何 agent 进程内运行——它是 Daemon 内的 Go driver，Daemon 无条件绑定，版本与 Daemon 天然锁定（部署边界见 `07-deployment-pilot.md#§2.3`；引擎唯一裁定见 `00-architecture.md#§3.6` 修订注记）。
-- **step skill（step agent 定义文件）**：`workflows/<bundle>/agents/*.md`，一个 step 的执行指令包，元数据写在其 frontmatter（`name`/`description`/`tools`/`output`，§4.4），由 WI Agent 第 0 步物化进 Capsule 供 harness 派生为执行该 step 的 step agent（step agent 即 WI Agent 派出执行 step 的 subagent；`03-execution-capsule.md#§4.5`）。
+- **step skill（step 定义文件）**：`workflows/<bundle>/steps/<id>.md`（`driver/spawn.go` 的 `dirStepDefs`），一个 step 的执行指令包；frontmatter 中 driver 只读 `output`（声明的输出 schema，§4.4），正文拼进该 step 派发的 prompt。driver 为每个 step 派生一个短驻 harness 进程执行它。
 
 **workflow 与执行图**：
 
-- **workflow bundle**：一个可被选择的执行方案包 = `workflows/<bundle-name>/` 目录，构成为 `workflow.md`（流程声明：frontmatter + 正文）+ `agents/*.md`（N ≥ 1 个 step skill）。整体有唯一的 bundle digest（§4.5）。**不存在任何 registry/installer/Core catalog**：bundle 随 aihub 仓交付，创建 WI 时由 AIHub 从本机 checkout 读取（§4.6），没有注册接口，也没有「已注册 bundle 列表」。
+- **workflow bundle**：一个可被选择的执行方案包 = `workflows/<bundle-name>/` 目录，构成为 `workflow.md`（流程声明：frontmatter + 正文）+ `steps/<id>.md`（每个 step 一个 step 定义文件）。没有 bundle digest（§4.5，polyforge#149 B9 删除）。**不存在任何 registry/installer/Core catalog**：bundle 随 aihub 仓交付，创建 WI 时由 AIHub 从本机 checkout 读取（§4.6），没有注册接口，也没有「已注册 bundle 列表」。
 - **workflow.md**：一个 bundle 的流程声明文件，两段构成——YAML frontmatter（唯一结构 schema，§4.1，AIHub 创建 WI 时校验）+ Markdown 正文（流程级说明，供 WI Agent 与人工阅读，WI Agent 第 0 步加载，`03-execution-capsule.md#§4.5`）。正文不是结构 schema：执行图的全部结构信息只来自 frontmatter。
 - **执行图（steps 数组）**：本 WI 绑定版本的 `workflow.md` frontmatter 的 `steps` 数组，数组顺序即执行序（V3）；WI Agent 第 0 步把它连同定义文件物化为 Capsule 内只读快照（`03-execution-capsule.md#§4.5`），执行期间不变（`00-architecture.md#§2.3` INV-8）。**Core 不存储任何解析结果**——WI 记录对 workflow 只保留 `bundle_name` 一个 scalar（`02-aihub-core.md#§4.4`）。
-- **budget**：对请求量、token 量与墙钟时间的上界声明；workflow 级与 step 级皆可声明，两层同时生效（§6.6）。
+- **budget**：只有 step 级 `budget.wall_minutes`，且是**估计值**而非硬上限：该 step 的总时长界 T = max(3 × wall_minutes, `--step-timeout`)（§6.6；`driver/supervision.go` 的 `WallEstimateFactor`）。不存在 requests/tokens 维度，也不存在 workflow 级预算。
 - **on_fail rewind**：业务 gate FAIL 时向更早 step 的有界回退；上界见 §6.2。
 - **model_candidates**：一个 step 的有序模型候选列表，声明在 workflow.md frontmatter（defaults 可整体缺省，step 可覆盖，§6.3）；它是模型选择的唯一载体——step skill frontmatter 不写 `model`（§4.4，INV-1g）。
-- **grill**：interactive 追问机制，由参考流程中两个显式 step 实现（§4.2/§4.3）：`grill`（spec 之前，把模糊需求问清）与 `grill-review`（spec 之后，对 spec 产物做一次总结性确认问答）。
+- **grill**：人工追问机制，由参考流程中两个显式 step 实现（§4.2/§4.3）：`grill`（spec 之前，把模糊需求问清）与 `grill-review`（spec 之后，对 spec 产物做一次总结性确认问答）。
 - **e2e-author**：在 code 运行之前对照 spec 只为**新行为**编写端到端验收场景、提交，并在同一步内对照实现前的工作树跑出逐场景的断言级红 bar 的 step（§4.2，polyforge#165 起 `e2e-baseline` 并入本步）；code 之后由 `verification` 在完整测试 bar 中复跑同一套场景（`e2e-run` 已并入 verification）。
 - **gate FAIL / 基础设施失败**：前者是 review/verification 等业务闸对产出质量的否定判定；后者是进程崩溃、断网、机器重启、上游限流、step agent 输出不符合 `output` schema（§4.4）等**未产出任何业务判定**的失败。二者的区分是本文核心不变量之一（`00-architecture.md#§2.3` INV-9，本文 §6）。
-- **interactive step**：需要人在会话内驱动才能完成的 step（frontmatter 标注 `interactive: true`），grill 与 grill-review 均属此类。
+- **人工 gate step**：frontmatter 标注 `requires_human_answer: true`（完成前必须有人工回答，如 feature-full 的 grill-review）或 `requires_human_answer: if_asked`（问题只能由人回答，零问题可完成但记 `human_gate_unasked` 事件，如 quick-fix 的 grill）。旧键 `interactive:` 不存在——未知键被静默忽略，写了它的 step **得不到**人工 gate。
 - **`next_step_by_order`**：驱动主循环用来选出「下一个待执行 step」的判定过程（§6.5）；其唯一职责是在执行图中定位最早处于非终止态的 step，**不判断也不影响** workflow 自身是成功完成还是已失败终止——那是调用方（§6.5 驱动主循环）在其返回空结果后必须另行判定的责任。
 
 ### 2.2 本文新增不变量 <!-- §2.2 -->
@@ -62,7 +63,7 @@
 - INV-1e：`next_step_by_order` 返回空结果有且只有两种原因——「执行图全部 step 已到达终止态（done 或 skipped）」与「workflow 已进入失败终态（`failed_gate` 或 `failed_rewind_exhausted`）」；驱动主循环必须先判定是哪一种，才能决定是记 `completed` 并触发 wrap，还是保持失败终态、不触发 wrap（§6.5）。
 - INV-1f：WI 的 workflow 引用（`bundle_name`，`02-aihub-core.md#§4.4`）随创建事务写入；**首次认领冻结**（R2 窗口：queued 且从未认领时可经 `PATCH` 三向变更，`02-aihub-core.md#§2.6` INV-2e/§4.5），认领后不存在任何重新固定/替换窗口；变更已认领 WI 的 workflow 的唯一路径是取消当前 WI 并新建 WI（§4.6）。
 - INV-1g（model_candidates 裁决）：模型候选的权威位置只在 workflow.md frontmatter；候选指针**只由基础设施失败的原地重派按序推进**，切换次数以候选列表长度为上界（§6.3）；业务 gate FAIL **绝不切换候选**——它保持当前候选走 §6.2 的 rewind 语义，不存在「gate FAIL 后换模型重试」的路径。
-- INV-1h（输出契约）：step skill frontmatter 不写 `model`；step agent 的最终输出必须是符合其 `output` JSON Schema 的 JSON，不符合即按该 step 的基础设施失败原地重派（§4.4/§6.3），不产出业务判定、不触发 gate。
+- INV-1h（输出契约）：step skill frontmatter 不写 `model`；step 的 completed 结果 `output` 应符合其声明的 `output` JSON Schema。当前为**只记录模式**（`driver/outputschema.go` 的 `enforceOutputSchemas=false`）：不合格只记 `output_schema_violation` 事件，不拒信封、不算基础设施失败、不推进候选（v2-converge §2.6）。
 
 ## 3. 模块与代码目录 <!-- §3 -->
 
@@ -71,12 +72,14 @@
 ```
 aihub/
 ├── skills/
-│   ├── polyforge/          # 路由 skill：SKILL.md + verbs/（13 个用户动词 fragment）
+│   ├── polyforge/          # 路由 skill：SKILL.md + verbs/（每个动词一个 fragment，另含 help/init/doctor 等；以目录为准）
 └── workflows/
     └── <bundle-name>/
         ├── workflow.md     # frontmatter（唯一结构 schema）+ 正文（流程级说明）
-        └── agents/          # step skill（step agent 定义文件），每 step 一个 <step-id>.md
+        └── steps/           # step skill（step 定义文件），每 step 一个 <step-id>.md
 ```
+
+> **ARCHIVED — 下面的 `internal/workflow/*` 包布局从未按此建成，do not build from this。** 现行代码：结构加载与校验在 `internal/polyforge/driver/workflow.go`，模型候选读取在 `internal/common/workflow`，没有 digest 包。
 
 本文对应 `internal/workflow/` 目录，职责划分：
 
@@ -91,29 +94,31 @@ aihub/
 
 `workflow.md` 以 YAML frontmatter 开头（`---` 定界），frontmatter 是本 WI 执行图的**唯一结构 schema**；其后的 Markdown 正文是流程级说明，不参与结构校验（加载与物化见 §4.4 与 `03-execution-capsule.md#§4.5`）。
 
-frontmatter 顶层字段：
+frontmatter 顶层字段（driver 解析的只有 `defaults`、`rewind`、`steps`；`name`/`description` 是给人看的，不被解析）：
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `name` | string | 必填 | bundle 名，约定等于 bundle 目录名（不校验） |
-| `description` | string | 可选 | ≤500 字符 |
-| `budget` | Budget | 可选（workflow 级） | 结构见 §6.6；缺省 = 无 workflow 级上界 |
+| `name` | string | 约定 | bundle 名，约定等于 bundle 目录名（不解析、不校验） |
+| `description` | string | 约定 | 一句话说明（不解析） |
 | `rewind.max_total` | int | 可选 | 缺省 4；整个 workflow 累计 rewind 上界 |
 | `rewind.max_per_step` | int | 可选 | 缺省 2；同一 step 被回退重入的上界 |
 | `defaults.model_candidates` | []string | 可选 | 步骤未声明时使用的有序候选；每项 `<harness>:<model>`（harness ∈ pi/claude，按第一个 `:` 切分，前缀必填，polyforge#175） |
 | `steps` | []Step | 必填 | 非空，元素 `id` 唯一（V2）；**数组顺序即唯一执行序**（V3） |
 
-Step 元素字段：
+不存在 workflow 级 `budget`（无人解析）。
+
+Step 元素字段——driver 解析的九个键（`internal/polyforge/driver/workflow.go` 的 `extStep`），其余键一律被静默忽略：
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `id` | string | 必填 | 非空，steps 内唯一（V2）；同时是 step skill 文件名绑定：`steps/<id>.md`，也是 workspace yaml `steps.<project>.<step-id>.models` 的键（同名步骤跨 bundle 共用一个键） |
-| `interactive` | bool | 可选，缺省 false | true 表示需要人在会话内驱动（grill/grill-review 等）；无位置限制 |
-| `gate` | bool | 可选，缺省 false | true 表示本 step 产出业务判定（review/verification/grill-review 皆可）；`interactive` 与 `gate` 可同时为 true |
+| `id` | string | 必填 | 非空，steps 内唯一（V2）；同时是 step 定义文件名绑定：`steps/<id>.md`，也是 workspace yaml `steps.<project>.<step-id>.models` 的键（同名步骤跨 bundle 共用一个键） |
+| `gate` | bool | 可选，缺省 false | true 表示本 step 产出业务判定（review/verification/grill-review 皆可） |
+| `requires_human_answer` | bool \| `if_asked` | 可选，缺省 false | 人工 gate：`true` = 本次尝试中没有人工回答之前，该 step 既不能 completed、也不能 gate_failed（否则会 rewind 或终止 workflow；这类信封被拒，repo review 2026-10-16 V-8）；`if_asked` = 提出的问题只能由人回答，零问题可完成（记 `human_gate_unasked` 事件）。**取代旧的 `interactive: true`**——后者是未知键，被忽略，写了它不会得到人工 gate |
+| `requires_command_evidence` | bool | 可选，缺省 false | true 表示 completed 结果必须带 `command_evidence`（V4 取证门禁，§4.4a；step id 为 `verification` 时隐式为 true） |
 | `on_fail` | OnFail | 可选，仅 `gate: true` 的 step 允许携带（V5） | `OnFail = {target: 更早的 step id（必填）}`——声明即 rewind 边；未声明 `on_fail` 即 §6.2 第 1 步的 `failed_gate` 终止。gate FAIL 判定全文一律随 `pending_rewind_input` 送达 target（polyforge#147 C5：`action` 与 `include_verdict` 键已删除，判定转发无条件） |
 | `context_policy` | string | 可选，缺省 `inherit` | `inherit`\|`fresh`：见 §4.4a。`inherit` 的 step 续上上游交接（派发输入带 handoff 文件正文），`fresh` 从零开始；`gate: true` 的 step 必须是 `fresh`（闸只凭自己的输入判，不继承有倾向性的上下文；V11） |
 | `handoff` | bool | 可选，缺省 false | true 表示本 step 必须写交接文件 `artifacts/handoff-<step-id>.md`：见 §4.4a |
-| `budget` | Budget | 可选 | step 级，覆盖/叠加 workflow 级，结构同 §6.6 |
+| `budget.wall_minutes` | int | 可选 | 本 step 运行时长的**估计**：总时长界 T = max(3 × wall_minutes, `--step-timeout`)（§6.6）；`budget` 下没有其它键 |
 | `model_candidates` | []string | 可选 | 覆盖 `defaults`（整体替换，非合并）；有序，切换语义见 §6.3；每项 `<harness>:<model>`（polyforge#175，可跨 harness，换到另一 harness 的候选时新开会话并带旧记录作只读参考） |
 
 frontmatter 不声明 step 间输入 wiring、执行目录（`cwd`）或任何排序/位置键：上游产物落 Capsule `artifacts/` 与 `execution.json` 的 `steps.<id>.output`（`03-execution-capsule.md#§4.2`），下游 step 的 agent 指令按产物路径约定读取（§4.2）；step 执行的 `cwd` 由 WI Agent 按 `03-execution-capsule.md#§5.1` 的 `RunCommand.cwd` 取值域（`repos/<name>` 或 `artifacts`）选择。结构 schema 只承载结构、调度与预算，不重复表达执行细节。
@@ -135,9 +140,9 @@ v1 schema 不声明任何 step 级 isolation 类键名；v1 不引入 per-step i
 
 vNext 自带参考 bundle `feature-full`（`workflows/feature-full/`），frontmatter `steps` 数组顺序为：
 
-1. `grill`（`interactive: true`，非 gate）
+1. `grill`（非 gate；feature-full 未声明 `requires_human_answer`，quick-fix 的 grill 声明 `if_asked`）
 2. `spec`（消费 `grill` 的问答记录产物）
-3. `grill-review`（`interactive: true` 且 `gate: true`；消费 `spec` 的产物；`on_fail: {target: spec}`）
+3. `grill-review`（`requires_human_answer: true` 且 `gate: true`；消费 `spec` 的产物；`on_fail: {target: spec}`）
 4. `plan`（消费 `spec` 的产物）
 5. `e2e-author`（`requires_command_evidence: true`；消费 `spec` 的产物，在 code 之前只为新行为编写端到端验收场景、提交，并在同一步内对实现前的树只跑这些作者文件，证明每个场景都是断言级红；输出 `baseline[]`）
 6. `code`（消费 `plan` 的产物与 `e2e-author` 证明为红的验收 bar，经 inherit 交接续上 `e2e-author` 的会话）
@@ -172,10 +177,12 @@ vNext 自带参考 bundle `feature-full`（`workflows/feature-full/`），frontm
 
 grill 的两段职责分别由两个独立 step 承载，不是单 step 内的隐藏相位：
 
-1. **`grill`**（spec 之前）：对模糊需求逐项发问，`interactive: true`，非 gate；问答记录写入 Capsule `artifacts/grill-qa.md`，产物路径记入 `steps.grill.output` 供 `spec` 消费。
-2. **`grill-review`**（spec 之后）：对 spec 产物做一次总结性确认问答，`interactive: true` 且 `gate: true`；PASS 表示用户确认无异议，直接推进 `plan`；FAIL 表示用户要求修改，触发 `on_fail: {target: spec}`（复用 §6.2 机制），问答追加进同一份 `artifacts/grill-qa.md`（按 step id 分节）。
+1. **`grill`**（spec 之前）：对模糊需求逐项发问，非 gate；问答记录写入 Capsule `artifacts/grill-qa.md`，产物路径记入 `steps.grill.output` 供 `spec` 消费。
+2. **`grill-review`**（spec 之后）：对 spec 产物做一次总结性确认问答，`requires_human_answer: true` 且 `gate: true`；PASS 表示用户确认无异议，直接推进 `plan`；FAIL 表示用户要求修改，触发 `on_fail: {target: spec}`（复用 §6.2 机制），问答追加进同一份 `artifacts/grill-qa.md`（按 step id 分节）。
 
 `grill-review` 的判定语义是「人是否确认」而非质量评分，但驱动引擎不区分判定来源，一律按 gate FAIL 语义处理，因此不需要为其新增状态机分支，恢复路径与其余 gate 完全一致。
+
+> **ARCHIVED — 本段描述已删除的机制（WI Agent、发布链路、`WF-105`、Interactive/Batch/Drain 判据）；do not build from this。** 现行：step 以 `needs_input` 结果提问，driver 把问题写进 `execution.json`，人经 `pf answer` → daemon `POST /jobs/{wi}/answer` → driver bridge 回答（v2-converge §3、README）。
 
 **交互渠道**：grill / grill-review 的问答由引擎的同一份驱动逻辑（`00-architecture.md#§3.6` 修订注记）驱动，走一条 needs_input/answer 的中继路径而非另立通道——引擎遇到 interactive step 时，把待问问题**持久化写入 `runtime-state/execution.json`**（`03-execution-capsule.md#§4.2` 的 `steps.<id>.pending_question`；execution.json 的权威 schema 在 `03-execution-capsule.md#§4.2`，本文只引用），该写入**作为 step interrupted 边界同步触发**一次发布请求（`00-architecture.md#§4.3` 的「step 中断」类触发时机），使待问问题经发布链路呈现给 owner 正在使用的 observer UI；owner 的回答经 Daemon 的 answer API（`answer(wi_id, payload)`，`04-local-runtime.md#§5.1`，以 `answer_id` 幂等，中继报文格式见 `00-architecture.md#§3.4a`）中继回进行中的同一个 step 的执行上下文，引擎收到后原地续跑同一 step，不新增状态机分支。每问每答即时追加写入 Capsule 内 `artifacts/grill-qa.md`。无人驱动（批处理）模式下两者均按本文 §5.2 `WF-105` 的规则处理（不派发，WI 转 blocked，`waiting_on=owner`，`02-aihub-core.md#§2.4`：`waiting_on` 非空即 blocked，非 pause），不依赖 schema 层位置假设；Daemon 侧只按 `00-architecture.md#§3.4` 的 Interactive/Batch/Drain 判据决定当前是否处于无人驱动上下文，具体拦截与状态转换语义仍在本层。
 
@@ -184,29 +191,29 @@ grill 的两段职责分别由两个独立 step 承载，不是单 step 内的�
 ```
 workflows/<bundle-name>/
 ├── workflow.md            # 必需：frontmatter（结构）+ 正文（流程级说明）
-└── agents/
+└── steps/
     └── <step-id>.md       # 每 step 一个；文件名 = step id
 ```
 
-每个 `agents/<step-id>.md` 是一个 step skill = 一份 **step agent 定义文件**：frontmatter（元数据）+ Markdown 正文（执行指令）。**Capsule 侧权威**（物化协议、只读快照、防冲突三层、harness 解析）在 `03-execution-capsule.md#§4.5`，本文只定义其内容 schema，两文字段集一致、互不另立。
+每个 `steps/<step-id>.md` 是一个 step skill = 一份 **step 定义文件**：frontmatter（元数据）+ Markdown 正文（执行指令）。driver 从物化后的 bundle 直接读取它（`driver/spawn.go`、`driver/outputschema.go`）。
 
-frontmatter 字段：
+frontmatter 字段——**driver 只读 `output`**，其余为约定：
 
 | 字段 | 类别 | 说明 |
 |---|---|---|
-| `name` | 硬必需 | harness 派生时引用的 step agent 名；必须等于文件名（即 step id）；（不校验） |
-| `description` | 硬必需 | 一句话职责说明，供 WI Agent 选择与组装派发 prompt |
-| `tools` | 硬必需 | 该 step 派生 step agent 的**工具面声明**，由 harness 适配器在派发时落实；OS 层文件系统读写权限不受本字段影响，仍由 `03-execution-capsule.md#§5.2` 的 v1 Native runner profile 统一裁定，本字段不做 OS 级权限放大或收窄 |
-| `output` | 硬必需 | JSON Schema；执行该 step 的 step agent 的最终输出必须是符合本 schema 的 JSON |
+| `name` | 约定 | 等于文件名（即 step id）；不解析、不校验 |
+| `description` | 约定 | 一句话职责说明；不解析 |
+| `tools` | 约定（无效果） | 历史上的工具面声明；**没有任何适配器读取或落实它**，写了也不收窄工具面 |
+| `output` | 可选，唯一被读取的键 | draft-07 JSON Schema（YAML 书写）：注入派发 prompt（放在正文之前），并由 driver 校验 completed 结果的 `output`——当前只记录不拒收（`enforceOutputSchemas=false`，见下） |
 | `model` | 禁止出现 | 模型选择是流程作者的决定，唯一载体是 workflow.md frontmatter 的 `model_candidates`（§4.1，INV-1g）；`model` 键不被读取 |
 
 不存在 `kind`/`phase`/`title`/`budget_hint` 或任何其他 frontmatter 字段：step 的调度与预算声明全部在 workflow.md frontmatter（§4.1），不在 step skill 内重复。
 
-**校验时机与生效**：AIHub 创建事务不解析 agents frontmatter——不做校验（§4.5，`02-aihub-core.md#§4.5`）；`internal/workflow/schema` 提供本表校验库，供 bundle 测试与执行侧告警使用，不阻塞创建；派发时由 harness 适配器按 `03-execution-capsule.md#§4.5` 的物化产物解析生效。
+**校验时机与生效**：没有对 step 定义文件 frontmatter 的结构校验；声明了却无法解析/编译的 `output` schema 记 `output_schema_unloadable` 事件并写 stderr。
 
-**输出契约（INV-1h）**：step agent 的最终输出必须是符合 `output` schema 的 JSON，**不符合即按该 step 的基础设施失败处理**（§6.3，原地重派并推进候选指针），不产出业务判定、不触发 gate（与 `03-execution-capsule.md#§4.5` 一致）。「不符合」的判定来源有两个（polyforge#27 修订）：一是执行侧自查（WI Agent 读取 schema 的既有路径）；二是**发布时机械校验**——每次全扫描发布（HEAD 推进）时，Daemon 侧校验器从已固化进 staging 的快照字节中逐 step 比对每个已完成 step 的输出与其 pinned `output` JSON Schema。校验器是 draft-07 的机械完整实现，schema-authoring 规则与本仓 bundle 测试（`internal/workflow/schema`）强制的同一契约：参考 bundle 的 output schema 只使用标准 draft-07 关键字，真校验器接入即同一契约生效，不要求改写任何既有 schema。该检查只读将随本次发布写入 Revision 的快照字节，**绝不触碰 Capsule 内 `runtime-state/` 活文件**（INV-6：runtime-state 是 WI Agent 的单写者私有域，Daemon 的校验只在发布面读已发布快照；Capsule 侧契约的权威在 `03-execution-capsule.md#§5.1a`）。失配分类不变：不合 schema = 该 step 的基础设施失败（§6.3），不产出业务判定、不新增终态。
+**输出契约（INV-1h）**：completed 结果的 `output` 由 driver 按声明的 `output` schema 机械校验（值为 `null` 的可选属性按缺省处理）。v2.5.0 起为**只记录模式**（`driver/outputschema.go` 的 `enforceOutputSchemas=false`，唯一开关）：不合格只记持久事件 `output_schema_violation`，**不拒信封、不算基础设施失败、不推进候选**；翻转开关后将改为信封被拒（同一进程内重试车道），仍不是基础设施失败（v2-converge §2.6）。旧文中「发布时由 Daemon 校验快照字节、不合格即基础设施失败」的机制已删除。
 
-正文为自然语言执行指令，由该 step 的 WI Agent 在派生 step agent 时组装进其 prompt（WI Agent 驱动逻辑的一部分，`00-architecture.md#§3.6`），不属于 harness 适配器或 Daemon 的实现细节。model/候选声明位置一律在 workflow.md frontmatter 的 step/defaults 字段（§4.1）——保证模型选择是流程作者的决定，而非 step skill 作者的决定。
+正文为自然语言执行指令，由 driver 在派发该 step 时组装进其 prompt。model/候选声明位置一律在 workflow.md frontmatter 的 step/defaults 字段（§4.1）——保证模型选择是流程作者的决定，而非 step skill 作者的决定。
 
 ### 4.4a step 间上下文传递：`context_policy` 与 `handoff`（polyforge#147） <!-- §4.4a -->
 
@@ -229,14 +236,13 @@ digest 链：不再对 bundle 计算任何聚合摘要，不再派生 `sha256("b
 
 历史注记：本节曾规定 RFC 8785 canonical JSON 的唯一聚合摘要计算规则与黄金向量（对 bundle 内
 `workflow.md` 与 `agents/` 全部文件逐文件 SHA-256 后再整体 SHA-256）。该规则连同其落库列、
-claim 响应字段与执行侧校验分支一起删除；workflow 包的 `Digest`/`FileEntry` 保留为通用库函数
-（不再有生产调用方）。
+claim 响应字段、执行侧校验分支与 `Digest`/`FileEntry` 库函数一起删除（`internal/` 中已无定义）。
 
-**预算作用域**：每个维度（requests/tokens/wall_minutes）独立判定两层上界：step 级上界限制单个
-step 单次执行尝试的消耗；workflow 级上界限制整个 WI 生命周期内全部 step 执行尝试的累计消耗
-（含 rewind 产生的重跑）。任一层达到上界均触发 §6.6 的超预算行为，谁先触发即报谁的错误。
+**预算作用域**：只有 step 级 `budget.wall_minutes` 一个维度，见 §6.6。
 
 ### 4.6 创建时的校验与固化（服务端内部步骤；无独立端点、无注册面） <!-- §4.6 -->
+
+> **ARCHIVED — 本节描述已删除的机制（创建时 digest 固化、WI Agent 第 0 步物化、Daemon 本地认证代理、`WF-203`）；do not build from this.** 现行：创建只落 `bundle_name`；工作机 daemon 从 `--workflows-dir` 物化 bundle，driver 加载时按 §4.1 校验。
 
 **主体裁定（消除 aihub#793 指出的启动循环）**：workflow 的校验与 digest 固化发生在 **WI 创建事务内、由 AIHub 服务端完成**——创建必先于 claim，时序约束天然满足；不存在独立的解析/固定端点，不存在任何「先注册 bundle 再使用」的前置步骤（`02-aihub-core.md#§4.5`：原 workflow-pin 端点与 bundle 注册面整体删除）。提交方（路由 Skill/`pf` CLI 代表用户发起创建）只提交 `bundle_name`；解析、校验与固化全部在服务端完成。**WI Agent 从不参与创建期校验，只按 digest 物化并执行**（`03-execution-capsule.md#§4.5`），这消除了「claim 后才能启动 WI Agent、WI Agent 又负责首次固定」的循环依赖。
 
@@ -249,6 +255,8 @@ step 单次执行尝试的消耗；workflow 级上界限制整个 WI 生命周�
 7. **与 WI Agent 凭证边界的关系（呼应 §5.1 与 `00-architecture.md#§5`/`#§8`）**：上述 1–6 步全部由提交方与 AIHub 服务端完成；WI Agent 自始至终**不持有任何 Core API key 或 Revision 发布 token**，只能通过 `04-local-runtime.md#§5.3` 的 Daemon 本地认证代理调用允许的 WI 生命周期/读操作（Revision 发布权仅属 Daemon）。
 
 ## 5. API 与错误码（本层） <!-- §5 -->
+
+> **ARCHIVED — 本节描述已删除的机制（创建时校验/digest、RunCommand、Revision 发布、`WF-*` 错误码族——`errors.go` 中没有任何 `WF-` 码）；do not build from this.** 现行：加载期校验失败只是 workflow 加载错误（无错误码，§4.1）；step 结果走 v2-converge §2.6 的结果信封。
 
 ### 5.1 本层调用面 <!-- §5.1 -->
 
@@ -304,6 +312,8 @@ step 单次执行尝试的消耗；workflow 级上界限制整个 WI 生命周�
 
 ### 6.3 基础设施失败 → 当前 step 原地 resume（按候选顺序有界切换），追加 attempt 历史 <!-- §6.3 -->
 
+> **以代码为准的更正（2026-10-16）**：(1) 候选指针**只在模型类死因上推进**（`driver/candidates.go` 的 `IsModelClass`：`model_error`、`model_hung`、`step_timeout_slow_model`、模型类退出）；宿主机类死因（`FailExitHost`）使 step blocked、不推进；其余死因原模型重试。下文第 4 步"每次基础设施失败重派前进一档"不成立。(2) 输出不合 `output` schema **不是**基础设施失败（只记录模式，§4.4）；下文第 1、5 步关于 schema 失配与"发布时机械校验证伪 done"的内容随 WI Agent / 发布链路一并删除。(3) 死因分类与重试次数界见 v2-converge §2.3。
+
 1. 判定标准：step agent 进程死亡或被杀、上游接口连续 429/5xx、宿主机重启、网络中断、本机磁盘或工具链不可用、step agent 最终输出不符合该 step 的 `output` JSON Schema（§4.4，INV-1h）——一切「未产出任何业务判定」的失败均归为基础设施失败。其中「输出不合 schema」有两个机械来源：WI Agent 派发侧自查，与每次全扫描发布时 Daemon 对已固化快照字节的 draft-07 校验（`03-execution-capsule.md#§5.1a`，polyforge#27）；二者失配分类相同，均走本节语义，不存在第二条处理路径。
 2. 处理（两个动作同一次写入原子完成，互不矛盾）：
    a. 该 step 在 `execution.json.steps[step_id].status` 中保持 `in_progress`，不重置为 `pending`（这是对**业务结果车道**而言：不归档为失败结果，不触发 gate FAIL 语义，也不清空上一次已成功 step 的输出）。
@@ -342,15 +352,13 @@ step 单次执行尝试的消耗；workflow 级上界限制整个 WI 生命周�
    - 若状态已经是 `failed_gate` 或 `failed_rewind_exhausted`（在第 3 步的处理中已经写入）：直接退出，不得把这两种终态误判为完成，不得触发 wrap。
    - 否则（意味着执行图中全部 step 都已到达 `done`）：这才是真正跑完全部 step 的成功路径，标记 workflow 状态为 `completed`，触发一次同步发布，并进入该 WI 的 wrap 流程（Core 侧 wrap 端点权威见 `02-aihub-core.md#§5.1`）。
 
-**失败终态之后**：`failed_gate`/`failed_rewind_exhausted` 是 Capsule 侧（`execution.json`）的终态，**不直接映射为** Core 侧 WI 状态机的终态（`wrapped`/`failed`/`cancelled`，`02-aihub-core.md#§2.5`）——workflow 失败不等于 WI 失败，这是刻意的两层分离（`00-architecture.md#§3.2` 归属判据）：WI 在 Core 侧转为 `blocked`（`waiting_on=owner`，与 §6.4 的 incomplete 走同一 Core 端点），由人决定是取消该 WI，还是新建一个 WI 重新走创建流程（§4.6）；这里不要求也不允许先重新执行才能取消（该终止契约的完整授权与状态映射规则以 `02-aihub-core.md#§2.5`/`#§5.1` 为权威）。
+**失败终态之后**：`failed_gate`/`failed_rewind_exhausted` 是 Capsule 侧（`execution.json`）的终态，**不直接映射为** Core 侧 WI 状态机的终态（`wrapped`/`failed`/`canceled`，`02-aihub-core.md#§2.5`）——workflow 失败不等于 WI 失败，这是刻意的两层分离（`00-architecture.md#§3.2` 归属判据）：WI 在 Core 侧转为 `blocked`（`waiting_on=owner`，与 §6.4 的 incomplete 走同一 Core 端点），由人决定是取消该 WI，还是新建一个 WI 重新走创建流程（§4.6）；这里不要求也不允许先重新执行才能取消（该终止契约的完整授权与状态映射规则以 `02-aihub-core.md#§2.5`/`#§5.1` 为权威）。
 
 ### 6.6 预算（budget） <!-- §6.6 -->
 
-- 结构：`{requests: int, tokens: int, wall_minutes: int}`，三个字段各自可选，取值须 >0；workflow 级声明 + step 级覆盖/叠加；三个维度互相独立判定。
-- 层次：**step 级预算**是单个 step 每次执行尝试的消耗上限；**WI 累计预算**（即 workflow 级声明）是跨该 WI 全部 step 执行尝试之和的消耗上限（含 rewind 产生的重跑消耗）。两层同时生效，谁先触发即报谁的错误——不存在「只要 WI 级不超就忽略 step 级」或反之的例外。
-- 记账：per-step `budget_consumed` 消耗记录与 wall-clock 基线（wall 维度计时的起算基准）写在 Capsule `execution.json`（执行态，`00-architecture.md#§2.3` INV-1；权威 schema 在 `03-execution-capsule.md#§4.2`，本文只引用）；每次 rewind 额外计一次 requests 单位并预估目标 step 的 token 消耗。WI 级基线 scalar 由创建事务从 frontmatter 抄录固化（`02-aihub-core.md#§4.4`），运行期生效额度的计算以该基线为起点（`02-aihub-core.md#§6.7`）。
-- **超预算行为**：任一维度、任一层级达到上界 → 当前 step 被停止 → WI 转为 Core 的 `blocked` 状态（`waiting_on=owner`，`02-aihub-core.md#§2.4`）并伴随 `WF-103 OVER_BUDGET`。超预算不是 FAIL，不触发 rewind，也不自动 resume。
-- **超预算之后的处理路径**：完全由 `02-aihub-core.md` 的授权与 CAS 规则定义，本文不重复也不新发明任何机制——具体为「Core 侧的增加预算 API」（谁可以调用、CAS 如何避免并发覆盖、新预算值如何作为独立可追加记录 `workflow_budget_increments` 合并进不可变的预算基线），权威见 `02-aihub-core.md#§6.7`。人工增加预算后，WI 按 `02-aihub-core.md#§2.5` 的 `unblock` 语义重新激活（新一次 claim），WI Agent 原地重派被停止的 step；若人工判断不值得继续，则直接取消该 WI（终止契约同 §6.5）。
+- 结构：step 级 `budget: {wall_minutes: int}`，唯一的键；不存在 requests/tokens 维度，也不存在 workflow 级预算（polyforge#147 删除 `Budget.USD`/`Tokens`）。
+- 语义：`wall_minutes` 是**估计值而非硬上限**——该 step 跨全部派发的累计运行时长界 T = max(3 × wall_minutes, 全局 `--step-timeout`，缺省 90m)（`driver/supervision.go` 的 `WallEstimateFactor`；v2-converge §2.4）。≤30 分钟的估计在该式下不起作用，交付 bundle 因此都不声明；release bundle 的 `release` step 声明 45（T = 135m）。
+- 超出 T：supervisor 判 `step_timeout_long_task` / `step_timeout_slow_model`，按 v2-converge §2.3 的死因处理（计入 step 失败计数，模型类死因换候选，第三次失败 blocked）。不存在 `WF-103 OVER_BUDGET`、增加预算 API 或 `workflow_budget_increments`。
 
 ## 7. 并发与崩溃恢复 <!-- §7 -->
 

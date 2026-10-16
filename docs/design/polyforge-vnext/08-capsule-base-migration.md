@@ -25,9 +25,10 @@ CLI 与 Daemon 读同一份配置；**不存在任何启动期 workspace 旗标�
 - **换基不需要搬进行中的 capsule**：把旧基底作为 workspace 节（连同它的 projects）保留在映射里，
   进行中的 capsule 就「留在原地」继续有效——重启对账按记录里的 capsule 路径就地续跑，绝不搬迁、
   绝不从远端 git 链重建（未发布的本地 capsule 状态不允许被静默丢弃）。
-- 运行中的 WI 若其 project 已从映射中消失（操作者删节后重启），Daemon **硬失败并点名该 project**
-  （`mid-flight project "…" is not in the [workspace] mapping`）——capsule **绝不**被搬迁到别的
-  workspace。唯一的补救就是把该 project 的 workspace 节重新加回映射，再重启。
+- 运行中的 WI 若其 project 已从映射中消失（操作者删节后重启），Daemon 不再整体拒绝启动：只把**该 WI**
+  在 aihub 置为 `blocked`（原因注记点名 project，`pf watch` 显示 `project_unmapped` 事件），其余 WI 照常恢复；
+  capsule **绝不**被搬迁到别的 workspace。补救：把该 project 的 workspace 节重新加回映射，再 `pf resume <id>`
+  （一次从 aihub capsule 链与 carrier ref 的全新再认领，见 v2-converge §14.1）。
 - 终态（已 wrap/fail/cancel）的 capsule 留在原地不动；Daemon 工具面（`pf watch` 等）只在该 WI 的 project
   **映射到的** workspace 里按 `capsules/<project>-<seq>` 寻找 capsule——把旧基底（连同该 project）重新加回映射即可让
   它们继续找到它。（原文此处举的 `pf ship` 已由 polyforge#166 删除：交付改为 workflow 的 deliver 步骤。）

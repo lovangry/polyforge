@@ -70,7 +70,8 @@ The version is `V`, the claimed release commit is `C`, the default branch is `<d
 
 ## Checks (record each as an entry in `checks`, in this order)
 
-- **(a) release commit and origin head.** `git fetch origin`. `C` must equal the
+- **(a) release commit and origin head.** `git fetch --tags origin` (`release.sh --verify`
+  needs the previous release tag's commit locally). `C` must equal the
   recorded `origin_head_at_release`, and `C` must be an ancestor-or-equal of the current
   `origin/<default>` (`git merge-base --is-ancestor C origin/<default>`).
 - **(b) the tag.** The tag named EXACTLY `V` (no prefix or suffix games, compare the

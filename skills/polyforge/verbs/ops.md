@@ -38,7 +38,11 @@ Starting the daemon is `pf daemon ensure` (polyforge#174) — never a bare
 `pf daemon` in the background. It is idempotent and file-locked: when a
 daemon answers it does nothing; otherwise it starts the restart loop in
 tmux session `polyforge-daemon` (a failed exit — crash, panic, kill — is
-restarted within ~5s; a clean exit ends the loop) and waits for the socket. The harness adapters already run it when a session
+restarted within ~5s; a clean exit ends the loop; exit 78 — the daemon
+refused to start for an operator-fixable reason: config, daemon id,
+workspace, on-disk state, failed restart reconciliation — also ends the
+loop, so read `<data-dir>/daemon.log`, fix the cause, then `pf daemon
+ensure` again) and waits for the socket. The harness adapters already run it when a session
 starts or resumes, so the agent runs it only as the fallback: an
 execution-plane verb answered `dial unix …` → `pf daemon ensure`, then
 retry that verb ONCE. A non-zero exit carries the reason (no `[workspace]`
@@ -85,15 +89,16 @@ end), `CORE-410` (terminal).
   began, and LAST-WORK is mm:ss since its harness last did real work (`-`
   when there is none). UI noise never refreshes LAST-WORK, so a job that is
   chattering but wedged reads as stale, not fresh. The daemon's own
-  supervisor owns the stuck verdict (its silence/tool/step bounds, which
-  a workflow step may override) and acts on it; a long LAST-WORK here is
-  an observation to read in that light, not a rule to apply.
+  supervisor owns the stuck verdict (its silence/tool/step bounds; a
+  workflow step can only stretch the step bound via `budget.wall_minutes`)
+  and acts on it; a long LAST-WORK here is an observation to read in that
+  light, not a rule to apply.
   A work item whose capsule directory is missing at restart
   (`capsule_missing`) or whose project is no longer mapped
   (`project_unmapped`) is not listed here: the daemon sets it `blocked` at
   the hub (reason note names the cause; the event shows in `pf watch`).
   The owner's moves: fix the cause if any and `pf resume <id>`, or give up
-  with `pf cancel <id>` / `pf wrap <id> --fail`.
+  with `pf cancel <id>` (`pf wrap` / `--fail` are refused on a blocked WI).
 - `auto` / `max` bare: `auto: on|off` / `max: N`; a change answers with
   the effective `{"auto":..,"max":..}`.
 - `shutdown`: `graceful shutdown requested; the daemon quiesces and exits`

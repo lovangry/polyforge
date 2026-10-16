@@ -13,9 +13,10 @@ package test
 //
 // Pinned: the old layout (pi git package entry, copied Claude skill dir)
 // migrates to the new one (pi local package naming release/current,
-// Claude skill symlink); a second run changes nothing; an upgrade stops
-// the restart loop FIRST, then shuts the daemon down gracefully, then
-// starts the new daemon through `pf daemon ensure`; pi is never invoked.
+// Claude skill symlink); a second run changes nothing; an upgrade shuts
+// the daemon down gracefully (its restart loop ends with that clean exit
+// — install kills no tmux session), swaps the binary, then starts the new
+// daemon through `pf daemon ensure`; pi is never invoked.
 // Repo review 2026-10-16 V-3: the binary swap is one rename of an
 // executable file staged next to $BIN; a prepare-phase failure (release
 // clone) changes nothing; running jobs refuse the upgrade unless

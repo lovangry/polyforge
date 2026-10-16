@@ -49,10 +49,12 @@ with `url`, `subdir` or `base` is refused.
 
 `edit` flags (only the flags you pass are sent; `--label` replaces the whole
 set): `--goal`, `--content`, `--label`, `--priority`, `--milestone` (an empty
-string clears it), `--waiting-on`, `--attr`, `--bundle` (switch the work
+string clears it), `--waiting-on`, `--bundle` (switch the work
 item's workflow bundle, e.g. `--bundle release`; an empty string unbinds it).
 aihub accepts a bundle change only while the work item is queued and has
 never been claimed — once a daemon has claimed it, the bundle is fixed.
+There is no `--attr` on `edit`: business attrs are set at create only (aihub
+does not accept `attrs` in a PATCH).
 
 `show` takes exactly one id (or slug) and renders the detail record plus
 its dependency block.
@@ -112,6 +114,7 @@ adds the dependency block. `dep add|rm|list` print the dependency view
 |---|---|---|
 | `AUTH-401` | api key missing or invalid | The AIHub credential is rejected — check `--api-key` / `PF_API_KEY` / the config's `api_key`. |
 | `CORE-400` | Invalid field or type; a workflow-frontmatter rule failed at create (`detail` names the rule); an `--attr` key hit the execution-state blacklist | The request body is wrong — read `detail` for the exact field/rule and fix the flags. |
+| `CORE-400` `PARENT_DEPTH` | `--parent` names a work item that is itself a child — work items nest one level only | Use the top-level work item (the epic) as the parent instead. |
 | `CORE-400` `REPO_NOT_IN_PROJECT` | A `--repo` name is not one of the project's repos | Name a repo the project has (`pf projects get <project>` lists them); a maintainer adds new repos to the project. |
 | `CORE-400` `INVENTORY_DUPLICATE_NAME` / `INVENTORY_URL_NOT_ALLOWED` / `INVENTORY_SUBDIR_UNSUPPORTED` / `INVENTORY_BASE_UNSUPPORTED` | The same repo named twice; a `--stdin` entry carrying `url`, `subdir` or `base` | Drop the duplicate; give names only. |
 | `CORE-400` (dependency) | An edge across two projects, or a work item depending on itself | Dependencies stay inside one project; name a work item of the same project. |
@@ -120,7 +123,8 @@ adds the dependency block. `dep add|rm|list` print the dependency view
 | `CORE-404` | Unknown or invisible work item id, unknown project; `dep rm` of an edge that does not exist | No such work item (or you cannot see it) — check the `wi_` id or slug and the project name. |
 | `CORE-409` `DEPENDENCY_CYCLE` | The new edge would close a loop (B already waits, directly or not, for the other side) | Refused — the order you asked for contradicts an existing one; `pf file dep list` shows the chain. |
 | `CORE-409` | Create-time conflict (e.g. duplicate) | The state machine refuses this write — read `detail`. |
-| `CORE-410` | PATCH of a terminal work item (wrapped/failed/cancelled) | This work item is closed and can no longer be edited — file a new one instead. |
+| `CORE-410` | PATCH of a terminal work item (wrapped/failed/canceled) | This work item is closed and can no longer be edited — file a new one instead. |
 
-Exit 2 with a `pf:` usage line (no typed code) means a local flag/argument
-mistake — read the message, fix the invocation.
+A `pf:` line with no typed code means a local flag/argument mistake (exit 1
+for a sub-action's flags or arguments, e.g. `file create --bogus` or a
+missing `--goal`) — read the message, fix the invocation.

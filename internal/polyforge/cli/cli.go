@@ -62,10 +62,12 @@ type Command struct {
 }
 
 // commands is the full registry (help grouping is per-command metadata,
-// Command.Group, not position): the 13 routing verbs first — 6 direct
-// to aihub (file, queue, cancel, recall, remember, memory; the blocked exits are
-// `resume` = continue and `cancel` = abandon, v2-converge §7) + 7 on the daemon UDS face (submit, watch,
-// answer, pause, resume, wrap, ops), then the management face M1–M5, then the
+// Command.Group, not position): the 13 routing verbs — 6 direct to aihub
+// (file, queue, cancel, recall, remember, memory; the blocked exits are
+// `resume` = continue and `cancel` = abandon, v2-converge §7) + 7 on the
+// daemon UDS face (submit, watch, answer, pause, resume, wrap, ops) — with
+// `chat` (the harness chat identity, also GroupExec, so the help face shows
+// 8 exec verbs) between ops and watch, then the management face M1–M5, then the
 // machine health face (doctor, #113), then the daemon
 // placeholder (help-only: cmd/pf/main.go intercepts the real launch).
 var commands = []*Command{
@@ -96,9 +98,11 @@ var commands = []*Command{
 // the process exit code:
 //
 //	0 success
-//	1 client-class failure (usage of the verb, local validation, 4xx
-//	  wire answers: not-found, conflict, forbidden, bad input)
-//	2 server-class failure (5xx wire answers) and usage/parse errors
+//	1 client-class failure (local validation, a sub-action's flag or
+//	  argument error, 4xx wire answers: not-found, conflict, forbidden,
+//	  bad input, transport failure)
+//	2 server-class failure (5xx wire answers), an unknown verb, and a
+//	  parse error of the global or the verb's own (Setup) flag set
 func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	gfs := flag.NewFlagSet("pf", flag.ContinueOnError)
 	gfs.SetOutput(stderr)

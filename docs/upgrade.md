@@ -14,7 +14,10 @@ so creating a project fails until the upgrade SQL has run.
   SQLite backup-API snapshot of `aihub.db` (consistent even under WAL
   writes), and an off-host copy. The service keeps running throughout.
 - **The switch window is the only service interruption**, in this order:
-  1. the old aihub container exits gracefully (drain ≤ `DRAIN_SECS`);
+  1. the old aihub container exits gracefully (drain ≤ `DRAIN_SECS`, default
+     15s — the compose file's `stop_grace_period` is also 15s, longer than
+     aihub's own 10s HTTP drain; the new default applies from the next
+     deploy);
   2. deploy.sh applies the upgrade SQL (see below), one transaction per
      script;
   3. the new container starts and HTTP is polled.
@@ -81,6 +84,18 @@ checks this in preflight, before the window, and refuses the deploy with
 nothing changed when the linked library is older. SQL execution itself uses
 the deployer's ssh + `python3` stdlib-sqlite3 path; the `sqlite3` CLI is
 neither used nor required.
+
+**Minimum database baseline.** The `deploy/sql/` chain starts at v2.4.0
+and assumes the columns that the old in-process Go migrations added:
+`machines.mode` / `machines.live_wi_ids` (heartbeat face, first in v0.4.2)
+and `memories.fs_mtime_ns` / `memories.fs_size` (memory freshness stamp,
+polyforge#129, first in v1.12.0). Those migrations were deleted in v2.2.0
+(3d7a857) and `Open` runs none, so a database must either have been
+created by v2.2.0 or later, or have been opened at least once by a server
+between v1.12.0 and v2.1.x. A database last served by anything older is
+not upgradable by deploy.sh: its first heartbeat or memory write fails
+with `no such column`. Bring it through a v2.1.x server first (or add the
+four columns by hand) before deploying a current version.
 
 ## First instance: v2.4.0 (polyforge#149, audit subtraction C)
 
@@ -311,9 +326,10 @@ steps:
 ```
 
 A step-id key governs the step with that id in every bundle that has one
-(`fix` covers bug-fix's and quick-fix's `fix`). A step entry's keys are
-`models` and — since polyforge#159, see the next section — `harness`;
-any other key is refused, naming it. YAML anchors and aliases work as usual
+(`fix` covers bug-fix's and quick-fix's `fix`). A step entry's only key is
+`models` (polyforge#159 briefly added `harness`; polyforge#175 removed it
+again — a residual `harness` key is refused with the retired-harness hint,
+see "Per-step harness" below); any other key is refused, naming it. YAML anchors and aliases work as usual
 (`models: &x [...]`, `{ models: *x }`).
 
 **No backward compatibility — edit all three workspace files together
@@ -643,6 +659,20 @@ derive from one root.
   `CLAUDE_CONFIG_DIR` are added, and the operator's inherited config-dir
   value is stripped (it is hard-set).
 
+- Where the daemon's environment comes from (repo review 2026-10-16
+  V-11): `pf daemon ensure` starts the daemon inside the
+  `polyforge-daemon` tmux session, so the daemon — and every step it
+  spawns — inherits the environment of that tmux SERVER, captured when
+  the server first started, possibly from a human's shell. Any
+  `ANTHROPIC_*` there reaches every claude step unchanged (and is
+  visible in `/proc/<pid>/environ`). The settings `env` block is the
+  intended single credential source; Claude Code's documentation
+  suggests that block overrides a same-named process variable, but that
+  is NOT verified by polyforge, and a variable set only in the process
+  env (e.g. an `ANTHROPIC_BASE_URL` absent from settings.json) certainly
+  applies. Either keep credentials out of the tmux server's environment,
+  or set every `ANTHROPIC_*` a step needs in settings.json.
+
 ### The pairing table (generic wording)
 
 | what the settings env block carries | what a claude step does |
@@ -943,3 +973,26 @@ Claude skills (`using-polyforge`, `pf-*`) and v1 Claude plugins — and
 print one command line that first backs them up into
 `~/polyforge-v1-backup-<timestamp>/`, then removes them. Nothing is
 removed automatically. Restart the harness sessions afterwards.
+
+## Hub git calls ignore the operator's git config (repo review 2026-10-16 V-5)
+
+The daemon's git calls
+that talk to aihub with the session credential — the capsule chain push, the
+capsule clone and the carrier ls-remote/fetch/push — run with no system or
+global git config (`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`) and
+with every inherited `GIT_*` variable stripped. So `http.proxy`,
+`http.sslCAInfo`, `url.*.insteadOf` and `credential.helper` from
+`~/.gitconfig` do NOT apply to them: give the daemon a proxy through
+`https_proxy` / `HTTPS_PROXY` in its environment, and since `GIT_SSL_CAINFO`
+is stripped too, an aihub behind an internal CA needs that CA in the system
+trust store. The capsule commit itself still reads the global config, so
+`user.name` / `user.email` must be set for the daemon user; task-repo git
+(inside `repos/<name>`) also still uses the global config.
+
+Before this change an operator's `~/.gitconfig` could reroute the
+credentialed push (`url.*.insteadOf`) or hand the session secret to a
+storing `credential.helper`. Check before upgrading a work machine whose
+aihub access depends on a git-config proxy or CA setting: move it to
+`https_proxy` / the system trust store first, or the chain push and
+re-claim clone will fail.
+
