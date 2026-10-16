@@ -259,11 +259,7 @@ func queuedFor(dir string, m capsule.OutboxMemory) string {
 			if !e.Type().IsRegular() || !strings.HasSuffix(e.Name(), ".md") {
 				continue
 			}
-			fi, err := e.Info()
-			if err != nil || fi.Size() > capsule.OutboxFileMax {
-				continue
-			}
-			raw, err := os.ReadFile(filepath.Join(d, e.Name()))
+			raw, err := capsule.ReadOutboxFile(filepath.Join(d, e.Name()))
 			if err != nil {
 				continue
 			}

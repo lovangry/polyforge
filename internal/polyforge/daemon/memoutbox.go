@@ -286,19 +286,10 @@ func (d *Daemon) flushOutbox(t outboxTarget, st *outboxState) {
 	}
 }
 
-// readOutboxFile reads and parses one outbox file, refusing a symlink or
-// an oversized file unread.
+// readOutboxFile reads and parses one outbox file (capsule.ReadOutboxFile:
+// no symlink, regular, capped).
 func readOutboxFile(path string) (capsule.OutboxMemory, string) {
-	fi, err := os.Lstat(path)
-	switch {
-	case err != nil:
-		return capsule.OutboxMemory{}, err.Error()
-	case !fi.Mode().IsRegular():
-		return capsule.OutboxMemory{}, "not a regular file"
-	case fi.Size() > capsule.OutboxFileMax:
-		return capsule.OutboxMemory{}, fmt.Sprintf("the file is %d bytes (at most %d)", fi.Size(), capsule.OutboxFileMax)
-	}
-	raw, err := os.ReadFile(path)
+	raw, err := capsule.ReadOutboxFile(path)
 	if err != nil {
 		return capsule.OutboxMemory{}, err.Error()
 	}

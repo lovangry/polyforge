@@ -141,6 +141,25 @@ func TestStepRefusesOtherAihubVerbs(t *testing.T) {
 	}
 }
 
+// TestStepRememberIgnoresPlantedSpecialFiles: a symlink to /dev/zero in
+// the outbox is never read (no hang, no huge read) by the second-memory
+// check.
+func TestStepRememberIgnoresPlantedSpecialFiles(t *testing.T) {
+	env, capDir, _, _ := stepEnv(t)
+	dir := filepath.Join(capDir, filepath.FromSlash(capsule.DirMemoryOutbox))
+	if err := os.MkdirAll(filepath.Join(dir, capsule.OutboxPending), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{filepath.Join(dir, "zero.md"), filepath.Join(dir, capsule.OutboxPending, "zero.md")} {
+		if err := os.Symlink("/dev/zero", p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if code, _, stderr := runPf(t, env, "remember", "--project", "polyforge", "--type", "experience.env", "--title", "t", "b"); code != 0 {
+		t.Fatalf("remember: exit %d %s", code, stderr)
+	}
+}
+
 func TestStepRememberRefusesCredentialValues(t *testing.T) {
 	env, capDir, _, _ := stepEnv(t)
 	for _, body := range []string{"token ghp_abcdefghijklmnopqrstuvwxyz0123", "pem: -----BEGIN OPENSSH PRIVATE KEY-----", "key: Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4zAb7c"} {

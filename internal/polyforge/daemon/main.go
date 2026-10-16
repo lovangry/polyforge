@@ -46,14 +46,15 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// `pf daemon ensure` (polyforge#174): start the daemon under
 	// supervision unless it already answers — never runs the daemon
 	// in this process.
-	if len(argv) > 0 && argv[0] == "ensure" {
-		return Ensure(argv[1:], stdout, stderr)
-	}
 	// a daemon reads cli.toml's api key and talks to aihub with it: never
-	// from inside a workflow step (the step markers are set)
+	// from inside a workflow step (the step markers are set) — neither run
+	// nor ensure
 	if os.Getenv("PF_WI_ID") != "" && os.Getenv("PF_DAEMON_ID") != "" {
 		fmt.Fprintln(stderr, "pf daemon: refused inside a workflow step (PF_WI_ID and PF_DAEMON_ID are set): only a human's session runs the daemon")
 		return 1
+	}
+	if len(argv) > 0 && argv[0] == "ensure" {
+		return Ensure(argv[1:], stdout, stderr)
 	}
 	fs := flag.NewFlagSet("pf daemon", flag.ContinueOnError)
 	fs.SetOutput(stderr)

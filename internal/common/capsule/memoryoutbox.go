@@ -25,8 +25,11 @@ package capsule
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"os"
 	"regexp"
 	"strings"
+	"syscall"
 
 	"gopkg.in/yaml.v3"
 )
@@ -143,4 +146,31 @@ func ParseOutboxMemory(raw []byte) (OutboxMemory, error) {
 	}
 	m.Body = s[4+end+5:]
 	return m, nil
+}
+
+// ReadOutboxFile reads one outbox file safely: opened without following
+// a symlink (and without blocking on a fifo), it must be a regular file
+// of at most OutboxFileMax bytes — the size is judged on the open file
+// and the read is capped, so a swap between check and read gains nothing.
+func ReadOutboxFile(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file")
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, OutboxFileMax+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > OutboxFileMax {
+		return nil, fmt.Errorf("the file exceeds %d bytes", OutboxFileMax)
+	}
+	return raw, nil
 }

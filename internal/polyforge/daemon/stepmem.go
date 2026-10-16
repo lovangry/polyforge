@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -87,10 +88,12 @@ func (d *Daemon) stepCaller(w http.ResponseWriter, r *http.Request) (stepJob, bo
 // peerStepOrigin is the production origin. The caller's own environment
 // is never the authority (any process may set PF_WI_ID): the kernel's
 // peer credential is walked up its ancestry (and process groups) to a
-// step process THIS daemon spawned — the pid of a live job's latest
-// spawn-journal entry that still carries that job's markers. The
-// caller's nearest PF_WI_ID must name the same work item; a mismatch is
-// refused.
+// step process THIS daemon spawned — the pid of a live job's
+// spawn-journal entry (any of its entries; the newest match names the
+// step and attempt) that still carries that job's markers. Exactly one
+// job may match — a tree reaching several jobs' steps (a process that
+// joined another step's process group) is refused — and the caller's
+// nearest PF_WI_ID must name it.
 func (d *Daemon) peerStepOrigin(r *http.Request) (stepOrigin, string) {
 	const notStep = "serves step agents only (the caller is no step process of this daemon) — outside a step, `pf recall` / `pf memory show` read aihub directly"
 	cred, ok := requestPeerCred(r.Context())
@@ -102,27 +105,43 @@ func (d *Daemon) peerStepOrigin(r *http.Request) (stepOrigin, string) {
 		return stepOrigin{}, notStep
 	}
 	chain := ancestry(cred.pid)
+	var matches []stepOrigin
 	for _, ji := range d.rt.List() {
 		if ji.CapsuleDir == "" {
 			continue
 		}
 		entries, err := capsule.ReadSpawnJournal(ji.CapsuleDir)
-		if err != nil || len(entries) == 0 {
+		if err != nil {
 			continue
 		}
-		e := entries[len(entries)-1]
-		if e.PID <= 1 || !chain[e.PID] {
-			continue
+		// the newest journaled dispatch of this job among the caller's
+		// ancestors whose process still carries the job's markers
+		for i := len(entries) - 1; i >= 0; i-- {
+			e := entries[i]
+			if e.PID <= 1 || !chain[e.PID] {
+				continue
+			}
+			if owner, ok := runtime.StepProcessOrigin(e.PID, d.cfg.MachineID); !ok || owner != ji.WorkItem {
+				continue
+			}
+			matches = append(matches, stepOrigin{wi: ji.WorkItem, step: e.StepID, attempt: e.SpawnN})
+			break
 		}
-		if owner, ok := runtime.StepProcessOrigin(e.PID, d.cfg.MachineID); !ok || owner != ji.WorkItem {
-			continue
-		}
-		if claimed != ji.WorkItem {
-			return stepOrigin{}, fmt.Sprintf("refused: the caller descends from the step process of %s but claims PF_WI_ID=%s", ji.WorkItem, claimed)
-		}
-		return stepOrigin{wi: ji.WorkItem, step: e.StepID, attempt: e.SpawnN}, ""
 	}
-	return stepOrigin{}, notStep + " (no live step process of this daemon is among its ancestors)"
+	switch {
+	case len(matches) == 0:
+		return stepOrigin{}, notStep + " (no live step process of this daemon is among its ancestors)"
+	case len(matches) > 1:
+		var wis []string
+		for _, m := range matches {
+			wis = append(wis, m.wi)
+		}
+		sort.Strings(wis)
+		return stepOrigin{}, "refused: the caller's process tree reaches the step processes of several work items (" + strings.Join(wis, ", ") + ")"
+	case claimed != matches[0].wi:
+		return stepOrigin{}, fmt.Sprintf("refused: the caller descends from the step process of %s but claims PF_WI_ID=%s", matches[0].wi, claimed)
+	}
+	return matches[0], ""
 }
 
 // ancestry answers the pids of pid, its ancestors and their process

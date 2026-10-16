@@ -291,6 +291,9 @@ type Daemon struct {
 	// stepOriginOf resolves a /step/* caller to its work item (nil = the
 	// UDS peer credential, peerStepOrigin; tests bind a stub).
 	stepOriginOf func(*http.Request) (stepOrigin, string)
+	// stopFn replaces rt.Stop in an operator close (nil = rt.Stop; tests
+	// bind a refusing stub).
+	stopFn func(ctx context.Context, wi, reason string) error
 	// projectIDs caches project name → aihub id for the step memory read.
 	projectIDs sync.Map
 	// outboxLocks holds one *sync.Mutex per work item: one memory-outbox

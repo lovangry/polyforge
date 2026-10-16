@@ -158,6 +158,9 @@ type Monitor struct {
 	rtQ    *supervise.Queue[Attach]
 	stopCh chan struct{}
 	stop   sync.Once
+	// closeRefused carries the daemon's word that a close it marked
+	// (markClosing) was refused after all (see onCloseRefused).
+	closeRefused chan struct{}
 
 	// supervision state (monitor goroutine; the activity face reads the
 	// published copy under stateMu).
@@ -276,6 +279,8 @@ func (m *Monitor) run() {
 			}
 		case <-m.exitCh:
 			m.onExit()
+		case <-m.closeRefused:
+			m.onCloseRefused()
 		case <-m.link.Facts.Notify():
 			m.drainFacts()
 		case <-ticker.C:
@@ -938,4 +943,24 @@ func (m *Monitor) markClosing() {
 	m.stateMu.Lock()
 	m.sealing = true
 	m.stateMu.Unlock()
+}
+
+// signalCloseRefused queues onCloseRefused for the monitor goroutine.
+func (m *Monitor) signalCloseRefused() {
+	select {
+	case m.closeRefused <- struct{}{}:
+	default:
+	}
+}
+
+// onCloseRefused disarms the suppression of a close that did not happen.
+// A driver exit it already swallowed (the close stopped the agent before
+// the runtime refused) goes to recovery now, like any other death.
+func (m *Monitor) onCloseRefused() {
+	m.stateMu.Lock()
+	m.sealing = false
+	m.stateMu.Unlock()
+	if m.exitCh == nil {
+		m.needRecovery(protocol.RecoverDeath, "agent stopped by a close the runtime then refused")
+	}
 }

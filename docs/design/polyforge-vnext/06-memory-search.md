@@ -113,8 +113,9 @@ rowid 与 rank，再沿 rank 顺序分批读取条目元数据，直到下界 (1
   step 模式（`cli/stepctx.go`）：`pf recall` / `pf memory show` 走 daemon UDS 的只读面
   `GET /step/memories/search`、`GET /step/memories/{id}`（`daemon/stepmem.go`）——daemon 以自己的机器凭据转发。
   work item 不取自请求、也不取自调用方自己的环境变量：沿 UDS 对端 pid 的祖先链（含进程组长）找到本 daemon 派生的 step
-  进程（某个活跃 job 的 spawn journal 最新条目的 pid，且该进程带着这个 job 的标记）；调用方最近的 `PF_WI_ID` 必须与之
-  一致，否则拒绝。项目取自该 job（请求里别的项目 → DAEMON-403，项目外的 id 一律 MEM-404）；GET 是读，过 step-origin
+  进程（某个活跃 job 的 spawn journal 任一条目的 pid，且该进程仍带着这个 job 的标记；最新的匹配条目给出 step 与
+  attempt）；必须恰好一个 job 匹配（进程树同时够到两个 job 的 step → 拒绝），调用方最近的 `PF_WI_ID` 必须与之一致，
+  否则拒绝。项目取自该 job（请求里别的项目 → DAEMON-403，项目外的 id 一律 MEM-404）；GET 是读，过 step-origin
   守卫，非 step 调用方被拒（人直接读 aihub）。step 模式要求 `PF_WI_ID` 与 `PF_DAEMON_ID` 同时存在；step 内
   `pf doctor` 与 `pf daemon` 也被拒（二者会读 `cli.toml` 的 key）。
   `pf remember` 不联网：写一个文件到 capsule `artifacts/memory-outbox/<n>.md`（frontmatter type/title/tags + 正文，
@@ -123,7 +124,9 @@ rowid 与 rank，再沿 rank 顺序分批读取条目元数据，直到下界 (1
   不防恶意。
 - outbox 上传（`daemon/memoutbox.go`）：flush 从不在 driver / runtime 的锁下运行——driver log 只"请求"一次后台
   flush（`step_done` / `gate_verdict` / `terminal`）；最终 flush 在 agent adapter 发现 driver 退出之后、上报退出之前运行
-  （即 observe 把 WI 交给封存之前），操作者 close（wrap / fail / pause）则先停 agent、再最终 flush、再 `rt.Stop` 封存。
+  （即 observe 把 WI 交给封存之前），操作者 close（wrap / fail / pause）对 RUNNING 的 job 先停 agent、再最终 flush、
+  再 `rt.Stop` 封存；若 `rt.Stop` 仍拒绝该 close，daemon 撤销预期退出的抑制（`Observe.CloseRefused`），已停的 agent
+  走正常恢复，outbox 重新打开。outbox 文件以 `O_NOFOLLOW` 打开、fstat 须为普通文件、读取上限 64KB。
   最终 flush 有界（20s）；结束或超时后 outbox 关闭：仍在进行的 flush 不再上传、移动文件或写 log，也不再开始新的 flush，
   直到新的 driver handle（恢复）重新打开。校验：文件 ≤64KB、type `experience.<kind>`、单行 title、正文 ≤2KB、tag 为
   普通名字、无疑似凭据值（私钥块、常见 key/token 前缀、JWT 形状、大小写数字混合的长串、daemon 自己的 key；只说"key 在哪"

@@ -613,21 +613,32 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 	// observable lie this closes).
 	d.obs.MarkClosing(wi)
 	// The memories the run's steps left in the outbox go up before the
-	// seal: stop the agent first (no step writes behind the flush), then
-	// the bounded final flush (it closes the outbox), then rt.Stop seals.
-	// rt.Stop's own teardown finds the driver already stopped.
-	if ji.Agent != nil && !ji.Agent.Done() {
+	// seal: a RUNNING job's agent is stopped first (no step writes behind
+	// the flush), then the bounded final flush (it closes the outbox),
+	// then rt.Stop seals — its own teardown finds the driver already
+	// stopped. Every other state goes straight to rt.Stop's own admission.
+	if ji.State == runtime.StateRunning && ji.Agent != nil && !ji.Agent.Done() {
 		if err := ji.Agent.Terminate(outboxStopWait); err != nil {
 			fmt.Fprintf(os.Stderr, "daemon: %s: stopping the agent before the close: %v\n", wi, err)
 		}
 	}
 	d.finalFlush(outboxTarget{wi: ji.WorkItem, project: ji.Project, capsuleDir: ji.CapsuleDir}, outboxFlushWait)
-	if err := d.rt.Stop(ctx, wi, reason); err != nil {
+	stop := d.rt.Stop
+	if d.stopFn != nil {
+		stop = d.stopFn
+	}
+	if err := stop(ctx, wi, reason); err != nil {
 		graceful, ae := d.mapCloseErr(err)
 		if graceful {
 			writeJSON(w, http.StatusOK, closeResponse{WorkItemID: wi, Slug: ji.Slug, Outcome: "already_terminal"})
 			return
 		}
+		// The close did not happen: withdraw the expected-exit
+		// suppression — an agent this close already stopped goes to the
+		// normal recovery — and reopen the outbox for the run that
+		// continues (a recovery installs a new handle and reopens it too).
+		d.obs.CloseRefused(wi)
+		d.reopenOutbox(ji.WorkItem)
 		writeJSON(w, ae.HTTPStatus(), ae)
 		return
 	}

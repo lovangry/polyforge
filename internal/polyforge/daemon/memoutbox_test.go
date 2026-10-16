@@ -180,7 +180,7 @@ func TestOutboxRejectsInvalidAndOverQuota(t *testing.T) {
 		t.Fatalf("rejected = %v", rejected)
 	}
 	log := memoryLog(t, tg)
-	for _, want := range []string{"a2.md: a second memory from step fix attempt 1", `i.md: step "review" attempt 9 is no dispatch`, "j.md: the file is", `b.md: type "doc.design" is not experience.<kind>`, "c.md: a title is required",
+	for _, want := range []string{"a2.md: a second memory from step fix attempt 1", `i.md: step "review" attempt 9 is no dispatch`, "j.md: the file exceeds 65536 bytes", `b.md: type "doc.design" is not experience.<kind>`, "c.md: a title is required",
 		"d.md: the body is 2049 bytes", "e.md: the memory looks like it carries a credential value", "f.md: the memory carries the daemon's credential", "g.md: tag \"bad tag\"", "h.md: no frontmatter"} {
 		if !strings.Contains(log, want) {
 			t.Fatalf("log lacks %q:\n%s", want, log)
