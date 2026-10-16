@@ -297,8 +297,11 @@ func IsLocalGitlink(err error) bool {
 // the next healthy CommitPush re-stages it) and answers the typed
 // GIT-412 LOCAL_GITLINK_DETECTED refusal (an *api.Error, so observe's
 // IsLocalGitlink classification sees the code + sentinel pair): the
-// error names the polluted paths and the cleanup recipe (delete the
-// nested .git, git rm --cached) so the operator can act on it. Repos
+// error names the polluted paths and the cleanup recipe (gitlinkRemedy:
+// under repos/ restore the capsule .gitignore and never delete the task
+// repo's .git; elsewhere move the embedded repository out or ignore it,
+// deleting its .git only if its history is disposable) so the operator
+// can act on it. Repos
 // under the capsule's ignored trees (repos/, artifacts/release-*/)
 // never reach the index, so ANY staged gitlink is poison by definition.
 func checkLocalGitlink(env []string, dir string) error {
