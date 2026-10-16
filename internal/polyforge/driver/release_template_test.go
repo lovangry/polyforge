@@ -115,13 +115,19 @@ func TestReleaseBundleShape(t *testing.T) {
 			t.Fatalf("release step lost its contract text %q", needle)
 		}
 	}
-	// The re-dispatch guard (repo review 2026-10-16 V-6): a re-run whose
-	// earlier attempt already published refuses before the procedure — a
-	// tag on origin_head missing from the kept pre-release list — and the
-	// first attempt's list is never overwritten.
+	// The already-released guard (repo review 2026-10-16 V-6), before the
+	// procedure runs: a release tag (v*) already on origin_head refuses
+	// whether or not an earlier attempt left its list; with a kept list,
+	// ANY remote tag line it lacks refuses; the kept list is never
+	// overwritten; a normal first run passes.
 	guard := strings.Index(rel, "PF-RELEASE-ALREADY_RELEASED")
-	if guard < 0 || !strings.Contains(rel, "never overwrite it") || !strings.Contains(rel, "equals `origin_head`") {
-		t.Fatal("the release step lost its already-released guard (PF-RELEASE-ALREADY_RELEASED: a tag on origin_head not in the kept pre-release-tags.txt)")
+	for _, needle := range []string{
+		"The head is already tagged", "whether or not any file from an earlier", "name starts with `v`", "equals `origin_head`",
+		"never overwrite it", "any tag, on any commit", "comm -13", "A normal first run passes both",
+	} {
+		if guard < 0 || !strings.Contains(rel, needle) {
+			t.Fatalf("the release step lost its already-released guard text %q (PF-RELEASE-ALREADY_RELEASED)", needle)
+		}
 	}
 	if run := strings.Index(rel, "## 4. Run the procedure"); run < 0 || guard > run {
 		t.Fatal("the already-released guard must come before the procedure runs")

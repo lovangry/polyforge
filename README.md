@@ -308,9 +308,10 @@ images are immutable, so there is no rewind into a re-release):
    head, records the pre-release remote tag list, checks the procedure supports
    `--verify`, then runs `.polyforge/release.sh [bump]` (which runs the repo's
    test gate itself). No procedure in the capsule is a FAIL; two repos carrying
-   one is `PF-RELEASE-AMBIGUOUS_OWNER`. A re-dispatch whose earlier attempt
-   already published (a tag on origin's head missing from the kept pre-release
-   list) is a FAIL `PF-RELEASE-ALREADY_RELEASED`, never a second release.
+   one is `PF-RELEASE-AMBIGUOUS_OWNER`. If origin's head already carries a
+   release tag (`v*`), or a re-dispatch finds a remote tag its earlier
+   attempt's pre-release list lacks, the step is a FAIL
+   `PF-RELEASE-ALREADY_RELEASED`, never a second release.
 2. `verify` - a fresh judge that trusts nothing from step 1: release commit vs
    origin head, the new tag exists and points at it, every older tag is
    unchanged, release notes are non-empty, then `.polyforge/release.sh --verify
