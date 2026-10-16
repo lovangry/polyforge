@@ -3,7 +3,7 @@ package driver
 // transition.go: the SINGLE write entry point for every execution.json
 // mutation (the driver spec's R5 single-write rule). The daemon-side
 // driver replaces the WI Agent as the one writer of the capsule's
-// runtime-state/execution.json (03-execution-capsule.md §4.2 keeps the
+// runtime-state/execution.json (reference.md §7.3 keeps the
 // tmp+fsync+rename contract; the v2 driver additionally fsyncs the
 // parent directory so the rename itself survives a crash). Every state
 // change — init, step start, step result, gate fail, rewind, budget,
@@ -37,7 +37,7 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
-// Workflow status vocabulary (03-execution-capsule.md §4.2, closed set).
+// Workflow status vocabulary (reference.md §7.3, closed set).
 // The strings are owned by the SCHEMA package
 // (internal/common/capsule) so non-driver lanes can read them without an
 // import cycle; these are the driver's write-side aliases.
@@ -317,14 +317,14 @@ func (d *Driver) applyStepStartLocked(req TransitionRequest, info *appliedInfo) 
 	}
 	st.Model = req.Model
 	st.Effort = req.Effort
-	st.StepStartedAt = d.stamp() // refreshes on every re-entry (03 §4.2 D8)
+	st.StepStartedAt = d.stamp() // refreshes on every re-entry (reference.md §7.3)
 	d.exec.WorkflowStatus = StatusRunning
 	d.exec.CurrentStep = req.StepID
 	return nil
 }
 
 // applyUnblockLocked lands the §6.4 owner resume verdict (polyforge#116):
-// only a blocked workflow accepts it (03 §4.2: the owner's follow-up
+// only a blocked workflow accepts it (reference.md §7.3: the owner's follow-up
 // writes running back), the position stays frozen exactly as the park
 // left it (the current step remains in_progress — the loop's own
 // step_start write on the next dispatch re-dispatches it as the fresh
@@ -627,7 +627,7 @@ func (d *Driver) applyTerminalLocked(req TransitionRequest) error {
 	return nil
 }
 
-// applyBudgetLocked adds one delta to both budget layers (03 §4.2:
+// applyBudgetLocked adds one delta to both budget layers (reference.md §7.3:
 // step-level authority, workflow-level aggregation — the same atomic
 // write).
 func (d *Driver) applyBudgetLocked(req TransitionRequest) error {

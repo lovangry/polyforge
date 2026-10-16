@@ -1,6 +1,8 @@
 # 05 — Sync / Revision / Recovery：单一发布路径、不可变 Revision、先数据后状态与 takeover fencing
 
-> **ARCHIVED（repo review 2026-10-16 G-1）— 本文大部分描述已删除的机制：Revision/CAS/manifest、`SYNC-*` 码、watcher dirty 位、删除保护、generation 收尾的 flush 证据（只有 §7.5/§7.6 是现行机制，已迁至 v2-converge §14）。标有 ARCHIVED 横幅的节 do not build from this；未标横幅的节也只作历史与溯源参考。现行设计权威：[v2-converge.md](v2-converge.md)、[wi-kind-contract.md](wi-kind-contract.md)、[08-capsule-base-migration.md](08-capsule-base-migration.md)；与代码冲突时一律以代码为准。**
+> **ARCHIVED 2026-10-16** (repo review 2026-10-16 wave 4): describes the v0/v1 design and is kept for history only — do not build from it. Current reference: [reference.md](../reference.md); decisions: [v2-converge.md](../v2-converge.md). Live mechanisms this file still held were moved there before archiving; section anchors are unchanged.
+
+> **ARCHIVED（repo review 2026-10-16 G-1）— 本文大部分描述已删除的机制：Revision/CAS/manifest、`SYNC-*` 码、watcher dirty 位、删除保护、generation 收尾的 flush 证据（只有 §7.5/§7.6 是现行机制，已迁至 v2-converge §14）。标有 ARCHIVED 横幅的节 do not build from this；未标横幅的节也只作历史与溯源参考。现行设计权威：[v2-converge.md](../v2-converge.md)、[wi-kind-contract.md](../wi-kind-contract.md)、[08-capsule-base-migration.md](../08-capsule-base-migration.md)；与代码冲突时一律以代码为准。**
 > Most of this document describes deleted mechanisms. Sections bannered ARCHIVED must not be built from; the live authority is v2-converge.md plus the code.
 
 | 权威项 | 值 |
@@ -27,7 +29,7 @@
 
 ### 1.1 范围 <!-- §1.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据、watcher dirty 位、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据、watcher dirty 位、takeover）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - **单一发布路径的裁定**：全扫描发布只有一条路径——由 `00-architecture.md#§4.3` 列出的四类事件（step 完成、step
   中断、WI 出最终结果、Daemon 优雅停机，以及可选 milestone）触发；watcher 不触发任何发布，唯一
@@ -63,7 +65,7 @@
 
 ### 2.1 Revision（权威定义） <!-- §2.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 **Revision**：一个 Capsule 同步面在某次触发事件时刻的**不可变增量快照**。性质：一经发布不可改写
 （`00` INV-4）；每个 Revision 按序号 `seq` 单调递增，指向唯一 parent（前一 seq）；内容 = 相对
@@ -73,7 +75,7 @@ Revision，没有 seq 号，不能被引用为 parent）。parent/HEAD 的完整
 
 ### 2.2 HEAD（权威定义） <!-- §2.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 **HEAD**：Core 中 `capsule_heads`（`02-aihub-core.md#§4.8`）记录的指针，指向某 WI 最新**完整发布**的 Revision
 `seq`。推进规则（§6 步骤 6）：仅当 ①候选 Revision 的全部 CAS 数据块已在 AIHub 数据目录落盘且
@@ -83,7 +85,7 @@ Revision，没有 seq 号，不能被引用为 parent）。parent/HEAD 的完整
 
 ### 2.3 watcher（唯一职责：标记 dirty） <!-- §2.3 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 **watcher**：Daemon 内对 Capsule 同步面（§4.1 定义的 `runtime-state/execution.json`、`artifacts/`、
 `logs/`、`repos/<name>/`，以及可选纳入同步的 `harness/<adapter>/session.json`（`03-execution-capsule.md#§4.4`），
@@ -158,7 +160,7 @@ HEAD 不前移；失败后的收敛发生在下一次 §2.4 触发时刻的全�
 
 ### 2.7 冻结协议与发布互斥（freeze window，修复 B01：快照一致性） <!-- §2.7 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 **问题**：WI Agent 在一次 step 执行期间可能连续修改多个文件（自身写入或经其派生的 step agent（subagent）写入 `repos/`/`artifacts/`/`logs/`），而不逐次记录版本；若扫描发生在这 〔#111分类：删→驱动〕
 些写入进行中的任意时刻，打包出的 manifest 可能混合了跨越两个不同逻辑时刻的字节（例如新产物文件
@@ -281,7 +283,7 @@ HEAD 不前移；失败后的收敛发生在下一次 §2.4 触发时刻的全�
 
 ### 2.8 幂等重放与 HEAD 校验的处理顺序（修复 B02） <!-- §2.8 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、SYNC-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、SYNC-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 **问题**：若发布请求先校验 `parent == 当前 HEAD` 再判断是否为重复请求，会在下列两个合法重放
 场景中产生错误的 `SYNC-409`：请求已在此前成功提交（Core 已 INSERT 且 HEAD 已推进到该 seq 或
@@ -368,7 +370,7 @@ manifest 恒等——而 `built_at` 是 manifest 中唯一的时间性字段，�
 
 ### 2.9 takeover fencing（判定条件与错误码，`00` INV-5 展开） <!-- §2.9 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、HMAC 令牌、SYNC-* 码、Revision/CAS/manifest、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、HMAC 令牌、SYNC-* 码、Revision/CAS/manifest、takeover）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 **判定**：发布请求（发起方恒为 Daemon，§2.7）携带 `(work_item_id, generation, seq, parent,
 manifest_sha)` 与 `X-PF-Generation-Token`（`02-aihub-core.md#§5.1` capability token，claim/takeover 时签发给
@@ -384,7 +386,7 @@ Core 写 API 的 generation token 校验（`02-aihub-core.md#§5.1` `CORE-403`�
 
 ### 2.10 删除保护（权威定义） <!-- §2.10 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（SYNC-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（SYNC-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 远端 Capsule 数据（Revision 块、manifest、归档）的删除受三重保护：
 
@@ -399,7 +401,7 @@ Core 写 API 的 generation token 校验（`02-aihub-core.md#§5.1` `CORE-403`�
 
 ### 2.11 与 `03` 落盘规则的关系（修复 B07：symlink 逃逸） <!-- §2.11 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 Capsule 落盘/写入的路径规则——同步根内的路径白名单、`../` 逃逸拒绝、symlink 目标解析后仍必须
 落在同步根内等——由 `03-execution-capsule.md#§6`（核心流程与 Subagent 写限制）权威定义，本文
@@ -411,7 +413,7 @@ Capsule 落盘/写入的路径规则——同步根内的路径白名单、`../`
 
 ### 2.12 本文追加不变量 <!-- §2.12 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据、read-through）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 | 编号 | 不变式 |
 |---|---|
@@ -428,7 +430,7 @@ Capsule 落盘/写入的路径规则——同步根内的路径白名单、`../`
 
 ## 3. 模块与代码目录 <!-- §3 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest、flush 证据、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest、flush 证据、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 ```
 internal/sync/
@@ -446,7 +448,7 @@ dirty 标记作为"是否值得扫一次"的提示，`watcher/` 绝不反向调�
 
 ### 4.1 同步面与 CAS <!-- §4.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - **同步根**（权威目录集合，边界按 `03-execution-capsule.md#§4.4` 最终契约裁定）：`runtime-state/execution.json`、
   `artifacts/`、`logs/`、`repos/<name>/`，以及**可选**的 `harness/<adapter>/session.json`
@@ -482,7 +484,7 @@ dirty 标记作为"是否值得扫一次"的提示，`watcher/` 绝不反向调�
 
 ### 4.2 manifest 文件格式（`rev/<seq>/manifest.json`） <!-- §4.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、SYNC-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、SYNC-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 磁盘上落盘的 `rev/<seq>/manifest.json` 即为下列 `manifest` 对象本身（合法 JSON，无注释）：
 
@@ -550,7 +552,7 @@ manifest 的生成时刻（RFC3339），仅供审计，**不参与 `manifest_sha
 
 ### 5.1 发布协议（Daemon → AIHub，权威签名） <!-- §5.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、SYNC-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、SYNC-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 **调用方与端点权威**：本节端点的方法/路径/调用方**一律以 `02-aihub-core.md#§5.1` canonical 行 14–20 为权威**（块上传/manifest/HEAD 读取为 Daemon；删除保护与撤销为人（admin）经 `pf` 部署 CLI；恢复读取为恢复方机器），本节不重复定义清单，只展开同步协议细节（分块、manifest、幂等、fencing）。发布动作的机械执行者恒为 Daemon（`00` INV-11/`04` INV-D3），与端点的授权调用方按 canonical 各行定义不冲突。WI Agent 向 〔#111分类：删→驱动〕
 本机 Daemon 发起发布请求的信道不属于本层 API，权威定义在 `04-local-runtime.md#§5.1`/§6.3/§6.4，
@@ -574,7 +576,7 @@ manifest 的生成时刻（RFC3339），仅供审计，**不参与 `manifest_sha
 
 ### 5.2 错误码表（前缀 SYNC） <!-- §5.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、SYNC-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、SYNC-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 | 码 | 语义 |
 |---|---|
@@ -590,7 +592,7 @@ manifest 的生成时刻（RFC3339），仅供审计，**不参与 `manifest_sha
 
 ## 6. 核心流程：全扫描发布的六个步骤 <!-- §6 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、SYNC-* 码、Revision/CAS/manifest、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、SYNC-* 码、Revision/CAS/manifest、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 以下按执行顺序描述唯一发布路径的六个阶段（编号步骤，非可执行代码；细节接口签名见 §5，数据格式
 见 §4）：
@@ -635,7 +637,7 @@ manifest 的生成时刻（RFC3339），仅供审计，**不参与 `manifest_sha
 
 ### 6.1 generation 收尾的 final flush 与 flush 证据生成（D6；Core 校验权威在 `02-aihub-core.md#§6.4`） <!-- §6.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 `02-aihub-core.md#§6.4` 规定 pause/block/wrap/fail 四个结束 generation 的端点必须携带 `flush_evidence`，且
 不允许调用方自报了事——证据的全部事实性字段都必须来自 **Daemon 侧**在写冻结后的一次真实
@@ -705,7 +707,7 @@ pending publish 记录并在确认落定后删除；收尾调用（携带证据�
 
 ### 7.1 本机崩溃（WI Agent / 整机） <!-- §7.1 --> 〔#111分类：删→驱动〕
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 WI Agent 或其所在机器崩溃重启后，Daemon 按 `04-local-runtime.md#§7` 检测到进程退出并基于 〔#111分类：删→驱动〕
 `runtime-state/execution.json` 当前内容重新派生新的 WI Agent 续跑（不要求从零重放整个 〔#111分类：删→驱动〕
@@ -721,7 +723,7 @@ workflow）。新 WI Agent 恢复驱动后，会在到达下一次 §2.4 的四�
 
 ### 7.2 同步中断（数据块仅部分落盘时崩溃） <!-- §7.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 若在 §6 步骤 4（打包/staging 固化/块上传）进行中崩溃，分两种子情形：**staging 固化尚未完成时
 崩溃**（write freeze 已获取但字节尚未全部复制进 staging）：本次发布流程视为未发生，Daemon
@@ -739,7 +741,7 @@ Daemon 重启后先按 §2.8 的 GET HEAD 三分支消歧：HEAD==记录 `seq` �
 
 ### 7.3 takeover 竞态（旧 owner 与新 owner 同时活动） <!-- §7.3 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、SYNC-* 码、Revision/CAS/manifest、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、SYNC-* 码、Revision/CAS/manifest、takeover）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 时序：旧 WI Agent 仍在运行 → 人工（admin）经恢复机器发起 force-takeover（该调用本身结束旧代并 〔#111分类：删→驱动〕
 开启 generation+1、在响应中返回新代凭证）→ 恢复机器的 Daemon **消费该响应凭证**创建新现场并派生
@@ -754,7 +756,7 @@ Agent 通过 §7.4（若适用）从远端 HEAD 恢复现场后，以新 generat
 
 ### 7.4 远端现场恢复（takeover / Capsule 重建时调用） <!-- §7.4 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、read-through）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 当 `03-execution-capsule.md#§6.1` 的 `create_capsule` 因 generation 变化（隔离重建或全新 Capsule）需要从远端恢复
 现场时：先读取当前 HEAD（若 404，说明尚无任何发布，`03` 创建的空目录原样保留，等待第一次走
@@ -781,7 +783,7 @@ bootstrap 分支）；再按 `02-aihub-core.md#§4.6`/§5.1 的 Core 权威 repo
 
 ### 7.5 任务仓库 carrier ref（polyforge#108 / #158） <!-- §7.5 -->
 
-> **已迁出 — 本节是历史副本；现行权威是 [v2-converge.md](v2-converge.md) §14.2（逐字迁入，2026-10-16），两者不一致时以那里为准。**
+> **已迁出 — 本节是历史副本；现行权威是 [v2-converge.md](../v2-converge.md) §14.2（逐字迁入，2026-10-16），两者不一致时以那里为准。**
 
 本节描述当前代码（v2 Go 执行驱动），与上文 Revision 模型并列。每次 capsule 发布，daemon 先推 capsule 链（`refs/heads/main`），
 再把每个任务仓库 `repos/<name>` 的本地 HEAD 推到该 WI 裸仓库的 carrier ref `refs/pf-task/<name>`（`gitops.pushTaskRefsLocked`）；
@@ -826,7 +828,7 @@ blocked→resume 等重新认领从上游 clone 后按 carrier ref 恢复任务�
 
 ### 7.6 任务仓库未提交改动：WIP ref（polyforge#167） <!-- §7.6 -->
 
-> **已迁出 — 本节是历史副本；现行权威是 [v2-converge.md](v2-converge.md) §14.3（逐字迁入，2026-10-16），两者不一致时以那里为准。**
+> **已迁出 — 本节是历史副本；现行权威是 [v2-converge.md](../v2-converge.md) §14.3（逐字迁入，2026-10-16），两者不一致时以那里为准。**
 
 carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改动。补充一条 WIP ref `refs/pf-wip/<name>`（`gitops.PushTaskWIP`）：
 
@@ -874,7 +876,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 
 ## 8. 安全边界 <!-- §8 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、SYNC-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、SYNC-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - 发布面信任模型：只有持有当前 generation 的 Daemon 可写 Revision 数据（§2.9 fencing）；Main
   Agent 不持有直接写入凭证，只能向本机 Daemon 发起发布请求（`00` INV-11/`04` INV-D3）；块内容不
@@ -888,7 +890,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 
 ## 9. 监控 <!-- §9 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（SYNC-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（SYNC-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - 发布延迟（从触发事件到 HEAD 推进完成）；write freeze 时长分布与超时次数（区分"强制触发
   超时升级为基础设施失败"与"milestone 超时放弃"两类，并细分为"确认/判定阶段"与"staging
@@ -901,7 +903,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 
 ## 10. 测试与故障注入 <!-- §10 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、SYNC-* 码、Revision/CAS/manifest、flush 证据、watcher dirty 位、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、SYNC-* 码、Revision/CAS/manifest、flush 证据、watcher dirty 位、takeover）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - 单一路径断言：制造 watcher 检测到文件变化但没有任何 §2.4 触发事件发生的情形 → 断言不产生
   任何发布、HEAD 不动，仅 dirty 标记被写入。
@@ -968,7 +970,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 
 ## 11. 迁移与 rollout <!-- §11 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - 新系统无存量迁移。协议携带自描述版本信息（checkpoint manifest 的 `kind` 字段与 CAS 布局
   版本）；未来存储后端替换（对象存储）只动 CAS 与块 PUT/GET 的实现，manifest 链与本文定义的

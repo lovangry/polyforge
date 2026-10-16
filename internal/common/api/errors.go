@@ -5,7 +5,7 @@ import (
 	"strconv"
 )
 
-// Error is the typed wire error shared by aihub and pf (02 §6.7 errStatus).
+// Error is the typed wire error shared by aihub and pf (reference.md §5).
 // HTTP status is derived from the numeric suffix of the code.
 type Error struct {
 	Code   string          `json:"code"`
@@ -36,14 +36,16 @@ func (e *Error) HTTPStatus() int {
 // Error code registry. v1 surface: CORE/MEM/AUTH/GIT/DAEMON/CAP.
 // SYNC-* codes are deleted (git replaces the revision chain).
 const (
-	// CORE — work item / project / user business errors (02 §6)
+	// CORE — work item / project / user business errors (reference.md §5)
 	ErrCoreBadInput  = "CORE-400"
 	ErrCoreForbidden = "CORE-403"
 	ErrCoreNotFound  = "CORE-404"
 	ErrCoreConflict  = "CORE-409"
 	ErrCoreGone      = "CORE-410"
 	ErrCoreInternal  = "CORE-500"
-	ErrCoreLockHeld  = "CORE-508"
+	// ErrCoreStorage: the SQLite backup (VACUUM INTO) failed.
+	ErrCoreStorage  = "CORE-507"
+	ErrCoreLockHeld = "CORE-508"
 
 	// MEM — memory errors (06 §5)
 	ErrMemBadInput    = "MEM-400"
@@ -66,7 +68,7 @@ const (
 	ErrGitNotFound     = "GIT-404"
 	ErrGitGitlink      = "GIT-412" // gitlink (mode 160000) in pushed tree
 	ErrGitInternal     = "GIT-500"
-	// DAEMON — pf daemon UDS surface (04 §5)
+	// DAEMON — pf daemon UDS surface (reference.md §6.1)
 	ErrDaemonBadInput  = "DAEMON-400"
 	ErrDaemonForbidden = "DAEMON-403"
 	ErrDaemonNotFound  = "DAEMON-404"

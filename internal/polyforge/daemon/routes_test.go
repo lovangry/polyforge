@@ -360,7 +360,7 @@ func TestOpsAutoAndMax(t *testing.T) {
 }
 
 // TestSubmitDispatchBackfill: submits beyond the concurrency cap queue
-// and backfill as slots open (04 §12 ruling 0).
+// and backfill as slots open (archive/04-local-runtime.md §12).
 func TestSubmitDispatchBackfill(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) { c.MaxConcurrent = 1 })
 	for _, wi := range []string{"wi_p", "wi_q", "wi_r"} {

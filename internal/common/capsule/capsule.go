@@ -2,14 +2,14 @@
 // (runtime creates capsules, observe commits them) and aihub (serves the
 // matching bare repos; git-dir lives OUTSIDE the capsule).
 //
-// Design authority: docs/design/polyforge-vnext/v1-architecture-spec.md,
-// v1-spec-full.md §六, and 03-execution-capsule.md for layout semantics.
+// Layout and chain rules: docs/design/polyforge-vnext/v2-converge.md §14 and
+// Appendix E.5 (summary in reference.md §8); the v1 records are archived.
 //
 // v1 deltas vs v0:
 //   - The capsule IS a git worktree; the revision chain IS git history.
 //   - git-dir is externalized: <data>/git/wi_xxx.git — agents cannot reach
 //     hooks/config/index.
-//   - .gitignore covers only repos/ and artifacts/release-*/ (ruling C1:
+//   - .gitignore covers only repos/ and artifacts/release-*/ (v1 ruling C1 (archive/v1-architecture-spec.md):
 //     transcripts go INTO git; secret scanning is dropped).
 //   - session-data/ side upload is deleted; transcripts are committed like
 //     any other capsule file.
@@ -34,10 +34,10 @@ const (
 	RecalledMemoriesJSON = "runtime-state/recalled-memories.json"
 )
 
-// GitignoreContent is the .gitignore written at capsule init (ruling C1).
+// GitignoreContent is the .gitignore written at capsule init (v1 ruling C1 (archive/v1-architecture-spec.md)).
 const GitignoreContent = "/repos/\n/artifacts/release-*/\n"
 
-// Identity is capsule.json (03 §2.2). Repos pins each task repo's claim-time
+// Identity is capsule.json (v2-converge.md Appendix E.5). Repos pins each task repo's claim-time
 // SHA. The v1 generation/attempt_id lineage fields and base_commit are
 // deleted: capsules still carrying those keys parse fine — encoding/json
 // ignores unknown keys.
@@ -53,7 +53,7 @@ type Identity struct {
 // WorkItemDoc is runtime-state/work-item.json: the daemon-materialized
 // copy of the work item's task definition (goal, content, labels,
 // priority, milestone, bundle pin and project name). v1 has NO
-// agent→server read path (ruling C3: the whole agent contact surface is
+// agent→server read path (v1 ruling C3 (archive/v1-architecture-spec.md): the whole agent contact surface is
 // the capsule), so this file is the ONE
 // authoritative statement of what the WI agent is working on — the
 // claim answer is its only source, and recovery re-materializes it from
@@ -72,7 +72,7 @@ type WorkItemDoc struct {
 }
 
 // Session is session.json: per-derivation harness session bookkeeping
-// used by the recovery engine (v1-spec-full §七; discriminator =
+// used by the recovery engine (reference.md §6.2; discriminator =
 // transcript exists). The v1 attempt_id/generation lineage fields are
 // deleted (v1.5 session model); legacy files carrying those keys parse
 // fine (encoding/json ignores unknown keys).
@@ -86,7 +86,7 @@ type Session struct {
 	UpdatedAt      string `json:"updated_at"`
 }
 
-// The workflow_status vocabulary (03 §4.2): the closed status set the
+// The workflow_status vocabulary (reference.md §7.3): the closed status set the
 // execution.json contract speaks. The DRIVER owns the writes and the
 // transitions (its own aliases in internal/polyforge/driver); these
 // constants live at the SCHEMA owner so non-driver lanes (the runtime's
@@ -101,9 +101,9 @@ const (
 	WorkflowStatusBlocked = "blocked"
 )
 
-// Execution is runtime-state/execution.json (03 §4.2): the single source of
+// Execution is runtime-state/execution.json (reference.md §7.3): the single source of
 // truth the daemon's Go driver writes (the single writer) and observe
-// watches (ruling C3: the agent is zero-blocking).
+// watches (v1 ruling C3 (archive/v1-architecture-spec.md): the agent is zero-blocking).
 type Execution struct {
 	CapsuleID      string           `json:"capsule_id"`
 	WorkItemID     string           `json:"work_item_id"`
@@ -229,11 +229,11 @@ type RewindStats struct {
 }
 
 // SeqTrailer is the git commit trailer used by pre-receive hooks to enforce
-// monotonically increasing commit sequence per work item (v1-spec-full §六).
+// monotonically increasing commit sequence per work item (reference.md §8).
 const SeqTrailer = "Polyforge-Seq"
 
 // MaxBlobBytes is the pre-receive blob size limit for the capsule chain
-// (default 16 MiB; the secret scanner is gone per ruling C1 but size
+// (default 16 MiB; the secret scanner is gone per v1 ruling C1 (archive/v1-architecture-spec.md) but size
 // stays bounded).
 const MaxBlobBytes = 16 << 20
 

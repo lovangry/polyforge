@@ -1,6 +1,8 @@
 # 04 — Daemon：Job 排入、Interactive/Batch/Drain、持久 WI Agent 生命周期与全扫描发布的机械执行
 
-> **ARCHIVED（repo review 2026-10-16 G-1）— 本文大部分描述已删除的机制：持久 WI Agent 生命周期、Interactive/Batch/Drain、双看门狗与 `--wall-window`/`pf/probe`、`daemon/state.json`、"final flush + end generation" 停机（代码：5 分钟预算、不结束 session、`refs/pf-wip` 快照）。标有 ARCHIVED 横幅的节 do not build from this；未标横幅的节也只作历史与溯源参考。现行设计权威：[v2-converge.md](v2-converge.md)、[wi-kind-contract.md](wi-kind-contract.md)、[08-capsule-base-migration.md](08-capsule-base-migration.md)；与代码冲突时一律以代码为准。**
+> **ARCHIVED 2026-10-16** (repo review 2026-10-16 wave 4): describes the v0/v1 design and is kept for history only — do not build from it. Current reference: [reference.md](../reference.md); decisions: [v2-converge.md](../v2-converge.md). Live mechanisms this file still held were moved there before archiving; section anchors are unchanged.
+
+> **ARCHIVED（repo review 2026-10-16 G-1）— 本文大部分描述已删除的机制：持久 WI Agent 生命周期、Interactive/Batch/Drain、双看门狗与 `--wall-window`/`pf/probe`、`daemon/state.json`、"final flush + end generation" 停机（代码：5 分钟预算、不结束 session、`refs/pf-wip` 快照）。标有 ARCHIVED 横幅的节 do not build from this；未标横幅的节也只作历史与溯源参考。现行设计权威：[v2-converge.md](../v2-converge.md)、[wi-kind-contract.md](../wi-kind-contract.md)、[08-capsule-base-migration.md](../08-capsule-base-migration.md)；与代码冲突时一律以代码为准。**
 > Most of this document describes deleted mechanisms. Sections bannered ARCHIVED must not be built from; the live authority is v2-converge.md plus the code.
 
 | 权威项 | 值 |
@@ -13,7 +15,7 @@
 
 ### 1.1 范围 <!-- §1.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - Daemon（`pf-daemon`）的职责边界与操作面：Job 排入、按 `00-architecture.md#§3.4` 的 Interactive/Batch/Drain 判据创建/回收 Capsule、为每个执行中的 WI 派生并监督其**持久** Harness RPC WI Agent（wi agent；`00-architecture.md#§3.6`），选定并启动该 WI 的 harness 适配器（Pi 或 Claude，§6.1a）、驱动 watcher（只做 dirty 标记）、在收到 `00-architecture.md#§4.3` 定义的发布请求时**机械地**执行一次全扫描发布。
 - 优雅停机（quiesce/shutdown）的**实现**（`00-architecture.md#§3.5` 权威定义的落地）：明确它不是 Drain，是 Daemon 进程生命周期的终止路径，并且是四类发布触发时机中唯一由 Daemon 自己发起请求的一类。
@@ -24,7 +26,7 @@
 
 ### 1.2 非目标 <!-- §1.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - **不重新定义** Interactive/Batch/Drain 三模式的进入条件、判据与边界——权威定义在 `00-architecture.md#§3.4`，本文只给实现（§2.2、§6）。
 - **不重新定义**优雅停机（quiesce/shutdown）的语义与其和 Drain 的区分——权威定义在 `00-architecture.md#§3.5`/INV-13，本文只给实现（§2.3、§6.5）。
@@ -38,7 +40,7 @@
 
 ### 2.1 Daemon（本文只做实现层复述，权威定义见 `00-architecture.md#§3.1`） <!-- §2.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 每台机器一个的守护进程（`pf-daemon`），职责恰好五项（`00-architecture.md#§3.1` 权威列举，本文逐项给实现）：
 
@@ -52,7 +54,7 @@ Daemon **不**重新实现 workflow 驱动逻辑——驱动 workflow 是 WI Age
 
 ### 2.2 Interactive / Batch / Drain：本文只引用判据，不重复定义 <!-- §2.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 三种模式的定义、进入条件、执行机制统一性（持久 WI Agent + Capsule 完全相同，差异只在 Job 的来源与准入判据）均以 `00-architecture.md#§3.4` 为唯一权威，本文档不重复给出定义，只在 §4/§6 给出 Daemon 侧的状态存储与流程实现：
 
@@ -62,7 +64,7 @@ Daemon **不**重新实现 workflow 驱动逻辑——驱动 workflow 是 WI Age
 
 ### 2.3 优雅停机（quiesce/shutdown）：本文只引用定义，强调与 Drain 的区分（INV-13） <!-- §2.3 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（Interactive/Batch/Drain、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（Interactive/Batch/Drain、takeover）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 优雅停机（亦称 quiesce 或 shutdown，三词同指一事）的权威定义在 `00-architecture.md#§3.5`；INV-13（`00-architecture.md#§2.3`）已裁定优雅停机与 Drain 是两个不同概念，命名与判据均不得混用：
 
@@ -73,7 +75,7 @@ Daemon **不**重新实现 workflow 驱动逻辑——驱动 workflow 是 WI Age
 
 ### 2.4 本文新增不变量 <!-- §2.4 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - **INV-D1**：Daemon state 文件不得记录任何 workflow 执行状态字段（`current_step`、`step_attempt`、`review_round` 等）——这些字段的唯一权威是 Capsule 的 `runtime-state/execution.json`（`00` INV-1）；Daemon state 只记录「Daemon 知道自己在管哪些 Job」这一簿记事实（§4.1）。
 - **INV-D2**：Daemon 自身不执行任何 step 命令；一切命令执行经 `03-execution-capsule.md#§5.1` `RunCommand`，调用方是 WI Agent，不是 Daemon（§6.6）。
@@ -82,7 +84,7 @@ Daemon **不**重新实现 workflow 驱动逻辑——驱动 workflow 是 WI Age
 
 ## 3. 模块与代码目录 <!-- §3 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 ```
 internal/daemon/
@@ -188,7 +190,7 @@ session 数据。
 
 ### 5.1a observe：两层观察协议 <!-- §5.1a -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（看门狗旗标、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（看门狗旗标、read-through）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 观察（observe）按「本机是否拥有该 WI 的 Capsule」分两层；两层都是短请求/响应，**无 SSE、无推送、无长连接**。
 
@@ -263,7 +265,7 @@ owner generation token（`02-aihub-core.md#§5.1`）向 AIHub 发起实际调用
 
 ### 6.1 claim / resume / takeover：预检 → workflow 引用读取 → 意图持久化 → Job 创建 → 引擎绑定（polyforge#106：Go driver） <!-- §6.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Interactive/Batch/Drain、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Interactive/Batch/Drain、takeover）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 下列每一步与其紧跟的持久化动作都写入 §4.1 的 `daemon/state.json`，实现 spec 「不可逆动作前持久化」要求（claim idempotency
 key、claim 响应、Job 创建意图、Harness session identity 均先于对应的不可逆外部动作落盘）；本文对
@@ -324,7 +326,7 @@ key、claim 响应、Job 创建意图、Harness session identity 均先于对应
 
 ### 6.1a Harness 适配器的启动参数（实现细节，最小契约权威在 `00-architecture.md#§3.6a`） <!-- §6.1a -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 Daemon 在第 6 步派生持久 WI Agent 时，按该 WI 配置选定的 harness 决定启动方式：
 
@@ -397,7 +399,7 @@ ready queue 请求，也不再创建新 Job——这是优雅停机对「禁止�
 
 ### 6.2 Job 回收（seal）：正常结束与 stale/takeover 是两条不同路径 <!-- §6.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据、看门狗旗标、takeover、publish_request）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据、看门狗旗标、takeover、publish_request）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 Job 回收的触发原因分两类，机械动作**不同**，不共用同一套「等待发布」步骤：
 
@@ -440,7 +442,7 @@ Job 回收的触发原因分两类，机械动作**不同**，不共用同一套
 
 ### 6.2a 挂起判据修订：记录流心跳（polyforge#48 裁定，取代 §6.2 的活动量判据） <!-- §6.2a -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（看门狗旗标）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（看门狗旗标）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 §6.2 的挂起探测以 `/proc` 活动量为判据，生产实测（2026-09-29 00:45，wi polyforge#7）证明该判据**方向反了**：agent 按一切人工判据都已挂起（无 TCP 在飞、会话零写 12min+、io 零增量），但 node 运行时的 epoll timer 记账每 10 秒仍 +1 jiffy，「任一计数变化 ⇒ 活动」把**空转底噪**读成工作，看门狗永不触发。判据测的是进程调度，不是 agent 进展。
 
@@ -497,7 +499,7 @@ Daemon 为每个活跃 Capsule 启动一个 watcher（进程内协程或子进�
 
 ### 6.4 全扫描发布的机械执行（`00-architecture.md#§4.3`/INV-11/INV-D3 的实现） <!-- §6.4 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、watcher dirty 位、publish_request）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、watcher dirty 位、publish_request）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 `00-architecture.md#§4.3` 定义的四类触发时机（+可选 milestone）中，「谁发起请求」与「谁机械执行」是两件事，本文
 只定义后者：
@@ -580,7 +582,7 @@ Drain 有「撤销」操作（`mode(abort-drain)`，§6.1c）；优雅停机没�
 
 ### 6.6 命令执行入口：Daemon 不执行 step 命令（INV-D2 的实现） <!-- §6.6 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 Daemon 在整个 Job 生命周期中**不直接执行任何 step 命令**。命令执行的唯一入口是 `03-execution-capsule.md#§5.1` 的 `RunCommand`，调用方是该 WI 的持久 WI Agent；Daemon 的职责止步于：
 
@@ -600,7 +602,7 @@ Daemon 在整个 Job 生命周期中**不直接执行任何 step 命令**。命�
 
 ### 7.1 Daemon 自身崩溃重启后的恢复（权威流程） <!-- §7.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 1. Daemon 进程重启，读取 `daemon/state.json`（§4.1），得到重启前记录的 `jobs[]` 列表——每条含 `work_item_id`、`capsule_id`、`generation`、`harness_adapter`、`harness_session_id`、`main_agent_pid`、`main_agent_started_at`。
 2. 对 `jobs[]` 中的每一条，做**存活检测**：
@@ -620,7 +622,7 @@ Daemon 在整个 Job 生命周期中**不直接执行任何 step 命令**。命�
 
 ### 7.3 rollback 专用现场隔离与重建（与 §7.1 崩溃续跑为两条独立路径，不共享判据） <!-- §7.3 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、takeover）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 触发条件：本机 Daemon 持有的某 WI token 的写请求收到 `CORE-403`，且响应体携带回滚作废专用的
 `reason=secret_rolled_back`（`02-aihub-core.md#§5.3`：区别于 `mode="grace"` 轮换宽限期过后的
@@ -645,7 +647,7 @@ Daemon 在整个 Job 生命周期中**不直接执行任何 step 命令**。命�
 
 ## 8. 安全边界 <!-- §8 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、read-through）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - **凭证隔离**：AIHub 凭证只存在于 `daemon/credentials/`（0600），从不进入任何 Capsule 目录（含 Capsule 本地会话目录）或 WI Agent/subagent 的 env/cwd/argv（`03-execution-capsule.md#§8`）。
 - **路径安全**：Daemon 派生 WI Agent 时只传入该 WI 自己的 Capsule 路径与 harness session id；不同 WI 的 Capsule 路径与会话目录互不可见；harness-native subagent 的可写路径集合由 WI Agent 侧限定为 worktree 与 artifacts 目录，不含 `runtime-state/`、Daemon state 或 Daemon 凭证目录（INV-6）。
@@ -655,7 +657,7 @@ Daemon 在整个 Job 生命周期中**不直接执行任何 step 命令**。命�
 
 ## 9. 监控 <!-- §9 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain、看门狗旗标）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain、看门狗旗标）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - 模式与切换次数；当前承载 Job 数（`daemon/state.json.jobs` 长度）；持久 WI Agent 存活数 / 派生失败率（`DAEMON-503`）；各 harness 适配器的启动成功率；watcher→发布请求→机械发布完成的端到端延迟（`05-sync-revision-recovery.md#§9` 联动，Daemon 是机械执行者，指标口径以本文档与 `05` 共同定义）；优雅停机时长；心跳年龄；预检失败率（`DAEMON-507` 尖峰 = 本机环境劣化）。
 - Daemon 重启后的恢复耗时与「续跑 vs 存活复用」的比例（后者应占绝大多数，前者尖峰意味着 WI Agent 崩溃率异常）。
@@ -664,7 +666,7 @@ Daemon 在整个 Job 生命周期中**不直接执行任何 step 命令**。命�
 
 ## 10. 测试与故障注入 <!-- §10 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据、Interactive/Batch/Drain、takeover、publish_request）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据、Interactive/Batch/Drain、takeover、publish_request）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - 预检：只读 Daemon 数据目录 / 删 Capsule 根 / 磁盘满 → 断言 `DAEMON-507` 且**未调用** claim（AIHub 侧无事件为证）。
 - **模式回归测试**：Interactive 下对处于 needs_input 的 step 调用 `answer` 成功、对未处于该状态的 step 调用 `answer` 返回 `DAEMON-409`；Batch 的 `get_recommendation` 不产生任何 Job，只有显式 `batch_submit` 才创建 Job；Drain 的内部循环在无候选时空闲而不退出进程。

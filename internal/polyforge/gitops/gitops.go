@@ -4,7 +4,7 @@
 // single choke point:
 //
 //   - per-WI git mutex: Runtime and Observe never run git against the same
-//     worktree concurrently (v1-spec-full §六);
+//     worktree concurrently (reference.md §8);
 //   - seq derivation has ONE authority: CommitPush derives the
 //     Polyforge-Seq trailer inside the per-WI lock as
 //     rev-list --count HEAD + 1 (first commit = 1). The lock makes the
@@ -15,7 +15,7 @@
 //     git HTTP proxy; the credential travels via a one-shot GIT_ASKPASS
 //     helper (never in argv, never in persistent env) and reaches both
 //     http:// and https:// remotes;
-//   - pushes carry --push-option=session-fingerprint=<fp> (v1.5 §1.6
+//   - pushes carry --push-option=session-fingerprint=<fp> (reference.md §3.4
 //     fencing-on-use backup layer: Opts.Fingerprint, the PUBLIC
 //     session handle). The runtime always sets it; the aihub hook
 //     REQUIRES the option on every push that travels through its git
@@ -32,7 +32,7 @@
 //   - task-repo durability lane (polyforge#108): every publish also
 //     mirrors each repos/<name> worktree's HEAD into the WI's own bare
 //     repo as refs/pf-task/<name> (pushTaskRefsLocked) — the capsule
-//     chain itself cannot carry task-repo state (ruling C1: /repos/ is
+//     chain itself cannot carry task-repo state (v1 ruling C1 (archive/v1-architecture-spec.md): /repos/ is
 //     gitignored), and without this lane the only copy of a session's
 //     code commits is the capsule directory a re-claim renames away.
 //     Best-effort-loud: a carrier failure never fails the
@@ -630,7 +630,7 @@ func pushLocked(o Opts) (bool, int64, error) {
 	}
 	args := []string{"push"}
 	if o.Fingerprint != "" {
-		// v1.5 §1.6 fencing-on-use backup layer: the push option carries
+		// reference.md §3.4 fencing-on-use backup layer: the push option carries
 		// the PUBLIC session fingerprint; the pre-receive hook rejects a
 		// push whose option differs from the credential's fingerprint,
 		// naming the CURRENT holder so a superseded daemon self-diagnoses.
@@ -685,7 +685,7 @@ func pushChainLocked(env []string, capsuleDir string, args []string) (bool, int6
 // claim-time clone lane (runtime.cloneTaskRepos, via FetchTaskRef)
 // restores it when a bounded-fail re-claim must rebuild repos/<name>
 // from its bare origin. The capsule chain cannot carry this state
-// (ruling C1: /repos/ is gitignored), so without the lane the only copy
+// (v1 ruling C1 (archive/v1-architecture-spec.md): /repos/ is gitignored), so without the lane the only copy
 // of a session's code commits is the capsule directory — exactly what a
 // re-claim renames away. The namespace lives OUTSIDE refs/heads/* so a
 // plain clone of the bare repo never materializes task branches, and

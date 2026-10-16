@@ -1,11 +1,10 @@
 // Package protocol defines the in-process/in-machine contracts of v1
-// (design authority: docs/design/polyforge-vnext/v1-architecture-spec.md +
-// v1-spec-full.md §二 §五, rulings C2/C3; v2-converge.md §2 for the
-// supervision changes):
+// (current routes: docs/design/polyforge-vnext/reference.md §6.1; decisions:
+// v2-converge.md §2; the v1 message design is archive/v1-spec-full.md §二 §五):
 //
 //  1. Runtime ↔ Observe messages (5 kinds, every message carries the
 //     per-WI derivation counter spawn_n).
-//  2. The pf CLI ↔ daemon UDS HTTP API surface (04 §5).
+//  2. The pf CLI ↔ daemon UDS HTTP API surface (reference.md §6.1).
 //
 // (The liveness-probe control message was deleted with the guessing
 // supervision lanes; the driver ↔ supervisor contract lives in
@@ -15,7 +14,7 @@ package protocol
 import "encoding/json"
 
 // ---------------------------------------------------------------------------
-// 1. Runtime ↔ Observe messages (v1-spec-full §二)
+// 1. Runtime ↔ Observe messages (archive/v1-spec-full.md §二)
 // ---------------------------------------------------------------------------
 
 // RTMsg is a Runtime→Observe message.
@@ -104,11 +103,11 @@ const (
 )
 
 // PushTimeout is the hard bound on one capsule commit+push (the
-// monitor's periodic push; v1-spec-full §五).
+// monitor's periodic push; archive/v1-spec-full.md §五).
 const PushTimeout = 60 * 1e9 // 60 seconds (ns, for time.Duration)
 
 // ---------------------------------------------------------------------------
-// 2. pf CLI ↔ daemon UDS HTTP API (04 §5.1; v0 surface minus publish_request)
+// 2. pf CLI ↔ daemon UDS HTTP API (reference.md §6.1; v0 surface minus publish_request)
 // ---------------------------------------------------------------------------
 
 // Daemon job states.

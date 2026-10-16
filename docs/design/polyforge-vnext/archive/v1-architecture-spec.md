@@ -1,6 +1,8 @@
 # v2 Architecture Spec — Design Record
 
-> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+> **ARCHIVED 2026-10-16** (repo review 2026-10-16 wave 4): describes the v0/v1 design and is kept for history only — do not build from it. Current reference: [reference.md](../reference.md); decisions: [v2-converge.md](../v2-converge.md). Live mechanisms this file still held were moved there before archiving; section anchors are unchanged.
+
+> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](../v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
 
 > Status: RULED (human-approved). This is the authoritative summary of the v2 architecture
 > redesign. The full specification lives in the work item (polyforge#61 content field).

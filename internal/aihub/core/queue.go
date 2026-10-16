@@ -38,7 +38,7 @@ func queueLess(a, b *WIView) bool {
 // ReadyQueue builds the queue for a project (name or id). A WI is
 // executable when: status queued, waiting_on empty, no unfinished
 // `blocks` dependency edge (only a wrapped blocker releases, #161), and every repo its inventory names is still
-// one of the project's repos (02 §4.6; else its claim would be refused
+// one of the project's repos (reference.md §2.1; else its claim would be refused
 // INVENTORY_REPO_GONE on every drain wave).
 func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 	var projectID, projectName string
@@ -66,7 +66,7 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 		PendingBundles: []WIView{},
 	}
 	// Loaded per candidate below: bundle_name decides execution vs
-	// registration ticket (02 §5.1b: the executable segments always exclude
+	// registration ticket (reference.md §2.2: the executable segments always exclude
 	// registration tickets — they cannot be claimed, #17); the child count
 	// feeds the w140 pending-bundle segment (an epic never queues).
 	rows, err := m.db.Query(`SELECT id, COALESCE(waiting_on,''), COALESCE(bundle_name,'')='',
@@ -167,7 +167,7 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 				return nil, err
 			}
 			if gone {
-				continue // 02 §4.6: a declared repo left the project
+				continue // reference.md §2.1: a declared repo left the project
 			}
 			q.Items = append(q.Items, *c.view)
 		}

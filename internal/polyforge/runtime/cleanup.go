@@ -1,4 +1,4 @@
-// cleanup.go: the layered process cleanup (v1-spec-full §八, minus the
+// cleanup.go: the layered process cleanup (reference.md §6.2, minus the
 // deleted layer-0 cgroup kill — audit-subtraction pass B). One WI's
 // agent tree — the agent itself, its step agents and command children — is
 // wiped with escalating precision, because a surviving orphan keeps writing

@@ -1,7 +1,7 @@
 package runtime
 
 // Restart reconciliation regressions, re-keyed onto the v1.5 session model
-// (contract §1.2/§1.3): the three-way verdict of SessionVerify —
+// (reference.md §3.3): the three-way verdict of SessionVerify —
 // matches+running (crash-mid-run → recover), matches+paused+!clean_pause
 // (graceful shutdown → attach+resume), matches=false (superseded/ended →
 // release or drop) — plus blocked (untouched, M2), terminal (drop), the

@@ -82,7 +82,7 @@ func slowPreReceive(t *testing.T, bare string, d time.Duration) {
 	}
 }
 
-// e2eRecord builds one runtime state.json record in the v1.5 §4.1 shape:
+// e2eRecord builds one runtime state.json record in the reference.md §3.5 shape:
 // the session secret plus its public fingerprint, the derivation counter,
 // and none of the deleted attempt/generation/instance/credential fields.
 func e2eRecord(wi, capDir, gitDir, bare string) map[string]any {

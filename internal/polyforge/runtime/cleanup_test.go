@@ -1,6 +1,6 @@
 package runtime
 
-// Layered cleanup regressions (v1-spec-full §八), against REAL child
+// Layered cleanup regressions (reference.md §6.2), against REAL child
 // processes: a parent that forks a grandchild, the (pid,starttime)
 // PID-reuse guard, the env-marker sweep and the warn-only cwd scan.
 // (The layer-0 cgroup tests went with the deleted layer — audit

@@ -2,13 +2,13 @@
 
 > 状态：**r3，owner 裁决已全部纳入，待审阅**（2026-10-12）。
 > 来源：2026-10-12 owner 与 review 会话的完整讨论；r2 吸收了一次独立深度审查（25 个漏洞 + 历史回归对照，附录 A/B），owner 已同意其 18 条修补默认值。
-> 本文取代的范围：04 §6.2 监督车道、v1.5-session-model 中 watch/adoption 相关描述、`skills/polyforge/scripts/watch.sh`。
+> 本文取代的范围：`archive/04-local-runtime.md#§6.2` 监督车道、`archive/v1.5-session-model.md` 中 watch/adoption 相关描述、`skills/polyforge/scripts/watch.sh`。
 > 落地进度：本文第 2–8 节的设计均已落地（含监督重写与 `pf watch` 进展字段）；见第 8 节状态列、第 10 节映射与文末「已知缺口」。
 > 落地方式：**快速落地**——直接切换到新设计，不走"新旧并行观察 → 再删旧"的分阶段迁移（owner 2026-10-12）。
 
 ---
 
-## 0. 定位与规则（已定）
+## 0. 定位与规则（已定） <!-- §0 -->
 
 - polyforge 是**团队级多 agent 系统**，将开源；保持克制，不大量加功能。
 - 核心三根支柱：**任务**（aihub WI）、**记忆**（项目演进与知识沉淀）、**workflow**（团队统一的任务处理规范）——目标是团队的 agent 在同一套体系下像一个 agent 一样运转。
@@ -16,14 +16,14 @@
 - **按步骤选模型**是核心能力，保留；**按步骤选 harness**（pi / Claude Code / Codex）要做，排在减法之后。
 - **信任模型（owner 裁定 2026-10-14，取代 2026-10-12 的"agent 不可信"）**：polyforge 只在团队内部使用；harness（pi / Claude Code）由人事先登录，daemon 只调用 CLI，**从不管理登录凭证**；不做重型隔离（独立 uid / bwrap 等）——**#135 冻结**，设计稿保留备查。仍然要防的是**事故**而非恶意：agent 推到 GitHub main（2026-10-13 #149 事故）、发布未经评审的提交、step agent 代答自己的人工 gate 问题（#122）。本文中以"agent 不可信"为理由的机制，现在一律按**事故护栏**理解：已建成并付出成本的护栏保留（#122/V-1 的 UDS step 进程拒绝、#156 的 ls-tree 检查与无 hook 推送、#158 的临时仓库 carrier 推送、V4 取证门禁、固定模板唤醒），但不再扩展为对抗性防御。step agent 按设计写 capsule 的 `runtime-state/pending-results/`，这不是缺陷。
 
-## 1. 业务领域划分
+## 1. 业务领域划分 <!-- §1 -->
 
 | 类型 | 领域 | 主要内容 |
 |---|---|---|
 | 主线 | 安装与升级 | install.sh（安装与升级均重跑它）、发版、aihub 部署 |
 | 主线 | 团队与权限 | 用户、key、项目、成员角色、agent 信任边界 |
 | 主线 | 任务管理与生命周期 | WI 状态机、依赖、就绪队列、领取（session 锁）、blocked 出口 |
-| 主线 | 记忆 | 存储与检索、recall/remember、领取时快照（`runtime-state/recalled-memories.json`，driver 以"非约束性历史"注入每个 step 提示，有界；无快照则不加该节） |
+| 主线 | 记忆 | 存储与检索、recall/remember、领取时快照（`runtime-state/recalled-memories.json`：以 goal + content 前 1500 字符为查询、`match=any` 排序检索本项目记忆取前 10 条；driver 以"非约束性历史"注入每个 step 提示，有界；无快照则不加该节） |
 | 主线 | workflow 定义 | bundle、step、gate/rewind、按步骤选模型（将来：harness） |
 | 主线 | 执行 | daemon、capsule、driver、并发、工作区映射 |
 | 主线 | 交付 | ship → git 分支 / PR (removed by polyforge#166: delivery is the workflows' deliver step. The driver checks the deliver step's recorded commands and the delivered history after the fact and escalates violations to a human; prevention rests on the step contract and the machine's local pre-push hook.) |
@@ -31,9 +31,9 @@
 | 横切 | 可靠性 | 监督（判死）、恢复、session 隔离、接管 |
 | 横切 | 运维 | doctor、backup、ops status、事件日志 |
 
-## 2. 执行与监督
+## 2. 执行与监督 <!-- §2 -->
 
-### 2.1 分工（已定）
+### 2.1 分工（已定） <!-- §2.1 -->
 
 | 组件 | 职责 | 不做什么 |
 |---|---|---|
@@ -44,7 +44,7 @@
 
 **例外（已定）**：step 进程**退出却没交结果**，由 driver 直接处理（它在等结果时就能看到），再告知 supervisor。
 
-### 2.2 driver ↔ supervisor 契约
+### 2.2 driver ↔ supervisor 契约 <!-- §2.2 -->
 
 二者同在 `pf daemon` 进程内。
 
@@ -76,7 +76,7 @@
 - **每次派发至多一次判定、至多一次失败记录**：driver 收到判定后该派发进入 terminating 状态，之后这次派发的进程退出、后续判定一律忽略；supervisor 对某次派发发出判定后静默，直到 `step_ended`。
 - supervisor 的状态**按每次派发一份**：`step_started` 新建，`step_ended` 丢弃（根治 #124 turn_duration 跨步不清零误杀）；**步骤级累计量**（总时长 T 的已用时间）由 driver 持久化在 `execution.json`，随 `step_started` 下发。
 
-### 2.3 判死规则（supervisor）与死因处理（driver）
+### 2.3 判死规则（supervisor）与死因处理（driver） <!-- §2.3 -->
 
 supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时间、当前是否在执行工具（哪个、何时开始）、是否在等模型回复（何时开始）、本次派发的"工具时间 / 等模型时间"。
 
@@ -138,7 +138,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 - （现状：候选列表五级优先，高到低：`pf submit --models a,b,c` 的手工列表（仅由本 daemon 保存、按 WI、作用于该 WI 的每一步；随 submit 队列落盘，认领时写入 daemon 数据目录的 `manual-models.json`（不进 capsule），本机 daemon 重启、恢复、`pf resume` 重新认领均沿用，WI 终态（wrapped/failed/canceled）时删除；在另一台机器上重新认领则没有该列表，使用那台机器自己的设置）> 工作区 yaml 文件的 `steps.<project>.<step-id>.models`（polyforge#169：按步骤 id 配置，顶层键 `steps:` 取代 `models:`，旧 `models:` 不兼容、加载即拒绝并给迁移提示，同名步骤跨 bundle 共用一个键；非 `default` 的键必须是已安装 workflows 中的步骤 id，否则 DAEMON-414 拒绝认领、`pf doctor` 报告）> bundle 步骤自带 `model_candidates` > `steps.<project>.default.models` > bundle `defaults.model_candidates`（polyforge#164：步骤自带列表高于项目 default，项目 default 只兜底未自选模型的步骤）；推进/重置语义不变。见 `workspace/compose.go`。）
 - 失败处理按死因表（上节）执行；`PolicyFor` / provider·host·operator·schema 分类已随 FaultClass 层删除（`driver/supervision.go`）。
 
-### 2.4 阈值（已定）
+### 2.4 阈值（已定） <!-- §2.4 -->
 
 - X（⓪②）、Y（③）、T（④）、N（driver_stalled）**全局默认**；step 级只能覆盖 T（见下条）。
 - **T 的 step 级覆盖复用现有 `budget.wall_minutes`**，但它是**估计值而非硬上限**（polyforge#164：≤30 分钟的估计在下式下不起作用，交付 bundle 已全部删除，只剩 release bundle 的 `release: 45` → T=135）：声明了 `wall_minutes` 的 step，总时长界 **T = max(3 × wall_minutes, 全局 `--step-timeout` 默认)**；未声明则就是全局默认。不新增键；X、Y 没有 step 级覆盖（polyforge#147 C5 删除了 `silence_minutes` / `tool_minutes`，旧 bundle 中残留的这两个键被静默忽略）。覆盖值随 bundle 在领取时钉住，对之后领取的 WI 生效。
@@ -148,7 +148,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 - T 按**整个步骤累计**（跨该步的多次派发、跨换模型、跨人工继续连续累计，polyforge#147 D6 起不再有任何"重开窗口"的 rebase——`runtime_base_ms` 已删）；计入 agent 实际运行时间与**限流退避的等待时间**（D7：同模型重试只受 T 约束，owner 裁定），等人回答（needs_input）的挂钟时间不计入。
 - **rewind 重跑清零**：gate FAIL rewind 回到某步时，该步的累计 T 归零（旧窗口的记账随归档 attempt 留存）；发起 rewind 的 gate 步自身（不归档、保持 in_progress）的累计 T 同样归零，重入在新窗口下评审。
 
-### 2.5 harness 翻译器
+### 2.5 harness 翻译器 <!-- §2.5 -->
 
 每个 harness 一个翻译器，把原生事件翻成标准信号：活着、在等模型、模型在输出（思考/正文）、工具开始（名称+参数）、工具结束、本轮结束（成功/出错）、**进程退出（退出码、最后一条错误）**。supervisor 只认标准信号。**这也是"按步骤选 harness"的接入点**。
 
@@ -160,7 +160,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 第一版只实现 pi 翻译器；Claude Code / Codex 随"按步骤选 harness"落地，接入时按当时最新版本复核协议。
 
-### 2.6 结果信封、`context_policy` 与 `handoff`（polyforge#147 定稿）
+### 2.6 结果信封、`context_policy` 与 `handoff`（polyforge#147 定稿） <!-- §2.6 -->
 
 **结果信封 = 最小契约**：step agent 把**一个** JSON 对象写到约定位置 `runtime-state/pending-results/<spawn_n>.json`（位置与命名不变），内容只有 `outcome` + `output`，`needs_input` 时另带 `question_id` + `question`，再加上派发身份围栏（`wi_id` / `step_id` / `spawn_n`）。`protocol_version`、`result_id`、`artifacts` 哈希清单、`handoff_ref` 摘要引用**全部删除**，driver 不再校验它们，缺这些旧字段 MUST NOT 判不合格；result_id 宽容等补全层一并删除，不留兼容分支。**V4 命令取证门禁保留**（owner 裁定；按 2026-10-14 信任模型它是**事故护栏**——防 agent 漏跑或误报验证命令，取证检查留在 driver）：欠取证的 step（声明了 `requires_command_evidence: true`；按 step id `verification` 的隐式规则已由 2026-10-16 裁定 G10 删除）的 completed 结果另带 `command_evidence: [{argv, exit_code, duration_ms}]`——至少一条、argv 非空、`duration_ms > 0`，否则信封被拒（进程内重试车道）；字符串形态条目由 `command_evidence` 的宽容重解析剔除并在拒绝原因里点名；被接受的取证由 driver 写入 `output.commands`（B10，step 自写的同名键被覆盖）。其余 step 的信封不带该字段。**已提交测试文件门禁**（polyforge#156，任意 step）：completed 结果的 `output.test_files` 非空时，每条路径必须是 repo 相对路径、至少存在于一个 task repo，且在其存在的每个 task repo 中都已提交在 HEAD，否则信封被拒（同一进程内重试车道，拒绝原因点名路径）——resume 只按 `refs/pf-task/<name>`（HEAD）恢复 task repo，未提交文件会丢。**声明输出 schema 校验**（polyforge#164 H3）：step 定义文件 frontmatter 的 `output:`（draft-07 JSON Schema，YAML 书写）既注入提示词（放在 step 正文之前，"per the schema above" 成立），也由 driver 机械校验 completed 结果的 `output`（值为 `null` 的可选属性按缺省处理）。v2.5.0 为**只记录模式**（`driver/outputschema.go` 的 `enforceOutputSchemas=false`，唯一开关）：不合格时不拒信封，只记持久事件 `output_schema_violation`（step、schema 路径、截断的校验错误）——用近期真实 result.json 回放约 64% 不合格（agent 此前从未见过 schema），后续版本翻转开关后改为信封被拒（同一进程内重试车道）。声明了却加载失败的 schema 记 `output_schema_unloadable` 事件并写 stderr。**既有失败的边界**（#164 S6）：repro 检查、作者 step 的 `test_files`、bug-fix fix 的 `regression_test` 永远不能标为 `pre_existing`（它们在 base 上失败是设计使然，未修好的 bug 会被当成既有失败放过），pre_existing 检查的 detail 必须带 base sha，且至少有一条 `<repo 相对路径>: <测试名>` 形式的 `pre_existing_failures` 条目（路径按完整路径或目录前缀的路径分段精确比对，不做子串匹配）；bug-fix 的 repro 已复现时，verification 的 pass 必须带一条名为 repro、状态 pass 的检查；违者信封被拒（同一车道）。**已写测试不可改**（polyforge#164 H4）：声明 `test_files` 的 step（e2e-author / repro）被接受时，driver 在其 `output.test_files_commit` 记下各 task repo 的 HEAD（只由 driver 写，step 自写的同名键被丢弃）；之后每个 completed 的 step 都机械比对这些文件在该提交与 HEAD 之间是否一致（等价于 `git diff <author-commit>..HEAD -- <test_files>`，以两次 `git ls-tree -r` 实现，沿用 #156 的加固 git 调用），有差异即信封被拒——除非该 step 当前尝试链里有人工回答（step 认为测试本身错了，必须用 needs_input 提出），此时改动成为新基线（driver 把新的 HEAD 写回前面作者 step 的 `test_files_commit`，故该 step 之后被 rewind 也不丢），并记持久事件 `authored_tests_rebaselined`（列出被改的文件）。**`requires_human_answer` 取值**：`true` = 完成前必须有人工回答（feature-full grill-review）；`if_asked`（polyforge#164 H11，autopilot grill）= 提出的问题只能由人回答，零问题可直接完成，但 driver 记一条持久事件 `human_gate_unasked`，watcher 据此通知 owner。
 
@@ -168,7 +168,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 **`handoff`（step 键，bool，缺省 false）**：`true` 的 step 必须在收尾前把交接内容写成 `artifacts/handoff-<step-id>.md`。**路径约定就是全部契约**：没有摘要、没有字节数、没有信封字段，driver 不校验交接文件的哈希、不比对清单；交接文件不在时，下游 inherit step 的派发只是少了那一段正文，不构成信封级失败。权威细节见 `01-workflow-skills.md#§4.4a`。
 
-### 2.7 harness 适配层的隔离保证（owner 裁决 A4，2026-10-13）
+### 2.7 harness 适配层的隔离保证（owner 裁决 A4，2026-10-13） <!-- §2.7 -->
 
 **禁止 step agent 使用 harness 后台任务，是 harness 适配层的责任，不是写进提示词的纪律。** 后台任务会让一个步骤在它的派生进程之外留下活动，监督面（判死、step 结束、派生计数）全部失真；靠"规则里写了不许用"约束的只是诚实的 agent。
 
@@ -182,9 +182,9 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 - **任何未来的 harness 在接入前，必须提供等价的保证**（一个 harness 若无法从启动配置上关掉后台任务族，就不具备接入资格）——这是适配层的准入条件，写在这里而不是写在执行者规则里。
 - 凭证边界（2026-10-14 裁定）：daemon 不管理凭证——`auth.json` / `models.json` 是人登录 harness 后留在 operator agent 目录里的文件，daemon 只按白名单**拷贝**进 step-agent 目录，不签发、不刷新、不轮换；claude step 的凭证同理只在 `<harness-root>/claude-config/settings.json` 的 env 块里，由人维护。（原"与 #135 独立 agent 用户方向一致"的注随 #135 冻结作废。）
 
-## 3. 人工协同：`pf watch`（已定）
+## 3. 人工协同：`pf watch`（已定） <!-- §3 -->
 
-### 3.1 形态
+### 3.1 形态 <!-- §3.1 -->
 
 - Go 实现的 `pf watch`，**取代 `watch.sh` 与 `pf watch-probe`**；`pf observe` 并入为 `pf watch <wi> --once`。
 - `pf watch --chat <id>`（缺省取 `PF_CHAT_ID`）**不因订阅的 WI 结束而退出**（保持常驻；D10 裁定，polyforge#150：以代码为准——只跳过已结束的 WI；仍会在父 harness 进程消失、stdout 关闭、或 `--wait-decision` 打印首批决策后退出，`watcher/engine.go`）；一个会话一个进程。
@@ -197,7 +197,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 - daemon 不可达：明确提示"daemon 无法连接，进展暂停"，而不是静默循环。
 - pidfile + 锁；**父进程（会话）消失即退出**，不留孤儿。
 
-### 3.2 两条通道（已定）
+### 3.2 两条通道（已定） <!-- §3.2 -->
 
 | 信息 | 通道 | 进 agent 上下文？ |
 |---|---|---|
@@ -208,24 +208,24 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 **事故护栏（r2 补；#135 已冻结，这些约束就是现行机制）**
 - 唤醒语句**只用 daemon 生成的固定模板**（WI 编号、事件类型、问题 id），**不夹带任何 agent 可写的自由文本**——防止 step agent 借此对交互 agent 做提示注入。问题正文由人通过 `pf watch <wi> --once` 主动查看。
 - 唤醒语句固定附带一句："这是需要人做的决定，agent 不得代答"（#122 教训）。
-- 进展状态文件由 daemon 写在其数据目录，statusLine / 扩展通过 socket 读取，**不放在 agent 可写的路径**。
+- 进展状态文件 **不放在 agent 可写的路径**。（现状，2026-10-16 按代码更正：文件由常驻 watcher（`pf watch --chat`，`watcher/engine.go`）写在 daemon 订阅应答给出的 `<data-dir>/chat-status/<chat>.status`，daemon 未给出时回退到 `$XDG_RUNTIME_DIR/polyforge/chat-<chat>.status`；statusLine 用 `pf watch --statusline` 直接读文件、不经 daemon，见附录 E.2。）
 
 **不做**：tmux 分屏（owner 否决）；把进展原样经过 agent（污染上下文、耗 token）。
 
-### 3.3 唤醒适配
+### 3.3 唤醒适配 <!-- §3.3 -->
 
 | 交互 harness | 唤醒方式 |
 |---|---|
 | pi | 扩展托管常驻 `pf watch`，决策事件用 `sendMessage(..., {triggerTurn: true})` 直接唤醒 |
-| Claude Code | 只能"进程退出即唤醒"：常驻部分负责状态；另起一个轻量等待命令以后台任务挂着，出现决策事件即退出唤醒，agent 处理后重新挂上。Monitor 工具有 30 分钟上限且每行耗 token，不用 |
+| Claude Code | 只能"进程退出即唤醒"：agent 以后台任务运行 `pf watch --chat "$PF_CHAT_ID" --wait-decision`（它同时写进度文件），出现决策事件即打印固定模板行并以 0 退出唤醒，agent 处理后重新挂上（`skills/polyforge/SKILL.md` Claude Code adapter；现状 2026-10-16）。Monitor 工具有 30 分钟上限且每行耗 token，不用 |
 
-### 3.4 待验证
+### 3.4 待验证 <!-- §3.4 -->
 
 - Claude Code 上下文压缩后 SessionStart（`compact`）是否触发（用于补注入提示）。
 - `claude --resume` 后 harness session_id 是否不变（决定 chat 映射依据）；pi 的 resume 行为；`/clear`、fork 后的语义。
 - pi 事件中 `tool_execution_start.args` 足以提取命令与文件路径。
 
-## 4. 身份模型（已定）
+## 4. 身份模型（已定） <!-- §4 -->
 
 | 概念 | 规则 |
 |---|---|
@@ -239,7 +239,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 
 "会话绑定 + adoption（接管 watcher）"整套规则被"负责人（必有）+ 订阅（可选）"取代。
 
-## 5. 执行模式与提交（已定）
+## 5. 执行模式与提交（已定） <!-- §5 -->
 
 - **drain 暂不做**，但架构保留支持：领取与执行分离（已是）；人与任务的交互不绑死在执行机上（依赖 #84 跨 daemon 通信）。
 - 形态（**已落地**，分支 `v2/m2-modes`）：`pf ops auto on|off` + `pf ops max N`，自动领取与手动提交并存。`auto off` = 只有显式 `pf submit`；`auto on` = daemon 另外自己拉 aihub 就绪队列（即原 drain 循环，origin 仍为 `auto`）。已删除 interactive/batch/drain 三模式、`abort-drain`、`batch-confirm`、`batch_submit`、`get_recommendation`（只是原样转发就绪队列，改用 `pf queue --ready`）、DAEMON-409「drain 是唯一建 job 入口」拒绝。`status` 头为 `auto: on|off  max: N`；heartbeat 体仍带 mode 字符串（`auto` / `manual`）以兼容 aihub。daemon 旗标 `-auto`（`-mode` 别名与 `daemon-state.json` 旧 `mode` 字段的迁移均已删除，见第 262 行「兼容垫片」：v2 不留向后兼容代码）。drain 作为产品能力仍属「暂不做」范围（跨 daemon 通信 #84 未到），但架构上已可用。
@@ -251,7 +251,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
   - 被拒一律发决策事件给订阅者 / 负责人。
 - `pf submit` 只在本机执行；跨机器使用方式 = 建票进就绪队列由执行方领取（auto 打开后）。
 
-## 6. 恢复与重启
+## 6. 恢复与重启 <!-- §6 -->
 
 **原则**：session 是唯一的锁；`execution.json` 是唯一的进度账本；推到 aihub git 才算保存；**绝不悄悄从远端重建本地现场**（#103）。
 
@@ -276,7 +276,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 
 **事实澄清**：正常关停后 WI 在 aihub 上保持 `running`（session 保留），下次 daemon 启动时恢复。
 
-## 7. 生命周期简化（已定方向）
+## 7. 生命周期简化（已定方向） <!-- §7 -->
 
 - "resume"现有 5 种含义 → 对人只保留 **暂停 / 继续**；系统内部自动处理统一称 **恢复（recover）**，不再叫 resume。
 - blocked 两扇门（unblock / resume-blocked）→ **继续 / 放弃**两个动作（terminate 门已删，polyforge#149）。
@@ -285,7 +285,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 - 继续 / 放弃的权限（已定）：**任务负责人、项目 maintainer、admin** 均可；顺带修 resume-blocked 只查 key scope 不查成员。
 - WI 依赖关系保留（#120 已解冻）。
 
-## 8. 减法清单
+## 8. 减法清单 <!-- §8 -->
 
 | 档 | 内容 | 状态 |
 |---|---|---|
@@ -300,7 +300,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 | 迁移代码 | v0→v1 迁移（`migrate-memories`/`migrate-work-items`、`core/import.go`、`tools/v0export`、`seed-v1.sh` 等）：owner 裁定提前删除，不再设观察期 | **已完成**（`v2/m1-migrate`） |
 | 兼容垫片 | owner 裁定 v2 不留向后兼容代码：`-mode` 别名、`daemon-state.json` 的 `mode` 迁移、`pf observe` 别名、`pf unblock` 提示桩、aihub `unblock` 端点与 `WIManager.Unblock`、`[watch.*]`/`watch_*` 配置容忍、`project_scope` 别名、对遗留 `takeover` 队列项的专名处理 | **已完成**（`v2/final`）；配置加载现对未知 section（含 `[watch.*]`）报错，未知顶层平铺键同样报错（含已移除的 `url` 别名；`533e032`）；2026-10-16 G5 再删 pre-#175 状态读兼容（`step_harness`/裸 id 候选）、`manual_models_dropped` 丢弃路径、pre-#144 按 id 命名 capsule 的隔离、无 `capsule_dir` 记录的目录回退 |
 
-## 9. 快速落地顺序
+## 9. 快速落地顺序 <!-- §9 -->
 
 不做新旧并行观察，按依赖关系直接替换：
 
@@ -316,7 +316,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 7. **减法一、二档**（可与 2–6 并行）。
 8. 之后：按步骤选 harness、drain + 跨 daemon 通信（#84）。（权限隔离 #135 已于 2026-10-14 冻结，不在计划内。）
 
-## 10. 现有 WI 映射
+## 10. 现有 WI 映射 <!-- §10 -->
 
 | WI | 去向 |
 |---|---|
@@ -333,17 +333,17 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 | #71、#73、#74、#118、#132、#133 | 不受影响 |
 | #78、#121、#125、#126、#128 | 继续冻结 |
 
-## 11. owner 裁决（2026-10-12，原待定项全部已定）
+## 11. owner 裁决（2026-10-12，原待定项全部已定） <!-- §11 -->
 
 1. **V4 验证证据门禁**：移入 driver（第 9 节步骤 1）。
 2. **`PF_AGENT_ROLE`**：删除（第 8 节二档）。
-3. **历史设计文档**：00–08、v1-*、v1.5-* 开头加注"部分内容已被本文取代，冲突时以本文为准"，不逐篇改写。
+3. **历史设计文档**：00–08、v1-*、v1.5-* 开头加注"部分内容已被本文取代，冲突时以本文为准"，不逐篇改写。（2026-10-16 repo review wave 4 取代：00、02–05、07 与 v1/v1.5 规格整体移入 `archive/`；现行参考为 `reference.md`，01/06 修剪为现状。）
 4. **takeover 简化**：**已完成**（先验证"结束会话 + 重新领取能从断点继续"，通过后删除 takeover；见第 8 节四档）。
 5. **#87、#88**：保留至"失联提示 + 接管"落地后再清理；接管（`pf ops end-session`）已落地，现可清理。
 6. **epic/task 概念（#133/#134）**：保留。
 7. **继续 / 放弃权限**：任务负责人、项目 maintainer、admin。
 
-## 12. polyforge#140 裁决（2026-10-13，拆分 a：wi-kind 契约——父子与 bundle 规则）
+## 12. polyforge#140 裁决（2026-10-13，拆分 a：wi-kind 契约——父子与 bundle 规则） <!-- §12 -->
 
 拆分 a（aihub 端 + 设计文档）落地 grill-review 的调整 1–6（w140 裁决记录；拆分 b 承接客户端面：CLI/skills/daemon submit 预检）。接口细节（字段、reason 清单、响应形状、部署与回滚）权威在 `wi-kind-contract.md`；本节登记裁决本身：
 
@@ -356,23 +356,23 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 
 **并发（两组，均有测试覆盖）**：只靠单写者事务串行化加各自的 CAS，不另设仲裁（不用内存闩、不用定时等待）。PATCH bundle vs Claim：绑定或改名的 PATCH 不会让 Claim 失败（解绑若排在前，Claim 按无 bundle 票被拒）；PATCH 排在 Claim 之前则 Claim 冻结新 bundle，排在之后则被拒且不写库（`CORE-400 reason=IMMUTABLE`，或 `CORE-409 reason=RACE_LOST`）——两种次序的终态都正确。绑定 bundle vs 新增子票：恰好一方成功，终态不同时出现“有子票 ∧ bundle 非空”。
 
-## 13. 审计裁定（2026-10-13，polyforge#150：文档对齐——以代码为准）
+## 13. 审计裁定（2026-10-13，polyforge#150：文档对齐——以代码为准） <!-- §13 -->
 
 来源：`audit-2026-10-13-invented-logic.md` §三/§七 + owner 同日补登（claim 幂等记录保留期），划归本票的全部 11 条裁定集中登记于此。每条一行：编号、一句话裁定、现文档落点（本次修订均已落盘）。
 
 | # | 裁定（一句话） | 文档落点 |
 |---|---|---|
-| D1 | 就绪队列（`GET /api/v1/projects/{project}/ready-queue`）响应为 `{items, running, paused, pending_bundles}` 四段（`internal/aihub/core/queue.go`）；无 `blocked` 数组，等依赖的票不出现 | `02-aihub-core.md#§5.1b`（重写）及 §5.1 行 4 / §4.2a 行 26 / §7 / §10 关联句；`00` §3.1 组件表、§3.4b/§3.4c 与 `07` §9.2 同步最小修订 |
-| D2 | `seq` 项目内唯一（`UNIQUE(project_id, seq)`），非全局 | `02-aihub-core.md#§4.2` DDL |
-| D4 | claim 需该 project 的 writer/maintainer membership 或全局 admin（`hSessionClaim`→`requireWrite`，403 otherwise）；key scope 不构成认领授权 | `02-aihub-core.md#§4.10`、`#§8`；`04` §6.1 关联句 |
-| D8 | 先推 capsule 链，再推任务仓库 carrier ref（`refs/pf-task/<name>`）；任务仓库推送失败不回滚 capsule 链（polyforge#158 起另发 `carrier_push_failed` 决策提醒，见 `05` §7.5） | `v1-spec-full.md`（单行最小修订）+ 本表登记（“或”：两处都做） |
+| D1 | 就绪队列（`GET /api/v1/projects/{project}/ready-queue`）响应为 `{items, running, paused, pending_bundles}` 四段（`internal/aihub/core/queue.go`）；无 `blocked` 数组，等依赖的票不出现 | `archive/02-aihub-core.md#§5.1b`（重写）及 §5.1 行 4 / §4.2a 行 26 / §7 / §10 关联句；`archive/00-architecture.md#§3.1` 组件表、§3.4b/§3.4c 与 `archive/07-deployment-pilot.md#§9.2` 同步最小修订 |
+| D2 | `seq` 项目内唯一（`UNIQUE(project_id, seq)`），非全局 | `archive/02-aihub-core.md#§4.2` DDL |
+| D4 | claim 需该 project 的 writer/maintainer membership 或全局 admin（`hSessionClaim`→`requireWrite`，403 otherwise）；key scope 不构成认领授权 | `archive/02-aihub-core.md#§4.10`、`#§8`；`archive/04-local-runtime.md#§6.1` 关联句 |
+| D8 | 先推 capsule 链，再推任务仓库 carrier ref（`refs/pf-task/<name>`）；任务仓库推送失败不回滚 capsule 链（polyforge#158 起另发 `carrier_push_failed` 决策提醒，见本文 §14.2） | `archive/v1-spec-full.md`（单行最小修订）+ 本表登记（“或”：两处都做） |
 | D10 | watcher 不因订阅的 WI 结束而退出（保持常驻），只跳过已结束的 WI；父 harness 消失、stdout 关闭或 `--wait-decision` 打印后仍退出 | 本文 §3.1 |
-| D14 | `paused` 的 WI 保留会话，可直接 wrap/fail/block，无需先 resume（`End()` 同一 session-hash fence，通过后清空会话） | `02-aihub-core.md#§2.5` 表行与相邻文字、§5.1 行 9 |
+| D14 | `paused` 的 WI 保留会话，可直接 wrap/fail/block，无需先 resume（`End()` 同一 session-hash fence，通过后清空会话） | `archive/02-aihub-core.md#§2.5` 表行与相邻文字、§5.1 行 9 |
 | C5 | `context_policy` / `handoff` 保留并写入文档 | **已由 #147 落地**，见 `01-workflow-skills.md#§4`/`§4.4a` 与本文 §2.6（本票不重复修改） |
 | C11 | job 级收尾前活转录同步保留（`runtime/pitranscript.go`） | 本文 §2.2 |
 | C13 | 决策类别补 `canceled`/`paused`/`submit_dropped`（另含 `submit_rejected`/`daemon_restarted`，与 `watcher/decision.go` 代码表对齐） | 本文 §3.1 |
-| C16 | `pf file create` 在 cwd 恰落一个映射 workspace 且该 workspace 恰映射一个 project 时推断 `--project`；其余一切情形要求显式 | `00-architecture.md#§3.1` |
-| 补登 | claim 幂等记录永不过期、无任何清理任务（缓存应答只含公开 fingerprint，永久保留无安全问题） | `02-aihub-core.md#§4.3`、`#§6.6` |
+| C16 | `pf file create` 在 cwd 恰落一个映射 workspace 且该 workspace 恰映射一个 project 时推断 `--project`；其余一切情形要求显式 | `archive/00-architecture.md#§3.1` |
+| 补登 | claim 幂等记录永不过期、无任何清理任务（缓存应答只含公开 fingerprint，永久保留无安全问题） | `archive/02-aihub-core.md#§4.3`、`#§6.6` |
 
 其余审计条目（B*、C1–C4、C6–C10、C12、C14–C15、D3/D5–D7/D9/D11–D13/D15 等）属其他票（#144/#145/#146/#147 等），不在本票范围。
 
@@ -380,9 +380,9 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 
 ## 14. capsule 链与任务仓库保全（现行机制；2026-10-16 自 05 文档 7.5/7.6 节迁入） <!-- §14 -->
 
-`05-sync-revision-recovery.md` 的其余部分描述已删除的 Revision/CAS/SYNC 模型（已加归档横幅）；本节是 capsule 链规则、任务仓库
-carrier ref 与 WIP ref 这三项**现行**机制的唯一设计记录。§14.2、§14.3 逐字迁自原 `05-sync-revision-recovery.md#§7.5`、`05-sync-revision-recovery.md#§7.6`（仅按 2026-10-14 信任模型改写了
-理由句，交叉引用改为本节编号）；原处保留为历史副本，以本节为准。
+`archive/05-sync-revision-recovery.md` 的其余部分描述已删除的 Revision/CAS/SYNC 模型（已归档）；本节是 capsule 链规则、任务仓库
+carrier ref 与 WIP ref 这三项**现行**机制的唯一设计记录。§14.2、§14.3 逐字迁自原 `archive/05-sync-revision-recovery.md#§7.5`、`archive/05-sync-revision-recovery.md#§7.6`（仅按 2026-10-14 信任模型改写了
+理由句，交叉引用改为本节编号）；原处随 05 归档为历史副本，以本节为准。
 
 ### 14.1 capsule 链规则 <!-- §14.1 -->
 
@@ -489,7 +489,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 
 ---
 
-## 附录 A：r2 深度审查漏洞清单与处置
+## 附录 A：r2 深度审查漏洞清单与处置 <!-- §A -->
 
 | # | 严重度 | 漏洞 | 处置（本文位置） |
 |---|---|---|---|
@@ -519,7 +519,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | 24 | 低 | 转录同步来源未写明 | 2.2 |
 | 25 | 低 | 失联阈值两套、WI 级失联定义 | 6 |
 
-## 附录 B：历史问题回归对照
+## 附录 B：历史问题回归对照 <!-- §B -->
 
 | 历史问题 | 新方案覆盖机制 |
 |---|---|
@@ -551,13 +551,13 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 
 ---
 
-## 附录 C：已知缺口（集成分支，2026-10-12）
+## 附录 C：已知缺口（集成分支，2026-10-12） <!-- §C -->
 
 - **(a) bundle digest**：已不存在——digest 链随 polyforge#149 B9 删除，`internal/` 中没有 `Digest` / `FileEntry`；`internal/common/workflow` 只读 frontmatter 的模型候选字段。`01-workflow-skills.md#§4.5` 的 digest 描述已归档。
 - **(b) 人工确认保证是事故护栏，不是对抗性防御**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证；step agent 可写 capsule，蓄意绕过不在 2026-10-14 信任模型的防御范围内（#135 冻结）。daemon 的 UDS 面（polyforge#122 起于 answer 路由，#164 并入；repo review 2026-10-16 V-1 扩到全部变更路由）按 UDS 对端 SO_PEERCRED pid 拒绝来自本 daemon step 进程树的一切非读请求（DAEMON-403）：对端、其祖先或其进程组 leader 带有 `PF_WI_ID` + `PF_DAEMON_ID=<本 daemon>` 标记即拒；取不到对端凭据也拒（fail closed）。拒绝面是一个包住整张路由表的中间件：`/jobs/{wi}/answer|claim|resume-blocked|resume-paused|pause|wrap`、`/ops/config`、`/shutdown`、`/chat/init`、`/chats/{id}/subscribe|unsubscribe|ack|heartbeat`；开放的只有读：`GET /status`、`/jobs/{wi}/watch`、`/chats/{id}/subscriptions`、`/chats/{id}/attention`。answer 路由保留其 #122 拒绝文案。残余：`setsid` 脱离进程组且清空环境的进程不在此检查内——这只能是蓄意行为，按信任模型不再追加防御（#135 冻结）。（曾有的 abandon-repair 路由随 repair_pending 一并删除，此实例已不存在。）
 - **(c) `pf watch` 进展字段**：已随监督重写合入——daemon watch 路由从 `Observe.Progress(wi)` 填充命令、命令时长、最近文件、工具调用数（见附录 D）。
 
-## 附录 D：监督替换落地对照（第 9 节步骤 2–3，分支 `v2/a-supervision`）
+## 附录 D：监督替换落地对照（第 9 节步骤 2–3，分支 `v2/a-supervision`） <!-- §D -->
 
 **代码位置**
 - 契约、翻译器、判死规则：`internal/polyforge/supervise`（`contract.go` 事实/判定/无界队列/每 WI 的 `Link`；`translator.go` + `pi.go` 翻译器接口与 pi 实现；`tracker.go` 每次派发一份的合并状态；`rules.go` 规则 ⓪–④ 的纯函数 `Judge`；`defaults.go` 全局阈值）。
@@ -622,8 +622,8 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 ### E.3 `attrs.blocked_seal` 与 `sealed_head` / `sealed_machine`
 
 - `work_items.attrs.blocked_seal = {"head": <sha>, "machine": <id>}`（`core/session.go` `blockedSealKey`）：带 head 的 `End(blocked)` 写入，其他任何 End/Pause 清除；不改 schema，搭在业务 attrs JSON 上。
-- 领取应答的 `sealed_head` / `sealed_machine`（`api/types.go` `SessionClaim`）由它读出：另一台机器继续一个 blocked WI 时，其 clone 里必须恰好有这个 head，否则拒绝（第 7 节"跨 daemon 继续"）。用户 PATCH attrs 可能把它删掉，后果只是该检查失效（fail open）。
-- 与 `02-aihub-core.md` INV-2c（attrs 不得承载执行态字段）的关系未裁定；本附录只登记现状，不做迁移（G17 选 A，I-5 不做 D）。
+- 领取应答的 `sealed_head` / `sealed_machine`（`api/types.go` `SessionClaim`）由它读出：另一台机器继续一个 blocked WI 时，其 clone 里必须恰好有这个 head，否则拒绝（第 7 节"跨 daemon 继续"）。`attrs` 不在 PATCH 可更新键中（`core/workitem.go` `patchableFields`，只在 create 时写入），用户无法改写或删掉它（2026-10-16 wave 4 按代码更正：原文称 PATCH 可删）。
+- 与 `archive/02-aihub-core.md#§2.6` INV-2c（attrs 不得承载执行态字段）的关系未裁定；本附录只登记现状，不做迁移（G17 选 A，I-5 不做 D）。
 
 ### E.4 daemon data dir（默认 `~/.local/share/polyforge`）
 
@@ -635,8 +635,8 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `daemon-state.json` | daemon `modes.go` | auto 开关与并发上限 |
 | `submit-queue.json` | daemon `modes.go` | 已接受、待派发的 submit 队列（重启后重放） |
 | `last-shutdown.json` | daemon `restartsignal.go` | 上次停机原因，供 `daemon_restarted` 使用 |
-| `runtime-state.json` | runtime `runtime.go` | runtime 的 job 记录（`04` 里称作 `state.json`） |
-| `claiming.json` | runtime `claiming.go` | 领取前的持久化意图日志（B1，v1.5 契约 §4.2），崩溃后重放 |
+| `runtime-state.json` | runtime `runtime.go` | runtime 的 job 记录（旧文档称作 `state.json`） |
+| `claiming.json` | runtime `claiming.go` | 领取前的持久化意图日志（B1，`reference.md#§3.5`），崩溃后重放 |
 | `manual-models.json` | runtime `manualmodels.go` | 每个 WI 的 `pf submit --models` 列表（只在本机有效） |
 | `events.log`（`.1`…`.3`）/ `events.seq` | observe `events.go` | 事件 JSONL（16 MiB 轮转，保留 3 代）/ 轮转时写入的每 WI 序号快照，保证 seq 跨重启单调 |
 | `chats.json`、`chat-subs.json`、`chat-status/` | 见 E.2 | |
@@ -650,10 +650,10 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 |---|---|
 | `capsule.json`、`session.json`、`.gitignore` | capsule 身份（含各仓库领取时 SHA）/ 公开 session 指纹 / 只忽略 `repos/`、`artifacts/release-*/` 与 `sync/` |
 | `runtime-state/work-item.json` | daemon 写入的 WI 快照 |
-| `runtime-state/execution.json` | 执行态唯一权威（`03` §4.2） |
+| `runtime-state/execution.json` | 执行态唯一权威（结构：`capsule.Execution`） |
 | `runtime-state/spawn-journal.jsonl` | 每次 step 派生一行（harness、会话、transcript 路径） |
 | `runtime-state/pending-results/<spawn_n>.json` | step agent 交付结果信封的唯一通道 |
-| `runtime-state/recalled-memories.json` | 领取时的记忆快照；driver 以"非约束性历史"注入 step 提示（G3） |
+| `runtime-state/recalled-memories.json` | 领取时的记忆快照（any-term 排序检索，见 `06-memory-search.md#§8`）；driver 以"非约束性历史"注入 step 提示（G3） |
 | `artifacts/steps/<step>/s<spawn_n>/result.json` | 已接受信封的归档 |
 | `artifacts/handoff-<step>.md` | 声明 `handoff` 的步骤按路径约定写出，后续 inherit 步读取 |
 | `session/session-<token>.jsonl` | harness 会话文件，在提交边界同步进来 |

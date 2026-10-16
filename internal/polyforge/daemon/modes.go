@@ -1,14 +1,14 @@
 package daemon
 
 // modes.go: the auto switch + admission (v2-converge §5), the pending-job
-// queue (04 §6.1d) and the daemon's own small state file. The daemon has
+// queue (reference.md §6.3) and the daemon's own small state file. The daemon has
 // ONE switch (auto on|off) and ONE number (max concurrent jobs): auto
 // off = only explicit pf submit; auto on = the daemon also pulls the
 // aihub ready queue by itself (the former drain loop). Manual submits
 // stay legal either way. The switch changes ONLY how future work is
 // sourced; it never touches running jobs and is fully independent from
 // the shutting_down latch. Jobs/attempts bookkeeping is NOT here — it
-// lives in Runtime's state.json and is never duplicated (04 §4.1 INV-D1).
+// lives in Runtime's state.json and is never duplicated (reference.md §6.4).
 
 import (
 	"encoding/json"
@@ -25,12 +25,12 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
-// Admission error shapes (04 §5.2); the HTTP layer maps them to codes.
+// Admission error shapes (reference.md §6.1); the HTTP layer maps them to codes.
 var errShuttingDown = errors.New("daemon is shutting down (DAEMON-410)")
 
 // ModeCtl stores the auto switch and admits against the shutting_down
 // latch. The latch gates BOTH external submissions and the auto-pull's
-// next fetch (04 §6.5 step 2) — two different block paths for the same
+// next fetch (reference.md §6.2, the shutdown latch) — two different block paths for the same
 // "no new jobs from any source" outcome.
 type ModeCtl struct {
 	mu           sync.Mutex
@@ -63,7 +63,7 @@ func (m *ModeCtl) ShuttingDown() bool {
 	return m.shuttingDown
 }
 
-// SetShuttingDown latches the flag one-way (04 §6.5 step 1: BEFORE any
+// SetShuttingDown latches the flag one-way (reference.md §6.2: latched BEFORE any
 // other shutdown action).
 func (m *ModeCtl) SetShuttingDown() {
 	m.mu.Lock()
@@ -102,7 +102,7 @@ func (m *ModeCtl) AdmitAutoPull() bool {
 }
 
 // ---------------------------------------------------------------------------
-// Pending-job queue (04 §6.1d): priority DESC (urgent > high > normal >
+// Pending-job queue (reference.md §6.3): priority DESC (urgent > high > normal >
 // low), FIFO within a priority, no preemption, ordered backfill. One
 // queue and one cap shared by manual submits and auto pulls.
 
@@ -449,7 +449,7 @@ func (q *jobQueue) FreeSlots() int {
 	return n
 }
 
-// Take pops the next DUE pending entry IF a slot is free (04 §6.1d
+// Take pops the next DUE pending entry IF a slot is free (reference.md §6.3
 // backfill: strictly priority desc, then FIFO; an entry still inside its
 // DAEMON-503 backoff is skipped). A started job occupies its slot by
 // appearing in the runtime's live list; a Take()n entry whose claim is
@@ -494,7 +494,7 @@ func (q *jobQueue) Take() *qEntry {
 
 // ---------------------------------------------------------------------------
 // The daemon's own state file: auto switch + the EXPLICIT `pf ops max`
-// cap only (the 04 §4.1 shape minus jobs[], which is Runtime's
+// cap only (daemon-state.json, reference.md §6.4; the archived 04 §4.1 shape minus jobs[], which is Runtime's
 // state.json). A configured cap is never persisted (decision 2026-10-16
 // G2): max_concurrent_jobs absent/0 = use the configured cap. Same atomic-write
 // discipline as every daemon-side state file.

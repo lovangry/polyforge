@@ -12,7 +12,7 @@ package runtime
 // — and nothing ever reaches the capsule's declared session/ path. The
 // fix: the observe monitor owns the sync (locate after spawn, copy into
 // the capsule at every commit boundary of the dispatch, before the
-// commit so the transcript rides git history — ruling C1), per dispatch
+// commit so the transcript rides git history — v1 ruling C1 (archive/v1-architecture-spec.md)), per dispatch
 // onto the path its step_started fact names. This file only holds the
 // locator the monitor calls.
 //

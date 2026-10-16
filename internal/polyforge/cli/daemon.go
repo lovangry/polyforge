@@ -38,7 +38,7 @@ import (
 //
 // Error envelope: the daemon answers non-2xx with the SAME typed
 // envelope the aihub face uses (common/api.Error: {code, detail} at the
-// top level, DAEMON-* codes per 04 §5.2). The phase-3 daemon assembly
+// top level, DAEMON-* codes per reference.md §5). The phase-3 daemon assembly
 // must serve exactly this shape.
 type DaemonClient struct {
 	Sock string

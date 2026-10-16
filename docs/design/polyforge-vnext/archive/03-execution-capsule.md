@@ -1,6 +1,8 @@
 # 03 — Execution Capsule：身份、repo inventory 与 Native Runner Profile
 
-> **ARCHIVED（repo review 2026-10-16 G-1）— 本文大部分描述已删除的机制：WI Agent、RunCommand 与 `CAP-*` 码、Revision 落盘、`capsules/_quarantine/`（代码为 `*.quarantined.<ts>`）、`.pi/agents/` 等物化目标。标有 ARCHIVED 横幅的节 do not build from this；未标横幅的节也只作历史与溯源参考。现行设计权威：[v2-converge.md](v2-converge.md)、[wi-kind-contract.md](wi-kind-contract.md)、[08-capsule-base-migration.md](08-capsule-base-migration.md)；与代码冲突时一律以代码为准。**
+> **ARCHIVED 2026-10-16** (repo review 2026-10-16 wave 4): describes the v0/v1 design and is kept for history only — do not build from it. Current reference: [reference.md](../reference.md); decisions: [v2-converge.md](../v2-converge.md). Live mechanisms this file still held were moved there before archiving; section anchors are unchanged.
+
+> **ARCHIVED（repo review 2026-10-16 G-1）— 本文大部分描述已删除的机制：WI Agent、RunCommand 与 `CAP-*` 码、Revision 落盘、`capsules/_quarantine/`（代码为 `*.quarantined.<ts>`）、`.pi/agents/` 等物化目标。标有 ARCHIVED 横幅的节 do not build from this；未标横幅的节也只作历史与溯源参考。现行设计权威：[v2-converge.md](../v2-converge.md)、[wi-kind-contract.md](../wi-kind-contract.md)、[08-capsule-base-migration.md](../08-capsule-base-migration.md)；与代码冲突时一律以代码为准。**
 > Most of this document describes deleted mechanisms. Sections bannered ARCHIVED must not be built from; the live authority is v2-converge.md plus the code.
 
 | 权威项 | 值 |
@@ -31,7 +33,7 @@
 
 ### 1.1 范围 <!-- §1.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、Revision/CAS/manifest、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、Revision/CAS/manifest、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - Capsule 权威定义：标识符格式、与 WI 的绑定关系、生成时机、生命周期（创建/复用/销毁，§2）。
 - Capsule 目录布局（§3）。
@@ -46,7 +48,7 @@
 
 ### 1.2 非目标（v1 判据的直接落实，逐字对齐 `00-architecture.md#§3.7`/INV-12） <!-- §1.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - **v1 执行边界**：v1 面向 trusted internal repo，采用 host-native 执行，不引入 per-step isolation；未来扩展只在 §11.1 记录一句方向，不进入本文任何范围、数据结构、API 或验收条款。
 - WI Agent 与 subagent 直接使用宿主机原生网络、工具链和运行环境；workflow schema 与 `RunCommand` 不承载隔离策略字段。 〔#111分类：替换后仍成立〕
@@ -59,7 +61,7 @@
 
 ### 2.1 Capsule（权威定义） <!-- §2.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、flush 证据、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、flush 证据、takeover）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 **Capsule（执行舱）**：一个 WI 在某台机器上的完整执行现场——工作树、执行状态文件与产物的目录集合（§3 布局）。Capsule 是执行态的唯一权威载体（INV-1 的另一面）。
 
@@ -98,7 +100,7 @@
 
 ### 2.4 多机 Capsule 副本裁定（本文裁定；与 `05-sync-revision-recovery.md#§2.9` 一致） <!-- §2.4 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、takeover）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 **裁定：不允许并存。** 任一时刻一个 WI 至多一个活跃 capsule 实例，由 owner generation 唯一活跃（`02-aihub-core.md#§4.3`）+ fencing（`05-sync-revision-recovery.md#§2.9` takeover fencing）在存储与发布两层强制。**这两层强制的是“过期结果无法生效”，不是“过期进程立即停止”**——后者只是本地協作行为（见下段）。本机 quarantine 机制仅处理**本机**目录：接管后，旧 generation 在**新 generation 所在那台机器上**的代目录（若与旧代同机）一律被新 generation 代的 `capsule_create`（§6.1）**隔离（quarantine）**到 `<pf-workspace>/capsules/_quarantine/<wi_id>/<old_generation>-<ts>/`，不在原地复用；新代总是从干净目录开始并按 `05-sync-revision-recovery.md#§7.4` 从远端 HEAD 完整重建现场（不信任任何本地残留）。若旧 generation 运行在**另一台机器**上，本机 quarantine 对那台远端机器本地目录**不构成任何隔离**：那台机器的旧目录能否及时封存完全取决于旧 Daemon 自己的协作行为（见下段），不在本机 quarantine 机制的控制范围内。隔离目录仅可人工经删除保护流程清理（与远端数据同一删除理念，`05-sync-revision-recovery.md#§2.10`）。详细隔离序列见 §6.1。
 
@@ -108,7 +110,7 @@
 
 ### 3.1 Capsule 目录布局（权威） <!-- §3.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 ```
 <pf-workspace>/capsules/<project>-<seq>/    # capsule_id = cap_<wi_id>；目录名用可读的 <project>-<seq>（polyforge#144，此前为 wi_id）。
@@ -262,7 +264,7 @@ WI 创建时可声明 repo inventory：`[{name}]`（项目仓库名），1 ≤ �
 
 ### 4.4 harness 会话目录：session 身份规则与本机会话数据的界限（`00-architecture.md#§3.6a` 会话数据落位的权威布局，本节是该规则的唯一权威定义，`04`/`05` 引用本节不重复定义） <!-- §4.4 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据、takeover）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 `00-architecture.md#§3.6a` 把「稳定的会话身份」与「会话数据落位」（跨 harness 契约要求＝封存（seal）时刻该 WI 的 Capsule 内含有该会话的会话记录；运行时落位按适配器区分，见下文 `session-data/` 条与 A14 归档段）列为跨 harness 的最小契约，权威布局与身份规则由本文给出：`<capsule>/harness/<adapter>/`（`adapter` 取当前该 WI 使用的 harness 适配器名，v1 为 `pi` 或 `claude`，`04-local-runtime.md#§6.1a` 权威）。
 
@@ -322,7 +324,7 @@ WI Agent 是唯一调用方；harness-native subagent 的命令都经其所属 s
 
 ### 5.1a 发布时输出 schema 机械校验（Daemon 侧检查步；polyforge#27 修订） <!-- §5.1a -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、flush 证据、publish_request）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、flush 证据、publish_request）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 每次全扫描发布（HEAD 推进）在 staging 固化（`05-sync-revision-recovery.md#§6` 第 4 步）之后、manifest 提交与 HEAD 推进（第 5–6 步）之前，挂载一次输出契约的机械校验步。它是 M 检查面（发布面机械证据通道）的新成员：与 `07-deployment-pilot.md#§9.2` 的 M4/M5 同属「机械证据优先于自报」的谱系，把执法对象从命令证据扩展到输出 schema 合规。六步发布序列的权威仍在 `05-sync-revision-recovery.md#§6`，本节只定义该检查步的 Capsule 侧契约，不构成第二条发布路径：
 
@@ -357,7 +359,7 @@ Native runner：v1 trusted internal repo，host-native，不引入 per-step isol
 
 ### 5.3 错误码表（前缀 `CAP`） <!-- §5.3 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、CAP-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、CAP-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 | 码 | 语义 |
 |---|---|
@@ -372,7 +374,7 @@ Native runner：v1 trusted internal repo，host-native，不引入 per-step isol
 
 ### 6.1 Capsule 创建 / 复用 / 隔离重建 <!-- §6.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、CAP-* 码、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、CAP-* 码、takeover）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 Daemon 在 `claim`/`takeover` 成功后（`04-local-runtime.md#§6.1`）按下列顺序驱动：
 
@@ -390,7 +392,7 @@ Daemon 在 `claim`/`takeover` 成功后（`04-local-runtime.md#§6.1`）按下�
 
 ### 6.2 Subagent 写限制：INV-6 的文件系统权限落实（v1 唯一机制，不引入 per-step isolation） <!-- §6.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、CAP-* 码、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、CAP-* 码、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 v1 trusted internal repo，host-native，不引入 per-step isolation；INV-6（harness-native subagent 不得写 `runtime-state/`）由**普通文件系统权限**落实，机制选定为**方式 B：只读权限位**，辅以方式 A 作为纵深防御：
 
@@ -413,7 +415,7 @@ v1 trusted internal repo，host-native，不引入 per-step isolation；INV-6（
 
 ### 6.3 Revision 恢复落盘的 symlink 安全规则（修复历史缺口 B07：symlink 路径逃逸） <!-- §6.3 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（CAP-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（CAP-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 **问题**：`05` 定义的 Revision 恢复（`apply_ops` 增量应用 / `apply_full_replace` 全量替换）把远端记录的文件树落盘到 Capsule 的 `repos/<name>/` 与 `artifacts/`。若恢复逻辑只检查目标路径**字符串**是否包含 `..`，则无法防御这样的攻击：先在工作树内创建一个 symlink（例如 `repos/ieops/evil -> ../../runtime-state`），字符串本身不含 `..`，但该 symlink 的**父目录**在恢复时会被“跟随”到 Capsule 根之外，导致后续对 `repos/ieops/evil/execution.json` 的写入实际落在 `runtime-state/execution.json` 上，绕过 §6.2 的只读权限位保护。
 
@@ -432,7 +434,7 @@ v1 trusted internal repo，host-native，不引入 per-step isolation；INV-6（
 
 ### 6.4 命令执行流程（编号步骤，非伪代码） <!-- §6.4 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、CAP-* 码、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、CAP-* 码、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 1. WI Agent 根据当前 step 的声明（`01-workflow-skills.md#§4.1`）与该 step 需要驱动的 harness-native subagent，构造 `RunCommand.spec`：`cwd` 取 `repos/<name>` 或 `artifacts`，`env` 为基线环境（不含 `runtime-state` 路径或 AIHub 凭证），`timeout_ms` 按 step/workflow 预算折算。 〔#111分类：删→驱动〕
 2. Native runner 以普通子进程方式启动 `argv`，工作目录设为 `<capsule>/<cwd>`。
@@ -442,7 +444,7 @@ v1 trusted internal repo，host-native，不引入 per-step isolation；INV-6（
 
 ## 7. 并发与崩溃恢复 <!-- §7 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - **单写者域**：`runtime-state/execution.json` 只被该 WI 的**执行驱动**写（INV-3 + INV-6；驱动是 Daemon 进程内的 goroutine，`pf daemon -use-driver` 默认路径；旧引擎下则是该 WI 的 WI-Agent 进程——历史记录）；同 capsule 内同一时刻至多一个 step 的 subagent 在跑（`01-workflow-skills.md#§6.1` 顺序语义）；watcher 读取 `runtime-state/` 与工作树不阻塞 subagent（读侧无锁，Revision 摘要以暂存快照为准，`05-sync-revision-recovery.md#§6`）。〔#111分类：已重写→驱动〕
 - **双实例竞态**：§2.4 裁定由 generation fencing 排除；本地残留的旧目录在 `capsule_create`（§6.1）时被隔离，不参与竞态。
@@ -459,7 +461,7 @@ v1 trusted internal repo，host-native，不引入 per-step isolation；INV-6（
 
 ## 8. 安全边界 <!-- §8 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、CAP-* 码、Revision/CAS/manifest、publish_request）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、CAP-* 码、Revision/CAS/manifest、publish_request）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - **信任面**（对齐 `00-architecture.md#§3.7`）：v1 面向可信内部仓库，harness-native subagent 执行的一切命令被视为**可信代码**——不存在需要防御「蓄意逃逸」的威胁模型；文件系统权限面（§5.2/§6.2）防御的是误写与实现 bug，不是对抗性绕过——host-native 同 UID 下不构成安全边界（B02 口径，§5.2/§6.2）。
 - **v1 明确不构成安全边界组成部分的机制**（完整清单与逐字裁定见 §1.2，不在此重复；不得在验收标准中出现）。
@@ -469,7 +471,7 @@ v1 trusted internal repo，host-native，不引入 per-step isolation；INV-6（
 
 ## 9. 监控 <!-- §9 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（CAP-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（CAP-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - `CAP-403` 写拦截次数（>0 即值得审计——subagent 试图写 `runtime-state/`，即便 v1 不视为攻击，也说明脚本行为超出预期）。
 - `CAP-406` symlink 逃逸拦截次数（>0 必须审计：Revision 数据或本地工作树出现了指向 Capsule 根之外的 symlink）。
@@ -477,7 +479,7 @@ v1 trusted internal repo，host-native，不引入 per-step isolation；INV-6（
 
 ## 10. 测试与故障注入 <!-- §10 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、CAP-* 码、Revision/CAS/manifest、flush 证据、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、CAP-* 码、Revision/CAS/manifest、flush 证据、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - 身份/绑定：篡改 `capsule.json.generation` → `capsule_create` 返回 `CAP-409`。
 - inventory：克隆/检出失败 → `DAEMON-507`（typed 的任务 repo 克隆失败，关闭为 blocked）。

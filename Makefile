@@ -5,7 +5,7 @@
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null || echo dev)
 GO_LDFLAGS := -X github.com/silgrid/polyforge/internal/version.Version=$(VERSION)
 
-.PHONY: check build vet fmt test release
+.PHONY: check build vet fmt test xrefs release
 
 build:
 	go build -ldflags "$(GO_LDFLAGS)" ./...
@@ -29,7 +29,21 @@ fmt:
 		echo "gofmt needed on:"; echo "$$out"; exit 1; \
 	fi
 
-check: build vet fmt test
+# xrefs checks the design doc set's cross-references and section anchors
+# (docs/design/polyforge-vnext/tools/check-xrefs.py; archived docs are not
+# checked). python3 is not a build dependency: without it the step is
+# skipped with a message instead of failing the whole check.
+# Note: .polyforge/release.sh's gate runs only `make test` (RELEASE_TEST_CMD),
+# so a release does not run xrefs; run `make check` (or `make xrefs`) before
+# tagging when docs changed.
+xrefs:
+	@if command -v python3 >/dev/null 2>&1; then \
+		python3 -I docs/design/polyforge-vnext/tools/check-xrefs.py; \
+	else \
+		echo "xrefs: python3 not found; SKIPPING the design-doc cross-reference check"; \
+	fi
+
+check: build vet fmt xrefs test
 
 # release builds the two shipped binaries with the git tag injected into
 # internal/version.Version via -ldflags -X, into artifacts/release-<tag>/.

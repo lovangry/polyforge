@@ -664,7 +664,7 @@ func (d *Driver) Answer(questionID, answer, answeredBy string) error {
 }
 
 // ResumeCurrent is the owner's third §6.4 verdict after an incomplete
-// result: write running back over the parked workflow (03 §4.2: the
+// result: write running back over the parked workflow (reference.md §7.3: the
 // owner's follow-up writes running back) and wake the loop, whose own
 // dispatch re-dispatches the frozen in_progress current step in place
 // as a fresh derivation. Only a blocked workflow accepts it — while

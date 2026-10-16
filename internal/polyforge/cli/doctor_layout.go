@@ -44,7 +44,7 @@ const (
 	docChSupervision  = "daemon supervision"
 )
 
-// v1ClaudeSkills are the v1 Claude Code skills (00-architecture §11.1).
+// v1ClaudeSkills are the v1 Claude Code skills (archive/00-architecture.md §11.1).
 var v1ClaudeSkills = []string{
 	"using-polyforge", "pf-spec", "pf-plan", "pf-retro", "pf-crystallize", "pf-revise",
 	"pf-project", "pf-user", "pf-sync", "pf-release", "pf-init", "pf-doctor", "pf-update",

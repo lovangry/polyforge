@@ -139,7 +139,7 @@ type CreateWorkItemRequest struct {
 	Attrs      map[string]any `json:"attrs,omitempty"`
 	BundleName *string        `json:"bundle_name,omitempty"`
 	// RepoInventory and RepoInventoryBase are passed through to aihub as
-	// given (02 §4.6: [{name}] of project repos), so aihub refuses what it
+	// given (reference.md §2.1: [{name}] of project repos), so aihub refuses what it
 	// does not accept (url, subdir, base) instead of the CLI dropping it.
 	RepoInventory     json.RawMessage `json:"repo_inventory,omitempty"`
 	RepoInventoryBase json.RawMessage `json:"repo_inventory_base,omitempty"`
@@ -453,7 +453,7 @@ func (c *Client) ListMachinesRaw() (json.RawMessage, error) {
 }
 
 // ---------------------------------------------------------------------------
-// v1.5 session model client (v1.5-api-contract.md §3).
+// v1.5 session model client (reference.md §3).
 
 // SessionClaim performs the CAS claim: set the session only if the WI is
 // queued and unheld (M1 joint gate). Idempotent on idempotency_key.

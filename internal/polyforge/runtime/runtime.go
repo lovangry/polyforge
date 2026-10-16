@@ -2,9 +2,9 @@
 // (Start / Stop / Recover / Restart), the pi-harness agent spawner with the
 // real RPC envelope, the six-layer process cleanup and the recovery engine.
 //
-// Design authority: docs/design/polyforge-vnext/v1-architecture-spec.md
-// (rulings C1–C3) + v1-spec-full.md (§二 messages, §三 state machine, §六
-// git, §七 recovery engine, §八 cleanup, §十一 restart reconciliation).
+// Current behavior: docs/design/polyforge-vnext/reference.md §3.5 (session
+// state), §6.2 (restart, recovery engine, cleanup) and §8 (git); decisions:
+// v2-converge.md §6. The v1 records are under docs/design/polyforge-vnext/archive/.
 // The Runtime talks to aihub through the shared aihubclient, to capsule git
 // through the shared gitops choke point, and to the Observe lane ONLY
 // through channels carrying common/protocol message types.
@@ -251,7 +251,7 @@ type job struct {
 	// with the record.
 	sealedPush bool
 	capsuleDir string
-	git        gitops.Opts // Username=wi, Secret=session_id (v1.5 §“gitops call sites”)
+	git        gitops.Opts // Username=wi, Secret=session_id (reference.md §3.4)
 	transcript string
 	bundleName string
 	// origin is how the job was submitted (nil = unknown).
@@ -631,7 +631,7 @@ func randomKey() string {
 	return hex.EncodeToString(b)
 }
 
-// mintSessionID mints the v1.5 SECRET (contract §0): 32 crypto-random
+// mintSessionID mints the v1.5 SECRET (reference.md §3.1): 32 crypto-random
 // bytes, hex — 64 chars. A CSPRNG failure is FATAL to the start: a
 // session secret must never fall back to a clock (that would be a
 // guessable credential, the exact failure B3 exists to prevent).
@@ -1377,7 +1377,7 @@ func readSessionMarker(capsuleDir string) string {
 }
 
 // quarantineCapsule moves a stale/foreign/superseded capsule aside, never
-// deleting it (v1.5 naming, contract §4.4: capsules/<name> →
+// deleting it (v1.5 naming, reference.md §3.5: capsules/<name> →
 // capsules/<name>.quarantined.<ts> — a sibling, so the scene sits next to
 // whatever replaces it and the bytes always survive).
 func quarantineCapsule(capsuleDir, gitDir string) error {
