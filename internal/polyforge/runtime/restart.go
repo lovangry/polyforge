@@ -515,6 +515,15 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) {
 		return
 	}
 	v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
+	if err == nil || verifyRefused(err) {
+		// the hub answered: a deferral persisted by the previous run is
+		// over (awaitVerify re-latches it when the hub is unreachable)
+		if j := r.jobOf(rec.WorkItemID); j != nil {
+			j.mu.Lock()
+			j.awaitingHub = false
+			j.mu.Unlock()
+		}
+	}
 	if err != nil {
 		if verifyRefused(err) {
 			// The hub answered and refused the verify (a typed 4xx): it

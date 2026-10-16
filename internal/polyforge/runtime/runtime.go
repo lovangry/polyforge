@@ -322,15 +322,16 @@ type job struct {
 	endHead string
 	// endPushGaveUp: the end_pending chain push met a PERMANENT rejection
 	// (hook refusal, non-fast-forward, size limit) — stop pushing, close
-	// without it (the commits stay in the local capsule; in memory only,
-	// a restart re-tries the push once and gives up again).
+	// without it (the commits stay in the local capsule). Persisted, so a
+	// restart's retry does not push again either.
 	endPushGaveUp bool
 	// sealPushFailNoted: this SEALING series already raised its
 	// push_failed event (one per series, not one per seal retry).
 	sealPushFailNoted bool
 	// awaitingHub: the restart-time session verify could not reach aihub
 	// and is being retried (awaitVerify) — status/watch name it, a close
-	// is answered "waiting for aihub".
+	// is answered "waiting for aihub". Persisted with the record; the
+	// next start's verify re-derives it.
 	awaitingHub bool
 	// claim is the CLAIMING placeholder's lane (B-8); nil otherwise.
 	claim *claimLane

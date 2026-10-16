@@ -125,6 +125,10 @@ func (r *Runtime) closeBlocked(j *job, push bool) bool {
 			j.mu.Lock()
 			j.endPushGaveUp = true
 			j.mu.Unlock()
+			// durable: a restart's retry must not push again either
+			if err := r.persist(); err != nil {
+				fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
+			}
 			local, _ := gitops.Head(chain)
 			fmt.Fprintf(os.Stderr, "runtime: %s: blocked-close chain push permanently rejected — closing without it (local head %s stays in the capsule): %v\n", j.wi, local, perr)
 			if r.cfg.EventTap != nil {
