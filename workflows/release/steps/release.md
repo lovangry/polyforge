@@ -84,10 +84,19 @@ The release must build exactly the freshly fetched origin default-branch head.
    no work worth keeping; the release builds origin's head, nothing else). Then require
    `git status --porcelain` to be empty and `git rev-parse HEAD` to equal
    `git rev-parse origin/<default>`. Anything else: `verdict: fail`.
-4. Record the pre-release remote tag list, which the next step needs for its
-   immutability check: `git ls-remote --tags origin > <capsule>/artifacts/pre-release-tags.txt`
+4. Record `origin_head` = `git rev-parse origin/<default>`.
+5. **Already released?** This step can be dispatched again after an earlier attempt
+   already published (the harness died before its result landed). If
+   `<capsule>/artifacts/pre-release-tags.txt` already exists, an earlier attempt got
+   this far: never overwrite it. Run `git ls-remote --tags origin` and take every tag
+   whose sha (or peeled `^{}` sha) equals `origin_head`. Any such tag that is not in
+   that existing file means a release was already cut from this head: do NOT run the
+   procedure; finish with `verdict: fail` and a `fail_reason` that begins with
+   `PF-RELEASE-ALREADY_RELEASED` and names the tag(s), so a human decides the next move.
+6. Only when the file does not exist yet: record the pre-release remote tag list, which
+   the next step needs for its immutability check:
+   `git ls-remote --tags origin > <capsule>/artifacts/pre-release-tags.txt`
    (run it BEFORE the procedure; keep the file exactly as git printed it).
-5. Record `origin_head` = `git rev-parse origin/<default>`.
 
 ## 4. Run the procedure
 

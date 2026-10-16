@@ -115,6 +115,17 @@ func TestReleaseBundleShape(t *testing.T) {
 			t.Fatalf("release step lost its contract text %q", needle)
 		}
 	}
+	// The re-dispatch guard (repo review 2026-10-16 V-6): a re-run whose
+	// earlier attempt already published refuses before the procedure — a
+	// tag on origin_head missing from the kept pre-release list — and the
+	// first attempt's list is never overwritten.
+	guard := strings.Index(rel, "PF-RELEASE-ALREADY_RELEASED")
+	if guard < 0 || !strings.Contains(rel, "never overwrite it") || !strings.Contains(rel, "equals `origin_head`") {
+		t.Fatal("the release step lost its already-released guard (PF-RELEASE-ALREADY_RELEASED: a tag on origin_head not in the kept pre-release-tags.txt)")
+	}
+	if run := strings.Index(rel, "## 4. Run the procedure"); run < 0 || guard > run {
+		t.Fatal("the already-released guard must come before the procedure runs")
+	}
 	if strings.Contains(rel, "enum: [pass, defer, fail]") || strings.Contains(rel, "enum: [defer]") {
 		t.Fatal("the release step must not admit a defer verdict: a release WI without a procedure is an error")
 	}
