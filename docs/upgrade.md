@@ -82,6 +82,18 @@ nothing changed when the linked library is older. SQL execution itself uses
 the deployer's ssh + `python3` stdlib-sqlite3 path; the `sqlite3` CLI is
 neither used nor required.
 
+**Minimum database baseline.** The `deploy/sql/` chain starts at v2.4.0
+and assumes the columns that the old in-process Go migrations added:
+`machines.mode` / `machines.live_wi_ids` (heartbeat face, first in v0.4.2)
+and `memories.fs_mtime_ns` / `memories.fs_size` (memory freshness stamp,
+polyforge#129, first in v1.12.0). Those migrations were deleted in v2.2.0
+(3d7a857) and `Open` runs none, so a database must either have been
+created by v2.2.0 or later, or have been opened at least once by a server
+between v1.12.0 and v2.1.x. A database last served by anything older is
+not upgradable by deploy.sh: its first heartbeat or memory write fails
+with `no such column`. Bring it through a v2.1.x server first (or add the
+four columns by hand) before deploying a current version.
+
 ## First instance: v2.4.0 (polyforge#149, audit subtraction C)
 
 The whole schema delta of #149: the delivery ledger, the dead tables and
