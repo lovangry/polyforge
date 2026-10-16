@@ -365,7 +365,12 @@ overwrites a tag, release or image; a failure after the tag push burns the versi
 equal to the version argument (no prompt), takes a server-side lock for the
 whole mutating part (fails fast if another deploy holds it), runs on a machine
 with `gh` and `docker` logged in to the private `ghcr.io/silgrid/aihub` - the
-server never holds GitHub credentials. Steps: ONLINE verified full backup; pull
+server never holds GitHub credentials. Machine preconditions (checked in its
+preflight; when the release bundle's `deploy` step runs it, they apply to the
+step's machine): a running docker daemon, `gh` with GHCR read access, root
+BatchMode ssh to `AIHUB_HOST`, `rsync`, a writable `BACKUP_ROOT` (default
+`/data/polyforge-backups`), and the target tag — for a downgrade also the running
+one — in the LOCAL repo (`git fetch --tags origin`). Steps: ONLINE verified full backup; pull
 `ghcr.io/silgrid/aihub:<tag>`, check the repo digest against the release's
 `aihub-image.digest` (itself checked via `SHA256SUMS`), `docker save | ssh
 docker load`, verify the image ID on the server and tag it

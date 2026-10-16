@@ -111,8 +111,7 @@ declare none (an estimate of 30 or less is inert under that rule) and get the 90
   a rollback must exit non-zero.
 - Both procedures run on the step's own machine, against the task-repo clone. They read
   LOCAL git tags (the steps run `git fetch --tags origin` first), and whatever else a
-  repo's procedure needs on that machine is the repo's precondition (this
-  repository's `deploy.sh` checks them in its preflight: a running docker daemon, `gh` with
-  GHCR read access, root BatchMode ssh to `AIHUB_HOST`, rsync, and a writable
-  `BACKUP_ROOT`, default `/data/polyforge-backups`). A missing one fails the step
-  gracefully, but only after a lane was spent — check them before filing a release WI.
+  repo's procedure needs on that machine (tools, registry and ssh access, writable
+  backup space) is the repo's precondition: the repo documents it next to its scripts,
+  and a missing one fails the step gracefully, but only after a lane was spent - check
+  them before filing a release WI.
