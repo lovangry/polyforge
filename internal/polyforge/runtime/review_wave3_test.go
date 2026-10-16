@@ -77,3 +77,33 @@ func TestTaskRepoCloneIsNonInteractive(t *testing.T) {
 		}
 	}
 }
+
+// B-6 end to end: after the restart drops the record of a WI the hub
+// holds blocked under another session, the owner's resume (hub back to
+// queued) re-claims it through the ordinary Start — not refused as
+// "already active".
+func TestBlockedRecordDroppedAtRestartThenResumeReclaims(t *testing.T) {
+	setGitIdentity(t)
+	hub := newFakeHub()
+	const wi = "wi_w3_blkres"
+	hub.items = map[string]*api.WorkItem{wi: {ID: wi, Slug: "proj#7", Seq: 7, ProjectName: "proj"}}
+	hub.status[wi] = api.StatusBlocked
+	r, toOB, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	t.Cleanup(r.Close)
+	rec := matrixRecord(r, wi, 0, "")
+	if err := os.MkdirAll(rec.CapsuleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeStateFile(t, r, []*jobRecord{rec})
+	if err := r.Restart(context.Background()); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	hub.status[wi] = api.StatusQueued // pf resume
+	if err := r.Start(context.Background(), wi); err != nil {
+		t.Fatalf("resume re-claim refused: %v", err)
+	}
+	defer terminateJobAgent(r, wi)
+	if m := recvRT(t, toOB); m.Kind != protocol.RTStarted {
+		t.Fatalf("expected RTStarted, got %+v", m)
+	}
+}
