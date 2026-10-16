@@ -439,7 +439,7 @@ error caught by the global / verb-level flag parse. The routing skill's fragment
 | Data-plane verbs (direct to aihub) | `file`, `queue`, `cancel`, `recall`, `remember`, `memory` |
 | Execution-plane verbs (local daemon UDS face) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`), `answer`, `pause`, `resume`, `wrap`, `ops` (`status`, `auto`, `max`, `shutdown`, and `end-session` — aihub-direct, admin/maintainer), `chat init` |
 | Management face (M1–M5) | `users`, `api-keys`, `projects`, `machines`, `backup` (DB-only snapshot, see below) |
-| Diagnostics | `doctor` |
+| Diagnostics | `doctor` (`--prune-scratch` removes stale `scratch/` entries), `init` (a workspace's local layout) |
 | Process | `daemon` (run the work machine; `pf daemon ensure` starts it) |
 
 `pf backup` writes a consistent DB-only snapshot (`VACUUM INTO`) under the
@@ -518,6 +518,37 @@ when any is missing or unusable (or when the config carries zero
 sections). Capsules route per claimed project through the inverse
 mapping; the auto-pull covers all mapped projects. `pf doctor` checks
 the mapping.
+
+Workspace layout (polyforge#177). Anything meant to be shared — designs,
+reviews, decision sheets, audits, experience — lives in aihub, not in a
+workspace file: a design in its work item's content while the work item
+is open (`pf file edit <wi> --content @f`), else a `doc.design` memory
+(`pf remember --project <p> --type doc.design --work-item <wi> @f`); reviews,
+decisions and audits as `doc.review` / `doc.decision` / `doc.audit`
+memories; experience as `experience.*` / `fact.*`. A workspace holds
+locally only:
+
+```
+<workspace>/
+  .polyforge.yaml   human-written model candidates
+  CLAUDE.md         workspace notes (polyforge-managed block + the human part)
+  .repo/<repo>/     clones for humans and interactive agents
+  capsules/<wi>/    work item workspaces (daemon-managed)
+  .polyforge/       polyforge-generated files only (repo-map/, watchers/) — no documents
+  scratch/          disposable output (logs, briefs, e2e output, downloads)
+```
+
+`pf init [<workspace-dir>]` creates `scratch/` and writes this convention
+as a layout section into CLAUDE.md's `polyforge:managed` block (a new
+block on top when there is none); re-running it rewrites only that
+section. `pf doctor` warns (never fails, never moves anything) about root
+entries outside the layout — dot-entries such as `.gitignore`, `.pi`,
+`.claude` and `.mcp.json` are tolerated, `.polyforge.yaml.*` backups are
+not — and about non-generated entries under `.polyforge/`, naming each
+one's destination; it reports `scratch/` entries whose newest
+modification is older than 14 days, and `pf doctor --prune-scratch`
+removes them, listing each. Step agents are unaffected: they work inside
+their capsule.
 
 Per-project model candidates. A workspace root may carry a
 `.polyforge.yaml` whose only section is `steps` (strict: unknown keys at

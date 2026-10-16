@@ -34,6 +34,25 @@ slug; an unknown one is a typed CORE-404). The work item must belong to
 `--project` — a memory belongs to one project; another project's work
 item is refused with CORE-400.
 
+## Shared documents go here, not into files (polyforge#177)
+
+A design, review, decision sheet or audit meant for others is a memory
+(or, for a design, its work item's content while the work item is open —
+`pf file edit <wi> --content @f`), never a file in the workspace root or
+`.polyforge/`:
+
+| Content | `--type` |
+|---|---|
+| a design of a closed (or no) work item | `doc.design` (with `--work-item` when it belongs to one) |
+| a review report | `doc.review` |
+| a decision sheet | `doc.decision` |
+| an audit | `doc.audit` |
+| a lesson / a fact | `experience.*` / `fact.*` |
+
+Pass the body as `@file` (≤1 MiB). A memory cannot be edited — store a
+new one (or redact). Local disposable output belongs in the workspace's
+`scratch/` only (`pf doctor` reports entries older than 14 days).
+
 ## Success
 
 `--json`: the server body raw. Human mode: `stored <id> (type T,

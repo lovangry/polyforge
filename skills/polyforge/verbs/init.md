@@ -111,10 +111,23 @@ restart is involved; the daemon reads the yaml fresh before every claim.
 An invalid file refuses the claim (DAEMON-414) before it is made: the
 work item stays queued, so fix the file and resubmit.
 
+5. **Lay out the workspace**: `pf init <workspace-root>` (default: the
+   current directory) creates `scratch/` and writes the runtime-artifact
+   convention (polyforge#177) into CLAUDE.md as a layout section inside
+   the `polyforge:managed` block — appended to an existing block, or a
+   new block on top. Re-running it is safe: it only rewrites its own
+   section, never the human part. The convention: shared content goes to
+   aihub (a design → its work item's content while open, else a
+   `doc.design` memory; reviews / decisions / audits → `doc.review` /
+   `doc.decision` / `doc.audit` memories; experience → `experience.*` /
+   `fact.*`); locally only `.repo/`, `capsules/`, `.polyforge/`
+   (polyforge-generated only) and `scratch/` (disposable, reported by
+   `pf doctor` after 14 days).
+
 ## Verify
 
 ```
-pf doctor           # machine face: config + [workspace] mapping + connectivity + supervision + harness layout
+pf doctor           # machine face: config + [workspace] mapping + workspace layout + connectivity + supervision + harness layout
 cat <workspace>/.polyforge.yaml   # the model pins the daemon reads (if any)
 ```
 

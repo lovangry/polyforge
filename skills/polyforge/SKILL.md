@@ -1,6 +1,6 @@
 ---
 name: polyforge
-description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of the 13 routing verbs (file, queue, cancel, recall, remember, memory, submit, watch, answer, pause, resume, wrap, ops) plus the machine verbs doctor and help and the init fragment (install / upgrade routing to tools/install.sh — not a pf verb), each carried by a fragment under verbs/ (`pf watch` is the progress verb: snapshot, resident watcher, subscriptions; `pf chat` carries the chat identity); data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
+description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of the 13 routing verbs (file, queue, cancel, recall, remember, memory, submit, watch, answer, pause, resume, wrap, ops) plus the machine verbs doctor and help and the init fragment (install / upgrade routing to tools/install.sh, plus `pf init` for a workspace's local layout), each carried by a fragment under verbs/ (`pf watch` is the progress verb: snapshot, resident watcher, subscriptions; `pf chat` carries the chat identity); data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
 license: proprietary
 compatibility:
   harnesses: [pi, claude]
@@ -216,6 +216,16 @@ Five standing rules, binding on every polyforge session:
    files in a polyforge workspace. Keep memory and repo references
    separate: no memory ids in repo docs, no repo paths inside memories;
    attribute memories with the `--work-item` flag, never prose.
+   **Workspace layout (polyforge#177):** anything meant to be shared goes
+   to aihub — a design into its work item's content while the work item
+   is open (`pf file edit <wi> --content @f`), else a `doc.design`
+   memory with `--work-item`; a review / decision sheet / audit into a
+   `doc.review` / `doc.decision` / `doc.audit` memory; experience into
+   `experience.*` / `fact.*`. Locally a workspace holds only `.repo/`
+   (clones), `capsules/` (daemon-managed), `.polyforge/`
+   (polyforge-generated only) and `scratch/` (disposable output; `pf
+   doctor` reports entries older than 14 days, `--prune-scratch` removes
+   them). Never write documents into the workspace root or `.polyforge/`.
 3. **Blockers become work items.** Root-cause obstacles instead of
    routing around them; an obstacle that is a bug or unresolvable here
    is tracked as a work item via `pf file`.
