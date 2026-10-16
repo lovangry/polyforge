@@ -208,10 +208,14 @@ kill <AIHUB_PID>
 
 ## Architecture
 
-Design authority: `docs/design/polyforge-vnext/v2-converge.md` (with
-`wi-kind-contract.md` and `08-capsule-base-migration.md`). The numbered
-docs 00–07 and the v1 specs are largely archived history — sections that
-describe deleted mechanisms carry an ARCHIVED banner; do not build from them.
+Current-system reference: `docs/design/polyforge-vnext/reference.md` (one
+file: components, WI state machine, session fencing, aihub and daemon
+routes, error codes, bundle keys, candidates, daemon lifecycle). Decision
+authority: `docs/design/polyforge-vnext/v2-converge.md` (with
+`wi-kind-contract.md`, `01-workflow-skills.md` for bundle authoring,
+`06-memory-search.md` and `08-capsule-base-migration.md`). The v0/v1 design
+set (00, 02–05, 07, the v1/v1.5 specs) is under
+`docs/design/polyforge-vnext/archive/` — history only; do not build from it.
 The subsections below describe the code as it actually exists in this tree —
 the live code is the authority; design-doc references are for traceability.
 
@@ -279,7 +283,8 @@ credential is unavailable, with `DAEMON-403` (polyforge#122 accident guard).
 
 Authoritative source for this table is the code itself — the
 `mux.Handle`/`mux.HandleFunc` mount list in `internal/polyforge/daemon/routes.go`;
-design-doc references (e.g. `04-local-runtime.md §5.1`) are for traceability only.
+the same table, with the step-origin refusal and socket resolution, is in
+`docs/design/polyforge-vnext/reference.md` §6.1.
 
 ### Failure codes of the recovery / re-claim paths
 
@@ -647,9 +652,9 @@ Change coverage is tiered by the change's **behavior face**, not by a
 "e2e on every ticket" blanket rule (owner ruling 2026-10-02). The existing
 e2e suite (`go test ./test/`) is the regression net for every
 change — each ticket's verification step runs it — and the three disciplines
-below govern when **new** coverage must be added. The authoritative source is
-`docs/design/polyforge-vnext/v1.5-change-coverage-rules.md` (Chinese); this
-section is a faithful summary, and that doc remains the single authority.
+below govern when **new** coverage must be added. This section is the authority (the original
+Chinese record, `docs/design/polyforge-vnext/archive/v1.5-change-coverage-rules.md`,
+is archived history).
 
 **Discipline ① — changes observable behavior → file on an e2e-carrying
 graph.** If a change alters observable behavior — a new endpoint, a
@@ -687,7 +692,7 @@ fixed. The window ticket is registered at merge; it blocks cutover, not
 merge. The report is filed on the window ticket and readings never
 rewrite history.
 
-**Merge-review checklist** (compact form of the authority doc's 检查单):
+**Merge-review checklist**:
 
 - [ ] Behavior face touched? → filed on an e2e-carrying graph, or new
   scenarios human-authored

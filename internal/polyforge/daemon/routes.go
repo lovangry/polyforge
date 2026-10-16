@@ -4,7 +4,7 @@ package daemon
 // contract (internal/polyforge/cli/verbs_daemon.go — the pinned route
 // family) into Runtime/observe calls. Every error
 // answer is the TOP-LEVEL api.Error envelope {code, detail} (the same
-// typed shape the aihub face uses; DAEMON-* codes per 04 §5.2).
+// typed shape the aihub face uses; DAEMON-* codes per reference.md §5).
 
 import (
 	"bytes"
@@ -805,7 +805,7 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 	cred, ok := requestPeerCred(r.Context())
 	cause := RouteShutdownCause(cred, ok)
 	// Answer immediately; the bounded sequence runs to completion in the
-	// background and Run returns when it finishes (04 §6.5).
+	// background and Run returns when it finishes (reference.md §6.2).
 	writeJSON(w, http.StatusOK, map[string]any{"shutting_down": true})
 	go func() {
 		if err := d.Shutdown(context.Background(), cause); err != nil {

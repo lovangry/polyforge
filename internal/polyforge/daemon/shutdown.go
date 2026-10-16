@@ -1,6 +1,6 @@
 package daemon
 
-// shutdown.go: the graceful shutdown sequence (04 §6.5, v1 shape). It is
+// shutdown.go: the graceful shutdown sequence (reference.md §6.2, v1 shape). It is
 // the daemon PROCESS's termination path — never a mode, never drain:
 //
 //  1. latch shutting_down FIRST (external submissions now answer

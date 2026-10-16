@@ -1,4 +1,4 @@
-// recover.go: the recovery engine (v1-spec-full §七) and the recovery
+// recover.go: the recovery engine (reference.md §6.2) and the recovery
 // lifecycle entry (§一 Recover). Discriminator = transcript availability
 // (NOT same-machine/cross-machine — cross-machine recovery gets the
 // transcript for free through capsule git):

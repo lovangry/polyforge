@@ -1,7 +1,7 @@
 package runtime
 
 // materialize.go: the F7 lane — the bundle materialization as ONE atomic
-// SET with a completion marker, ported from v0's 03 §4.5 semantics
+// SET with a completion marker, ported from the v0 materialization semantics (reference.md §7.1)
 // (v0/internal/capsule/materialize.go, git history):
 //
 //   - the full bundle tree lands under workflows/<bundle>/ (the driver
@@ -23,7 +23,7 @@ package runtime
 // (no marker, so the next pass re-materializes) — never a half-new
 // snapshot read as if it were whole.
 //
-// sync/ is daemon-private state (03 §5.2 semantics): it never enters the
+// sync/ is daemon-private state (reference.md §7.1 semantics): it never enters the
 // capsule's revision chain — the .gitignore carries /sync/ for exactly
 // that reason — and is rebuilt by every new generation.
 
@@ -64,7 +64,7 @@ type materializeMarkerRecord struct {
 	CompletedAt string   `json:"completed_at"`
 }
 
-// materializationComplete is the trust gate (v0 03 §4.5): it reports
+// materializationComplete is the trust gate (reference.md §7.1): it reports
 // whether the materialized snapshot is COMPLETE for THIS job's pinned
 // identity and therefore trustworthy. A parseable marker alone proves
 // nothing — the gate additionally requires:

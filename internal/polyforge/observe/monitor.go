@@ -725,7 +725,7 @@ func (m *Monitor) claimTranscriptWarning() bool {
 // syncTranscript is the F3 commit-boundary transcript sync: copy the
 // current derivation's live harness transcript onto the capsule's
 // declared session path, READ-ONLY w.r.t. the source, so the transcript
-// rides the very commit the caller is about to make (ruling C1). Runs in
+// rides the very commit the caller is about to make (v1 ruling C1 (archive/v1-architecture-spec.md)). Runs in
 // the push sub-goroutines BEFORE the push itself; a missing source is
 // the typed advisory transcript_missing (once per attempt), never an
 // error — the commit proceeds without the transcript.

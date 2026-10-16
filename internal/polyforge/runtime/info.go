@@ -93,7 +93,7 @@ func (j *job) info() JobInfo {
 }
 
 // Persist rewrites state.json on demand. The daemon's graceful-shutdown
-// sequence calls it as its final durability step (04 §6.5: the persisted
+// sequence calls it as its final durability step (reference.md §6.2: the persisted
 // bookkeeping must reflect reality before the process exits).
 func (r *Runtime) Persist() error { return r.persist() }
 

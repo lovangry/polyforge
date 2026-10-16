@@ -41,13 +41,13 @@ type CreateRequest struct {
 	Attrs     map[string]any `json:"attrs"`
 	Reporter  string         `json:"reporter"` // user id (from auth)
 	// BundleName non-empty marks an execution ticket; NULL leaves a pure
-	// registration ticket (02 §4.4: not claimable, CORE-409 NOT_CLAIMABLE).
+	// registration ticket (wi-kind-contract.md §1: not claimable, CORE-409 NOT_CLAIMABLE).
 	// The bundle reference freezes at FIRST CLAIM (the R2 window, w140):
 	// while the WI is queued and never claimed, PATCH may set, rename or
 	// clear bundle_name through the shared persist path (bundleRef);
 	// after the first claim it is immutable again (INV-2e as amended).
 	BundleName *string `json:"bundle_name"`
-	// Repo inventory (02 §4.6): the project repos this WI works in,
+	// Repo inventory (reference.md §2.1): the project repos this WI works in,
 	// [{name}] only, frozen at create into work_items.repo_inventory and
 	// served by the claim (URLs resolved from the project then) in place
 	// of the project's full repo list.
@@ -84,7 +84,7 @@ func validPriority(p string) bool {
 	return false
 }
 
-// forbidden attrs keys (execution-state blacklist; 02 §5.1a, kept from v0
+// forbidden attrs keys (execution-state blacklist; archive/02-aihub-core.md §5.1a, kept from v0
 // business semantics): Core never persists workflow execution state.
 var executionStateKeys = map[string]bool{
 	"current_step": true, "step_id": true, "step_attempt_id": true,
@@ -186,7 +186,7 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 		if parentBundle.Valid && parentBundle.String != "" {
 			return nil, Fail(api.ErrCoreBadInput, "PARENT_NOT_REGISTRY", "parent is an execution ticket, not a registry ticket")
 		}
-		// Depth is one level (02 §4.2a): the parent may not itself have
+		// Depth is one level (wi-kind-contract.md §2): the parent may not itself have
 		// a parent. parent_id is immutable after create, so this create
 		// check is the whole rule.
 		if grandParent.Valid && grandParent.String != "" {
@@ -217,7 +217,7 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 		}
 	}
 
-	// Repo inventory (02 §4.6): resolved INSIDE the create transaction
+	// Repo inventory (reference.md §2.1): resolved INSIDE the create transaction
 	// against the project's repos, so a refused create persists nothing.
 	if err := refuseRepoInventoryBase(req.RepoInventoryBase); err != nil {
 		return nil, err
@@ -246,7 +246,7 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 	}
 	seq := maxSeq.Int64 + 1
 
-	// Bundle reference (02 §4.4/§4.5): a non-empty bundle_name makes an
+	// Bundle reference (wi-kind-contract.md §1): a non-empty bundle_name makes an
 	// execution ticket. The name resolves through the ONE shared persist
 	// path (bundleRef — the same helper the PATCH entry uses): a nil/empty
 	// name resolves to NULL. Full §4.5 fixation is deleted with the digest
@@ -494,8 +494,8 @@ func bundleRef(name *string) (bundleName any) {
 	return *name
 }
 
-// patchableFields (02 §5.1 row 3). Workflow refs and parent are immutable.
-// clean_pause rides the whitelist per the v1.5 contract §1.5 AMEND
+// patchableFields (reference.md §4.1). Workflow refs and parent are immutable.
+// clean_pause rides the whitelist per the session-end paused verdict (reference.md §3.3)
 // ("pf resume clears the flag via WI PATCH (whitelist gained
 // clean_pause)") — the operator resume face; the update half below was
 // wired at merge, the whitelist entry was missed there (found by the
@@ -652,10 +652,10 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 	if err != nil {
 		return nil, err
 	}
-	// The repo inventory (02 §4.6) is frozen at create: no UPDATE path.
+	// The repo inventory (reference.md §2.1) is frozen at create: no UPDATE path.
 	if _, ok := fields["repo_inventory"]; ok {
 		return nil, Fail(api.ErrCoreBadInput, "IMMUTABLE",
-			"repo_inventory is frozen at create (02 §4.6, no UPDATE path); cancel and re-create the work item to change it")
+			"repo_inventory is frozen at create (no UPDATE path); cancel and re-create the work item to change it")
 	}
 	for k := range fields {
 		if !patchableFields[k] {

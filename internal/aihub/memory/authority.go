@@ -41,7 +41,7 @@ func errf(code, reason, format string, args ...any) *APIError {
 	return &APIError{Code: code, Reason: reason, Detail: fmt.Sprintf(format, args...)}
 }
 
-// Visibility tiers (06 §4.2; membership-first filtering is the server's).
+// Visibility tiers (06 §6; membership-first filtering is the server's).
 var visibilities = map[string]bool{"admin": true, "private": true, "project": true, "public": true, "team": true}
 
 // maxContentBytes is the MEM-413 body limit (≤ 1 MiB).
@@ -126,7 +126,7 @@ func buildAuthorityFile(fm *frontmatter, body string) ([]byte, error) {
 	return []byte(sb.String()), nil
 }
 
-// extractBody derives the searchable text (06 §4.4): strip frontmatter,
+// extractBody derives the searchable text (06 §5.1): strip frontmatter,
 // drop structural '#','*','_','>' from regular lines; fenced and indented
 // code blocks stay verbatim.
 func extractBody(content string) string {

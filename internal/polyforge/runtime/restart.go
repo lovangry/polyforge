@@ -1,7 +1,7 @@
 package runtime
 
-// restart.go: daemon-startup reconciliation (v1-spec-full §十一, re-keyed
-// onto the v1.5 session model — contract §1.2/§1.3). The Runtime never
+// restart.go: daemon-startup reconciliation (reference.md §6.2, re-keyed
+// onto the v1.5 session model — reference.md §3.3). The Runtime never
 // revives from state.json alone — every recorded job is reconciled
 // against aihub's own verdict first, and the verdict is the SESSION
 // verify (compare-only, B3: the hub stores only the hash of our secret):

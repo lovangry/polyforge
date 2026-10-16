@@ -1,7 +1,7 @@
 package git
 
 // Janitor: the periodic reconciler pass over the bare-repo tree
-// (v1-spec-full §六 定期 gc/repack). A simple janitor: every repo whose
+// (reference.md §8 定期 gc/repack). A simple janitor: every repo whose
 // objects have grown past a threshold is gc'd; repositories disappear
 // only with the data dir (no auto-deletion of WI chains).
 

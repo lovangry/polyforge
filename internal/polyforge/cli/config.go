@@ -38,7 +38,7 @@ import (
 // Default aihub listen address.
 const defaultServer = "http://localhost:8420"
 
-// Default daemon unix domain socket (04 §5.1: local machine only, no
+// Default daemon unix domain socket (reference.md §6.1: local machine only, no
 // network face).
 const defaultDaemonSocket = "/run/polyforge.sock"
 

@@ -1,6 +1,6 @@
 package core
 
-// WI repo inventory (02 §4.6): the project repos one work item declares
+// WI repo inventory (reference.md §2.1): the project repos one work item declares
 // it works in. It is stored as ONE JSON array of NAMES in
 // work_items.repo_inventory (NULL = no inventory): [{"name": "..."}].
 // Frozen at create — there is no UPDATE path (a changed inventory means a

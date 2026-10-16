@@ -133,7 +133,8 @@ correctly on the result, existing rows carry the defaults.
 
 ## v2.5.0 (polyforge#157, repo inventory column)
 
-The per-work-item repo inventory (02 §4.6) moves from the
+The per-work-item repo inventory (frozen at create; see
+`docs/design/polyforge-vnext/reference.md` §2.1) moves from the
 `wi_repo_inventory` table into one JSON column, `work_items.repo_inventory`
 (`[{"name": "<project repo>"}]`, names only — URLs are resolved from the
 project at claim time; NULL = no inventory). Production held 0 rows in

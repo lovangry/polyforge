@@ -406,7 +406,7 @@ func TestCommitPushFirstCommitIsSeqOneOnUnbornBranch(t *testing.T) {
 	}
 }
 
-// TestPushOptionSessionFingerprintReachedServer (v1.5 §1.6): when the
+// TestPushOptionSessionFingerprintReachedServer (reference.md §3.4): when the
 // opts carry the PUBLIC session fingerprint, the push option becomes
 // session-fingerprint=<fp> — the fencing-on-use backup layer.
 func TestPushOptionSessionFingerprintReachedServer(t *testing.T) {

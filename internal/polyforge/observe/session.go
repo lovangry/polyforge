@@ -48,7 +48,7 @@ import (
 // SessionVerify signature matches verbatim); tests bind fakes. nil on
 // the config disables revalidation entirely.
 type SessionVerifier interface {
-	// SessionVerify is the compare-only holder check (contract §1.2):
+	// SessionVerify is the compare-only holder check (reference.md §3.3):
 	// the daemon presents its own session secret, the hub answers
 	// matches plus the CURRENT holder's public fingerprint.
 	SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse, error)

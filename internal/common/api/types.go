@@ -1,8 +1,7 @@
 // Package api defines the shared business contract between the aihub server
 // and the pf client: work items, projects, users, sessions, memories and
-// the typed error-code registry (v1.5 session model:
-// docs/design/polyforge-vnext/v1.5-api-contract.md, over the v1
-// architecture baseline).
+// the typed error-code registry (session model and routes:
+// docs/design/polyforge-vnext/reference.md §2–§5).
 //
 // v1 deltas vs v0 (removed from the tree; in git history):
 //   - SYNC-* and revision-chain endpoints are deleted (git IS the chain).
@@ -17,7 +16,7 @@ import (
 	"strings"
 )
 
-// WorkItem is the server-side work item record (02 §4). Field semantics are
+// WorkItem is the server-side work item record (reference.md §2). Field semantics are
 // inherited from the v0 contract; JSON tags are wire-stable.
 type WorkItem struct {
 	ID          string         `json:"id"`
@@ -72,7 +71,7 @@ func PathName(slug, id string) string {
 // name (core/admin.go's charset) and a decimal seq.
 var slugShape = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,39}#[0-9]+$`)
 
-// WI statuses (02 §4.1).
+// WI statuses (reference.md §2.1).
 const (
 	StatusQueued   = "queued"
 	StatusRunning  = "running"
@@ -91,7 +90,7 @@ const (
 	PriorityLow    = "low"
 )
 
-// Project (02 §3).
+// Project (reference.md §4.1).
 type Project struct {
 	ID          string          `json:"id"`
 	Name        string          `json:"name"`
@@ -114,7 +113,7 @@ type ProjectMember struct {
 	Role   string `json:"role"` // maintainer|writer|viewer
 }
 
-// User (02 §2).
+// User (reference.md §4.1).
 type User struct {
 	ID          string     `json:"id"`
 	DisplayName string     `json:"display_name"`
@@ -153,7 +152,7 @@ type ListResponse[T any] struct {
 }
 
 // ---------------------------------------------------------------------------
-// v1.5 session model wire types (docs/design/polyforge-vnext/v1.5-api-contract.md).
+// Session model wire types (docs/design/polyforge-vnext/reference.md §3).
 
 // SessionClaim is the v1.5 claim/attach response envelope. The
 // session_id is a SECRET minted by the daemon; it is never echoed here —

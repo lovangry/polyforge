@@ -6,11 +6,10 @@
 // admission modes, the pending-job dispatcher, the auto-claim loop and the
 // graceful shutdown sequence.
 //
-// Design authority: docs/design/polyforge-vnext/v1-architecture-spec.md
-// (rulings C1–C3), v1-spec-full.md (§一 §二 §五 §十一), 04-local-runtime.md
-// (§3 modes, §5 routes/error codes, §6.1 admission, §6.5 shutdown — the
-// v0-era publish machinery it describes is deleted per C2/C3; Observe,
-// not a publish loop, executes the archival push).
+// Current behavior: docs/design/polyforge-vnext/reference.md §6 (routes,
+// lifecycle, shutdown, configuration); decisions: v2-converge.md §5–§6.
+// The v1 records it was first built from (v1-architecture-spec, v1-spec-full,
+// 04-local-runtime) are under docs/design/polyforge-vnext/archive/.
 package daemon
 
 import (
@@ -898,7 +897,7 @@ func (l driverEventLog) Append(wi, kind string, body any) error {
 }
 
 // ---------------------------------------------------------------------------
-// Dispatcher (04 §6.1d backfill) and auto-pull loop (04 §6.1c).
+// Dispatcher (reference.md §6.3 backfill) and auto-pull loop (reference.md §6.3).
 
 // occupiedSlots is the set of WIs holding a concurrency slot: the
 // runtime's live jobs, whoever started them (dispatch, restart recovery,
@@ -982,7 +981,7 @@ func (d *Daemon) startEntry(e qEntry) {
 }
 
 // fetchAutoWave pulls the ready queue and enqueues what is claimable
-// (04 §6.1c): only with auto on, never once shutting_down latched, and
+// (reference.md §6.3): only with auto on, never once shutting_down latched, and
 // never beyond the concurrency it can actually start — the wave's
 // free-slot budget is spent per enqueued entry (audit B3a: one wave
 // enqueues at most the CURRENT free-slot count; the rest of the ready

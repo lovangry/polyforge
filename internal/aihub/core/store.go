@@ -2,9 +2,8 @@
 // writer, WAL), work-item state machine, claim/generation arbitration with
 // attempt-scoped push credentials, the ready queue and the admin face.
 //
-// Design authority: docs/design/polyforge-vnext/v1-architecture-spec.md
-// (rulings C1–C3), v1-spec-full.md §六, and the v0 business-semantic
-// baseline in 02-aihub-core.md where v1 has not superseded it. The v0
+// Current behavior: docs/design/polyforge-vnext/reference.md §2–§5 (the v1
+// and v0 records it was built from are under docs/design/polyforge-vnext/archive/). The v0
 // revision chain (capsule_revisions / capsule_heads / SYNC-*) is deleted:
 // git IS the revision chain; aihub serves one bare repo per WI.
 package core

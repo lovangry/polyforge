@@ -15,7 +15,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 )
 
-// v1_t7: pre-claim crash — the B1 journal replay (v1.5 contract §4.2),
+// v1_t7: pre-claim crash — the B1 journal replay (reference.md §3.5),
 // e2e, driver/envelope edition. The crash window is the v0 known gap
 // "#Start-crash" (D5): the daemon dies between the aihub session claim
 // and the local job registration, orphaning a RUNNING session nobody can
