@@ -36,7 +36,7 @@
 
 **三类 skill（skill 层定稿，本节为唯一权威布局）**：
 
-- **路由 skill**：`skills/polyforge/`，构成 = `SKILL.md`（路由清单与装配入口）+ `verbs/` 下按用户动词拆分的 13 个 fragment（`ship` (removed by polyforge#166: delivery is the workflows' deliver step. The driver checks the deliver step's recorded commands and the delivered history after the fact and escalates violations to a human; prevention rests on the step contract and the machine's local pre-push hook.) 为基线修订 polyforge#37 所加，分流表 `00-architecture.md#§5.1`）。它是用户 harness 的**唯一安装面**：只读用户请求、判定意图、把请求转发给本机 Daemon（`00-architecture.md#§3.1`），不解析 workflow、不触碰执行现场、不保存状态、**永不执行 workflow**——用户在 Interactive 模式下只提交意图、观察、回答（`00-architecture.md#§3.4a`）。
+- **路由 skill**：`skills/polyforge/`，构成 = `SKILL.md`（路由清单与装配入口）+ `verbs/` 下的 fragment：13 个路由动词各一个，另有 doctor/help/init 与 `ship.md`（交付已改为 workflow 的 deliver step，polyforge#166，该文件只说明这一点）——以目录为准）。它是用户 harness 的**唯一安装面**：只读用户请求、判定意图、把请求转发给本机 Daemon（`00-architecture.md#§3.1`），不解析 workflow、不触碰执行现场、不保存状态、**永不执行 workflow**——用户只提交意图、观察、回答。
 - 【polyforge#106 修订】**执行 skill 已删除**：workflow 的驱动主循环（§6.5）不在任何 agent 进程内运行——它是 Daemon 内的 Go driver，Daemon 无条件绑定，版本与 Daemon 天然锁定（部署边界见 `07-deployment-pilot.md#§2.3`；引擎唯一裁定见 `00-architecture.md#§3.6` 修订注记）。
 - **step skill（step 定义文件）**：`workflows/<bundle>/steps/<id>.md`（`driver/spawn.go` 的 `dirStepDefs`），一个 step 的执行指令包；frontmatter 中 driver 只读 `output`（声明的输出 schema，§4.4），正文拼进该 step 派发的 prompt。driver 为每个 step 派生一个短驻 harness 进程执行它。
 
