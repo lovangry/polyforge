@@ -520,11 +520,11 @@ func deliveryContract(p promptParts) string {
 // Step definition + capsule file reads.
 
 // readStepDefinition loads workflows/<bundle>/steps/<id>.md (the R9
-// path convention) and strips any leading frontmatter block: the body
-// is the step's instruction of record.
+// path convention; falling back to workflows/_shared/steps/<id>.md when
+// the bundle carries no own file) and strips any leading frontmatter
+// block: the body is the step's instruction of record.
 func readStepDefinition(bundleDir, stepID string) (string, error) {
-	path := filepath.Join(bundleDir, dirStepDefs, stepID+".md")
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(workflow.StepDefinitionPath(bundleDir, stepID))
 	if err != nil {
 		return "", fmt.Errorf("driver: step definition for %q unreadable (expected %s under the bundle): %w", stepID, dirStepDefs+"/"+stepID+".md", err)
 	}

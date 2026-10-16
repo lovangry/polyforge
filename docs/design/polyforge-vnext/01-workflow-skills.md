@@ -193,9 +193,14 @@ workflows/<bundle-name>/
 ├── workflow.md            # 必需：frontmatter（结构）+ 正文（流程级说明）
 └── steps/
     └── <step-id>.md       # 每 step 一个；文件名 = step id
+workflows/_shared/
+└── steps/
+    └── <step-id>.md       # 多个 bundle 逐字共用的 step 定义（如 deliver.md）
 ```
 
 每个 `steps/<step-id>.md` 是一个 step skill = 一份 **step 定义文件**：frontmatter（元数据）+ Markdown 正文（执行指令）。driver 从物化后的 bundle 直接读取它（`driver/spawn.go`、`driver/outputschema.go`）。
+
+**共享 step 定义（2026-10-16 裁定 G1）**：查找顺序由 `workflow.StepDefinitionPath` 决定——bundle 自己的 `steps/<id>.md` 存在即用它（**bundle 自己的文件优先**，可覆盖共享版本）；不存在时回退到 `workflows/_shared/steps/<id>.md`。`_shared` 不是 bundle（没有 `workflow.md`），物化时整目录拷到 capsule 的 `workflows/_shared/`（与 bundle 并列，记入完成标记）。不要用 symlink 共享：物化的 `copyTree` 跳过 symlink，capsule 会缺文件。多个 bundle 逐字相同的 step 文件必须放进 `_shared`（`driver/shared_steps_test.go` 守护）。
 
 frontmatter 字段——**driver 只读 `output`**，其余为约定：
 

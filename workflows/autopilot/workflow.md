@@ -83,12 +83,8 @@ not more loops.
 
 ## Budget guidance
 
-There is no workflow-level budget; the bounds are the rewind limits above and the daemon's
-per-step runtime bound. No step declares `budget.wall_minutes` (polyforge#164): the daemon
-bounds a step's total runtime across its dispatches at T = max(3 × `budget.wall_minutes`,
-the daemon's `--step-timeout`, default 90 minutes), so any estimate of 30 minutes or less is
-inert and T is 90 minutes for every step here. Declare a wall only for a step that
-legitimately needs more than 90 minutes in total (31 or more).
+No workflow-level budget and no step `budget.wall_minutes`: the bounds are the rewind limits
+above and the daemon's per-step runtime bound T (README, `pf daemon` flags).
 
 ## No release slot
 
