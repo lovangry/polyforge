@@ -940,8 +940,8 @@ func TestW113MappingInvalidKeysRejected(t *testing.T) {
 				d.stop()
 				t.Fatalf("daemon started on invalid workspace key %q", c.key)
 			}
-			if dcode != 1 {
-				t.Fatalf("daemon on invalid key %q: exit %d, want 1 (output %q)", c.key, dcode, doutput)
+			if dcode != w113ExitNeedsOperator {
+				t.Fatalf("daemon on invalid key %q: exit %d, want 78 (output %q)", c.key, dcode, doutput)
 			}
 			if !strings.Contains(doutput, c.want) {
 				t.Fatalf("daemon on invalid key %q: error does not name the offending key %q (output %q)", c.key, c.want, doutput)
@@ -970,10 +970,10 @@ func TestW113OldShapeConfigRefusedEverywhere(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(oldShape), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	assertRefused := func(what, out string, code int) {
+	assertRefused := func(what, out string, code, want int) {
 		t.Helper()
-		if code != 1 {
-			t.Fatalf("%s on old-shape config: exit %d, want 1 (output %q)", what, code, out)
+		if code != want {
+			t.Fatalf("%s on old-shape config: exit %d, want %d (output %q)", what, code, want, out)
 		}
 		for _, tok := range []string{`unknown key "project" in ` + cfgPath} {
 			if !strings.Contains(out, tok) {
@@ -983,12 +983,12 @@ func TestW113OldShapeConfigRefusedEverywhere(t *testing.T) {
 	}
 	// The CLI readers.
 	out, code := w113Pf(t, inst, w113Env{config: cfgPath}, "queue")
-	assertRefused("pf queue", out, code)
+	assertRefused("pf queue", out, code, 1)
 	out, code = w113Pf(t, inst, w113Env{config: cfgPath},
 		"remember", "--type", "experience.debug", "w113 old-shape memory")
-	assertRefused("pf remember", out, code)
+	assertRefused("pf remember", out, code, 1)
 	out, code = w113Pf(t, inst, w113Env{config: cfgPath}, "recall", "w113 query")
-	assertRefused("pf recall", out, code)
+	assertRefused("pf recall", out, code, 1)
 	// The daemon reader.
 	d := w113NewDaemon(t, nil, w113DOptConfig(cfgPath))
 	served, doutput, dcode := d.boot(30 * time.Second)
@@ -996,7 +996,7 @@ func TestW113OldShapeConfigRefusedEverywhere(t *testing.T) {
 		d.stop()
 		t.Fatal("daemon started on an old-shape config")
 	}
-	assertRefused("pf daemon", doutput, dcode)
+	assertRefused("pf daemon", doutput, dcode, w113ExitNeedsOperator)
 	if d.socketExists() {
 		t.Fatal("daemon on an old-shape config still created its socket")
 	}
@@ -1034,8 +1034,8 @@ func TestW113AmbiguousInverseRejected(t *testing.T) {
 		d.stop()
 		t.Fatal("daemon started on an ambiguous mapping")
 	}
-	if dcode != 1 {
-		t.Fatalf("daemon on ambiguous inverse: exit %d, want 1 (output %q)", dcode, doutput)
+	if dcode != w113ExitNeedsOperator {
+		t.Fatalf("daemon on ambiguous inverse: exit %d, want 78 (output %q)", dcode, doutput)
 	}
 	for _, tok := range []string{"ieops", "w113dupA", "w113dupB"} {
 		if !strings.Contains(doutput, tok) {
@@ -1073,8 +1073,8 @@ func TestW113DuplicateProjectInOneListRejected(t *testing.T) {
 		d.stop()
 		t.Fatal("daemon started on a duplicate project list")
 	}
-	if dcode != 1 {
-		t.Fatalf("daemon on duplicate project: exit %d, want 1 (output %q)", dcode, doutput)
+	if dcode != w113ExitNeedsOperator {
+		t.Fatalf("daemon on duplicate project: exit %d, want 78 (output %q)", dcode, doutput)
 	}
 	for _, tok := range []string{"e2e", "w113dup"} {
 		if !strings.Contains(doutput, tok) {
@@ -1185,8 +1185,8 @@ func TestW113DaemonNoMappingRefusesStartup(t *testing.T) {
 		d.stop()
 		t.Fatal("daemon started serving with zero [workspace] sections")
 	}
-	if code != 1 {
-		t.Fatalf("daemon with no mapping: exit %d, want 1 (output %q)", code, output)
+	if code != w113ExitNeedsOperator {
+		t.Fatalf("daemon with no mapping: exit %d, want 78 (output %q)", code, output)
 	}
 	for _, tok := range []string{"[workspace", "doctor"} {
 		if !strings.Contains(output, tok) {
@@ -1221,8 +1221,8 @@ func TestW113DaemonValidatesAllMappedWorkspaces(t *testing.T) {
 		d.stop()
 		t.Fatalf("daemon started with a missing mapped workspace %s", missing)
 	}
-	if code != 1 {
-		t.Fatalf("daemon with missing workspace: exit %d, want 1 (output %q)", code, output)
+	if code != w113ExitNeedsOperator {
+		t.Fatalf("daemon with missing workspace: exit %d, want 78 (output %q)", code, output)
 	}
 	if !strings.Contains(output, "w113gone") {
 		t.Fatalf("daemon with missing workspace: refusal does not name it (output %q)", output)
@@ -2315,3 +2315,9 @@ func TestW113DaemonSourcesNoRetiredEnvTokens(t *testing.T) {
 			len(hits), strings.Join(hits, "\n"))
 	}
 }
+
+// w113ExitNeedsOperator mirrors daemon.ExitNeedsOperator (78): a daemon that
+// refuses to start for an operator-fixable reason (config, workspace,
+// mapping) exits 78 so its supervision loop stops instead of restarting it
+// every 5s (repo review 2026-10-16 B-14). The pf CLI verbs still exit 1.
+const w113ExitNeedsOperator = 78
