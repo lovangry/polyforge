@@ -35,9 +35,9 @@ package runtime
 //	  transition — superseded, not terminal.
 //	verify does not match + terminal status → drop the record: the
 //	  close settled server-side before the crash.
-//	verify does not match + blocked → leave everything untouched (M2:
-//	  the bounded-fail verdict stands; consecutive-failure accounting's
-//	  "never a third relaunch" is exactly this).
+//	verify does not match + blocked → the bounded-fail verdict stands
+//	  (M2): nothing revived, crash orphans reaped, the record dropped so
+//	  the owner's `pf resume` re-claims through the ordinary Start.
 //	verify does not match + paused/clean_pause under another session →
 //	  drop the record: restart must NOT auto-resume it.
 //	aihub unreachable (transport error, timeout, 5xx) → no verdict, no
@@ -635,14 +635,17 @@ func (r *Runtime) restartVerified(ctx context.Context, rec *jobRecord, v *api.Se
 		r.restartDrop(rec)
 		r.clearManualModels(rec.WorkItemID)
 	case api.StatusBlocked:
-		// M2: the bounded-fail verdict stands — no
-		// revival, no kill, no quarantine; the record is kept so the
-		// next boot re-checks (the unblock path re-claims through the
-		// normal start, which quarantines the old scene itself).
-		// Crash orphans are the one exception: no live step process
-		// is legitimate for a blocked WI, and they would keep writing
-		// the scene — reap only (no session action).
+		// M2: the bounded-fail verdict stands — no revival, no
+		// quarantine, no session action. Crash orphans are reaped: no
+		// live step process is legitimate for a blocked WI, and they
+		// would keep writing the scene. The record is then DROPPED — the
+		// hub's blocked is the authority, and a kept record would make
+		// the unblock path's re-claim (`pf resume` → Start, which
+		// quarantines-or-clones the old scene itself) refuse as "already
+		// active" and count as an occupied slot until the next restart
+		// (repo review 2026-10-16 B-6). The capsule stays on disk.
 		r.reapOrphans(rec.WorkItemID, rec.CapsuleDir)
+		r.forgetRecord(rec)
 	case api.StatusQueued:
 		// back in the pool: our claim is gone. A local tree (if any)
 		// is a writer of a session nobody holds — collect it and drop
