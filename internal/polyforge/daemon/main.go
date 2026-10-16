@@ -47,7 +47,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	server := fs.String("server", "", "aihub base URL (env PF_SERVER)")
 	apiKey := fs.String("api-key", "", "machine aihub api key (env PF_API_KEY)")
 	machineID := fs.String("machine-id", "", "daemon id (env POLYFORGE_MACHINE_ID; default m-<hostname>); recorded in <data-dir>/daemon-id on first start, which then wins — a differing value refuses to start")
-	displayName := fs.String("display-name", "", "daemon display name shown by `pf ops status` (env POLYFORGE_DISPLAY_NAME; default hostname)")
+	displayName := fs.String("display-name", "", "daemon display name shown by pf ops status (env POLYFORGE_DISPLAY_NAME; default hostname)")
 	dataDir := fs.String("data-dir", "", "daemon data dir (env POLYFORGE_DATA_DIR)")
 	workflowsDir := fs.String("workflows-dir", "", "workflows/ checkout dir (default ./workflows)")
 	piBin := fs.String("pi-bin", "", "harness binary (default pi)")

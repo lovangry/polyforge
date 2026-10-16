@@ -202,10 +202,10 @@ kill <AIHUB_PID>
 
 ## Architecture
 
-Design record: `docs/design/polyforge-vnext/v1-architecture-spec.md`, as
-superseded in part by `docs/design/polyforge-vnext/v2-converge.md` (the
-design authority; conflicts resolve in its favor; full design record:
-`v1-spec-full.md`).
+Design authority: `docs/design/polyforge-vnext/v2-converge.md` (with
+`wi-kind-contract.md` and `08-capsule-base-migration.md`). The numbered
+docs 00–07 and the v1 specs are largely archived history — sections that
+describe deleted mechanisms carry an ARCHIVED banner; do not build from them.
 The subsections below describe the code as it actually exists in this tree —
 the live code is the authority; design-doc references are for traceability.
 
@@ -215,13 +215,15 @@ One row per sub-package, exactly as `internal/` exists today:
 
 | Package | Role |
 | --- | --- |
-| `internal/common/api` | Shared business contract between aihub and pf: work items, projects, users, generations, memories, and the typed error-code registry (`CORE-*`, `MEM-*`, `AUTH-*`, `DAEMON-*`, `GIT-*`, `CAP-*`). |
+| `internal/common/api` | Shared business contract between aihub and pf: work items, projects, users, sessions, memories, and the typed error-code registry (`CORE-*`, `MEM-*`, `AUTH-*`, `DAEMON-*`, `GIT-*`). |
+| `internal/common/atomicfile` | The one crash-safe "replace this file" primitive every state writer uses. |
 | `internal/common/capsule` | Execution-capsule contract shared by pf (runtime creates capsules, the driver writes `execution.json`, the observe lane commits them) and aihub (serves the matching bare repos; git-dir lives outside the capsule). |
 | `internal/common/protocol` | The in-machine contracts: Runtime↔Observe messages and the pf CLI↔daemon UDS HTTP API surface. |
+| `internal/common/harness` | The closed step-harness set (`pi` \| `claude`) and the one model-candidate format `<harness>:<model>`. |
 | `internal/common/spawn` | Process-derivation contract shared by the runtime (daemon assembly) and the driver (step-process spawning). |
-| `internal/common/workflow` | Workflow-bundle digest contract shared by pf (bundle materialization with digest verification) and aihub (serves bundle bytes, validates digests at claim time). |
-| `internal/aihub/core` | aihub persistent layer: SQLite store (single writer, WAL), the work-item state machine, claim/generation arbitration with attempt-scoped push credentials, the ready queue and the admin face. |
-| `internal/aihub/git` | aihub git surface: per-WI bare-repo lifecycle, the git-http-backend smart-protocol proxy, attempt-scoped credential auth (generation fencing) and the pre-receive hook enforcing the capsule-chain invariants. |
+| `internal/common/workflow` | The minimal workflow-bundle frontmatter read surface (defaults + per-step `model_candidates`) that drives model and harness selection. No digest contract: the bundle digest chain was deleted (polyforge#149). |
+| `internal/aihub/core` | aihub persistent layer: SQLite store (single writer, WAL), the work-item state machine, claim/session arbitration (one live session per WI, its hashed push secret and public fingerprint), the ready queue and the admin face. |
+| `internal/aihub/git` | aihub git surface: per-WI bare-repo lifecycle, the git-http-backend smart-protocol proxy, session-secret auth (only the WI's live session secret pushes; session-fingerprint fencing) and the pre-receive hook enforcing the capsule-chain invariants. |
 | `internal/aihub/memory` | Core-side memory store: FTS5-trigram full-text search, authoritative `memory.md` files and the reconcile procedure. |
 | `internal/aihub/server` | The AIHub HTTP face: business endpoints, the admin face, and the `/git/{wi}.git/...` proxy mount; Bearer API key auth, typed `api.Error` envelope. |
 | `internal/polyforge/aihubclient` | Shared HTTP client for the aihub server, used by runtime, observe and the CLI verbs; decodes the typed error envelope back into `*api.Error`. |
@@ -231,6 +233,7 @@ One row per sub-package, exactly as `internal/` exists today:
 | `internal/polyforge/bridge` | Connects the runtime's job machinery to the Go driver: a running `Driver.Run` is the job's agent handle for supervision. |
 | `internal/polyforge/mapping` | The workspace→projects plan read from cli.toml's `[workspace]` sections, and its validated inverse (project → workspace). |
 | `internal/polyforge/sessionjsonl` | The single parser of the harness session-jsonl format (live transcript tail extraction). |
+| `internal/polyforge/supervisor` | The daemon's own supervision on a work machine: the `polyforge-daemon` tmux restart loop shared by `pf daemon ensure` and `pf doctor`. |
 | `internal/polyforge/supervise` | The driver↔supervisor contract: facts, verdicts and the per-WI link (v2-converge §2.2–2.5). |
 | `internal/polyforge/workspace` | The `.polyforge.yaml` loader (`steps.<project>.<default\|step-id>.models`), read and validated by the daemon before every claim and by `pf doctor` (an invalid file refuses the claim without claiming). |
 | `internal/polyforge/observe` | Observe lane: the events log, per-WI monitor goroutines, live-transcript streaming, session verification, and the live activity / pending-question / progress views the daemon reads. |
@@ -413,7 +416,10 @@ the installer scenarios, which write `/usr/local/bin/pf` (disposable hosts only)
 [--user ID] <verb> ...` (global flags before the verb; env `PF_SERVER`,
 `PF_API_KEY`, `PF_DAEMON_SOCKET`, `PF_USER_ID`; `PF_CHAT_ID` is the
 notification label a harness adapter sets for the chat). `pf help` prints the
-registry; `pf <verb> -help` one verb's face. The routing skill's fragments
+registry; `pf help <verb>` one verb's usage line. Exit codes: 0 success; 1
+client-class (4xx, transport, local validation, and a sub-action's
+flag/argument mistake); 2 server-class (5xx), an unknown verb, or a flag
+error caught by the global / verb-level flag parse. The routing skill's fragments
 (`skills/polyforge/verbs/`) carry each verb's success and failure shapes.
 
 | Face | Verbs |

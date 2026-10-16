@@ -122,5 +122,6 @@ adds the dependency block. `dep add|rm|list` print the dependency view
 | `CORE-409` | Create-time conflict (e.g. duplicate) | The state machine refuses this write — read `detail`. |
 | `CORE-410` | PATCH of a terminal work item (wrapped/failed/cancelled) | This work item is closed and can no longer be edited — file a new one instead. |
 
-Exit 2 with a `pf:` usage line (no typed code) means a local flag/argument
-mistake — read the message, fix the invocation.
+A `pf:` line with no typed code means a local flag/argument mistake (exit 1
+for a sub-action's flags or arguments, e.g. `file create --bogus` or a
+missing `--goal`) — read the message, fix the invocation.

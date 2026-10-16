@@ -5,7 +5,9 @@ dispatches no verb, performs no wi-lifecycle action and edits no file. It
 is the one-to-one index of the routing skill's verb fragments and the
 `pf` subcommand each fragment drives. Flags are spelled exactly as the
 binary's help faces print them; `pf help` lists the full registry and
-`pf <verb> -help` prints one verb's face.
+`pf help <verb>` prints one verb's usage line (`pf <verb> -help` only
+prints that verb's own registered flags — empty for verbs whose flags
+live on sub-actions — and exits 2).
 
 ## Data-plane verbs (pf CLI talks HTTP direct to AIHub)
 
@@ -43,7 +45,7 @@ see `verbs/ship.md`.
 | doctor | `verbs/doctor.md` | `pf doctor` — the machine's one health face: config, `[workspace]` mapping, connectivity (`--json` for machines) |
 | chat | (`SKILL.md`, Chat identity) | `pf chat init --harness claude\|pi --harness-session ID` — the chat id a harness adapter exports as `PF_CHAT_ID` |
 | help | `verbs/help.md` | `pf help` — the registry face; this fragment is its routing-side index |
-| init | the init fragment (`init.md`) | install / upgrade / machine setup — routes to the repo's `tools/install.sh` |
+| init | the init fragment (`init.md`) | NOT a `pf` verb (`pf init` is an unknown command): install / upgrade / machine setup — routes to the repo's `tools/install.sh` |
 
 ## Non-goals
 

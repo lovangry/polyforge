@@ -127,7 +127,7 @@ func fileCreate(ctx *Context, args []string) error {
 		useStdin  = f.Bool("stdin", false, "read the full create-body JSON from stdin")
 	)
 	f.Var(&repos, "repo", "project repo this work item works in (repeatable; only these are cloned at claim)")
-	f.Var(&after, "after", "execution ticket (id or slug) that must WRAP before this one is claimed (repeatable; a `blocks` edge, written atomically with the create)")
+	f.Var(&after, "after", "execution ticket (id or slug) that must WRAP before this one is claimed (repeatable; a blocks edge, written atomically with the create)")
 	f.Var(&content, "content", "markdown background; '-' reads stdin, '@file' reads a file")
 	f.Var(&labels, "label", "label (repeatable)")
 	f.Var(&milestone, "milestone", "milestone name")
