@@ -605,7 +605,7 @@ Launch flags (with environment variable and default, where one exists):
       SOURCE of the dedicated step agent directory: the daemon copies
       the minimal set (auth.json, models.json, agents/,
       extensions/subagent/ — the subagent tool) from here into
-      <data-dir>/step-agent and every step agent runs against THAT
+      <harness-root>/step-agent and every step agent runs against THAT
       directory, so the operator's own harness settings — user-level
       packages included — never reach a step agent
       (env POLYFORGE_OPERATOR_AGENT_DIR; default ~/.pi/agent). A
@@ -620,10 +620,12 @@ Launch flags (with environment variable and default, where one exists):
   --auto
       auto-pull: the daemon claims ready-queue work itself (default
       off; unset keeps the persisted switch; --auto=false forces off)
+  --heartbeat-every D
+      machines heartbeat cadence (default 60s; 0 disables)
 
 Supervision flags (v2-converge 2.4; Go duration strings; omitted or 0 keeps
-the default; a step overrides them in workflow.md: budget.wall_minutes = T,
-silence_minutes = X, tool_minutes = Y):
+the default; the only per-step override is workflow.md budget.wall_minutes,
+an estimate: T = max(3 x wall_minutes, --step-timeout); X and Y are global):
 
   --silence-window D
       X: no real work signal after dispatch, or no model output while

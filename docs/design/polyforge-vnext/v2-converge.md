@@ -140,8 +140,8 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 ### 2.4 阈值（已定）
 
-- X（⓪②）、Y（③）、T（④）、N（driver_stalled）**全局默认，step 可覆盖**。
-- **T 的 step 级覆盖复用现有 `budget.wall_minutes`**，但它是**估计值而非硬上限**（polyforge#164：≤30 分钟的估计在下式下不起作用，交付 bundle 已全部删除，只剩 release bundle 的 `release: 45` → T=135）：声明了 `wall_minutes` 的 step，总时长界 **T = max(3 × wall_minutes, 全局 `--step-timeout` 默认)**；未声明则就是全局默认。不新增键；X、Y 的 step 级覆盖在 frontmatter 新增。覆盖值随 bundle 在领取时钉住，对之后领取的 WI 生效。
+- X（⓪②）、Y（③）、T（④）、N（driver_stalled）**全局默认**；step 级只能覆盖 T（见下条）。
+- **T 的 step 级覆盖复用现有 `budget.wall_minutes`**，但它是**估计值而非硬上限**（polyforge#164：≤30 分钟的估计在下式下不起作用，交付 bundle 已全部删除，只剩 release bundle 的 `release: 45` → T=135）：声明了 `wall_minutes` 的 step，总时长界 **T = max(3 × wall_minutes, 全局 `--step-timeout` 默认)**；未声明则就是全局默认。不新增键；X、Y 没有 step 级覆盖（polyforge#147 C5 删除了 `silence_minutes` / `tool_minutes`，旧 bundle 中残留的这两个键被静默忽略）。覆盖值随 bundle 在领取时钉住，对之后领取的 WI 生效。
 - X 默认按 harness 翻译器声明的**输出粒度**取：逐字粒度（思考时也有输出）可短（例 10 分钟）；整条粒度或模型不返回思考内容时放长（例 30 分钟）。"模型不返回思考内容"在模型配置中声明。
 - Y 默认 30 分钟（#83 教训）；T 默认 60–90 分钟（#117 教训）；N 默认 10 分钟。
 - **放宽**：每次放宽翻倍（放宽后的界 = 放宽前界 × 2），写入 `execution.json`（`steps.<id>.supervision.relaxed_wall_ms` / `relaxed_tool_ms`），重启后沿用。**只有超时类死因放宽 T**（`step_timeout_slow_model` 与 `step_timeout_long_task` 每次处置都放宽一次，第二次 `step_timeout_long_task` 也先翻倍再 blocked）；换模型、人工继续、限流退避一律不放宽（polyforge#147 D6）。

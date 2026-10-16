@@ -236,7 +236,7 @@ One row per sub-package, exactly as `internal/` exists today:
 | `internal/polyforge/observe` | Observe lane: the events log, per-WI monitor goroutines, live-transcript streaming, session verification, and the live activity / pending-question / progress views the daemon reads. |
 | `internal/polyforge/driver` | The Go execution driver: owns `runtime-state/execution.json`, spawns one step process per workflow step and validates each result envelope (needs_input rules, human gate, command-evidence gate). |
 | `internal/polyforge/watcher` | The `pf watch` engine: decision classification (fixed-template wake-up lines) and the resident per-chat watcher with its progress file. |
-| `internal/polyforge/runtime` | Runtime lane: the WI lifecycle manager (Start/Stop/Recover/Restart), the pi-harness agent spawner, the six-layer process cleanup and the recovery engine. |
+| `internal/polyforge/runtime` | Runtime lane: the WI lifecycle manager (Start/Stop/Recover/Restart), the pi-harness agent spawner, the layered (L1–L5) process cleanup and the recovery engine. |
 
 Binaries: `cmd/aihub` (server binary) and `cmd/pf` (work-machine binary:
 CLI verbs + `pf daemon`).
@@ -455,10 +455,11 @@ the `PF_*` entries.
 | `--machine-id ID` | `POLYFORGE_MACHINE_ID` | `m-<hostname>` | Machine identity claims and leases are recorded under; recorded in `<data-dir>/daemon-id` on first start, after which that file wins (a differing value refuses to start). |
 | `--display-name NAME` | `POLYFORGE_DISPLAY_NAME` | hostname | Daemon display name shown by `pf ops status`. |
 | `--data-dir DIR` | `POLYFORGE_DATA_DIR` | `~/.local/share/polyforge` | Daemon state, events log and derived data. |
-| `--workflows-dir DIR` | — | `./workflows` | Workflow-bundle checkout the executor reads. |
+| `--workflows-dir DIR` | — | `./workflows` | Workflow-bundle checkout the in-process Go driver loads step definitions from (`pf daemon ensure` passes `<data-dir>/release/current/workflows`). |
 | `--pi-bin PATH` | — | `pi` | Harness binary the agent processes are derived from. |
+| `--claude-bin PATH` | — (config `claude_bin`) | `claude` | Claude Code binary for steps whose harness is `claude` (run as `claude -p --bare`). The daemon never manages its credentials: the `<harness-root>/claude-config/settings.json` env block is the authority layer. |
+| `--operator-agent-dir DIR` | `POLYFORGE_OPERATOR_AGENT_DIR` | `~/.pi/agent` | SOURCE of the dedicated step agent dir: the daemon copies the minimal set (`auth.json`, `models.json`, `agents/`, `extensions/subagent/`) from here into `<harness-root>/step-agent`, and every pi step runs against that copy — the operator's own packages and settings never reach a step. A configured source without a readable `auth.json` refuses the start. |
 | `--harness-root DIR` | `POLYFORGE_HARNESS_ROOT` | `<data-dir>` | Parent root of the step harness dirs: `<DIR>/step-agent` (dedicated agent dir), `/step-agent-sessions` (pi sessions) and `/claude-config` (claude config dir; its settings.json env block is the credential authority layer). The former `--harness-sessions-root` was renamed — old deployments fail loudly at startup. |
-| `--cgroup-root DIR` | `POLYFORGE_CGROUP_ROOT` | — | cgroup v2 root used for layer-0 agent cleanup. |
 | `--git-remote-base URL` | — | `<server>/git` | aihub bare-repo base URL for the capsule revision chain. |
 | `--max-concurrent-jobs N` | — | `4` | Cap on concurrently running jobs (also `pf ops max N`). |
 | `--recall-topk N` | `POLYFORGE_RECALL_TOPK` | `10` (max 50) | Claim-time memory snapshot hit count. |
@@ -522,10 +523,11 @@ any claim. Upgrading from the pre-#169 shape: see
 
 Supervision bounds (v2-converge 2.4) — Go duration strings (e.g. `700ms`,
 `5m`), flags only (no environment fallbacks). Omitting a flag, or passing
-`0`, keeps the default listed here. A workflow step overrides them in
-`workflow.md`: `budget.wall_minutes` (an estimate: T becomes
-`max(3 x wall_minutes, --step-timeout)`), `silence_minutes` (X),
-`tool_minutes` (Y).
+`0`, keeps the default listed here. The only per-step override in
+`workflow.md` is `budget.wall_minutes` (an estimate: T becomes
+`max(3 x wall_minutes, --step-timeout)`); X and Y are global only — the
+former `silence_minutes` / `tool_minutes` keys were deleted (polyforge#147)
+and an old bundle that still carries them has them silently ignored.
 
 | Flag | Env | Default | Controls |
 | --- | --- | --- | --- |
