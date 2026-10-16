@@ -22,6 +22,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
+	"github.com/silgrid/polyforge/internal/polyforge/supervisor"
 	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
@@ -108,9 +109,18 @@ type statusResponse struct {
 	ShuttingDown bool                     `json:"shutting_down"`
 	// EnvWarnings: retired POLYFORGE_* variables the daemon found set to
 	// a differing value at boot (no longer read; pf doctor relays them).
-	EnvWarnings []string    `json:"env_warnings,omitempty"`
-	Jobs        []statusJob `json:"jobs"`
-	Queue       queueStats  `json:"queue"`
+	EnvWarnings []string `json:"env_warnings,omitempty"`
+	// EnvNames are the NAMES (never values) of the daemon's own
+	// environment, sorted: pf doctor flags a daemon carrying ANTHROPIC_*
+	// or other credential-looking names outside the ensure allow-list
+	// (supervisor/env.go).
+	EnvNames []string `json:"env_names,omitempty"`
+	// PiModelsEnvRefs are the variable NAMES the step agent dir's
+	// models.json interpolates (`$NAME`); pf doctor warns on those no
+	// ensure-started daemon carries.
+	PiModelsEnvRefs []string    `json:"pi_models_env_refs,omitempty"`
+	Jobs            []statusJob `json:"jobs"`
+	Queue           queueStats  `json:"queue"`
 }
 
 type opsConfigResponse struct {
@@ -728,15 +738,17 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 		harnesses = d.harnessStatuses()
 	}
 	writeJSON(w, http.StatusOK, statusResponse{
-		Harnesses:    harnesses,
-		MachineID:    d.cfg.MachineID,
-		DisplayName:  d.cfg.DisplayName,
-		Auto:         d.modes.Auto(),
-		Workspaces:   d.cfg.Mapping.Workspaces(),
-		WorkflowsDir: d.cfg.WorkflowsDir,
-		ShuttingDown: d.modes.ShuttingDown(),
-		EnvWarnings:  d.cfg.EnvWarnings,
-		Jobs:         jobs,
+		Harnesses:       harnesses,
+		MachineID:       d.cfg.MachineID,
+		DisplayName:     d.cfg.DisplayName,
+		Auto:            d.modes.Auto(),
+		Workspaces:      d.cfg.Mapping.Workspaces(),
+		WorkflowsDir:    d.cfg.WorkflowsDir,
+		ShuttingDown:    d.modes.ShuttingDown(),
+		EnvWarnings:     d.cfg.EnvWarnings,
+		EnvNames:        supervisor.EnvNames(os.Environ()),
+		PiModelsEnvRefs: d.piModelsEnvRefs(),
+		Jobs:            jobs,
 		Queue: queueStats{
 			Pending:       d.q.LenPending(),
 			Running:       running,

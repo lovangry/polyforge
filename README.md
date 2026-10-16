@@ -452,6 +452,37 @@ trust store. The capsule commit itself still reads the global config, so
 `user.name` / `user.email` must be set for the daemon user; task-repo git
 (inside `repos/<name>`) also still uses the global config.
 
+The daemon's environment is an explicit allow-list (defined once, in
+`internal/polyforge/supervisor/env.go`): `pf daemon ensure` launches it
+with only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_*`,
+`TZ`, `TMPDIR`, the proxy variables (`http_proxy`, `https_proxy`,
+`no_proxy`, `all_proxy`, upper and lower case), `SSL_CERT_FILE`,
+`SSL_CERT_DIR`, the XDG base dirs, the Go toolchain variables below, `POLYFORGE_DATA_DIR`,
+`GOCOVERDIR` and
+the `POLYFORGE_SUPERVISOR` marker, with the values of the shell that ran
+ensure (the tmux server's environment — whatever shell first started it —
+never reaches the daemon: the loop runs `env -i <allow-list> sh -c
+<loop>`). Nothing else gets through: no `ANTHROPIC_*`, no `PF_*`, no
+stale API key. A proxy or CA the daemon needs must therefore be set where
+ensure runs (the harness session, or the install.sh shell). `PF_SERVER`,
+`PF_API_KEY`, `PF_USER_ID` and `PF_DAEMON_SOCKET` in that shell do steer
+ensure's own config load (which socket it probes), but are not passed to
+the daemon: it reads `cli.toml` (`--config`). The Go toolchain variables
+(`GOPATH`, `GOROOT`, `GOPROXY`, `GOPRIVATE`, `GONOSUMDB`, `GONOPROXY`,
+`GOFLAGS`, `GOTOOLCHAIN`, `GO111MODULE`, `GOCACHE`, `GOMODCACHE`) are on
+the list, so Go steps keep their caches and module settings. Step agents
+see only this environment: claude steps additionally drop every
+inherited `ANTHROPIC_*` (their credential and endpoint come only from
+`<harness-root>/claude-config/settings.json`); pi steps need their
+provider keys in `auth.json` or as literals in `models.json` — a
+`$NAME` there, or a provider `*_API_KEY`, that is not on the list never
+reaches them.
+`GET /status` reports the daemon's environment variable names (never
+values), and `pf doctor`'s `daemon env` row warns when a running daemon
+carries `ANTHROPIC_*` or another credential-looking name, or when the pi
+step agent's `models.json` references a variable off the list — restart it
+clean with `pf ops shutdown`, wait, `pf daemon ensure`.
+
 Production starts the daemon only through `pf daemon ensure`, which
 passes only the fixed launch flags (`--config`, `-machine-id`,
 `-data-dir`, `-socket`, `-workflows-dir`). The five production knobs come
@@ -491,7 +522,8 @@ while one is in force.
 Every other flag is test/dev-only: nothing in production sets it, and it
 is listed for running `pf daemon` by hand. The only environment variable
 the daemon reads besides the `PF_*` CLI ones is `POLYFORGE_DATA_DIR` (the
-`--data-dir` default; ensure reads it too). The former
+`--data-dir` default; ensure reads it too) — and an ensure-started daemon
+sees no `PF_*` at all (its environment is the allow-list above). The former
 `POLYFORGE_MACHINE_ID`, `POLYFORGE_DISPLAY_NAME`, `POLYFORGE_HARNESS_ROOT`,
 `POLYFORGE_OPERATOR_AGENT_DIR` and `POLYFORGE_RECALL_TOPK` fallbacks are
 gone; a value in the environment is ignored. Because harness state must

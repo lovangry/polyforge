@@ -24,6 +24,9 @@ package daemon
 //     tools/install.sh holds the same lock across an upgrade (stop →
 //     swap), so an adapter's ensure in that window starts nothing.
 //   - A step agent (PF_WI_ID set) is refused outright.
+//   - The daemon's environment is exactly the supervisor allow-list
+//     (supervisor/env.go) taken from the CALLER of ensure, never the tmux
+//     server's (see daemonEnv).
 //   - Without tmux it falls back to one unsupervised detached start and
 //     says so loudly.
 //
@@ -292,26 +295,55 @@ func (p *ensurePlan) start(stdout, stderr io.Writer) error {
 	return nil
 }
 
-// loopScript is the sh program the tmux session runs. Its environment is
-// the TMUX SERVER's (its global environment, captured when the server
-// started, plus the client's update-environment variables), not the
-// ensure caller's: PATH and HOME are therefore pinned to the caller's,
-// and the markers of a harness session (TMUX*, every CLAUDE*, PF_CHAT_ID,
-// PF_WI_ID) are dropped so the daemon — and the step agents it spawns —
-// never inherit them. Everything else (e.g. ANTHROPIC_*) is whatever the
-// tmux server carries — and reaches every step process (precedence vs
-// claude-config/settings.json: see runtime/claudespawn.go, V-11).
+// daemonEnv is the daemon's whole environment (env hygiene): the
+// supervisor allow-list (supervisor.DaemonEnv — the one place it is
+// defined) filtered from the ENSURE CALLER's environment, HOME pinned to
+// the resolved home, plus the supervision marker when the loop starts
+// it. Nothing else — in particular nothing of the tmux server's
+// environment (ANTHROPIC_*, stale keys, harness-session markers such as
+// TMUX*, CLAUDE*, PF_CHAT_ID, PF_WI_ID) — reaches the daemon or the step
+// agents it spawns.
+func (p *ensurePlan) daemonEnv(marker bool) []string {
+	env := []string{"HOME=" + p.home}
+	for _, kv := range supervisor.DaemonEnv(os.Environ()) {
+		// HOME is pinned; PWD is the shell's own (the loop's /bin/sh
+		// exports its cwd), never the caller's
+		if !strings.HasPrefix(kv, "HOME=") && !strings.HasPrefix(kv, "PWD=") {
+			env = append(env, kv)
+		}
+	}
+	if marker {
+		env = append(env, supervisor.MarkerEnv+"=tmux:"+supervisor.SessionName)
+	}
+	return env
+}
+
+// loopScript is the sh program the tmux session runs. The tmux session
+// itself runs in the TMUX SERVER's environment (captured when that server
+// first started, plus the client's update-environment variables), so the
+// script's first act (after cd'ing to the home) is
+// `exec /usr/bin/env -i <daemonEnv assignments> /bin/sh -c <loop>`: the loop — and every daemon it (re)starts — runs in exactly
+// the allow-listed environment of the ensure caller, and the tmux
+// server's environment is irrelevant.
 func (p *ensurePlan) loopScript() string {
+	env := p.daemonEnv(true)
+	assign := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, val, _ := strings.Cut(kv, "=")
+		assign = append(assign, name+"="+shQuote(val))
+	}
+	return fmt.Sprintf("cd %s 2>/dev/null || cd /\nexec /usr/bin/env -i %s /bin/sh -c %s\n",
+		shQuote(p.home), strings.Join(assign, " "), shQuote(p.loopBody()))
+}
+
+// loopBody is the restart loop itself (run by loopScript's clean sh).
+func (p *ensurePlan) loopBody() string {
 	argv := []string{"nohup", shQuote(p.pfBin)}
 	for _, a := range p.daemonArgv() {
 		argv = append(argv, shQuote(a))
 	}
 	log := shQuote(p.logPath())
 	var b strings.Builder
-	fmt.Fprintf(&b, "export PATH=%s HOME=%s %s=%s\n", shQuote(os.Getenv("PATH")), shQuote(p.home), supervisor.MarkerEnv, shQuote("tmux:"+supervisor.SessionName))
-	b.WriteString("unset TMUX TMUX_PANE PF_CHAT_ID PF_WI_ID\n")
-	b.WriteString("for v in $(env | sed -n 's/^\\(CLAUDE[A-Za-z0-9_]*\\)=.*/\\1/p'); do unset \"$v\"; done\n")
-	fmt.Fprintf(&b, "cd %s 2>/dev/null || cd /\n", shQuote(p.home))
 	b.WriteString("while :; do\n")
 	fmt.Fprintf(&b, "  if [ \"$(wc -c < %s 2>/dev/null || echo 0)\" -gt %d ]; then mv -f %s %s.1; fi\n", log, logRotateBytes, log, log)
 	fmt.Fprintf(&b, "  echo \"pf daemon ensure loop: starting the daemon at $(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)\" >> %s\n", log)
@@ -334,6 +366,7 @@ func (p *ensurePlan) startDetached() error {
 	defer logf.Close()
 	cmd := exec.Command(p.pfBin, p.daemonArgv()...)
 	cmd.Dir = p.home
+	cmd.Env = p.daemonEnv(false)
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
