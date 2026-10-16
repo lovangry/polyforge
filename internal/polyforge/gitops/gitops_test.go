@@ -937,3 +937,31 @@ func TestCarrierPushRetriesRefCasRejection(t *testing.T) {
 		t.Fatalf("a non-CAS failure must not be retried: err=%v calls=%d", err, calls)
 	}
 }
+
+// repo review 2026-10-16 V-5: the operator's global git config must not
+// reroute the credentialed chain push (url.*.insteadOf) — it reads no
+// system/global config, like the carrier lane.
+func TestChainPushIgnoresGlobalGitConfig(t *testing.T) {
+	setIdentity(t)
+	o, barePath := testOpts(t, "wi_insteadof")
+	bare := mkBare(t, barePath, true)
+	decoy := filepath.Join(t.TempDir(), "decoy.git")
+	mkBare(t, decoy, false)
+	cfg := "[url \"" + decoy + "\"]\n\tinsteadOf = " + barePath + "\n"
+	gc := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(gc, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", gc) // the operator's global config
+	mkCapsule(t, o)
+	writeDirty(t, o, "f.txt", "x\n")
+	if _, pushed, _, err := CommitPush(o, "observe: v1"); err != nil || !pushed {
+		t.Fatalf("CommitPush: pushed=%v err=%v", pushed, err)
+	}
+	if got := bare.tipSeq(t); got < 1 {
+		t.Fatalf("the real hub repo did not receive the push (tip seq %d)", got)
+	}
+	if out, err := run("git", "--git-dir", decoy, "rev-parse", "-q", "--verify", "refs/heads/main"); err == nil {
+		t.Fatalf("the push was rerouted to the decoy by ~/.gitconfig: %s", out)
+	}
+}

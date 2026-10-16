@@ -145,6 +145,29 @@ func (o Opts) Env() []string {
 	)
 }
 
+// hubEnv is the environment of every chain-lane git call that talks to
+// the hub with the session credential (the chain push, the capsule
+// clone, the carrier ls-remote/fetch): the daemon's environment minus
+// every inherited GIT_* variable and with no system or global config —
+// the carrier lane's rule (carrierEnv). An operator's ~/.gitconfig must
+// not reroute the credentialed push (url.*.insteadOf) nor hand the
+// session secret to a credential helper that stores it (repo review
+// 2026-10-16 V-5). bindRepo adds the capsule's external git-dir binding;
+// additions (the askpass pair) come last.
+func hubEnv(o Opts, bindRepo bool, additions []string) []string {
+	env := make([]string, 0, len(os.Environ())+4+len(additions))
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "GIT_") {
+			env = append(env, kv)
+		}
+	}
+	env = append(env, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+	if bindRepo {
+		env = append(env, "GIT_DIR="+o.GitDir, "GIT_WORK_TREE="+o.CapsuleDir)
+	}
+	return append(env, additions...)
+}
+
 // CEnv returns env (nil = inherited environ) pinned to the C locale:
 // LC_ALL=C and no LANGUAGE, so git's messages are never translated and
 // the output this package pattern-matches stays stable.
@@ -596,7 +619,7 @@ func pushLocked(o Opts) (bool, int64, error) {
 		return false, 0, err
 	}
 	defer cleanup()
-	env := append(o.Env(), additions...)
+	env := hubEnv(o, true, additions)
 	pushed, pushMS, perr := pushChainLocked(env, o.CapsuleDir, args)
 	// Task-repo durability lane: after the chain push either way, its
 	// own invocations, its own failures — never the chain's result. A
@@ -1050,7 +1073,7 @@ func fetchCarrierRef(o Opts, dir, ref string) (string, error) {
 		return "", err
 	}
 	defer cleanup()
-	env := append(os.Environ(), additions...)
+	env := hubEnv(o, false, additions)
 	// ls-remote --exit-code answers 2 when no ref matches: the
 	// language-independent "no carrier yet" signal (never git's message).
 	if _, err := gitTimed(o.bound(chainRemoteTimeout), env, dir, "ls-remote", "--exit-code", o.RemoteURL, ref); err != nil {
@@ -1099,7 +1122,7 @@ func Clone(o Opts) error {
 		return err
 	}
 	defer cleanup()
-	env := append(os.Environ(), additions...)
+	env := hubEnv(o, false, additions)
 	_, err = gitTimed(chainRemoteTimeout, env, "", "clone", o.RemoteURL, o.CapsuleDir)
 	return err
 }
