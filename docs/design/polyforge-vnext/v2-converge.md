@@ -623,7 +623,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 
 - `work_items.attrs.blocked_seal = {"head": <sha>, "machine": <id>}`（`core/session.go` `blockedSealKey`）：带 head 的 `End(blocked)` 写入，其他任何 End/Pause 清除；不改 schema，搭在业务 attrs JSON 上。
 - 领取应答的 `sealed_head` / `sealed_machine`（`api/types.go` `SessionClaim`）由它读出：另一台机器继续一个 blocked WI 时，其 clone 里必须恰好有这个 head，否则拒绝（第 7 节"跨 daemon 继续"）。`attrs` 不在 PATCH 可更新键中（`core/workitem.go` `patchableFields`，只在 create 时写入），用户无法改写或删掉它（2026-10-16 wave 4 按代码更正：原文称 PATCH 可删）。
-- 与 `archive/02-aihub-core.md#§2.6` INV-2c（attrs 不得承载执行态字段）的关系未裁定；本附录只登记现状，不做迁移（G17 选 A，I-5 不做 D）。
+- 与 `archive/02-aihub-core.md#§2.6` INV-2c（attrs 不得承载执行态字段）的关系：02 已归档，不再是权威；现行代码是权威。代码里 INV-2c 的落地是 create 时的执行态键黑名单（`core/workitem.go` `executionStateKeys`），`blocked_seal` 不在其中。现行行为：`blocked_seal` 由 aihub 在 session 事务里读写（`setBlockedSealTx` / `blockedSealTx`），daemon 只能经 `End(blocked)` 间接写入；用户只能在 create 时经 attrs 带入同名键，之后无法改写（随后的 End/Pause 按上条覆盖或清除它）；它不是执行态（执行态的唯一权威仍是 capsule 的 `runtime-state/execution.json`），只记录 blocked 封存时的交接点——哪台机器、哪个 head。读不到它（键不存在或 attrs 解析失败）时领取应答的 `sealed_head` 为空，跨机继续不做 head 校验（fail open）。不做迁移（G17 选 A，I-5 不做 D）。
 
 ### E.4 daemon data dir（默认 `~/.local/share/polyforge`）
 
