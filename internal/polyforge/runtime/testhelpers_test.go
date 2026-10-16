@@ -78,6 +78,59 @@ type fakeHub struct {
 	// endBlockFor parks the SessionEnds of one work item (canonical id)
 	// until its channel is closed.
 	endBlockFor map[string]chan struct{}
+	// gates parks one kind of hub call ("probe", "verify", "claim",
+	// "attach") for one work item (canonical id) until released — a hung
+	// hub for that call alone (installed with hangCall).
+	gates map[string]*hubGate
+}
+
+// hubGate is one parked hub call: entered closes once a call parked,
+// release lets every parked (and later) call through.
+type hubGate struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	rel     sync.Once
+}
+
+// hangCall installs a gate for kind calls of wi; the test waits on
+// entered and releases it (released at cleanup at the latest).
+func (h *fakeHub) hangCall(t *testing.T, kind, wi string) *hubGate {
+	t.Helper()
+	g := &hubGate{entered: make(chan struct{}), release: make(chan struct{})}
+	h.mu.Lock()
+	if h.gates == nil {
+		h.gates = map[string]*hubGate{}
+	}
+	h.gates[kind+":"+wi] = g
+	h.mu.Unlock()
+	t.Cleanup(g.open)
+	return g
+}
+
+func (g *hubGate) open() { g.rel.Do(func() { close(g.release) }) }
+
+// waitEntered blocks until a call parked at the gate.
+func (g *hubGate) waitEntered(t *testing.T, what string) {
+	t.Helper()
+	select {
+	case <-g.entered:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("%s never reached the hub", what)
+	}
+}
+
+// park holds a kind call of idOrSlug while its gate is installed and
+// closed (called before the fake takes its own lock).
+func (h *fakeHub) park(kind, idOrSlug string) {
+	h.mu.Lock()
+	g := h.gates[kind+":"+h.canonicalID(idOrSlug)]
+	h.mu.Unlock()
+	if g == nil {
+		return
+	}
+	g.once.Do(func() { close(g.entered) })
+	<-g.release
 }
 
 type claimFault struct {
@@ -140,6 +193,7 @@ func (h *fakeHub) claimResponse(wi, sessionID string) *api.SessionClaimResponse 
 }
 
 func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimResponse, error) {
+	h.park("claim", req.WorkItemID)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.claims = append(h.claims, req)
@@ -203,6 +257,7 @@ func (h *fakeHub) forceEnd(wi string) {
 }
 
 func (h *fakeHub) SessionAttach(wi string, req api.SessionAttachRequest) (*api.SessionClaimResponse, error) {
+	h.park("attach", wi)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.attaches = append(h.attaches, req)
@@ -221,6 +276,7 @@ func (h *fakeHub) SessionAttach(wi string, req api.SessionAttachRequest) (*api.S
 }
 
 func (h *fakeHub) SessionVerify(wi, sessionID string) (*api.SessionVerifyResponse, error) {
+	h.park("verify", wi)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	id := h.canonicalID(wi)
@@ -276,6 +332,7 @@ func (h *fakeHub) SessionEnd(wi string, req api.SessionEndRequest) error {
 }
 
 func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
+	h.park("probe", idOrSlug)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	id := h.canonicalID(idOrSlug)

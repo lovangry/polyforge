@@ -261,11 +261,21 @@ func (r *Runtime) attachPaused(ctx context.Context, rec *jobRecord, cause, detai
 	if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
 		return err
 	}
-	if _, err := r.hub.SessionAttach(rec.WorkItemID, api.SessionAttachRequest{
-		WorkItemID: rec.WorkItemID,
-		SessionID:  rec.SessionID,
-		MachineID:  r.cfg.MachineID,
-	}); err != nil {
+	// The attach runs with opMu released and the job latched busy
+	// (offLock, B-8): a Stop or a second resume of it answers DAEMON-409
+	// meanwhile, the other work items' doors stay open.
+	var err error
+	if !r.offLock(j, func() {
+		_, err = r.hub.SessionAttach(rec.WorkItemID, api.SessionAttachRequest{
+			WorkItemID: rec.WorkItemID,
+			SessionID:  rec.SessionID,
+			MachineID:  r.cfg.MachineID,
+		})
+	}) {
+		// defensive: a busy job leaves the table through no other door
+		return fmt.Errorf("runtime: %s: the record left the job table during its session attach", rec.WorkItemID)
+	}
+	if err != nil {
 		var ae *api.Error
 		if !errors.As(err, &ae) {
 			// no typed hub answer: the hub was not reached (transport)
@@ -299,8 +309,12 @@ func (e *hubTransportError) Unwrap() error { return e.err }
 // *api.Error refusal:
 // DAEMON-404 (this daemon holds no record for the WI), DAEMON-409 (not
 // a paused record, clean_pause not yet cleared, a pending terminal
-// close, or the session no longer holds the WI), DAEMON-503 (hub
-// unreachable — nothing was resumed). A typed mid-flight failure
+// close, the session no longer holds the WI, or another door's network
+// step of it in flight), DAEMON-503 (hub unreachable — nothing was
+// resumed), DAEMON-410 (the shutdown latched during the verify). The
+// verify and the attach run with opMu released and the job latched busy
+// (offLock): a Stop of it answers DAEMON-409 meanwhile, a Start
+// DAEMON-503, and every other work item stays operable. A typed mid-flight failure
 // (missing capsule / unmapped project) BLOCKS the work item first
 // (blockUnrecoverable, the ordinary bounded-fail close at aihub) and
 // returns the cause as the DAEMON-409 refusal detail — the resume door
@@ -335,7 +349,25 @@ func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 		// resume must not race the close it would cancel.
 		return "", &api.Error{Code: api.ErrDaemonConflict, Detail: fmt.Sprintf("a %s close of the retained paused record is pending (a crash interrupted it); the next daemon start replays the close", rec.StopReason)}
 	}
-	v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
+	// The verify (and the attach below) run with opMu released and the
+	// job latched busy (offLock, B-8): a Stop, a pause or a second resume
+	// of it answers DAEMON-409 meanwhile, a Start DAEMON-503, and every
+	// other work item's doors stay open.
+	var v *api.SessionVerifyResponse
+	var err error
+	if !r.offLock(j, func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) }) {
+		return "", &api.Error{Code: api.ErrDaemonConflict, Detail: fmt.Sprintf("%s: the record left the job table during the resume's session verify; nothing was resumed", id)}
+	}
+	if st, _ := j.snapshot(); st != StatePaused {
+		// defensive: a busy job's state moves through no other door
+		return "", &api.Error{Code: api.ErrDaemonConflict, Detail: fmt.Sprintf("work item turned %s during the resume's session verify; nothing was resumed", st)}
+	}
+	if r.abortedClaims() {
+		// the shutdown latched while the verify was on the wire: attach
+		// nothing behind its teardown — the record stays paused, the
+		// next daemon start reconciles it
+		return "", &api.Error{Code: api.ErrDaemonGone, Detail: fmt.Sprintf("%s: the daemon is shutting down; nothing was resumed", id)}
+	}
 	var vae *api.Error
 	if err == nil || errors.As(err, &vae) {
 		// the hub answered: a restart-time verify deferral is over (its
@@ -382,7 +414,8 @@ func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 			}
 			return "", &api.Error{Code: api.ErrDaemonInternal, Detail: err.Error()}
 		}
-		// the recovery continuation runs synchronously (opMu held): a
+		// the recovery continuation runs synchronously (opMu held, released
+		// around its pushes like every recovery): a
 		// terminal capsule verdict or an exhausted relaunch ladder closes
 		// the job inside it — the WI does NOT continue in place then.
 		if nj := r.jobOf(id); nj == nil {
