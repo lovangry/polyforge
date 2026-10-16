@@ -325,7 +325,6 @@ func fileEdit(ctx *Context, args []string) error {
 		milestone optString
 		waitingOn optString
 		bundle    optString
-		attrs     kvList
 		useStdin  = f.Bool("stdin", false, "read the full PATCH-body JSON from stdin")
 	)
 	f.Var(&bundle, "bundle", "bundle_name (empty string unbinds); aihub accepts it only while the work item is queued and never claimed")
@@ -335,7 +334,8 @@ func fileEdit(ctx *Context, args []string) error {
 	f.Var(&priority, "priority", "low|normal|high|urgent")
 	f.Var(&milestone, "milestone", "milestone (empty string clears it)")
 	f.Var(&waitingOn, "waiting-on", "waiting_on value")
-	f.Var(&attrs, "attr", "business attr key=json-value (repeatable)")
+	// No --attr: attrs are set at create only — aihub's PATCH whitelist
+	// (core patchableFields) refuses the key with CORE-400 IMMUTABLE.
 	rest, err := parseCommandArgs(f, args)
 	if err != nil {
 		return err
@@ -394,18 +394,6 @@ func fileEdit(ctx *Context, args []string) error {
 			body["bundle_name"] = bundle.Val()
 		}
 	}
-	if len(attrs) > 0 {
-		m := map[string]any{}
-		for _, kv := range attrs {
-			v, err := parseAttrValue(kv.Value)
-			if err != nil {
-				return fmt.Errorf("--attr %s: %w", kv.Key, err)
-			}
-			m[kv.Key] = v
-		}
-		body["attrs"] = m
-	}
-
 	raw, err := ctx.aihub().PatchWorkItem(id, body)
 	if err != nil {
 		return err

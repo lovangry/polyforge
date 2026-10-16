@@ -179,6 +179,17 @@ func TestVerbFileShowAndEditRequestShape(t *testing.T) {
 			t.Errorf("edit --bundle %q body = %s, want %s", c.val, got.Body, c.want)
 		}
 	}
+
+	// No --attr on edit: aihub's PATCH whitelist refuses attrs (CORE-400
+	// IMMUTABLE), so the flag could only ever fail on the wire. It is a
+	// local usage error now and nothing reaches aihub.
+	before := len(rec.all())
+	if code, _, _ := runPf(t, env, "file", "edit", "wi_abc", "--attr", "team=x"); code == 0 {
+		t.Errorf("edit --attr: exit 0, want a usage error")
+	}
+	if n := len(rec.all()); n != before {
+		t.Errorf("edit --attr reached aihub (%d new requests)", n-before)
+	}
 }
 
 func TestVerbQueueRequestShape(t *testing.T) {

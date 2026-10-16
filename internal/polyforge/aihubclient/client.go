@@ -160,8 +160,9 @@ func (c *Client) GetWorkItemRaw(idOrSlug string) (json.RawMessage, error) {
 }
 
 // PatchWorkItem updates the PATCHable field set. body must contain only
-// keys from {goal, content, labels, priority, milestone, waiting_on,
-// attrs} — an immutable key answers CORE-400 server-side.
+// keys from aihub's whitelist {goal, content, labels, priority,
+// milestone, waiting_on, clean_pause, bundle_name} — any other key
+// (attrs included) answers CORE-400 IMMUTABLE server-side.
 func (c *Client) PatchWorkItem(id string, body map[string]any) (json.RawMessage, error) {
 	return c.raw("PATCH", "/api/v1/work-items/"+url.PathEscape(id), body)
 }
