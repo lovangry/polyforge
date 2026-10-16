@@ -127,7 +127,7 @@
 #   BACKUP_ROOT=/data/polyforge-backups (local)
 #   GH_REPO=silgrid/polyforge   GHCR_IMAGE=ghcr.io/silgrid/aihub   AIHUB_PORT=8080   WAIT_SECS=60
 #   COMPOSE_FILE=/data/aihub-app/docker-compose.yml  COMPOSE_PROJECT=aihub-app  AIHUB_SERVICE=aihub
-#   DRAIN_SECS=15 (stop_grace_period; > aihub's own 10s drain)   MAX_DOWNTIME_SECS=10 (warn)   UP_WAIT_SECS=30 (fail)
+#   DRAIN_SECS=15 (stop_grace_period; > aihub's own 10s drain)   MAX_DOWNTIME_SECS=20 (warn; > DRAIN_SECS)   UP_WAIT_SECS=30 (fail)
 #   DEPLOY_LOCK_FILE=/data/aihub-app/.deploy.lock (on the server)   LOCK_WAIT_SECS=20
 set -eu
 
@@ -186,7 +186,7 @@ AIHUB_PORT="${AIHUB_PORT:-8080}"
 WAIT_SECS="${WAIT_SECS:-60}"
 POLL_SECS="${POLL_SECS:-2}"
 DRAIN_SECS="${DRAIN_SECS:-15}"
-MAX_DOWNTIME_SECS="${MAX_DOWNTIME_SECS:-10}"
+MAX_DOWNTIME_SECS="${MAX_DOWNTIME_SECS:-20}"
 UP_WAIT_SECS="${UP_WAIT_SECS:-30}"
 DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/data/aihub-app/.deploy.lock}"
 LOCK_WAIT_SECS="${LOCK_WAIT_SECS:-20}"

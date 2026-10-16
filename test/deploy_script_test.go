@@ -161,6 +161,10 @@ func TestDeployHappyPathHoldsAndReleasesLock(t *testing.T) {
 	if !strings.Contains(d.composeText(), "    stop_grace_period: 15s\n") {
 		t.Errorf("compose stop_grace_period is not 15s:\n%s", d.composeText())
 	}
+	// a normal drain-length stop must not trip the downtime warning
+	if !strings.Contains(out, "warn > 20s") {
+		t.Errorf("the downtime warning threshold is not 20s (above the 15s drain):\n%s", out)
+	}
 	if !strings.Contains(d.logOf("log-docker"), "stop -t 15 ") {
 		t.Errorf("the switch-window stop does not wait 15s:\n%s", d.logOf("log-docker"))
 	}
