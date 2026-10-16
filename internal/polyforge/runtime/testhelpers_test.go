@@ -561,11 +561,13 @@ func initGitCapsule(t *testing.T, j *job) string {
 	j.git.RemoteURL = bare
 	j.git.Username = j.wi
 	j.git.Secret = "push-secret"
-	if out, err := exec.Command("git", "init", j.git.CapsuleDir).CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v: %s", err, out)
+	if err := os.MkdirAll(filepath.Dir(j.git.GitDir), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if err := gitops.ExternalizeGitDir(j.git); err != nil {
-		t.Fatalf("gitops.ExternalizeGitDir: %v", err)
+	// the production layout (gitops.Clone's): external git-dir, .git
+	// pointer, working branch main
+	if out, err := exec.Command("git", "init", "--initial-branch=main", "--separate-git-dir="+j.git.GitDir, j.git.CapsuleDir).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
 	}
 	// one initial commit so rev-list/push have a HEAD to stand on
 	if err := os.WriteFile(filepath.Join(j.capsuleDir, "seed.txt"), []byte("seed\n"), 0o644); err != nil {

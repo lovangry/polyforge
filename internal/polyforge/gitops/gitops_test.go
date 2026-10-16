@@ -178,9 +178,6 @@ func mkCapsule(t *testing.T, o Opts) {
 	if err := initLocal(t, o); err != nil {
 		t.Fatalf("initLocal: %v", err)
 	}
-	if err := ExternalizeGitDir(o); err != nil {
-		t.Fatalf("ExternalizeGitDir: %v", err)
-	}
 	if !isPointerFile(t, o.CapsuleDir) {
 		t.Fatal("capsule .git must be a pointer file after externalization")
 	}
@@ -651,14 +648,6 @@ func TestPushAndCloneOverHTTPWithCredential(t *testing.T) {
 	if err := Clone(context.Background(), o); err != nil {
 		t.Fatalf("clone over http:// must receive the credential: %v", err)
 	}
-	// re-externalize: Clone leaves the git-dir inside the worktree
-	if err := os.Rename(filepath.Join(o.CapsuleDir, ".git"), o.GitDir); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(o.CapsuleDir, ".git"),
-		[]byte("gitdir: "+o.GitDir+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	writeDirty(t, o, "http.txt", "over http\n")
 	sha, pushed, _, err := CommitPush(o, "http push")
 	if err != nil || !pushed {
@@ -672,8 +661,8 @@ func TestPushAndCloneOverHTTPWithCredential(t *testing.T) {
 	// without a credential the same remote answers 401
 	noCred := o
 	noCred.Username, noCred.Secret = "", ""
-	capsule2 := filepath.Join(base, "capsules", "wi_http2")
-	noCred.CapsuleDir = capsule2
+	noCred.CapsuleDir = filepath.Join(base, "capsules", "wi_http2")
+	noCred.GitDir = filepath.Join(base, "git", "wi_http2.git")
 	if err := Clone(context.Background(), noCred); err == nil {
 		t.Fatal("clone without a credential must fail against the authed server")
 	}
@@ -790,83 +779,50 @@ func TestCleanStaleLocksAges(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// initLocal / ExternalizeGitDir (the hoisted single implementation)
+// Clone: the external git-dir layout in one git call
 
-func TestInitLocalAndExternalize(t *testing.T) {
+// Clone lays the capsule out with its git-dir EXTERNAL (a .git pointer
+// file, no inner git-dir) on main — from an empty remote (aihub's fresh
+// bare repo) and from one with history.
+func TestCloneSeparatesGitDirOnMain(t *testing.T) {
 	setIdentity(t)
-	o, _ := testOpts(t, "wi_init")
-
-	if err := initLocal(t, o); err != nil {
-		t.Fatalf("initLocal: %v", err)
-	}
-	if err := ExternalizeGitDir(o); err != nil {
-		t.Fatalf("ExternalizeGitDir: %v", err)
-	}
-	if !isPointerFile(t, o.CapsuleDir) {
-		t.Fatal(".git must be a pointer file after externalization")
-	}
-	if !dirExists(o.GitDir) {
-		t.Fatalf("external git-dir missing at %s", o.GitDir)
-	}
-	// the working branch is main
-	out, err := git(o.Env(), o.CapsuleDir, "symbolic-ref", "HEAD")
-	if err != nil || strings.TrimSpace(out) != "refs/heads/main" {
-		t.Fatalf("working branch = %q (%v), want refs/heads/main", out, err)
-	}
-	// idempotent: a second externalization is a no-op
-	if err := ExternalizeGitDir(o); err != nil {
-		t.Fatalf("ExternalizeGitDir (again): %v", err)
-	}
-}
-
-// TestCrossDeviceMoveFallback (the #103 cutover lesson): ExternalizeGitDir
-// renames the capsule .git into the data-dir git store; with capsules under
-// -workspace on another mount, rename(2) fails EXDEV and the claim dies.
-// crossDeviceMove must fall back to copy+remove — pinned here on a real
-// cross-device boundary when /tmp and the test dir differ, and on the
-// copy path's fidelity either way.
-func TestCrossDeviceMoveFallback(t *testing.T) {
-	src := t.TempDir()
-	dst := filepath.Join(t.TempDir(), "dst")
-	if err := os.MkdirAll(filepath.Join(src, "objects", "pack"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(src, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(src, "objects", "pack", "x.pack"), []byte("pack"), 0o444); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink("refs/heads/main", filepath.Join(src, "sym")); err != nil {
-		t.Fatal(err)
-	}
-	// direct: the fallback path itself (rename across two distinct t.TempDir
-	// dirs is a rename on the same device on most systems, so pin the pieces)
-	if err := copyDirTree(src, dst); err != nil {
-		t.Fatalf("copyDirTree: %v", err)
-	}
-	// fidelity: file bytes, read-only mode preserved, symlink preserved
-	raw, err := os.ReadFile(filepath.Join(dst, "objects", "pack", "x.pack"))
-	if err != nil || string(raw) != "pack" {
-		t.Fatalf("copied pack content wrong: %q err=%v", raw, err)
-	}
-	if st, serr := os.Stat(filepath.Join(dst, "objects", "pack", "x.pack")); serr == nil && st.Mode().Perm() != 0o444 {
-		t.Fatalf("read-only mode not preserved: %v", st.Mode())
-	}
-	if target, lerr := os.Readlink(filepath.Join(dst, "sym")); lerr != nil || target != "refs/heads/main" {
-		t.Fatalf("symlink not preserved: %q err=%v", target, lerr)
-	}
-	// crossDeviceMove over a fresh dst uses the copy fallback only on EXDEV;
-	// on same-device it is a plain rename — both must leave dst complete
-	dst2 := filepath.Join(t.TempDir(), "dst2")
-	if err := crossDeviceMove(src, dst2); err != nil {
-		t.Fatalf("crossDeviceMove: %v", err)
-	}
-	if _, serr := os.Stat(filepath.Join(dst2, "HEAD")); serr != nil {
-		t.Fatalf("move left the tree incomplete: %v", serr)
-	}
-	if _, serr := os.Stat(filepath.Join(src, "HEAD")); !os.IsNotExist(serr) {
-		t.Fatal("the source must be gone after the move")
+	for _, withHistory := range []bool{false, true} {
+		o, barePath := testOpts(t, "wi_clone")
+		mkBare(t, barePath, false)
+		// aihub's bare repos answer HEAD -> main (aihub/git/repo.go)
+		if out, err := run("git", "--git-dir", barePath, "symbolic-ref", "HEAD", "refs/heads/main"); err != nil {
+			t.Fatalf("bare HEAD: %v: %s", err, out)
+		}
+		if withHistory {
+			seed, _ := testOpts(t, "wi_clone_seed")
+			seed.RemoteURL = barePath
+			mkCapsule(t, seed)
+			writeDirty(t, seed, "seed.txt", "seed\n")
+			if _, pushed, _, err := CommitPush(seed, "seed"); err != nil || !pushed {
+				t.Fatalf("seed push: %v", err)
+			}
+		}
+		if err := os.RemoveAll(o.CapsuleDir); err != nil {
+			t.Fatal(err)
+		}
+		if err := Clone(context.Background(), o); err != nil {
+			t.Fatalf("Clone (history=%v): %v", withHistory, err)
+		}
+		if !isPointerFile(t, o.CapsuleDir) {
+			t.Fatal(".git must be a pointer file")
+		}
+		if !dirExists(o.GitDir) {
+			t.Fatalf("external git-dir missing at %s", o.GitDir)
+		}
+		out, err := git(o.Env(), o.CapsuleDir, "symbolic-ref", "HEAD")
+		if err != nil || strings.TrimSpace(out) != "refs/heads/main" {
+			t.Fatalf("working branch = %q (%v), want refs/heads/main", out, err)
+		}
+		if withHistory {
+			if _, err := os.Stat(filepath.Join(o.CapsuleDir, "seed.txt")); err != nil {
+				t.Fatalf("the clone did not check the history out: %v", err)
+			}
+		}
 	}
 }
 

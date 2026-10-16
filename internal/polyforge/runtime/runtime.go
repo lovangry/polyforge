@@ -1389,9 +1389,9 @@ func (r *Runtime) verifySealedHead(j *job, c api.SessionClaim) error {
 
 // prepareCapsule makes CapsuleDir a git worktree whose git-dir is EXTERNAL
 // (ruling #2: agents never reach hooks/config/index). The aihub bare repo is
-// cloned (an empty-history clone succeeds with a warning); the shared
-// gitops.Clone puts the git-dir inside the worktree, so it is relocated to
-// the external location right after, leaving a one-line .git pointer file.
+// cloned straight into that layout (gitops.Clone: the git-dir at
+// o.GitDir, a one-line .git pointer file in the worktree; an
+// empty-history clone succeeds with a warning).
 //
 // v1.5 capsule ownership: generations no longer discriminate a reusable
 // husk from a foreign scene — the session does. materialize stamps the
@@ -1418,9 +1418,6 @@ func (r *Runtime) prepareCapsule(ctx context.Context, j *job) error {
 	if err := quarantineCapsule(o.CapsuleDir, o.GitDir); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(o.GitDir), 0o755); err != nil {
-		return err
-	}
 	if o.RemoteURL == "" {
 		// A capsule whose origin cannot be resolved is never silently
 		// init'ed locally and restarted from step 1 (the audit's
@@ -1438,7 +1435,7 @@ func (r *Runtime) prepareCapsule(ctx context.Context, j *job) error {
 		return &api.Error{Code: api.ErrDaemonCapsuleClone,
 			Detail: fmt.Sprintf("capsule clone failed: %v", err)}
 	}
-	return gitops.ExternalizeGitDir(o)
+	return nil
 }
 
 func isRegularFile(p string) bool {

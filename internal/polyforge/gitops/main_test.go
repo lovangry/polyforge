@@ -3,6 +3,7 @@ package gitops
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/testenv"
@@ -22,7 +23,12 @@ func initLocal(t *testing.T, o Opts) error {
 	if err := os.MkdirAll(o.CapsuleDir, 0o755); err != nil {
 		return err
 	}
-	if _, err := git(nil, "", "init", o.CapsuleDir); err != nil {
+	if err := os.MkdirAll(filepath.Dir(o.GitDir), 0o755); err != nil {
+		return err
+	}
+	// the production layout (Clone's): an external git-dir behind a
+	// one-line .git pointer, working branch main
+	if _, err := git(nil, "", "init", "--initial-branch=main", "--separate-git-dir="+o.GitDir, o.CapsuleDir); err != nil {
 		return fmt.Errorf("git init: %s", err.Error())
 	}
 	return nil
