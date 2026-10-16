@@ -1,6 +1,7 @@
 # 02 — AIHub Core：SQLite Core schema、单 active Service、owner generation 与进度 read-through
 
-> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+> **ARCHIVED（repo review 2026-10-16 G-1）— 本文大部分描述已删除的机制：owner generation + HMAC token、flush 证据（CORE-425）、Revision/CAS 登记、预算增量、凭证轮换、26 端点清单（11 行无路由、6 条真路由未列）。标有 ARCHIVED 横幅的节 do not build from this；未标横幅的节也只作历史与溯源参考。现行设计权威：[v2-converge.md](v2-converge.md)、[wi-kind-contract.md](wi-kind-contract.md)、[08-capsule-base-migration.md](08-capsule-base-migration.md)；与代码冲突时一律以代码为准。**
+> Most of this document describes deleted mechanisms. Sections bannered ARCHIVED must not be built from; the live authority is v2-converge.md plus the code.
 
 | 权威项 | 值 |
 |---|---|
@@ -9,8 +10,8 @@
 | 术语权威 | 本文负责：Core、单 active Service、owner generation、assignee/waiting_on、attrs 拆分、workflow 引用（bundle_name）、parent_id（epic-lite）与依赖边、project membership 权限硬边界、进度 read-through、AIHub 本地目录布局 |
 
 > **执行模型勘误（polyforge#111 删除 pass，2026-10-09）**：Phase-3 引擎切换（`d9bb866`/`f2163fe`）后，默认执行模型是
-> Daemon 进程内的 **Go 执行驱动**（`internal/polyforge/driver`，`pf daemon -use-driver` 默认开启）；WI-Agent 派生进程
-> 仅在显式选择的旧引擎（`pf daemon -use-driver=false`）下仍存在。本文写于 WI-Agent 模型，正文不整篇重写；
+> Daemon 进程内的 **Go 执行驱动**（`internal/polyforge/driver`，`-use-driver` 旗标现已删除，driver 是唯一引擎）；WI-Agent 派生进程
+> 旧引擎及其 `-use-driver=false` 开关均已删除。本文写于 WI-Agent 模型，正文不整篇重写；
 > 每处「WI Agent」引用按下列行尾标记分类（可机械检索 `#111分类`）：
 >
 > - **〔#111分类：删→驱动〕** —— 该行所述的 WI Agent 进程机制在默认引擎下已删除，职责由驱动承接；按「执行者 = 驱动」读，裁定本身仍有效。
@@ -23,6 +24,8 @@
 ## 1. 范围与非目标 <!-- §1 -->
 
 ### 1.1 范围 <!-- §1.1 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、Revision/CAS/manifest、flush 证据、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 - 一期唯一持久层 SQLite 的完整 Core schema DDL（§4），覆盖 work item 基本字段（含 parent_id（epic-lite）、milestone、assignee、workflow 引用三列与预算基线，§4.2、§4.2a、§4.4）、WI 间依赖边（§4.2a）、project membership 与权限硬边界（§4.10）、assignee/waiting_on 语义与状态迁移、attrs 拆分原则；DDL 中不含任何执行态列（`current_step`/`step_attempt`/`review_round` 等一律不出现）。
 - 单 active Service 的含义与保证（§2.2/§7）；owner generation 的存储与生命周期（§2.3/§6.2）。
@@ -44,6 +47,8 @@
 
 ### 2.1 Core（权威定义） <!-- §2.1 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 **Core = AIHub 持有的持久化数据集合**：具体为 §4 的全部 SQLite 表，加上 §4.11 目录中由 AIHub 管理的文件（Memory 权威 Markdown、Revision 数据文件、最终结果归档）。Core 的边界由 `00-architecture.md#§2.3` INV-1 锁定：**不含任何执行态**（current step、step 结果、review 轮次、预算消耗只存在于 Capsule 的 `runtime-state/execution.json`）。
 
 需要澄清的表面矛盾：Core 确实持有 Revision 数据文件（`05-sync-revision-recovery.md#§4` 权威），而 Revision 里可能包含 `execution.json` 的历史快照——这不违反 INV-1，因为 Core 对这些文件是不解析的不透明字节档案：没有任何 SQLite 列或 API 字段以结构化方式暴露 `current_step`/`step_attempt_id` 等执行态语义（§2.6 INV-2c 已将此列为写路径的硬性禁止）。唯一对外读取路径是 §5.2 的 read-through：把整份 Revision 当作不透明 byte blob 重建后，原样透传其中 `runtime-state/execution.json`（`03-execution-capsule.md#§4.2` 当前权威 schema）的完整内容作为对外可见的「进度」，不额外解析、不裁剪字段、不在 Core 自己的数据模型中重新表示它；`execution.json` 当前 schema 未定义独立命名的 `progress` 字段，若 `03` 未来新增该字段，本节的透传对象相应收窄为该字段本身，接口形状不变。「持有 Revision 文件」（存储层面）与「含有执行态」（数据模型/API 层面）是两件事，INV-1 约束的是后者。
@@ -58,6 +63,8 @@
 
 ### 2.3 owner generation（权威定义：概念与生命周期；存储见 §4.3） <!-- §2.3 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、Revision/CAS/manifest、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 **owner generation**：WI 归属权的单调递增整数，每发生一次认领（claim）或接管（force-takeover）加一。第 g 代 owner 是 `[g, g+1)` 时间窗内该 WI 的唯一执行权持有者。保证（`00-architecture.md#§2.3` INV-3 的 Core 侧）：
 
 - 同一时刻只有一个 generation 处于活跃态（`owner_generations` 中 `ended_at IS NULL` 的行至多一条，由部分唯一索引在存储层强制）。
@@ -71,6 +78,8 @@
 - **waiting_on**：WI 当前等待的对象，正交于状态机的状态标注，人工/客户端写入（`PATCH`），取值域：`owner`（等人决策/输入）、`dependency:<slug>`（人工注记的等待对象）、空值（无需等待）；`gate` 与 `runtime:*` 已删除（polyforge#149）。`waiting_on` 非空是「被阻塞」的可见信号；就绪队列据此过滤（§5.1）。`blocks` 依赖边**不**写 `waiting_on`：依赖等待由派生只读字段 `waiting_for` 呈现（§4.2a）。
 
 ### 2.5 状态机（WI 生命周期，Core 权威） <!-- §2.5 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 状态集合：`queued`、`running`、`paused`、`blocked`，以及三个终态 `wrapped`、`failed`、`canceled`。合法迁移：
 
@@ -210,6 +219,8 @@ CREATE TABLE wi_dependencies (
 
 ### 4.3 `owner_generations` 与 `claim_idempotency` <!-- §4.3 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 ```sql
 CREATE TABLE owner_generations (
   work_item_id TEXT NOT NULL REFERENCES work_items(id),
@@ -240,6 +251,8 @@ CREATE TABLE claim_idempotency (
 
 ### 4.4 `work_items` 的 workflow 引用列与预算基线（WI 记录瘦身为引用） <!-- §4.4 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、WF-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 **WI 记录对 workflow 只保留引用**（skill 层定稿裁决；polyforge#149 B9 收窄）：`bundle_name` 一列（DDL 见 §4.2）**是 WI 引用的唯一数据模型**——不存在任何第二张表或第二组列承载 WI 对 workflow 的固定信息，resolved steps、frontmatter 解析结果、任何 digest 一律不落库。digest 列与预算基线列已删。Core 不存储 resolved steps 大 JSON，也不保留任何 bundle 目录/注册/文件内容职责——原 `workflow_bundles`/`workflow_bundle_versions`/`workflow_bundle_files`/`workflow_pins` 四表整体删除，对应端点（bundle 注册表、bundle 文件取回、workflow-pin）一并删除（§5.1）。
 
 **NULL = 纯登记票**：`bundle_name` 可空，NULL/非 NULL 由写路径强制（§4.5 的共用落库路径；存量异常行按字面数据展示、不拒读）。`bundle_name IS NULL` 的 WI 是**纯登记票**（registration-only）：仅承载 goal/content/labels/attrs/parent_id 等登记信息——**不可 claim**（`CORE-409`（`reason=NOT_CLAIMABLE`），§6.1；无 owner_generations 行、无 Capsule 现场），**不可 submit**（块上传与 manifest 提交端点一律 `CORE-409`，无 Revision 可发布）；状态机上只能停在 `queued` 或被 `cancel`（§6.5）。非 NULL 时即为**执行票**，受 §4.5 创建时校验与固化约束。NULL 与非 NULL 之间在 R2 窗口（queued ∧ 从未认领）内可经 `PATCH bundle_name` 双向变更（登记票可在窗口内补挂 workflow，执行票可解绑降回登记票；§4.5），首次认领后不存在任何 UPDATE 路径（INV-2e）；要执行某登记票承载的内容，可在 R2 窗口内直接补挂 bundle（§4.5），或将内容拆为子票（epic-lite，§4.2a；子票自身可为执行票），父票保持登记票不变。epic 父票（§4.2a）必为登记票（对称规则，§4.2a）。
@@ -266,6 +279,8 @@ CREATE TABLE claim_idempotency (
 **R2 窗口与 PATCH 落库（w140 裁决，首次认领冻结）**：`bundle_name` 的固化时点为**首次认领冻结**——R2 窗口（`status='queued'` 且从未认领：无活跃 session 行且无 `session_claimed` 事件）内，`PATCH /api/v1/work-items/{id}` 携带 `bundle_name` 被接受：NULL→X 补挂、X→Y 换名、X→NULL 解绑（票回到 ready queue 待选 bundle 分段）；写路径与创建共用同一落库规则（引用即名字；携带 digest 键的 PATCH 整体拒绝 `CORE-400`；`repo_inventory` 不触碰），窗口判定不看 `waiting_on`。窗口外拒绝且不写库：已认领/非 queued → `CORE-400 reason=IMMUTABLE`，终态 → `CORE-410 reason=TERMINAL_STATE`。对称规则（§4.2a）：有子票的票拒绝非 NULL 绑定（`CORE-400 reason=HAS_CHILDREN_NO_BUNDLE`）。并发：PATCH bundle vs Claim 不另设仲裁，单写者事务串行化加各自 CAS 保证终态一致——绑定或改名的 PATCH 不会让 Claim 失败，PATCH 排在其前则 Claim 冻结新 bundle，排在其后则被拒（`CORE-400 reason=IMMUTABLE`，或复查无具体原因时 `CORE-409 reason=RACE_LOST`），均不写库；绑定 bundle vs 新增子票以创建事务内父票 bundle 复查互斥，终态不同时出现「有子票 ∧ bundle 非空」。接口契约（字段、reason 清单、响应形状、部署与回滚）权威：`wi-kind-contract.md`。
 
 ### 4.5a `workflow_budget_increments`（预算增量，独立可追加记录） <!-- §4.5a -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 ```sql
 CREATE TABLE workflow_budget_increments (
@@ -322,6 +337,8 @@ CREATE INDEX idx_events_wi ON wi_events(work_item_id, id);
 ```
 
 ### 4.8 `capsule_revisions` / `capsule_heads` / `capsule_tombstones`（Revision 登记与 HEAD 指针） <!-- §4.8 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 数据模型与发布协议权威在 `05-sync-revision-recovery.md#§4`、`#§5`；本文只定义 Core 侧登记表（HEAD 是指针状态，不是执行态——两表列均为 Revision 元数据，无 step/attempt 语义）。
 
@@ -391,6 +408,8 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
 
 ### 4.10 身份、机器与 service 自注册 <!-- §4.10 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 ```sql
 CREATE TABLE projects (
   id        TEXT PRIMARY KEY,
@@ -451,6 +470,8 @@ CREATE TABLE service_secret_epochs (
 
 ### 4.11 AIHub 本地数据目录布局（权威；`07-deployment-pilot.md#§4` 为部署视角摘要，完整树以本文为准） <!-- §4.11 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 ```
 <data_dir>/                              # 缺省 /var/lib/polyforge/aihub（可配置）
 ├── aihub.db                             # Core（§4 全部表）
@@ -471,6 +492,8 @@ CREATE TABLE service_secret_epochs (
 
 ## 5. API 与错误码 <!-- §5 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（flush 证据、read-through、本地认证代理）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 本节是 AIHub 对外 HTTP API 的唯一权威面（端点 canonical 清单见 §5.1）。
 
 **单端口与无长连接（A5 裁定，保留）**：AIHub 只监听一个 HTTP 端口，§5.1 全部端点（业务面 26 端点与管理面 M1–M5）共用该端口与同一鉴权面，不按功能分设第二监听面；AIHub 与任何调用方之间不存在长连接（无 WebSocket/SSE/流式保活），一切交互均为短 HTTP 请求/响应。**跨机无 Daemon 直连**：Daemon 是本机执行面（`00-architecture.md#§3.1`，只经本机 Unix domain socket 服务同机 Harness，`04-local-runtime.md#§5.1`），跨机器的客户端（`pf` CLI、CI、人）一律直连 AIHub 本节端点，不存在「跨机直连他人 Daemon」的任何路径。
@@ -485,6 +508,8 @@ CREATE TABLE service_secret_epochs (
 分流不改变语义权威，也不放宽 Core 侧校验：直连 verbs 与其他 HTTP 客户端过同一套鉴权（§8）；经 Daemon 的 verbs 由 Daemon 机械转发与本地认证代理（`04-local-runtime.md#§5.3`），Core 端点仍是同一张 §5.1 清单。
 
 ### 5.1 API 全集（26 端点）——canonical inventory <!-- §5.1 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、HMAC 令牌、SYNC-* 码、Revision/CAS/manifest、flush 证据、backupBarrier、takeover、rotate-secret、read-through、本地认证代理）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 **计数口径（权威，A6 修复；B06 裁定后计数为 25；基线修订 polyforge#3 补 G 组行 26 后为 26——理由：§4.2a 定义了 wi_dependencies 完整写路径，原清单漏列其路由）**：本表是 AIHub HTTP API 的唯一 canonical 端点清单（`00-architecture.md#§5` 所引「26 个端点分组」即本表），任何文档不得在别处另行枚举 AIHub 端点。计数单位 = **端点行**：A–D 组每行是一个 method+path 端点（唯一例外：行 3 把 `/work-items/{id}` 同路径的 GET（详情）与 PATCH（更新）合并计 1 行——两方法共享同一路径、同一鉴权与 §4.10 权限面）；E 组每行是一个**操作组**（组内可含多条 method+path，计 1 行）；F 组每行是一个资源的 CRUD 面（同资源路径族计 1 行）。业务面 26 行逐字可复算：
 
@@ -586,6 +611,8 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 
 ### 5.2 进度 read-through API（权威定义） <!-- §5.2 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 `GET /api/v1/work-items/{id}/progress` 返回 `{work_item_id, head_seq, head_generation, progress, head_updated_at, freshness_note}`；WI 不存在 → `CORE-404`；该 WI 从未发布任何 Revision 且其机器心跳仍存活（Capsule 尚在初次检出）→ `CORE-504`。
 
 语义（`00-architecture.md#§2.3` INV-1 的接口面）：
@@ -596,6 +623,8 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 4. 新鲜度 = HEAD 更新时间，由 `05-sync-revision-recovery.md#§6` 的发布触发时机保证（HEAD 只在该流程的步骤 6 推进）；`freshness_note` 标注「数据截至最近一次发布」。AIHub 不主动向 Daemon/WI Agent 拉取实时状态，read-through 的读取对象永远是已发布的 Revision 现场，不是任何进程的内存状态。 〔#111分类：删→驱动〕
 
 ### 5.1a 事件与执行态键名附录（§2.6 INV-2c 引用的权威表） <!-- §5.1a -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、WF-* 码、takeover、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 `wi_events.event_type` 允许枚举（部署/生命周期/审计类，无 step/attempt/review 语义）：
 
@@ -612,6 +641,8 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 **执行态键名黑名单（递归扫描，非仅顶层，修复 B22）**：`current_step`、`step_id`、`step_attempt_id`、`attempt`、`review_round`、`review_rounds`、`review_verdict`、`progress`、`workflow_status`、`steps`、`rewind_stats`、`budget_consumed`、`command_count`、`step_start_refs`、`pending_question`。校验器**递归遍历** `attrs`/payload 整个 JSON 树的每一层对象键（不只检查顶层），任何深度的对象键命中该词表均拒绝，不因嵌套在任意包装键之下（例如 `attrs.custom.current_step`、`attrs.foo.bar.budget_consumed`）而侥幸通过；数组元素内的对象同样递归扫描。拒绝错误码为 `CORE-400`（`reason=EXECUTION_STATE_REJECTED`，`detail` 携带命中的完整 JSON 路径，如 `attrs.custom.current_step`）。该词表逐一覆盖 `03-execution-capsule.md#§4.2` 当前权威 `runtime-state/execution.json` schema 的全部执行态字段（`current_step`/`workflow_status`/`steps`/`review_rounds`/`rewind_stats`/`budget_consumed`/`step_start_refs`/`pending_question`），而不是只列举示例性字段名——目的是让 `attrs`/事件 payload 这类自由 JSON 结构（无论嵌套多深）都拼不出任何一段完整或局部的 workflow execution state；`03` schema 未来新增字段时，必须先在此表登记再实现（本文与 `01-workflow-skills.md`/`03-execution-capsule.md`/`04-local-runtime.md` 共享同一词表权威在此）。
 
 ### 5.3 错误码表（前缀 CORE） <!-- §5.3 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、Revision/CAS/manifest、flush 证据、takeover、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 | 码 | 语义 |
 |---|---|
@@ -634,6 +665,8 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 
 ### 6.1 claim（generation 仲裁，含幂等硬化） <!-- §6.1 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、HMAC 令牌、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 1. 查 `claim_idempotency` 是否存在 `idempotency_key` 匹配的行。若存在：校验该行的 `caller_identity` 与 `work_item_id` 是否与本次请求完全一致（INV-2d）——三项均匹配才直接返回缓存的 `response_json`，不重新分配 generation；若 `idempotency_key` 相同但 `caller_identity` 或 `work_item_id` 不同，视为不同请求，拒绝为 `CORE-409 IDEMPOTENCY_KEY_REUSED`（防止跨身份或跨 WI 误命中缓存响应）。
 2. 若无匹配行：加载 WI；不存在 → `CORE-404`；处于终态 → `CORE-410`；登记票（`bundle_name IS NULL`，§4.4）→ `CORE-409`（`reason=NOT_CLAIMABLE`）；已存在活跃 generation 行 → `CORE-409 ALREADY_CLAIMED`。
 3. 若均未命中上述拒绝条件：新 generation `g = 当前最大 generation + 1`，插入一行 `owner_generations`（`ended_at` 为 NULL）；WI 的 `assignee` 设为调用方、`status` 转 `running`、`waiting_on` 清空。
@@ -644,6 +677,8 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 若请求发出后、响应返回前调用方进程崩溃：调用方重启后带同一 `idempotency_key` 重发，命中第 1 步缓存直接返回之前结果，不重新分配 generation，也不报 `CORE-409`。若本地的 `idempotency_key` 也丢失（磁盘同时损坏）：唯一人工介入路径是查询 WI 当前 `assignee`/generation，若确认属于本机则手动 `force-takeover`（自接管，仅升 generation，不影响语义）后重建本地现场。
 
 ### 6.2 generation 生命周期（§2.3 的流程面） <!-- §6.2 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、flush 证据、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 1. `pause`/`block`/`wrap`/`fail`：先校验 §6.4 的 `flush_evidence`，通过后将当前活跃行 `ended_at` 设为 `now`、`end_reason` 设为对应值；`assignee` 保留为最后一任 owner（作为历史记录）。
 2. `force-takeover`：不需要 `flush_evidence`（旧 owner 可能已失联，无法提供证据）；将旧活跃行 `end_reason` 设为 `takeover`，开新一行 `generation+1`；旧 owner 之后任何携旧 token 的写请求均因校验失败而返回 `CORE-403`（`reason=stale_generation`）。
@@ -656,6 +691,8 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 3. 将该文件的完整内容（或其未来新增的 `progress` 字段，若 `03` 演进出该字段）直接作为响应返回；每次调用都现读现算，不写入、不查询任何独立的物化缓存文件。
 
 ### 6.4 generation 收尾的 flush 证据协议（B03 修复） <!-- §6.4 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 **适用范围**：`pause`、`block`、`wrap`、`fail` 四个使当前活跃 generation 结束的端点，调用时必须携带 `flush_evidence` 字段，证明本 generation 已完成最后一次全扫描发布（或确认无需发布）。`cancel` 不适用本协议（见 §6.5：只能作用于本来就没有活跃 generation 的 WI）。
 
@@ -682,6 +719,8 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 
 ### 6.5 非活跃 WI 的终止（cancel）契约（B05 修复） <!-- §6.5 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、flush 证据、takeover、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 `cancel` 只适用于 `queued`/`paused`/`blocked` 三种非活跃状态（`running` 需先 `pause`/`block` 或被 `force-takeover` 后再 cancel，不在本契约范围内）。三种状态的授权与前置条件完全一致，不需要持有任何活跃 generation 令牌：
 
 1. **`queued`**：该 WI 从未发生过任何 claim，不存在 `owner_generations` 行。授权：调用方为 `reporter`、该 project 的 maintainer 或 `role='admin'`。成功后 `status → canceled`，`closed_at` 赋值，不涉及任何 generation 行。
@@ -691,6 +730,8 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 **workflow 失败终态的映射与可取消性**：`01-workflow-skills.md#§6.5` 定义的 `failed_gate`/`failed_rewind_exhausted` 是 Capsule 侧（`execution.json.workflow_status`，`03-execution-capsule.md#§4.2`）终态，WI Agent 检测到这两种终态后，按 §6.4 的 flush 证据协议调用 `block` 端点（`waiting_on=owner`）。Core 侧只接收并落盘这一次状态迁移本身（`status=blocked`、`waiting_on=owner`，以及 §5.1a 通用 `blocked` 事件 `{generation, reason?}`）；具体是 `failed_gate` 还是 `failed_rewind_exhausted` 这一区分不随事件或任何字段进入 Core（Core 不新增专属事件类型来承载它，INV-2c），该区分永远只能从 Capsule 的 `execution.json` 或 read-through（§5.2）读到。进入 `blocked` 之后，该 WI 就是本节定义的普通 `blocked` WI，可直接按上述第 3 条取消，**不要求先重新执行任何 step 才能取消**。 〔#111分类：删→驱动〕
 
 ### 6.6 凭证轮换后的重新授权（B09 修复） <!-- §6.6 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、HMAC 令牌、takeover、rotate-secret）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 **两种轮换模式（管理面操作 M5，不占业务 26 端点口径；由 `mode` 区分，互不混用）**：经 `POST /api/v1/service/rotate-secret`（行 M5，`role='admin'` 或启动自检触发）接受 body `{mode: "grace"|"rollback", grace_seconds?}`：
 
@@ -719,6 +760,8 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 
 ### 6.7 超预算后的增加预算 API（B11 修复） <!-- §6.7 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 **端点**：`POST /api/v1/work-items/{id}/budget-increments`，body `{dimension, amount, note?, based_on_seq}`。
 
 **授权规则**：调用方必须是以下之一：该 WI 的 `reporter`、该 project 的 maintainer、或 `role='admin'`。不要求调用方持有该 WI 的 generation token——这是人工在 WI 处于 `blocked`（`waiting_on=owner`）时从外部做出的决定，不是当前执行现场的操作。不符合上述角色 → `CORE-403`（`reason=forbidden`）。
@@ -742,6 +785,8 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 
 ## 8. 安全边界 <!-- §8 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、takeover、rotate-secret）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 - 写 API 三重校验：api_key（身份）→ WI 级 generation 凭证（有活跃 generation 时）→ 状态机合法性。过期 generation 一律 `CORE-403`，防止被接管方残留写入。
 - **api_key project scope 由 HTTP middleware 在进入任何业务 handler 之前强制执行**（§4.10）：`api_keys.project_id` 非 NULL 的 key 对 scope 外 project 的一切对象（含列表/过滤/检索请求中的 project 维参数）一律拒绝，不依赖各 handler 自觉校验；scope 只收窄不扩大授权（scoped key 的 user 仍须本就在 `project_members` 中）。无 membership 者的不可见性（§4.10 权限硬边界）同样在 middleware 层先于 handler 生效。**两面分层（澄清 7 的 middleware 落地；D4 修订 polyforge#150）**：membership 不可见性只作用于**数据面端点**（A 组 WI 业务、E 组 Memory、管理面）——机器调用方在这些端点上按 membership OR admin 判定；**执行面端点**（B 组 claim/force-takeover/session-end/budget、C 组同步、D 组心跳）不做 membership **可见性过滤**，但 claim 本身仍要求该 project 的 writer/maintainer membership 或全局 admin（D4：`hSessionClaim` → `requireWrite`，403 otherwise），其余执行面端点按角色（force-takeover 限 admin）与 generation token 判定；claim 响应携带 bundle 引用与预算基线，机器无需任何数据面读取即可完成执行路径（`04-local-runtime.md#§6.1`）。
 - api_keys 只存哈希；service_secret 仅存在进程内存 + 本地文件（0600），不入库。本地目录 `memory/`、`capsules/`、`backups/` 权限 0750、属主 aihub 进程用户。
@@ -750,11 +795,15 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 
 ## 9. 监控 <!-- §9 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、flush 证据、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 - service 心跳年龄（告警阈值可配）；Core 写事务 p99 延迟；`capsule_heads.updated_at` 滞后分布（= 各 WI 同步新鲜度）；read-through 进度查询延迟 p99。
 - `CORE-403`/`CORE-425`/`CORE-509` 计数分别监控：`CORE-403` 尖峰常对应接管事件或凭证轮换窗口；`CORE-425` 尖峰提示 WI Agent 侧 flush 协议实现可能有缺陷；`CORE-509` 任何非零计数都需人工审查。 〔#111分类：删→驱动〕
 - stale Daemon/机器数量（心跳过期）；就绪队列长度；`workflow_budget_increments` 的频率（频繁增量提示 workflow 预算声明偏保守，反馈给 `01-workflow-skills.md` 的参考流程作者）。
 
 ## 10. 测试与故障注入 <!-- §10 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、Revision/CAS/manifest、flush 证据）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 测试类别（不给具体历史数据或日期，量化指标与回归清单权威在 `07-deployment-pilot.md`）：
 

@@ -1,6 +1,7 @@
 # 01 — Workflow 与 Skills：frontmatter schema、执行语义与预算
 
-> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+> **ARCHIVED（repo review 2026-10-16 G-1）— 本文大部分描述已删除的机制：WI Agent 物化、创建时 digest 固化、`WF-*` 码、requests/tokens 预算（§4.1/§4.4/§6.6 已按代码更正）。标有 ARCHIVED 横幅的节 do not build from this；未标横幅的节也只作历史与溯源参考。现行设计权威：[v2-converge.md](v2-converge.md)、[wi-kind-contract.md](wi-kind-contract.md)、[08-capsule-base-migration.md](08-capsule-base-migration.md)；与代码冲突时一律以代码为准。**
+> Most of this document describes deleted mechanisms. Sections bannered ARCHIVED must not be built from; the live authority is v2-converge.md plus the code.
 
 | 权威项 | 值 |
 |---|---|

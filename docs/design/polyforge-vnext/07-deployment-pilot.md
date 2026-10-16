@@ -1,6 +1,7 @@
 # 07 — Deployment / Pilot：一期部署形态、回归清单与否决门槛
 
-> **注意 / Note（2026-10-12）**：本文部分内容已被 [v2-converge.md](v2-converge.md) 取代；两者冲突时以 v2-converge 为准。Parts of this document are superseded by v2-converge.md; where they conflict, v2-converge wins.
+> **ARCHIVED（repo review 2026-10-16 G-1）— 本文大部分描述已删除的机制：`pf upgrade`、`DEPLOY-*` 码、`aihub migrate` / `schema_version`、`rotate-secret` 回滚、`machines register`、Interactive/Batch/Drain（§3、§6.5 已按 #174 更新）。标有 ARCHIVED 横幅的节 do not build from this；未标横幅的节也只作历史与溯源参考。现行设计权威：[v2-converge.md](v2-converge.md)、[wi-kind-contract.md](wi-kind-contract.md)、[08-capsule-base-migration.md](08-capsule-base-migration.md)；与代码冲突时一律以代码为准。**
+> Most of this document describes deleted mechanisms. Sections bannered ARCHIVED must not be built from; the live authority is v2-converge.md plus the code.
 
 | 权威项 | 值 |
 |---|---|
@@ -11,6 +12,8 @@
 ## 1. 范围与非目标 <!-- §1 -->
 
 ### 1.1 范围 <!-- §1.1 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（PILOT-* 码、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 - 一期部署形态：单 active AIHub + SQLite + 本地目录，**无 PostgreSQL / JuiceFS / S3**（INV-10），
   Daemon 统一作为 Interactive / Batch / Drain 三种 WI Job 执行模式的唯一执行者（`00-architecture.md#§3.4`），
@@ -69,6 +72,8 @@
 
 ### 2.1 一期部署形态（权威） <!-- §2.1 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、CAP-* 码、Revision/CAS/manifest、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 单主机运行 `aihub` 服务进程（单 active Service，INV-2，`02-aihub-core.md#§2.2`）；Core 是单个 SQLite 文件 +
 WAL，**不保存任何 workflow 执行状态**（INV-1）。远端数据——Capsule Revision 的 CAS 存储、Memory
 权威 Markdown、最终结果归档——全部落在本机目录 `<data_dir>/`（布局权威在 `02-aihub-core.md#§4.11`；本文 §4 给出
@@ -117,6 +122,8 @@ tracker sync 等 v1 不含的能力）是两个互不共享代码与数据的独
 
 ### 2.2 本文新增不变量 <!-- §2.2 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 | 编号 | 不变式 |
 |---|---|
 | INV-D1 | 升级期间**没有**双写窗：旧 aihub 进程必须先停稳、释放 `02-aihub-core.md#§2.2` 的 `service.lock`，新进程才允许启动。 |
@@ -126,6 +133,8 @@ tracker sync 等 v1 不含的能力）是两个互不共享代码与数据的独
 | INV-D5 | 任何以「样本占比超过阈值」形式表达的否决门槛，必须同时给出：统计窗口（Pilot 累计周期或滚动周期）与分母的精确定义（哪一类事件、取自哪个时间范围）；只给比例不给窗口/分母的表述在本文视为未完成定义，不得进入否决门槛表（§9.3 逐条落实）。 |
 
 ### 2.3 部署单元与 WI Agent 的关系 <!-- §2.3 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 WI Agent（`00-architecture.md#§3.6`）**不是**独立安装的部署单元：它是 Daemon 在创建 Job 时按需派生的每 WI
 一个的宿主机原生子进程，运行的是与 Daemon 同一份分发物中的驱动代码，不单独打包、不单独安装、不
@@ -169,13 +178,14 @@ agents 废弃）——部署面不部署、不迁移其中任何被删除或废�
 | `aihub` | AIHub 服务二进制（**新仓部署物**，`00-architecture.md#§3.3` 取代声明；与旧 aihub 系统并存到 Pilot 通过，切换见 §2.1/§11） | 单主机，docker compose 服务 `aihub`（`deploy/docker-compose.yml`，`restart: unless-stopped`：崩溃与主机重启均由 docker 拉起；镜像只由 `.polyforge/deploy.sh` 拉取/加载，compose 从不构建） | 是（§6.3/§6.4，经 `.polyforge/deploy.sh`：在线备份后秒级切换窗口，失败自动回滚） |
 | 工作机二进制 | 单文件：`pf` CLI 动词 + `daemon` 子命令（部署单元合并裁定，`00-architecture.md#§3.3`；数据面动词直连 AIHub 与管理操作，分流表 `00-architecture.md#§5.1`） | 每台工作机：`/usr/local/bin/pf`，由 `tools/install.sh` 安装。`daemon` 子命令**只经 `pf daemon ensure` 拉起**（幂等 + 文件锁）：它在 tmux 会话 `polyforge-daemon` 中运行监督环（`pf daemon <规范 argv>`，非零退出 5s 后重启，干净退出即结束环）——**崩溃**约 5s 内被环重新拉起，`pf ops shutdown` 则连环一起停下；tmux 不跨容器/机器重启存活，**重启**后由下一个开始或恢复的 harness 会话（pi `pf-chat` 扩展、Claude Code SessionStart 钩子）执行 `pf daemon ensure` 拉起（§6.5）。有 systemd 的机器同样走 tmux 环（与容器一致，最小可行）；操作者若改用自管的 systemd 单元 `polyforge-daemon.service`，`pf doctor` 亦认作已监督。满足 `04-local-runtime.md#§7` 的「崩溃后可被重新拉起」 | 是，逐台滚动（§6.3⑤：持 ensure 锁→优雅停机（环随干净退出结束）→替换单文件与 `release/current`→释放锁→`pf daemon ensure`） |
 | 路由 Skill | Skill 包（含 pi `pf-chat` 扩展与 Claude Code SessionStart 钩子两个适配层） | 各用户 Harness，引用工作机的 `release/current` 检出（§2.3） | 随仓 tag 版本（mono-repo 单一 semver，`00-architecture.md#§3.3`）：`tools/install.sh` 切换 `release/current` 即更新，下一个 harness 会话生效；pi 为本地路径包、cc 为软链，均零复制；不构成独立版本线 |
-| bundle | `workflows/<bundle-name>/`：`workflow.md`（frontmatter + 正文）+ `agents/*.md`（`01-workflow-skills.md#§2.1`/§3） | 随 aihub 仓本机 checkout 交付：AIHub 服务主机（创建 WI 时服务端读取，`02-aihub-core.md#§4.5`）与每台工作机（WI Agent 第 0 步物化来源，`03-execution-capsule.md#§4.5`） | 否——无注册接口、无 registry/Core catalog（`01-workflow-skills.md#§2.1`）；随 checkout 的 git 版本演进，不构成独立部署/升级/回滚单元 |
+| bundle | `workflows/<bundle-name>/`：`workflow.md`（frontmatter + 正文）+ `steps/<id>.md`（`01-workflow-skills.md#§2.1`/§3） | 随 aihub 仓本机 checkout 交付：AIHub 服务主机（创建 WI 时服务端读取，`02-aihub-core.md#§4.5`）与每台工作机（WI Agent 第 0 步物化来源，`03-execution-capsule.md#§4.5`） | 否——无注册接口、无 registry/Core catalog（`01-workflow-skills.md#§2.1`）；随 checkout 的 git 版本演进，不构成独立部署/升级/回滚单元 |
 
-WI Agent（§2.3）不在本表——它没有独立的部署位置或版本号，其代码版本恒等于派生它的 Daemon
-版本。Interactive / Batch / Drain 三种模式是 Daemon 自身的运行时判据（`00-architecture.md#§3.4`），不是三个
-独立部署单元，本表不为它们分别列行。
+执行 workflow 的 Go driver 运行在 Daemon 进程内，没有独立的部署位置或版本号（原 WI Agent 与
+Interactive / Batch / Drain 模式均已删除）。
 
 ## 4. 数据结构：部署单元文件清单与目录布局 <!-- §4 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 ```
 主机侧（AIHub）：<data_dir>/           # 缺省 /var/lib/polyforge/aihub/
@@ -207,6 +217,8 @@ workspace 旗标或环境变量（旧 `-workspace` / `POLYFORGE_WORKSPACE` 已�
 
 ## 5. API 与错误码（部署 CLI 面） <!-- §5 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（SYNC-* 码、DEPLOY-* 码、PILOT-* 码、backupBarrier、pf upgrade）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 | 操作 | 语义 | 可能错误码 |
 |---|---|---|
 | `.polyforge/deploy.sh <ver> --confirm <ver>` | AIHub 服务主机：把已发布版本推上 docker 服务——在线备份（rsync + SQLite backup API 快照 + 追平 + 异机副本，服务不停）→ 秒级切换窗口（停旧容器→该版本 upgrade SQL→起新容器）→ 校验；切换后任一步失败自动回滚（§6.3/§6.4） | 退出码 10（已回滚）/ 11（回滚失败） |
@@ -235,6 +247,8 @@ workspace 旗标或环境变量（旧 `-workspace` / `POLYFORGE_WORKSPACE` 已�
 ## 6. 核心流程：安装 / 升级 / 回滚（编号步骤） <!-- §6 -->
 
 ### 6.1 安装 <!-- §6.1 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 1. 在主机创建 `<data_dir>`（权限 `0750`，属主为服务运行用户）。
 2. 部署 `aihub`：以 docker compose 服务 `aihub` 运行已发布镜像（`deploy/docker-compose.yml`，
@@ -274,6 +288,8 @@ workspace 旗标或环境变量（旧 `-workspace` / `POLYFORGE_WORKSPACE` 已�
    失败原地 resume 语义处理，装机探针不为其兜底，也不因探针曾通过而改变该语义。
 
 ### 6.2 一致性备份（`pf backup` 与 `.polyforge/deploy.sh` 在线备份，升级/回滚均以此为前置步骤） <!-- §6.2 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（DEPLOY-* 码、Revision/CAS/manifest、backupBarrier）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 现行实现：升级前的全量备份是 `.polyforge/deploy.sh` 第 3–5 步（服务不停：rsync `memory/` 与 `git/`
 → SQLite backup API 快照 `aihub.db` → rsync 追平 → 快照完整性与计数校验 → 异机副本）；`pf backup`
@@ -319,6 +335,8 @@ workspace 旗标或环境变量（旧 `-workspace` / `POLYFORGE_WORKSPACE` 已�
 
 ### 6.3 升级 <!-- §6.3 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、DEPLOY-* 码、Revision/CAS/manifest、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 1. 执行一次 §6.2 一致性备份（必做，不可跳过）。
 2. 经 `.polyforge/deploy.sh` 的切换窗口停止旧 `aihub` 容器（优雅排空）；确认 `service.lock` 已释放（INV-D1）——若检测到锁未释放
    （例如停止超时），中止升级并返回 `DEPLOY-409 LOCK_HELD`。
@@ -344,6 +362,8 @@ workspace 旗标或环境变量（旧 `-workspace` / `POLYFORGE_WORKSPACE` 已�
    异常收敛失败。
 
 ### 6.4 回滚 <!-- §6.4 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、HMAC 令牌、DEPLOY-* 码、Revision/CAS/manifest、takeover、rotate-secret）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 1. 确认回滚安全前置条件：查询机器身份表，全部机器的最近心跳时间距当前超过 5 分钟，或操作者已
    手动确认接受跨过该检查；若存在近期心跳且未手动确认，中止回滚并返回
@@ -429,6 +449,8 @@ docker 拉起，升级只在 `.polyforge/deploy.sh` 的秒级切换窗口中断�
 
 ## 7. 并发与崩溃恢复（升级窗口） <!-- §7 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 - **升级窗内 Core 不可用**：WI Agent 一侧的 Revision 发布请求失败后按 `05-sync-revision-recovery.md#§6` 的六步流程原地
   重试（幂等，`05-sync-revision-recovery.md#§2.8`）；watcher 标记的 dirty 状态在此期间只是持续累积，不丢失（`00-architecture.md#§4.3`：
   watcher 只标记不发布）。升级完成、AIHub 恢复可用后，`00-architecture.md#§4.3` 定义的四类触发时机之一（通常是
@@ -467,6 +489,8 @@ docker 拉起，升级只在 `.polyforge/deploy.sh` 的秒级切换窗口中断�
 
 ### 9.1 Pilot 范围与参与面 <!-- §9.1 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（Interactive/Batch/Drain、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 - 范围：1 个 project、3 个内部仓库、4 名工程师（经路由 Skill 会话使用 **Interactive** 模式：
   submit/observe/answer，`00-architecture.md#§3.4a`）+ 2 台常驻工作机（分别运行 **Batch**——人显式确认 wave 后
   成批派发，`00-architecture.md#§3.4b`——与 **Drain**——反复向 AIHub 调度器（就绪队列）取用下一批可执行 WI 且无需逐条
@@ -497,6 +521,8 @@ docker 拉起，升级只在 `.polyforge/deploy.sh` 的秒级切换窗口中断�
   请求/响应，不出现 SSE、服务端推送或长连接。
 
 ### 9.2 观测指标 <!-- §9.2 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（SYNC-* 码、Interactive/Batch/Drain、watcher dirty 位、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 指标分层遵循 `00-architecture.md#§9` 的总则（AIHub / Daemon / Sync / Workflow / Capsule / Memory 六层各自的
 权威指标定义分别在 `02`/`04`/`05`/`01`/`03`/`06-memory-search.md#§9`）；本节只定义 Pilot 期间额外聚合、用于
@@ -551,6 +577,8 @@ M1–M9 无一依赖旧多段结构——M3 的卡死判定来自 step 状态与
 
 ### 9.3 否决门槛（每条均给出机械判定公式） <!-- §9.3 -->
 
+> **ARCHIVED — 本节描述或依赖已删除的机制（WF-* 码、PILOT-* 码）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+
 | 门槛 | 判定（机械） | 触发动作 |
 |---|---|---|
 | `PILOT-V1` | M1 计数 > 0（Pilot 累计运行以来任何一次 HEAD 回退） | 否决：回滚或重设计 Sync 域 |
@@ -567,6 +595,8 @@ M1–M9 无一依赖旧多段结构——M3 的卡死判定来自 step 状态与
 `max_per_step`/`max_total` 收敛，超界直接进入终态（`WF-101`），不需要额外的 Pilot 期比例门槛。
 
 ### 9.2a M4/M5 的机械可判定性与证据来源（INV-D3/INV-D4 落实） <!-- §9.2a -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、RunCommand、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 **M5（谎报逃逸）的判定不依赖任何形式的人工抽查**，也**不以「调用了多少次 `RunCommand`」作为
 可疑信号**（该口径的问题：产出代码或文档的 step（如 `code`、`fix`、`plan`、`e2e-author`）完全
@@ -618,6 +648,8 @@ Agent 独占写入的 `runtime-state/execution.json`（INV-6）才具备 INV-D3 
 ## 10. 测试、故障注入与回归清单 <!-- §10 -->
 
 ### 10.1 部署域测试与故障注入 <!-- §10.1 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、SYNC-* 码、Revision/CAS/manifest、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 - 升级序端到端：单机升级 → 断言 INV-D1（升级窗内任意时刻查询 Core 写路径，不存在两个进程同时
   持有 `service.lock` 的窗口）、Capsule 现场零丢失（`05-sync-revision-recovery.md#§7.1` 收敛断言）。
@@ -672,6 +704,8 @@ Agent 独占写入的 `runtime-state/execution.json`（INV-6）才具备 INV-D3 
    不出现 `unicode61` 等其他 tokenizer 口径。
 
 ### 10.2 回归清单（13 条，逐条含缺陷摘要 / vNext 交叉引用 / 机械反例断言） <!-- §10.2 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、SYNC-* 码、CAP-* 码、WF-* 码、Revision/CAS/manifest、RunCommand、takeover、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 > 考证方法（B19 修复：逐条经本仓 git 历史考证，不用「仅按编号可追溯」作声明）：13 个编号均为本 aihub
 > 部署自身的真实 polyforge 工作项（work item，非 GitHub issue）。撰写本文档时在当前 worktree（即
@@ -908,6 +942,8 @@ Core 侧转为 `blocked`/`waiting_on=owner`；Core 事件流中不出现 `WF-101
 本实现，不存在另一份独立实现。
 
 ## 11. 迁移与 rollout <!-- §11 -->
+
+> **ARCHIVED — 本节描述或依赖已删除的机制（Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
 
 - rollout 顺序（权威，`00-architecture.md#§11` 总则的展开，按顺序描述，不绑定具体日历日期）：`aihub` 装机
   （`02`）→ Memory 面就绪（`06`）→ 参考 bundle 就位（checkout 内 `workflows/<bundle-name>/`，无注册面，`01-workflow-skills.md#§2.1`）→ 工作机 Daemon + Capsule 就绪（`04`/
