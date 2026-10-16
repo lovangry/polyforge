@@ -94,7 +94,7 @@ func (r *Runtime) endPendingAttempt(j *job) bool {
 
 // closeBlocked sends one job's SessionEnd(blocked), pushing the local
 // chain FIRST when push is set, with the session credential that dies
-// with the close (B-2): boundedFail commits the dirty capsule before the
+// with the close (RR B-2): boundedFail commits the dirty capsule before the
 // verdict, and when that push failed (most often the same outage that
 // fails the close) the commits would otherwise stay local while the hub's
 // blocked WI is re-claimed from the remote chain.
@@ -219,7 +219,7 @@ func (r *Runtime) finishBlocked(j *job, detail string, settled bool) {
 	}
 }
 
-// retrySeal is the SEALING job's close retry (B-4): the terminal SessionEnd
+// retrySeal is the SEALING job's close retry (RR B-4): the terminal SessionEnd
 // failed after the agent was torn down, so the job sits in SEALING with its
 // verdict recorded. Each attempt takes opMu, checks the job is still the
 // current SEALING one, and runs the very close the restart finisher runs —

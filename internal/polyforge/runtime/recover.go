@@ -81,7 +81,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	switch capsuleWorkflowStatus(j.capsuleDir) {
 	case capsule.WorkflowStatusCompleted:
 		fmt.Fprintf(os.Stderr, "runtime: %s: driver workflow completed — wrapping (recovery cause %q is the completion signal, not a death)\n", j.wi, cause)
-		// The ordinary seal push runs (B-7): the driver does no git, and
+		// The ordinary seal push runs (RR B-7): the driver does no git, and
 		// the observe flush that would carry the terminal execution.json
 		// may have failed or timed out. On a clean tree CommitPush only
 		// re-pushes HEAD; a failed push degrades the close to blocked like
@@ -113,19 +113,18 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		r.boundedFail(ctx, j, "workflow blocked: the owner holds the next move (resume / cancel)")
 		return
 	}
-	// The single recovery ledger (C7): ONE
-	// counter of consecutive recovery failures. A recovery whose relaunch
-	// made no real progress — no step result accepted since — is a
-	// failure, counted at the NEXT re-entry (that re-entry is its proof);
-	// a re-entry that follows an accepted result resets the counter (real
-	// progress is the only reset). The progress signal is the capsule
-	// execution state's accepted-result attempts (the driver's R14 commit
-	// points — the same surface the observe lane polls); a dead agent
-	// writes nothing, so a dying relaunch can never fake its way out of
-	// the ledger. A daemon restart / operator attach is NOT a failure
-	// (v2-converge §2.3): those causes are exempt from the ledger
-	// entirely — neither counted nor resetting — so a deploy retry or a
-	// systemd restart loop cannot bounded-fail every running WI.
+	// The single recovery ledger (C7): ONE counter of consecutive recovery
+	// failures. A recovery whose relaunch made no real progress — no step
+	// result accepted since — is a failure, counted at the NEXT re-entry
+	// (that re-entry is its proof); a re-entry that follows an accepted
+	// result resets the counter (real progress is the only reset). The
+	// progress signal is the capsule execution state's accepted-result
+	// attempts (the driver's R14 commit points — the same surface the
+	// observe lane polls); a dead agent writes nothing, so a dying relaunch
+	// can never fake its way out of the ledger. A daemon restart / operator
+	// attach is NOT a failure (v2-converge §2.3): those causes are exempt
+	// from the ledger entirely — neither counted nor resetting — so a deploy
+	// retry or a systemd restart loop cannot bounded-fail every running WI.
 	if !restartExemptCause(cause) {
 		j.mu.Lock()
 		accepted := acceptedResultCount(j.capsuleDir)

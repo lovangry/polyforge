@@ -452,11 +452,11 @@ func (q *jobQueue) FreeSlots() int {
 // Take pops the next DUE pending entry IF a slot is free (reference.md §6.3
 // backfill: strictly priority desc, then FIFO; an entry still inside its
 // DAEMON-503 backoff is skipped). A started job occupies its slot by
-// appearing in the runtime's live list; a Take()n entry whose claim is
-// still under way occupies one too (B-8: the
-// dispatcher runs each claim in its own goroutine, so the live list
-// learns of it only once the claim landed). An entry whose work item is
-// already in flight waits for that claim to settle.
+// appearing in the runtime's live list; a Take()n entry whose claim is still
+// under way occupies one too (RR B-8: the dispatcher runs each claim in its
+// own goroutine, so the live list learns of it only once the claim landed).
+// An entry whose work item is already in flight waits for that claim to
+// settle.
 func (q *jobQueue) Take() *qEntry {
 	q.mu.Lock()
 	defer q.mu.Unlock()

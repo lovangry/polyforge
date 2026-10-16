@@ -19,7 +19,7 @@ package runtime
 //     5xx) KEEPS the entry: the claim may have landed and the entry is
 //     the only copy of its secret. The in-process retry of the same
 //     start reuses it (claimIntent) and so does the next replay; only a
-//     typed refusal (4xx) or a verify that no longer matches drops it (B-1).
+//     typed refusal (4xx) or a verify that no longer matches drops it (RR B-1).
 //
 // The file is a map keyed by the SUBMITTED id spelling (a slug is legal:
 // the claim endpoint accepts id-or-slug), so clearClaiming and the
@@ -210,7 +210,7 @@ func (r *Runtime) resumeClaiming(ctx context.Context) (replays []claimReplay) {
 			if !claimRefused(err) {
 				// transport loss / 5xx: the outcome is unknown and the
 				// entry is the only copy of the secret — keep it for the
-				// next replay (B-1), exactly like the verify failure
+				// next replay (RR B-1), exactly like the verify failure
 				// above.
 				fmt.Fprintf(os.Stderr, "runtime: %s: claiming entry kept (aihub claim replay failed): %v\n", wi, err)
 				continue
@@ -264,7 +264,7 @@ type claimReplay struct {
 }
 
 // runReplays carries the restart's journal replays to their agents, each
-// on its own goroutine like Start's lane (B-8): the capsule
+// on its own goroutine like Start's lane (RR B-8): the capsule
 // clone and materialize do not run under opMu inside Restart, so a hung
 // clone holds neither the other records' reconciliation nor the
 // daemon's socket. A shutdown meanwhile defers them (AbortClaims) with

@@ -161,15 +161,14 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 	// Step 1: the latch, before any other action.
 	d.modes.SetShuttingDown()
 
-	// Step 1b (B-8): claims under way run outside
-	// the Run loop and outside the runtime's lock. Stop them before the
-	// live-job snapshot: no new claim starts, every capsule/task-repo
-	// clone is cancelled, and each in-flight claim is DEFERRED — its
-	// claiming-journal entry (and its queue entry) stay for the next
-	// start, the work item is never turned blocked — and none can
-	// install an agent behind the teardown below. Only claims already
-	// CLAIMING are waited for, and at most claimAbortWait — the WIP
-	// snapshots below need the rest of the budget.
+	// Step 1b (RR B-8): claims under way run outside the Run loop and
+	// outside the runtime's lock. Stop them before the live-job snapshot: no
+	// new claim starts, every capsule/task-repo clone is cancelled, and each
+	// in-flight claim is DEFERRED — its claiming-journal entry (and its
+	// queue entry) stay for the next start, the work item is never turned
+	// blocked — and none can install an agent behind the teardown below.
+	// Only claims already CLAIMING are waited for, and at most
+	// claimAbortWait — the WIP snapshots below need the rest of the budget.
 	actx, acancel := context.WithTimeout(ctx, claimAbortWait(ctx))
 	d.rt.AbortClaims(actx)
 	acancel()

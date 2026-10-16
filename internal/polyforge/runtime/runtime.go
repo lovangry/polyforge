@@ -114,9 +114,9 @@ type Config struct {
 	RecallTopK int
 	// MemoryRecall, when non-nil, is the F6-A claim-time semantic-recall
 	// seam: materialize calls it with the claim's goal+content, the work
-	// item's own project (B5: the snapshot is scoped to that
-	// project, not to everything the daemon credential can read) and the
-	// top-K, and writes the answer as a static snapshot for the agent.
+	// item's own project (audit B5: the snapshot is scoped to that project,
+	// not to everything the daemon credential can read) and the top-K, and
+	// writes the answer as a static snapshot for the agent.
 	// The daemon binds it to aihub's memory search face (the machine
 	// credential stays with the daemon — agents hold no aihub credential
 	// of any kind); nil disables the snapshot entirely (slim installs,
@@ -178,15 +178,15 @@ type Runtime struct {
 
 	// opMu serializes the mutating operations (Start/Stop/recover/Restart):
 	// the message loop and the daemon's direct calls share it, so the state
-	// machine never sees two drivers at once. It is NOT held across the
-	// slow network steps (B-8): a claim's capsule clone
-	// and materialize run with the job CLAIMING in the table; a
-	// close's or a recovery's pushes and SessionEnd run with the job
-	// latched busy (offLock); a claim's compensation SessionEnd runs with
-	// its work item latched ending (claimEndOffLock). Each re-takes the
-	// lock and re-checks the job's identity before mutating it. The
-	// hub calls of the claim itself (probe, verify, SessionClaim) stay
-	// under it, bounded by the hub client's timeout.
+	// machine never sees two drivers at once. It is NOT held across the slow
+	// network steps (RR B-8): a claim's capsule clone and materialize run
+	// with the job CLAIMING in the table; a close's or a recovery's pushes
+	// and SessionEnd run with the job latched busy (offLock); a claim's
+	// compensation SessionEnd runs with its work item latched ending
+	// (claimEndOffLock). Each re-takes the lock and re-checks the job's
+	// identity before mutating it. The hub calls of the claim itself (probe,
+	// verify, SessionClaim) stay under it, bounded by the hub client's
+	// timeout.
 	opMu      sync.Mutex
 	statePath string
 	// persistMu serializes persist's snapshot and write: with the network
@@ -356,7 +356,7 @@ func (j *job) isBusy() bool {
 }
 
 // offLock runs fn — one job's slow network step: a chain push, the
-// task-repo WIP push, a SessionEnd — with opMu RELEASED (B-8, the claim's
+// task-repo WIP push, a SessionEnd — with opMu RELEASED (RR B-8, the claim's
 // pattern carried to the closes and the recovery). The caller holds opMu on
 // entry and holds it again on return; in between the job is latched busy,
 // so no other door interleaves with the step and one work item's hung push
@@ -745,9 +745,9 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 		return err
 	}
 	// The claim landed and the job sits CLAIMING in the table: the clone
-	// and the materialize run WITHOUT opMu (B-8), so
-	// one slow or hung clone no longer freezes the stops, pauses,
-	// resumes, recoveries and claims of every other work item.
+	// and the materialize run WITHOUT opMu (RR B-8), so one slow or hung
+	// clone no longer freezes the stops, pauses, resumes, recoveries and
+	// claims of every other work item.
 	return r.runClaim(ctx, wi, j)
 }
 
@@ -823,7 +823,7 @@ func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
 	// A journal entry left by an earlier attempt whose claim answer was
 	// lost (transport error, timeout, hub 5xx — see below) is REUSED
 	// rather than replaced: this start is then a replay of the same claim
-	// (B-1), so a claim the hub had committed is adopted instead of
+	// (RR B-1), so a claim the hub had committed is adopted instead of
 	// orphaned.
 	sessionID, key, replay, err := r.claimIntent(wi)
 	if err != nil {
@@ -876,14 +876,14 @@ func claimRefused(err error) bool {
 }
 
 // claimIntent answers the session secret and idempotency key this start
-// claims with (B-1). With no journal entry for wi it mints
-// a fresh pair. An entry left by an earlier attempt whose answer
-// was lost is checked first: SessionVerify says the journaled session
-// holds the WI → the claim landed, reuse the pair so the claim is a D4
-// replay that hands the same answer back; verify says it does not → the
-// earlier claim never landed or was ended since (a replay could hand
-// back a stale cached answer) — drop the entry and mint fresh; verify
-// unreachable → the typed transient, entry kept.
+// claims with (RR B-1). With no journal entry for wi it mints a fresh pair.
+// An entry left by an earlier attempt whose answer was lost is checked
+// first: SessionVerify says the journaled session holds the WI → the claim
+// landed, reuse the pair so the claim is a D4 replay that hands the same
+// answer back; verify says it does not → the earlier claim never landed or
+// was ended since (a replay could hand back a stale cached answer) — drop
+// the entry and mint fresh; verify unreachable → the typed transient, entry
+// kept.
 func (r *Runtime) claimIntent(wi string) (sessionID, key string, replay bool, err error) {
 	if rec := r.loadClaiming()[wi]; rec != nil && rec.SessionID != "" && rec.IdempotencyKey != "" {
 		v, verr := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
@@ -1141,11 +1141,10 @@ func (r *Runtime) finishClaim(ctx context.Context, wi string, j *job, sceneErr e
 // job and turns it RUNNING (opMu held).
 func (r *Runtime) installClaim(ctx context.Context, wi string, j *job) error {
 	id := j.wi
-	// The Go driver is the engine. The daemon binds
-	// bridge.Start as AgentStarter at assembly; the driver owns the step
-	// state machine from here on. There is no second engine to fall back
-	// to (polyforge#106): a nil starter is a misassembly and refuses the
-	// claim loudly.
+	// The Go driver is the engine. The daemon binds bridge.Start as
+	// AgentStarter at assembly; the driver owns the step state machine from
+	// here on. There is no second engine to fall back to (polyforge#106): a
+	// nil starter is a misassembly and refuses the claim loudly.
 	starter := r.cfg.AgentStarter
 	if starter == nil {
 		err2 := fmt.Errorf("runtime misassembly: no execution engine bound (Config.AgentStarter is nil) — the legacy in-package WI-Agent engine was deleted (polyforge#106); the daemon binds the driver bridge starter unconditionally at assembly")
@@ -1337,7 +1336,7 @@ func (r *Runtime) abandonClaim(j *job, submitted string, origErr error, note str
 
 // claimEndOffLock sends the SessionEnd of a claim that never got (or no
 // longer has) a job in the table — the compensation of a failed start,
-// an operator close during the claim — with opMu RELEASED (B-8):
+// an operator close during the claim — with opMu RELEASED (RR B-8):
 // the caller holds opMu on entry and again on return.
 // Meanwhile the work item's keys are latched ending, so a Start of it
 // answers the typed transient (the dispatcher retries) rather than
@@ -1517,13 +1516,13 @@ func quarantineCapsule(capsuleDir, gitDir string) error {
 // injected-failure test).
 var renameFn = os.Rename
 
-// materialize lays out the capsule: workflows/,
-// capsule.json, session.json, .gitignore and the runtime-state/ tree.
-// The bundle is materialized as ONE atomic set with a completion marker
-// (F7, materialize.go; no digest verification — there is no digest
-// chain, polyforge#149 B9). The claim's task-repo
-// inventory is cloned into repos/<name> BEFORE the capsule identity is
-// written, so the recorded baselines are the true claim-time SHAs.
+// materialize lays out the capsule: workflows/, capsule.json, session.json,
+// .gitignore and the runtime-state/ tree. The bundle is materialized as ONE
+// atomic set with a completion marker (F7, materialize.go; no digest
+// verification — there is no digest chain, polyforge#149 B9). The claim's
+// task-repo inventory is cloned into repos/<name> BEFORE the capsule
+// identity is written, so the recorded baselines are the true claim-time
+// SHAs.
 func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	for _, d := range []string{
 		capsule.DirArtifacts, capsule.DirLogs, capsule.DirRepos,
@@ -1995,7 +1994,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	if endErr != nil {
 		if st, _ := j.snapshot(); st == StateSealing {
 			// Persist the push outcome and retry the close in the
-			// background (B-4): without the retry the job would sit
+			// background (RR B-4): without the retry the job would sit
 			// SEALING — agent dead, every `pf wrap` answering "a close is
 			// already in progress" — until a daemon restart ran the
 			// finisher.

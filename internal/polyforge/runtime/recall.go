@@ -136,7 +136,7 @@ func (r *Runtime) writeRecalledMemories(j *job) {
 	case strings.TrimSpace(snap.Query) == "":
 		snap.Notice = "no task definition to recall against"
 	default:
-		// The search is scoped to the work item's own project (B5): the
+		// The search is scoped to the work item's own project (audit B5): the
 		// snapshot must not draw on every project the daemon credential
 		// can read. A populated query implies item != nil (the query is
 		// built from it); the nil check keeps the seam honest anyway.

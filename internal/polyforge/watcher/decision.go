@@ -191,7 +191,7 @@ func Evaluate(sub protocol.ChatSub, snap *protocol.WatchSnapshot) Result {
 		if cur[key] {
 			// execution.json and the hub status can name the same class
 			// (completed+wrapped, failed_gate+failed, blocked+blocked):
-			// one decision per poll (B-9).
+			// one decision per poll (RR B-9).
 			return
 		}
 		cur[key] = true

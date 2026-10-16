@@ -648,7 +648,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			// Only the shutdown sequence closes the face (its step 5),
 			// and it still has the runtime drain and the final agent
 			// sweep to run: returning here would let the process exit
-			// mid-sequence (B-16).
+			// mid-sequence (RR B-16).
 			<-d.shutDone
 			return nil
 		case <-dispatch.C:
@@ -915,11 +915,11 @@ func (d *Daemon) occupiedSlots() map[string]bool {
 }
 
 // dispatch starts pending jobs into free slots, priority-desc then FIFO.
-// Each claim runs in its own goroutine (B-8): a slow capsule or
-// task-repo clone does not hold the Run loop, so the loop keeps serving
-// shutdown, drain and the next dispatch ticks. The
-// queue counts a Take()n entry against the slots until it settles, so
-// the concurrency cap holds across the goroutines.
+// Each claim runs in its own goroutine (RR B-8): a slow capsule or task-repo
+// clone does not hold the Run loop, so the loop keeps serving shutdown,
+// drain and the next dispatch ticks. The queue counts a Take()n entry
+// against the slots until it settles, so the concurrency cap holds across
+// the goroutines.
 func (d *Daemon) dispatch() {
 	for !d.modes.ShuttingDown() {
 		e := d.q.Take()
@@ -953,13 +953,12 @@ func (d *Daemon) startEntry(e qEntry) {
 	}
 	var ae *api.Error
 	if errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable {
-		// The hub could not be reached, or the claim's answer was
-		// lost: the accepted submit stays queued and is retried with
-		// backoff (never dropped on a transient blip, never blocking
-		// the other entries). A claim that may have landed keeps its
-		// claiming-journal entry, so the retry replays the SAME claim
-		// and adopts the session (B-1). One
-		// log line per episode.
+		// The hub could not be reached, or the claim's answer was lost: the
+		// accepted submit stays queued and is retried with backoff (never
+		// dropped on a transient blip, never blocking the other entries). A
+		// claim that may have landed keeps its claiming-journal entry, so
+		// the retry replays the SAME claim and adopts the session (RR B-1).
+		// One log line per episode.
 		if e.Deferrals == 0 {
 			fmt.Fprintf(os.Stderr, "daemon: start %s deferred, will retry with backoff: %v\n", e.WorkItemID, err)
 		}

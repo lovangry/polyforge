@@ -74,7 +74,7 @@ type statusJob struct {
 	StopReason string `json:"stop_reason,omitempty"`
 	// AwaitingHub: the restart-time session verify could not reach aihub
 	// and is being retried — a RECOVERING job waiting for the hub, not an
-	// ordinary recovery (B-2).
+	// ordinary recovery (RR B-2).
 	AwaitingHub bool `json:"awaiting_hub,omitempty"`
 }
 
@@ -828,18 +828,17 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 // refuseStepOrigin is the step-origin guard on the whole UDS face
-// (v2-converge.md Appendix C(b); V-1): the agent
-// executing a work item must never drive the daemon. Every request that
-// is not a read (GET/HEAD — status, watch snapshot, subscriptions,
-// attention stay open; a GET attention with mark=1 or ack=1 records
-// delivery state, so a step could hide a human's notices — it is guarded
-// like a mutation) is refused DAEMON-403 when its UDS peer — the
-// kernel's SO_PEERCRED record, never anything from the request body —
-// belongs to a step process tree of this daemon
-// (runtime.StepProcessOrigin: the PF_WI_ID/PF_DAEMON_ID markers on the
-// peer, an ancestor or its process-group leader). A request whose peer
-// credential is unavailable is refused too: the guard fails closed.
-// An answer keeps its own #122 wording (answerFromStepProcess).
+// (v2-converge.md Appendix C(b); RR V-1): the agent executing a work item
+// must never drive the daemon. Every request that is not a read (GET/HEAD —
+// status, watch snapshot, subscriptions, attention stay open; a GET
+// attention with mark=1 or ack=1 records delivery state, so a step could
+// hide a human's notices — it is guarded like a mutation) is refused
+// DAEMON-403 when its UDS peer — the kernel's SO_PEERCRED record, never
+// anything from the request body — belongs to a step process tree of this
+// daemon (runtime.StepProcessOrigin: the PF_WI_ID/PF_DAEMON_ID markers on
+// the peer, an ancestor or its process-group leader). A request whose peer
+// credential is unavailable is refused too: the guard fails closed. An
+// answer keeps its own #122 wording (answerFromStepProcess).
 func (d *Daemon) refuseStepOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if (r.Method != http.MethodGet && r.Method != http.MethodHead) || attentionRecords(r) {
