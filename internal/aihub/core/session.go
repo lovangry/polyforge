@@ -749,10 +749,10 @@ func (m *SessionManager) ForceEnd(wiID, reason, callerIdentity string) error {
 // capsule head (v2-converge §7): {"head": sha, "machine": id}. It rides the
 // existing business attrs JSON — no schema change. Set by End(blocked) with
 // a head, cleared by every other End/Pause, read by the claim answer so a
-// continue on a different machine can check its clone. attrs is not
-// PATCH-able (patchableFields), so after create only this file writes
-// the seal; a missing or unreadable one only disables the check (fail
-// open).
+// continue on a different machine can check its clone. Create refuses the
+// key (executionStateKeys) and attrs is not PATCH-able (patchableFields),
+// so only this file writes the seal; a missing or unreadable one only
+// disables the check (fail open).
 const blockedSealKey = "blocked_seal"
 
 type txExecer interface {

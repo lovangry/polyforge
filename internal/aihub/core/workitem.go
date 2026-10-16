@@ -86,7 +86,12 @@ func validPriority(p string) bool {
 
 // forbidden attrs keys (execution-state blacklist; reference.md §2.3, kept from v0
 // business semantics): Core never persists workflow execution state.
+// blocked_seal is reserved too: Core itself writes it on a blocked close
+// (setBlockedSealTx, a direct UPDATE that never passes through
+// checkAttrs), so a create must not plant a fake seal that the next
+// cross-machine claim would then check a clone against.
 var executionStateKeys = map[string]bool{
+	blockedSealKey: true,
 	"current_step": true, "step_id": true, "step_attempt_id": true,
 	"attempt": true, "review_round": true, "review_rounds": true,
 	"review_verdict": true, "progress": true, "workflow_status": true,
@@ -102,7 +107,7 @@ func checkAttrs(v any, path string) error {
 			p := path + "." + k
 			if executionStateKeys[k] {
 				return Fail(api.ErrCoreBadInput, "EXECUTION_STATE_REJECTED",
-					"attrs key %s carries execution state; Core never persists it", p)
+					"attrs key %s carries execution state or a Core-written key; a create cannot set it", p)
 			}
 			if err := checkAttrs(val, p); err != nil {
 				return err
