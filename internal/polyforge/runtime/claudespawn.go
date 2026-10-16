@@ -34,11 +34,8 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/harness"
 )
@@ -168,43 +165,9 @@ func (s *claudeSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, 
 	if err != nil {
 		return nil, err
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	stdin, err := cmd.StdinPipe()
+	proc, stdin, err := startHarness(cmd, p, false)
 	if err != nil {
 		return nil, err
-	}
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		return nil, err
-	}
-	errR, errW, err := os.Pipe()
-	if err != nil {
-		outR.Close()
-		outW.Close()
-		return nil, err
-	}
-	cmd.Stdout = outW
-	cmd.Stderr = errW
-	if err := cmd.Start(); err != nil {
-		outR.Close()
-		outW.Close()
-		errR.Close()
-		errW.Close()
-		return nil, fmt.Errorf("runtime: harness start failed: %w", err)
-	}
-	outW.Close()
-	errW.Close()
-	proc := newProcOpts(cmd, nil, outR, procOpts{
-		taps:   recordTaps(p),
-		stderr: errR,
-		onExit: p.OnExit,
-	})
-	if p.Journal != nil {
-		if jerr := p.Journal(cmd.Process.Pid, proc.startedAt); jerr != nil {
-			stdin.Close()
-			_ = proc.Terminate(5 * time.Second)
-			return nil, fmt.Errorf("runtime: spawn journal failed (process torn down): %w", jerr)
-		}
 	}
 	_, werr := stdin.Write([]byte(p.InitialPrompt))
 	cerr := stdin.Close()
@@ -212,18 +175,7 @@ func (s *claudeSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, 
 		werr = cerr
 	}
 	if werr != nil {
-		// a CLI that died at startup (a bad credential, an unknown model)
-		// never read the prompt: its stderr is the explanation the driver
-		// classifies (EPIPE path, as pi)
-		_ = proc.Terminate(5 * time.Second)
-		select {
-		case <-proc.exited:
-		case <-time.After(2 * time.Second):
-		}
-		if detail := strings.TrimSpace(proc.tail.String()); detail != "" {
-			return nil, fmt.Errorf("runtime: initial prompt injection failed (process torn down): %w; harness stderr: %s", werr, detail)
-		}
-		return nil, fmt.Errorf("runtime: initial prompt injection failed (process torn down): %w", werr)
+		return nil, injectionFailed(proc, werr)
 	}
 	return proc, nil
 }

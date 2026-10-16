@@ -237,11 +237,28 @@ func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, erro
 			return nil, err
 		}
 	}
-	cmd := s.buildCmd(p)
+	proc, _, err := startHarness(s.buildCmd(p), p, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := proc.writeCommand(piCommand{ID: "pf-init", Type: "prompt", Message: p.InitialPrompt}); err != nil {
+		return nil, injectionFailed(proc, err)
+	}
+	return proc, nil
+}
+
+// startHarness starts a built step command — either harness — as its own
+// process-group leader (so the cleanup layers can collect step agents and
+// command children) with its own stdout/stderr pipes, wraps it in a
+// supervised proc and writes the identity journal before returning.
+// keepStdin hands the stdin pipe to the proc (pi's RPC command channel);
+// otherwise the caller owns the returned pipe (claude writes the prompt
+// once and closes it).
+func startHarness(cmd *exec.Cmd, p SpawnParams, keepStdin bool) (*proc, io.WriteCloser, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Own pipes (not cmd.StdoutPipe): cmd.Wait would close the read end
 	// the instant the process exits and could drop the tail of the
@@ -250,13 +267,13 @@ func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, erro
 	// nothing, and the reader sees EOF once every writer is gone.
 	outR, outW, err := os.Pipe()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	errR, errW, err := os.Pipe()
 	if err != nil {
 		outR.Close()
 		outW.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	cmd.Stdout = outW
 	cmd.Stderr = errW
@@ -265,11 +282,15 @@ func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, erro
 		outW.Close()
 		errR.Close()
 		errW.Close()
-		return nil, fmt.Errorf("runtime: harness start failed: %w", err)
+		return nil, nil, fmt.Errorf("runtime: harness start failed: %w", err)
 	}
 	outW.Close()
 	errW.Close()
-	proc := newProcOpts(cmd, stdin, outR, procOpts{
+	var procStdin io.WriteCloser
+	if keepStdin {
+		procStdin = stdin
+	}
+	proc := newProcOpts(cmd, procStdin, outR, procOpts{
 		taps:   recordTaps(p),
 		stderr: errR,
 		onExit: p.OnExit,
@@ -279,27 +300,31 @@ func (s *piSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, erro
 	// orphan. Its failure tears the fresh process down.
 	if p.Journal != nil {
 		if jerr := p.Journal(cmd.Process.Pid, proc.startedAt); jerr != nil {
+			if !keepStdin {
+				stdin.Close()
+			}
 			_ = proc.Terminate(5 * time.Second)
-			return nil, fmt.Errorf("runtime: spawn journal failed (process torn down): %w", jerr)
+			return nil, nil, fmt.Errorf("runtime: spawn journal failed (process torn down): %w", jerr)
 		}
 	}
-	if err := proc.writeCommand(piCommand{ID: "pf-init", Type: "prompt", Message: p.InitialPrompt}); err != nil {
-		_ = proc.Terminate(5 * time.Second)
-		// A harness that died at startup (an unresolvable pinned model, a
-		// bad credential) never read the prompt: its stderr is the only
-		// explanation, and the driver classifies the failure from it (a
-		// model-class text advances the candidate chain, F4).
-		select {
-		case <-proc.exited:
-		case <-time.After(2 * time.Second):
-		}
-		detail := strings.TrimSpace(proc.tail.String())
-		if detail != "" {
-			return nil, fmt.Errorf("runtime: initial prompt injection failed (process torn down): %w; harness stderr: %s", err, detail)
-		}
-		return nil, fmt.Errorf("runtime: initial prompt injection failed (process torn down): %w", err)
+	return proc, stdin, nil
+}
+
+// injectionFailed tears down a harness whose initial prompt could not be
+// delivered and returns the spawn error. A harness that died at startup
+// (an unresolvable pinned model, a bad credential) never read the prompt:
+// its stderr is the only explanation, and the driver classifies the
+// failure from it (a model-class text advances the candidate chain, F4).
+func injectionFailed(proc *proc, err error) error {
+	_ = proc.Terminate(5 * time.Second)
+	select {
+	case <-proc.exited:
+	case <-time.After(2 * time.Second):
 	}
-	return proc, nil
+	if detail := strings.TrimSpace(proc.tail.String()); detail != "" {
+		return fmt.Errorf("runtime: initial prompt injection failed (process torn down): %w; harness stderr: %s", err, detail)
+	}
+	return fmt.Errorf("runtime: initial prompt injection failed (process torn down): %w", err)
 }
 
 // ---------------------------------------------------------------------------
