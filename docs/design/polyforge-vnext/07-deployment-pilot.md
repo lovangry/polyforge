@@ -186,15 +186,18 @@ WI Agent（§2.3）不在本表——它没有独立的部署位置或版本号�
 ├── backups/<timestamp>/              # 一致性备份点，§6.2 产出
 └── tmp/                              # 原子写中转（tmp+fsync+rename 模式）
 
-工作机侧（Daemon + Capsule）——workspace 由操作者经**必填**的 `pf daemon -workspace <path>` 旗标或
-`POLYFORGE_WORKSPACE` 环境变量指定（无默认值，缺则拒绝启动；迁移走
-`08-capsule-base-migration.md` 的人工运行手册）：
+工作机侧（Daemon + Capsule）——workspace 由共享配置 `~/.config/polyforge/cli.toml` 的
+`[workspace."<path>"]` 映射唯一决定（polyforge#113；见 `08-capsule-base-migration.md#§1`）。不存在启动期
+workspace 旗标或环境变量（旧 `-workspace` / `POLYFORGE_WORKSPACE` 已删除，传入即解析失败）；零个
+`[workspace]` 节时 Daemon 拒绝启动：
 
 <pf-workspace>/capsules/<project>-<seq>/…  # （polyforge#144；此前认领的为 <wi_id>）Capsule 布局权威，`03-execution-capsule.md#§3.1`；执行权威文件为
                                        # <capsule>/runtime-state/execution.json（`03-execution-capsule.md#§4.2`）
-$POLYFORGE_HOME/daemon/…              # Daemon 自身状态目录（daemon/state.json + credentials/），
-                                       # 权威路径见 `04-local-runtime.md#§4.1`；不含任何 workflow 执行状态字段
-                                       # （04 INV-D1），与 Capsule 的 execution.json 严格区分
+<data-dir>/…                          # Daemon 自身状态（`--data-dir`，缺省 ~/.local/share/polyforge）：daemon-id、
+                                       # runtime-state.json、daemon-state.json、events 日志、daemon.log 等；不含任何
+                                       # workflow 执行状态字段，与 Capsule 的 execution.json 严格区分。没有 credentials/
+                                       # 目录——daemon 不管理凭证（v2-converge §0；harness 由人登录）。
+<harness-root>/…                      # 缺省 <data-dir>：step-agent/、step-agent-sessions/、claude-config/（v2-converge §2.7）
 ```
 
 `<data_dir>` 是 AIHub 唯一持久化根：删除或迁移 `<data_dir>` 等价于删除或迁移全部 Core 数据、

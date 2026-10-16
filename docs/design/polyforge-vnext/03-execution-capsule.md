@@ -99,12 +99,14 @@
 
 ```
 <pf-workspace>/capsules/<project>-<seq>/    # capsule_id = cap_<wi_id>；目录名用可读的 <project>-<seq>（polyforge#144，此前为 wi_id）。
-                                            # <pf-workspace> 由操作者经必填的 pf daemon -workspace <path>
-                                            # 旗标（或 POLYFORGE_WORKSPACE 环境变量）指定——没有默认值：两者
-                                            # 皆缺时 Daemon 拒绝启动。启动时校验 workspace 目录存在
-                                            # （Daemon 绝不代建它）且 <workspace>/capsules/ 可创建、可写；
-                                            # Daemon 在 workspace 内只写 capsules/ 子树。workspace 的迁移
-                                            # 是人工流程（08-capsule-base-migration.md 运行手册）。
+                                            # <pf-workspace> 由共享配置 cli.toml 的 [workspace."<path>"] 映射
+                                            # 唯一决定（polyforge#113；每节列出落点在该 workspace 的 projects，
+                                            # 按被认领 WI 的 project 逆映射路由）。不存在启动期 workspace
+                                            # 旗标或环境变量（旧 -workspace / POLYFORGE_WORKSPACE 已删除，
+                                            # 传入即解析失败）；零个 [workspace] 节时 Daemon 拒绝启动。启动时
+                                            # 校验每个 workspace 目录存在（Daemon 绝不代建它）且
+                                            # <workspace>/capsules/ 可创建、可写；Daemon 在 workspace 内只写
+                                            # capsules/ 子树。迁移见 08-capsule-base-migration.md §1。
 ├── capsule.json                # 身份清单（§2.2）
 ├── repos/<repo_name>/          # inventory 检出的完整工作树（源文件本身，subagent 可读写，§4）
 │   └── inventory.json          # 检出快照（§4.3），与源文件同级，subagent 只读
