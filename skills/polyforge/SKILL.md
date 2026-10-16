@@ -269,7 +269,10 @@ pf [global flags] <verb> [verb flags] [positional args]
   `pf doctor`). A missing file is not an error (defaults apply, empty
   mapping); a malformed file is. The mapping governs capsule placement:
   placement verbs (`file create`, `remember`, `recall`) REQUIRE
-  `--project` and validate it against the mapping; `queue` without
+  `--project` and refuse locally a project the mapping does not list (the
+  error names the mapped projects; owner ruling 2026-10-16) — aihub
+  additionally gates memory by project membership (read access to search
+  or read, the writer role to remember); `queue` without
   `--project` covers all mapped projects; one daemon serves every mapped
   workspace and routes capsules to `<workspace>/capsules/<project>-<seq>`
   (e.g. `capsules/polyforge-140`; no `#` in paths) by the claimed work item's

@@ -575,8 +575,13 @@ full-text search):
 
 `<query>` is required (positional or `--q`); so is `--project` — there
 is no default project anymore (polyforge#113), and the value is
-validated against the `[workspace]` mapping (an unmapped project fails
-loudly). Flags:
+validated against the `[workspace]` mapping: an unmapped project, or no
+mapping at all, fails locally naming the mapped projects, and nothing is
+sent (`pf remember` applies the same check; owner ruling 2026-10-16). aihub
+additionally gates memory by project membership: a search answers only
+projects the caller can read, and `project=` naming an unknown or unreadable
+project answers the same `CORE-404`; reading a memory needs read access,
+writing one needs the writer role. Flags:
 
 - `--limit N` — max results. **Default 20** when the flag is omitted
   (the CLI's product choice, sent explicitly); values must satisfy
