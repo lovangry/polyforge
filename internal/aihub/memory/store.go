@@ -367,7 +367,7 @@ func (s *Store) SearchMode(match, project, q, memType string, tags []string, lim
 	switch match {
 	case "", MatchAll, MatchAny:
 	default:
-		return nil, errf("MEM-400", "", "match must be %q or %q", MatchAll, MatchAny)
+		return nil, errf(api.ErrMemBadInput, "", "match must be %q or %q", MatchAll, MatchAny)
 	}
 	if strings.TrimSpace(q) == "" {
 		return nil, errf(api.ErrMemBadInput, "", "q required")
