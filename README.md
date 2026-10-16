@@ -18,7 +18,7 @@ curl -s -H "Authorization: token $(gh auth token)" \
 (requires `gh` authenticated — the repo is private. Override the
 server host with `PF_HOST=<host>` if it ever moves.)
 
-It installs the `pf` binary (SHA-verified from the release server), writes
+It installs the `pf` binary (downloaded from the GitHub Release with `gh release download` and checked against its `SHA256SUMS`), writes
 `~/.config/polyforge/cli.toml` (never rewritten), and keeps its own checkout
 of the release tag in `~/.local/share/polyforge/release/<tag>` (stable
 symlink `release/current`, previous version kept). From that checkout it
@@ -44,8 +44,9 @@ shuts the daemon down gracefully (the loop ends with that clean exit —
 swaps the binary, then ensures again; meanwhile it holds the ensure lock,
 so a harness session starting mid-upgrade starts nothing. A daemon already running with a different workflows
 dir, or without its loop, is reported, never auto-restarted. Finally it
-verifies connectivity. The admin
-registers the machine identity first. Re-running the same command upgrades
+verifies connectivity. If the machine's daemon id is new to aihub, an admin
+registers it afterwards — the installer prints the id (`pf ops status` shows
+it) when the daemon does not answer or a heartbeat fails. Re-running the same command upgrades
 and is idempotent. Daily use from a session is natural language via the
 `polyforge` routing skill; from a terminal it's
 `pf queue`, `pf submit`, `pf answer`, `pf ops status`, …
@@ -344,9 +345,10 @@ default `minor`) refuses a dirty tree or a HEAD that is not the fetched
 every commit that entered `main` since the previous release tag came through a merged
 PR (main's first-parent history must be merge commits that `gh api
 repos/<repo>/commits/<sha>/pulls` names as a merged PR's merge commit — the shape
-the workflows' `deliver` step produces with `gh pr merge --merge`), runs `make test`
-(including the e2e suite), takes the version floor from the highest semver
-among the ORIGIN tags only (an unreadable `ls-remote` is fatal), builds the two
+the workflows' `deliver` step produces with `gh pr merge --merge`), and takes the
+version floor from the highest semver among the ORIGIN tags only (an unreadable
+`ls-remote` is fatal) — these cheap refusals run first; only then does it run
+`make test` (including the e2e suite, ~20 minutes), build the two
 binaries and the `ghcr.io/silgrid/aihub:<tag>` image, claims the version by
 pushing the git tag (fails if it exists: nothing is published), pushes the
 image, writes `aihub-image.digest` after the push, then `SHA256SUMS` and
@@ -368,11 +370,15 @@ server never holds GitHub credentials. Steps: ONLINE verified full backup; pull
 `aihub-image.digest` (itself checked via `SHA256SUMS`), `docker save | ssh
 docker load`, verify the image ID on the server and tag it
 `polyforge/aihub:<tag>`; edit only the aihub service of the server's compose
-file and recreate just that container (seconds of downtime, measured and
+file; then the switch window — the old container stops (graceful drain), the
+versions' upgrade SQL under `deploy/sql/` runs (one transaction per script;
+there is no startup auto-migration, see [docs/upgrade.md](docs/upgrade.md)),
+and just that container is recreated (seconds of downtime, measured and
 printed); post-swap checks. If post-swap verification fails or the service does
 not come back, it AUTOMATICALLY rolls the compose image back to
 `polyforge/aihub:<old>`, recreates, verifies the old version answers and prints
-`ROLLED BACK` (distinct non-zero exit; if the rollback itself fails it prints
+`ROLLED BACK` (the applied versions' `rollback.sql` runs first, in descending
+order, so the old binary never sees the new schema; distinct non-zero exit; if the rollback itself fails it prints
 loud manual instructions). Data restore stays manual (it needs a stop).
 `--dry-run` shows the plan and the compose diff; `--force` is a human-only
 override. Deploying a work machine is re-running `tools/install.sh`. It is a
