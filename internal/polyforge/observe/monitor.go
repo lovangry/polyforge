@@ -144,8 +144,6 @@ type Monitor struct {
 	ob   *supervise.Queue[protocol.OBMsg]
 	link *supervise.Link
 
-	// handle attachment (monitor-goroutine only).
-	handle Handle
 	// spawnN is the v1.5 B2 derivation counter of the CURRENTLY ADOPTED
 	// derivation (guarded by stateMu for the HTTP fence's read). It is
 	// fed from RTMsg.SpawnN at RTStarted/RTRecovered adoption.
@@ -604,7 +602,6 @@ func (m *Monitor) onRecovered(at Attach) {
 	if at.Handle == nil || at.Msg.SpawnN <= 0 {
 		return // malformed attachment (no announced derivation): never adopted
 	}
-	m.handle = at.Handle
 	m.exitCh = at.Handle.Exit()
 	if m.cur != nil {
 		m.link.Release(m.cur.spawnN)

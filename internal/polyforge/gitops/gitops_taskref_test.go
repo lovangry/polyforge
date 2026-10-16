@@ -928,7 +928,7 @@ func TestCarrierPushTimesOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	objects, sha, reason := carrierSource(repos, "demo-src")
+	objects, sha, reason := carrierSourceT(repos, "demo-src", carrierCheckTimeout)
 	if reason != "" || sha == "" {
 		t.Fatalf("carrierSource = %q, %q", sha, reason)
 	}

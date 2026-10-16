@@ -928,7 +928,7 @@ func (d *Daemon) dispatch() {
 			// and adopts the session (repo review 2026-10-16 B-1). One
 			// log line per episode.
 			if e.Deferrals == 0 {
-				fmt.Fprintf(os.Stderr, "daemon: start %s (%s) deferred, will retry with backoff: %v\n", e.WorkItemID, e.Intent, err)
+				fmt.Fprintf(os.Stderr, "daemon: start %s deferred, will retry with backoff: %v\n", e.WorkItemID, err)
 			}
 			if rerr := d.q.Requeue(e.WorkItemID); rerr != nil {
 				fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, rerr)
@@ -936,7 +936,7 @@ func (d *Daemon) dispatch() {
 			continue
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "daemon: start %s (%s) failed: %v\n", e.WorkItemID, e.Intent, err)
+			fmt.Fprintf(os.Stderr, "daemon: start %s failed: %v\n", e.WorkItemID, err)
 			// The submit was answered `accepted`: record the refusal as a
 			// durable event on the WI so watchers can surface it (v2 §5).
 			d.recordSubmitRejected(*e, err)
@@ -1051,7 +1051,7 @@ func (d *Daemon) fetchAutoWave() {
 		// the auto-off purge takes, so an entry either sees auto off or
 		// lands before the purge and is dropped by it (audit B3 race,
 		// wi_seWTgHeKtaa8).
-		ok, err := d.q.EnqueueIf(qEntry{WorkItemID: it.ID, Priority: it.Priority, Intent: "claim", Origin: runtime.Origin{Kind: runtime.OriginAuto}}, d.modes.AdmitAutoPull)
+		ok, err := d.q.EnqueueIf(qEntry{WorkItemID: it.ID, Priority: it.Priority, Origin: runtime.Origin{Kind: runtime.OriginAuto}}, d.modes.AdmitAutoPull)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "daemon: drain enqueue %s: queue persist failed: %v\n", it.ID, err)
 			continue // nothing landed: the budget is not spent
@@ -1076,11 +1076,10 @@ func (d *Daemon) autoOffPurge() {
 		return
 	}
 	for _, e := range dropped {
-		fmt.Fprintf(os.Stderr, "daemon: auto off: pending %s (%s) dropped from the submit queue\n", e.WorkItemID, e.Intent)
+		fmt.Fprintf(os.Stderr, "daemon: auto off: pending %s dropped from the submit queue\n", e.WorkItemID)
 		if d.obs != nil {
 			body := map[string]any{
 				"reason":       "auto off",
-				"intent":       e.Intent,
 				"submitted_at": e.SubmittedAt.UTC().Format(time.RFC3339Nano),
 			}
 			if e.Origin.Kind != "" {

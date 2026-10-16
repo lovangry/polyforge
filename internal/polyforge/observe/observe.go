@@ -333,7 +333,6 @@ func (o *Observe) newMonitor(at Attach) *Monitor {
 // attach binds the first handle of a monitor's life (onRecovered does
 // the same for successors).
 func (m *Monitor) attach(at Attach) {
-	m.handle = at.Handle
 	m.exitCh = at.Handle.Exit()
 	m.stateMu.Lock()
 	m.spawnN = at.Msg.SpawnN

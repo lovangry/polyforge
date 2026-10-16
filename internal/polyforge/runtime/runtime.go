@@ -258,9 +258,6 @@ type job struct {
 	// not part of the persisted job record.
 	repos []api.ProjectRepo
 
-	// workspaceYaml is the claim's pre-claim-validated .polyforge.yaml
-	// (nil when the workspace carries none). In-memory only.
-	workspaceYaml *workspace.Config
 	// stepCandidates is the polyforge#79 claim-time compose: the
 	// per-step post-precedence candidate lists (step id → list; a
 	// present-empty entry governs and means no switchable chain). In-
@@ -872,7 +869,6 @@ func (r *Runtime) startClaimed(ctx context.Context, wi, sessionID string, resp *
 	// polyforge#79: the workspace yaml was loaded and validated BEFORE the
 	// claim (Start / the journal replay); compose the per-step candidates
 	// for the claimed project from that snapshot.
-	j.workspaceYaml = wcfg
 	// polyforge#175: a bundle whose candidates are not `<harness>:<model>`
 	// (or that still declares a `harness` key) is a load error naming the
 	// file and the step; the claim ends blocked with it.
@@ -1774,20 +1770,4 @@ func (r *Runtime) CanonicalID(wi string) string {
 		return id
 	}
 	return wi
-}
-
-// CapsuleDirFor returns the capsule directory of a WI: the live job's
-// own recorded dir (routed by its project at claim time, polyforge#113);
-// "" when the WI holds no live job — a route caller for a non-live WI
-// has no capsule to address.
-func (r *Runtime) CapsuleDirFor(wi string) string {
-	id := r.Resolve(wi)
-	if id == "" {
-		id = wi
-	}
-	j := r.jobOf(id)
-	if j == nil {
-		return ""
-	}
-	return j.capsuleDir
 }

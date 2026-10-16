@@ -92,7 +92,6 @@ func TestAutoWaveBudgetSubtractsQueuedEntries(t *testing.T) {
 		e := qEntry{
 			WorkItemID: fmt.Sprintf("wi_b3q_%d", i),
 			Priority:   api.PriorityNormal,
-			Intent:     "claim",
 			Origin:     runtime.Origin{Kind: runtime.OriginAuto},
 			NotBefore:  time.Now().Add(time.Hour),
 		}

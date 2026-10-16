@@ -124,7 +124,6 @@ type qEntry struct {
 	WorkItemID string    `json:"work_item_id"`
 	Priority   string    `json:"priority,omitempty"`
 	EnqueuedAt time.Time `json:"enqueued_at"`
-	Intent     string    `json:"intent"` // claim | resume
 	// Models is the manual `pf submit --models` candidate list (top
 	// precedence level); persisted so a restart before the claim keeps it.
 	Models []string `json:"models,omitempty"`

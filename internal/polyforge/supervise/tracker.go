@@ -87,9 +87,6 @@ func (t *Tracker) Begin(f StepStarted) {
 	}
 }
 
-// SpawnN is the dispatch ordinal.
-func (t *Tracker) SpawnN() int64 { return t.spawn }
-
 // --- Sink ---
 
 func (t *Tracker) workLocked() {
@@ -337,16 +334,6 @@ func (t *Tracker) Snapshot(now time.Time) Snapshot {
 		s.Exit = &c
 	}
 	return s
-}
-
-// LastErrorText answers the best "last error" evidence of the dispatch:
-// the exit's stderr tail when it has one, else the newest error the
-// harness reported on its record stream.
-func (s Snapshot) LastErrorText() string {
-	if s.Exit != nil && strings.TrimSpace(s.Exit.LastError) != "" {
-		return strings.TrimSpace(s.Exit.LastError)
-	}
-	return s.LastError
 }
 
 // summarizeTool renders a tool call for the live-progress face and extracts

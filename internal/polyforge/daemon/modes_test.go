@@ -5,12 +5,13 @@ package daemon
 
 import (
 	"errors"
-	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/polyforge/observe"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
@@ -279,10 +280,10 @@ func TestRequeueBackoffDoesNotBlockOthers(t *testing.T) {
 	var persisted []qEntry
 	q.persist = func(es []qEntry) error { persisted = append([]qEntry(nil), es...); return nil }
 
-	if err := q.Enqueue(qEntry{WorkItemID: "wi_bad", Priority: "urgent", Intent: "claim"}); err != nil {
+	if err := q.Enqueue(qEntry{WorkItemID: "wi_bad", Priority: "urgent"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.Enqueue(qEntry{WorkItemID: "wi_ok", Priority: "low", Intent: "claim"}); err != nil {
+	if err := q.Enqueue(qEntry{WorkItemID: "wi_ok", Priority: "low"}); err != nil {
 		t.Fatal(err)
 	}
 	e := q.Take()
@@ -344,7 +345,7 @@ func TestEnqueueIfAtomicWithAutoOffPurge(t *testing.T) {
 		t.Fatal(err)
 	}
 	q := NewJobQueue(4, func() map[string]bool { return map[string]bool{} })
-	auto := qEntry{WorkItemID: "wi_a", Intent: "claim", Origin: runtime.Origin{Kind: runtime.OriginAuto}}
+	auto := qEntry{WorkItemID: "wi_a", Origin: runtime.Origin{Kind: runtime.OriginAuto}}
 
 	// flip lands between the re-check and the append
 	done := make(chan []qEntry)
