@@ -353,6 +353,17 @@ func (s *Store) Search(q string, memType string, tags []string, limit int, allow
 			short = append(short, tok)
 		}
 	}
+	match := ""
+	if len(long) > 0 {
+		match = ftsQuery(long)
+	}
+	return s.collect(match, short, memType, tags, limit, allowed)
+}
+
+// collect answers the filtered hits for one search. match is the FTS5
+// MATCH expression ("" = no FTS step: every active body is scanned);
+// short tokens must each appear as a substring of the indexed body.
+func (s *Store) collect(match string, short []string, memType string, tags []string, limit int, allowed func(*Entry) bool) ([]Entry, error) {
 	out := []Entry{}
 	// seen: a write between two FTS pages can shift ranks, so the same
 	// entry may appear on consecutive pages — it is answered once.
@@ -398,7 +409,7 @@ func (s *Store) Search(q string, memType string, tags []string, limit int, allow
 		}
 		return false
 	}
-	if len(long) == 0 {
+	if match == "" {
 		scanned, serr := s.scanBodies()
 		if serr != nil {
 			return nil, serr
@@ -412,7 +423,7 @@ func (s *Store) Search(q string, memType string, tags []string, limit int, allow
 	// could silently answer fewer than limit hits while more exist.
 	batch := limit * 4
 	for offset := 0; ; offset += batch {
-		cands, err := s.ftsPage(ftsQuery(long), batch, offset)
+		cands, err := s.ftsPage(match, batch, offset)
 		if err != nil {
 			return nil, err
 		}
@@ -485,15 +496,19 @@ func (s *Store) scanBodies() ([]candRow, error) {
 	return out, nil
 }
 
-// ftsQuery ANDs the tokens as quoted phrases for the trigram MATCH. Every
-// token is an FTS5 string literal (embedded `"` doubled), so operator
-// characters such as - : * ( ) never reach the FTS5 expression parser.
-func ftsQuery(tokens []string) string {
+// ftsQuery ANDs the tokens as quoted phrases for the trigram MATCH.
+func ftsQuery(tokens []string) string { return ftsJoin(tokens, " AND ") }
+
+// ftsJoin joins the tokens with op (" AND " / " OR ") as quoted phrases.
+// Every token is an FTS5 string literal (embedded `"` doubled), so
+// operator characters such as - : * ( ) never reach the FTS5 expression
+// parser.
+func ftsJoin(tokens []string, op string) string {
 	parts := make([]string, len(tokens))
 	for i, p := range tokens {
 		parts[i] = `body:"` + strings.ReplaceAll(p, `"`, `""`) + `"`
 	}
-	return strings.Join(parts, " AND ")
+	return strings.Join(parts, op)
 }
 
 func containsAll(have, want []string) bool {

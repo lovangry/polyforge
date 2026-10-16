@@ -1173,8 +1173,24 @@ func (s *Server) hSearchMemory(w http.ResponseWriter, r *http.Request, idn *iden
 		}
 		project = projectID
 	}
-	s.hSearchRun(w, q.Get("q"), q.Get("type"), tags, project, limit, excerpt, idn)
+	// match= picks the search mode: "all" (the default — every token
+	// must match, the shape of a short human query) or "any" (ranked
+	// any-term — the daemon's claim-time recall over a whole task
+	// description). An unknown mode is refused, never silently ANDed.
+	search := s.Mems.Search
+	switch q.Get("match") {
+	case "", memory.MatchAll:
+	case memory.MatchAny:
+		search = s.Mems.SearchAny
+	default:
+		writeErr(w, &api.Error{Code: api.ErrMemBadInput, Detail: "match must be \"" + memory.MatchAll + "\" or \"" + memory.MatchAny + "\""})
+		return
+	}
+	s.hSearchRun(w, search, q.Get("q"), q.Get("type"), tags, project, limit, excerpt, idn)
 }
+
+// searchFn is one store search mode (memory.Store.Search / SearchAny).
+type searchFn func(q, memType string, tags []string, limit int, allowed func(*memory.Entry) bool) ([]memory.Entry, error)
 
 // maxMemoryExcerptRunes bounds the content excerpt a search answer may
 // carry (the F6 recall faces ask for bounded excerpts; the cap keeps a
@@ -1196,7 +1212,7 @@ type memoryHitList struct {
 	Total int         `json:"total"`
 }
 
-func (s *Server) hSearchRun(w http.ResponseWriter, query, memType string, tags []string, project string, limit, excerpt int, idn *identity) {
+func (s *Server) hSearchRun(w http.ResponseWriter, search searchFn, query, memType string, tags []string, project string, limit, excerpt int, idn *identity) {
 	// Membership-first filtering: restrict to the projects the caller can
 	// read before visibility tiers apply.
 	allowed := s.memAllowed(idn)
@@ -1215,7 +1231,7 @@ func (s *Server) hSearchRun(w http.ResponseWriter, query, memType string, tags [
 		}
 		return baseAllowed(e)
 	}
-	items, err := s.Mems.Search(query, memType, tags, limit, allowed)
+	items, err := search(query, memType, tags, limit, allowed)
 	if err != nil {
 		writeErr(w, err)
 		return
