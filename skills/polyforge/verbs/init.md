@@ -15,40 +15,16 @@ Two levels, never mixed:
 
 ## Machine install — the pointer
 
-```
-curl -s -H "Authorization: token $(gh auth token)" \
-  https://raw.githubusercontent.com/silgrid/polyforge/main/tools/install.sh \
-  | bash -s -- <your-personal-api-key>
-```
-
-Install and upgrade are the same command: run it again any time to
-upgrade in place. The script installs the `pf` binary (SHA-verified),
-writes the client config, keeps a checkout of the release at
-`~/.local/share/polyforge/release/current` that both harnesses reference
-(pi: one local package entry naming it; Claude Code:
-`~/.claude/skills/polyforge` as a symlink into it — no copy, no second
-clone), and — on execution machines — starts the local daemon through
-`pf daemon ensure` (a restart loop in tmux session `polyforge-daemon`;
-an upgrade first downloads, verifies and fetches everything, then shuts
-the daemon down gracefully — the loop ends with that clean exit — swaps
-the binary atomically and ensures again). While the daemon runs jobs an
-upgrade is refused and nothing changes: wait, `pf pause` them, or re-run
-with `PF_INSTALL_FORCE=1` in front of `bash`. After a container or machine restart the next
-pi or Claude Code session runs the same ensure; nothing else needs to be
-started by hand. Prerequisites (a personal API key,
-`gh` authenticated) and flags live in the README install section and
-`tools/install.sh`; this fragment deliberately does not duplicate them.
-
-The one operator step the script defers — editing the mapping template —
-belongs to the operator, not the script:
-
-- `~/.config/polyforge/cli.toml` ships with a COMMENTED
-  `[workspace."<path>"]` template; uncomment ONE section per workspace
-  with its `projects = ["..."]` list.
-- The daemon refuses to start until a real mapping exists; `pf doctor`
-  checks the mapping (and the whole machine) after editing.
-
-`tools/install.sh` itself never learns about workspaces.
+Install and upgrade are the same command, `tools/install.sh`: the README's
+"Install (team machines — read this first)" section carries the one-liner,
+the prerequisites and what an upgrade does (busy-job refusal,
+`PF_INSTALL_FORCE=1`); this fragment does not repeat them. The one step
+the script leaves to the operator: uncomment ONE
+`[workspace."<path>"]` section per workspace (with its
+`projects = ["..."]`) in the template it writes to
+`~/.config/polyforge/cli.toml` — the daemon refuses to start until a real
+mapping exists — then run `pf doctor`. `tools/install.sh` itself never
+learns about workspaces.
 
 ## Workspace init — the flow this fragment owns
 
@@ -66,58 +42,23 @@ the user saying "init workspace".
    `projects` list. Nothing rewrites cli.toml behind the operator's back —
    the agent proposes the section, the operator's config carries it.
 4. **Optionally write `.polyforge.yaml`** at the workspace root to pin
-   model candidates per project, in the exact closed schema the loader
-   enforces (any other key, a duplicate key, a type mismatch, a per-step
-   key that is no step id of the installed workflows, a project key this
-   workspace's cli.toml section does not list, a step-entry key other
-   than `models` — the retired `harness` key included — a top-level
-   `models:` section (the pre-#169 shape), or a candidate that is not
-   `<harness>:<model>[:<effort>]` refuses to load; YAML merge keys (`<<`) are
-   refused — share a list with anchors, `models: &x [...]` /
-   `{ models: *x }`):
+   model candidates per project. The README's "Per-project model
+   candidates (`.polyforge.yaml`)" paragraphs (release checkout:
+   `~/.local/share/polyforge/release/current/README.md`) are the one
+   authority for its closed schema, the `<harness>:<model>[:<effort>]`
+   candidate syntax and the precedence — read them before writing. The
+   shape:
 
    ```yaml
-   # Precedence: pf submit --models > steps.<project>.<step-id>.models > bundle step model_candidates > steps.<project>.default.models > bundle defaults
-   # Every candidate is <harness>:<model>[:<effort>], harness pi or claude (polyforge#175, #176)
    steps:
      polyforge:                               # one entry per project of this workspace
-       default: { models: ["pi:prov/model-a", "pi:prov/model-b"] }  # optional: steps without a list of their own
-       fix: { models: ["pi:prov/model-c"] }   # optional: per step id (the step
-                                              # with that id in every bundle)
-       review: { models: ["claude:claude-opus-5-5:high", "pi:prov/model-a"] }  # Claude Code (effort high) first, pi as fallback
+       default: { models: ["pi:prov/model-a"] }  # optional: steps without a list of their own
+       review: { models: ["claude:claude-opus-5-5:high", "pi:prov/model-a"] }  # optional: per step id
    ```
 
-   Each candidate is `<harness>:<model>`: `pi:` or `claude:`, split on
-   the first `:` (the model keeps any `/` or further `:`); no prefix, an
-   unknown prefix or an empty model refuses. The prefix alone decides
-   where the candidate runs — a chain may mix harnesses, and a switch
-   onto a candidate of another harness starts a fresh session with the
-   previous transcript as read-only reference. A step with no list (or
-   an empty one) runs pi's own default model.
-
-   A candidate may end in a thinking effort (polyforge#176):
-   `<harness>:<model>:<effort>`, effort one of `off minimal low medium
-   high xhigh max`. Only a last segment that is one of those words is
-   the effort — `pi:ollama/llama3:8b` keeps `:8b` in the model id. pi
-   gets it as `--thinking <effort>` (all seven), claude as `--effort
-   <effort>` (`low`…`max`; `off`/`minimal` refuse). No effort: no flag,
-   the harness's own default.
-
-   Precedence for a step of the claimed project: `pf submit --models`,
-   then the yaml list keyed by its step id, then the workflow step's own
-   `model_candidates`, then the project's `default` list, then the
-   bundle's `defaults`. A project not listed keeps the bundle's. A
-   declared-but-empty list governs (no switchable chain). Claude Code
-   must be installed and logged in by a human on the daemon's machine
-   (`claude_bin` in cli.toml is optional; the credential lives in the
-   harness root's `claude-config/settings.json`; see docs/upgrade.md,
-   polyforge#159, #171, #175). The aihub project registry, not this file,
-   supplies the repo list.
-
-An edit to `.polyforge.yaml` takes effect on the NEXT claim — no daemon
-restart is involved; the daemon reads the yaml fresh before every claim.
-An invalid file refuses the claim (DAEMON-414) before it is made: the
-work item stays queued, so fix the file and resubmit.
+   An edit takes effect on the NEXT claim — no daemon restart is
+   involved. An invalid file refuses the claim (DAEMON-414) before it is
+   made: the work item stays queued, so fix the file and resubmit.
 
 5. **Lay out the workspace**: `pf init <workspace-root>` (default: the
    current directory) creates `scratch/` and writes the runtime-artifact

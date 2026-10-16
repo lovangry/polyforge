@@ -26,21 +26,12 @@ on model-class failures like any list), kept by this daemon only (across its
 restarts and `pf resume`); a re-claim on another machine uses that machine's
 settings. Non-empty, comma-separated, no empty
 or duplicate candidates, else a local bad-input refusal. Every candidate is
-`<harness>:<model>` with harness `pi` or `claude`, split on the first `:`
-(e.g. `--models claude:claude-opus-5-5,pi:sub2api-glm/glm-5.3`); a candidate
-without a prefix, with an unknown prefix or an empty model is refused up
-front, naming it (`"sub2api-glm/glm-5.3" needs a harness prefix (pi:… or
-claude:…)`). A candidate may end in a thinking effort (polyforge#176), e.g.
-`--models claude:claude-opus-5-5:high,pi:sub2api-glm/glm-5.3:low`: only a last
-segment among `off minimal low medium high xhigh max` is the effort (pi takes
-all seven as `--thinking`, claude `low`…`max` as `--effort`); an effort the
-harness does not take is refused up front the same way; omitted, the harness
-uses its own default. A chain may mix harnesses: a switch onto a candidate of another
-harness starts a fresh session with the previous transcript as read-only
-reference. Candidate precedence,
-highest first: `--models` > yaml `steps.<project>.<step-id>.models` > bundle step
-`model_candidates` > yaml `steps.<project>.default.models` > bundle
-`defaults.model_candidates`. Before the daemon is
+`<harness>:<model>[:<effort>]` (e.g. `--models
+claude:claude-opus-5-5:high,pi:sub2api-glm/glm-5.3`); a candidate without a
+prefix, with an unknown prefix, an empty model or an effort the harness does
+not take is refused up front, naming it. Syntax and precedence (`--models`
+is the highest level): the README's "Per-project model candidates"
+paragraphs. Before the daemon is
 involved, the CLI prechecks the work item against Core with the caller's own
 api key, so obviously doomed submissions fail fast with a visible verdict.
 
