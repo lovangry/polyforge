@@ -66,7 +66,7 @@
 
 不存在 workflow 级 `budget`。
 
-Step 元素字段——driver 解析的九个键（`internal/polyforge/driver/workflow.go` 的 `extStep`），其余键一律被静默忽略（含 `kind`、`interactive`、`tools`、`inputs`、`silence_minutes`、`tool_minutes`）：
+Step 元素字段——driver 解析的十个键（`internal/polyforge/driver/workflow.go` 的 `extStep`），其余键一律被静默忽略（含 `kind`、`interactive`、`tools`、`inputs`、`silence_minutes`、`tool_minutes`）：
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
@@ -76,9 +76,10 @@ Step 元素字段——driver 解析的九个键（`internal/polyforge/driver/wo
 | `requires_command_evidence` | bool | 缺省 false | completed 结果必须带 `command_evidence`（§4.4a；没有按 step id 的隐式规则——交付 bundle 的 `verification` 显式声明，2026-10-16 裁定 G10） |
 | `on_fail` | `{target}` | 仅 `gate: true` | `target` 为更早的 step id——声明即 rewind 边；未声明即 `failed_gate` 终止（§6.2）。FAIL 判定全文无条件送达 target |
 | `context_policy` | string | 缺省 `inherit` | `inherit`\|`fresh`（§4.4a）；`gate: true` 的 step 必须是 `fresh` |
-| `handoff` | bool | 缺省 false | 本 step 写交接文件 `artifacts/handoff-<step-id>.md`（§4.4a） |
+| `handoff` | bool | 缺省 false | 本 step 写交接文件 `artifacts/handoff-<step-id>.md`（§4.4a）；缺省即 false，不写 `handoff: false` |
 | `budget.wall_minutes` | int | 可选 | 运行时长**估计**：T = max(3 × wall_minutes, `--step-timeout`)（§6.6） |
 | `model_candidates` | []string | 可选 | 覆盖 `defaults`（整体替换，非合并）；可跨 harness，换到另一 harness 的候选时新开会话并带旧记录作只读参考 |
+| `vars` | map[string]string | 可选 | 填充本 step 定义文件里的 `{{name}}` 占位符（§4.4「step 变量」）；共享 step 文本的车道差异只在这里声明 |
 
 frontmatter 不声明 step 间输入 wiring、`cwd` 或排序键：上游产物落 capsule `artifacts/` 与 `execution.json` 的 `steps.<id>.output`，下游 step 的指令按产物路径约定读取；step 进程的 cwd 恒为 capsule 根。
 
@@ -133,12 +134,14 @@ workflows/<bundle-name>/
     └── <step-id>.md       # 每 step 一个；文件名 = step id
 workflows/_shared/
 └── steps/
-    └── <step-id>.md       # 多个 bundle 逐字共用的 step 定义（如 deliver.md）
+    └── <step-id>.md       # 多个 bundle 共用的 step 定义（deliver.md、verification.md、review.md）
 ```
 
 每个 `steps/<step-id>.md` = frontmatter（元数据）+ Markdown 正文（执行指令）；driver 从物化后的 bundle 直接读取（`driver/spawn.go`、`driver/outputschema.go`）。
 
 **共享 step 定义（2026-10-16 裁定 G1）**：查找顺序由 `workflow.StepDefinitionPath` 决定——bundle 自己的 `steps/<id>.md` 存在即用它（可覆盖共享版本）；否则回退到 `workflows/_shared/steps/<id>.md`。`_shared` 不是 bundle（没有 `workflow.md`），物化时整目录拷到 capsule 的 `workflows/_shared/`。不要用 symlink 共享：物化的 `copyTree` 跳过 symlink。多个 bundle 逐字相同的 step 文件必须放进 `_shared`（`driver/shared_steps_test.go` 守护）。
+
+**step 变量（2026-10-16 裁定 G1 后续）**：车道之间只差几处事实（rewind 目标、产物名、车道专属检查）的 step 也只写一份共享文本，差异写成 `{{name}}` 占位符，由 workflow.md 里该 step 条目的 `vars:` 填值（`common/workflow.RenderStepVars`；`name` 为 `[a-z][a-z0-9_]*`）。规则只有三条：渲染作用于整个定义文件（frontmatter 的 `output` schema 与正文都渲染，`readStepDefinition` 与 `loadStepOutputSchema` 读的是同一份渲染结果）；值原样插入（YAML 块标量的结尾换行被去掉），不再二次展开；两个方向都 fail-closed——文件里用了却没声明的占位符、声明了却没被用到的变量都是错误（派发时 step 定义不可读，schema 记 `output_schema_unloadable`；`TestShippedStepDefinitionsResolve` 对所有出厂 bundle 守护）。能用中性措辞表达的差异不开变量。字面的 `{{name}}` 没有转义写法；变量值原样插入（在 schema 行里即未加引号的 YAML），bundle 视为可信、由测试守护（`TestShippedStepOutputSchemasCompile`、`TestShippedStepDefinitionsResolve`）。出厂的 `verification`（`output_required`、`build_step`、`position`、`lane_checks`、`never_pre_existing`）与 `review`（`build_step`、`scope_source`、`intro`、`judge`）按此共享；`TestSharedStepPromptsKeepLaneFacts` 逐 bundle 派发并核对每条车道事实仍在 prompt 里、且不混入别的车道的事实。workflow.md 正文的交付与发版说明也只留一段指向 `_shared/steps/deliver.md` 的「Delivery and releases」。
 
 frontmatter 字段——**driver 只读 `output`**：
 

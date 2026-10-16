@@ -989,6 +989,18 @@ older binary running against the new checkout cannot find the shared
 `tools/install.sh` swaps both together; do not update only the checkout
 under `release/current`.
 
+**Shared verification and review (G1 follow-up).** `verification.md` and
+`review.md` now also live once under `workflows/_shared/steps/`; their
+lane-specific text comes from the new `vars:` map on each bundle's
+`workflow.md` step entry, rendered into `{{name}}` placeholders by the
+driver. This raises the same rule: an older `pf` binary does not render
+`vars`, so against the new checkout it would dispatch verification and
+review with raw `{{name}}` placeholders, and verification's output schema
+(whose `required` list is a placeholder) would not load.
+Upgrade the binary and the checkout together (`tools/install.sh`).
+Capsules claimed before the upgrade keep their own snapshot and are
+unaffected.
+
 **Dead bundle keys removed (G10).** Step files no longer carry `tools:`.
 Seven steps whose handoff file nobody read no longer declare
 `handoff: true`. The release bundle's inert `rewind: 1/1` is gone. The

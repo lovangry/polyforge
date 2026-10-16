@@ -64,17 +64,18 @@ type stepOutputSchema struct {
 }
 
 // loadStepOutputSchema reads workflows/<bundle>/steps/<id>.md (or the
-// shared workflows/_shared/steps/<id>.md it falls back to) and
-// answers its declared output schema; (nil, nil) when the definition
-// declares none (or there is no definition file). A declared schema
+// shared workflows/_shared/steps/<id>.md it falls back to), rendered
+// with the step entry's vars, and answers its declared output schema;
+// (nil, nil) when the definition declares none (or there is no
+// definition file). A declared schema
 // that does not parse or compile is an error — a bundle whose contract
 // cannot be checked must say so, never validate silently against
 // nothing.
-func loadStepOutputSchema(bundleDir, stepID string) (*stepOutputSchema, error) {
+func loadStepOutputSchema(bundleDir, stepID string, vars map[string]string) (*stepOutputSchema, error) {
 	if bundleDir == "" {
 		return nil, nil
 	}
-	raw, err := os.ReadFile(workflow.StepDefinitionPath(bundleDir, stepID))
+	raw, err := workflow.ReadStepDefinition(bundleDir, stepID, vars)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

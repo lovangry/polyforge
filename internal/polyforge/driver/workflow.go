@@ -72,6 +72,10 @@ type StepSpec struct {
 	RequiresCommandEvidence bool
 	// The step's wall-budget estimate (budget.wall_minutes, T's base).
 	WallMinutes int
+	// Vars fills the {{name}} placeholders of the step's definition file
+	// (workflow.RenderStepVars): the lane-specific facts a shared
+	// workflows/_shared/steps/<id>.md leaves to each bundle.
+	Vars map[string]string
 }
 
 // OnFail is the gate FAIL policy: the rewind target the gate's FAIL
@@ -94,6 +98,18 @@ func (w *Workflow) indexOf(stepID string) (int, bool) {
 func (w *Workflow) step(id string) *StepSpec {
 	if i, ok := w.indexOf(id); ok {
 		return &w.Steps[i]
+	}
+	return nil
+}
+
+// stepVars answers the vars step id declares (nil for none, an unknown
+// step or a nil workflow).
+func (w *Workflow) stepVars(id string) map[string]string {
+	if w == nil {
+		return nil
+	}
+	if s := w.step(id); s != nil {
+		return s.Vars
 	}
 	return nil
 }
@@ -149,6 +165,7 @@ func parseWorkflow(front []byte) (*Workflow, error) {
 			HumanAnswerIfAsked:      s.RequiresHumanAnswer.ifAsked,
 			RequiresCommandEvidence: s.RequiresCommandEvidence,
 			ModelCandidates:         s.ModelCandidates,
+			Vars:                    s.Vars,
 		}
 		if s.Budget != nil {
 			step.WallMinutes = s.Budget.WallMinutes
@@ -230,15 +247,16 @@ type extRewind struct {
 }
 
 type extStep struct {
-	ID                      string     `yaml:"id"`
-	Gate                    bool       `yaml:"gate"`
-	Handoff                 bool       `yaml:"handoff"`
-	RequiresHumanAnswer     humanGate  `yaml:"requires_human_answer"`
-	RequiresCommandEvidence bool       `yaml:"requires_command_evidence"`
-	ContextPolicy           string     `yaml:"context_policy"`
-	ModelCandidates         []string   `yaml:"model_candidates"`
-	OnFail                  *extOnFail `yaml:"on_fail"`
-	Budget                  *extBudget `yaml:"budget"`
+	ID                      string            `yaml:"id"`
+	Gate                    bool              `yaml:"gate"`
+	Handoff                 bool              `yaml:"handoff"`
+	RequiresHumanAnswer     humanGate         `yaml:"requires_human_answer"`
+	RequiresCommandEvidence bool              `yaml:"requires_command_evidence"`
+	ContextPolicy           string            `yaml:"context_policy"`
+	ModelCandidates         []string          `yaml:"model_candidates"`
+	OnFail                  *extOnFail        `yaml:"on_fail"`
+	Budget                  *extBudget        `yaml:"budget"`
+	Vars                    map[string]string `yaml:"vars"`
 }
 
 // humanGate is the requires_human_answer value: a bool (true = a human
