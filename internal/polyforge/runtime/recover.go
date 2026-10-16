@@ -480,6 +480,14 @@ func (r *Runtime) killAgentTree(j *job) {
 // restart, an operator attach or an operator resume — a process-
 // lifecycle event, not a failure, so the consecutive-failures ledger
 // ignores it.
+//
+// This is deliberately a DIFFERENT rule from the bridge's
+// interruptedFromCause (internal/polyforge/bridge): this one is about the
+// consecutive-failures budget; that one decides which interruptions are
+// archived in execution.json attempts[] as audit-only records (everything
+// except the operator-shutdown attach). The driver's failure counting
+// skips those audit records (driver/supervision.go trailingCause), so the
+// lists need not match.
 func restartExemptCause(cause string) bool {
 	return cause == causeDaemonRestart || cause == causeOperatorAttach || cause == causeOperatorResume
 }

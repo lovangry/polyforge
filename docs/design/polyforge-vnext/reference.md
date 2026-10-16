@@ -151,7 +151,7 @@ health route. All paths under `/api/v1` except `/git/`.
 | POST | `/machines/heartbeat` | key; first registration needs admin or any-project maintainer | §4.3 |
 | GET | `/machines` | admin | §4.3 |
 | POST | `/memories` | key + writer (else `MEM-403`) | §9 |
-| GET | `/memories/search` | key | `q` (required), `type` (exact or `X.*`), `tags`, `limit` (default 50; ≤0 or >200 → 50), `project`, `excerpt` (≤8192 runes → `content_excerpt`) |
+| GET | `/memories/search` | key | `q` (required), `match` (`all` default: every term; `any`: ranked any-term; else `MEM-400`), `type` (exact or `X.*`), `tags`, `limit` (default 50; ≤0 or >200 → 50), `project`, `excerpt` (≤8192 runes → `content_excerpt`) |
 | GET | `/memories/{id}` | key; denied = `MEM-404` | `format=content` → raw Markdown body |
 | POST | `/memories/{id}/redact` | owner or admin | soft delete |
 | POST, GET / GET, PATCH | `/users`, `/users/{id}` | admin | |
@@ -384,11 +384,14 @@ Detail: `06-memory-search.md#§1`. Summary (`internal/aihub/memory`): the Markdo
 `<data-dir>/memory/<project>/<mem>/memory.md` is the authority; SQLite holds metadata + an FTS5 trigram
 index (`memory_fts`). Write = temp file + fsync → one transaction (row + FTS) → rename. A startup
 background reconcile (`RebuildIndex`) makes rows/index match files (file wins). Search needs `q`;
-tokens of ≥3 runes use FTS, shorter ones a substring scan (`Store.Search`). CLI (`cli/verbs_aihub.go`): `pf recall --project P <query>` (project must
-be mapped), `pf remember --project P --type T <content|-|@file>`, `pf memory show <id>`. At claim the
-daemon writes `runtime-state/recalled-memories.json` (the WI's goal+content is the query, top 10,
+`match=all` (default) ANDs every token (≥3 runes as FTS phrases, shorter ones as substrings);
+`match=any` ORs up to 32 filtered terms ranked by bm25 (rules in `06-memory-search.md#§5.1`); filters
+and limit are the same in both modes. CLI (`cli/verbs_aihub.go`): `pf recall --project P <query> [--any]` (project must
+be mapped; `--any` = `match=any`), `pf remember --project P --type T <content|-|@file>`, `pf memory show <id>`. At claim the
+daemon writes `runtime-state/recalled-memories.json` (query = goal + the first 1500 runes of content, `match=any`, project-scoped, top 10,
 1200-rune excerpts; empty list + notice on error or no hits; never fails the claim — `runtime/recall.go`,
-`daemon/memface.go`). `pf backup` is a SQLite-only snapshot (§4.1).
+`daemon/memface.go`). Deploy aihub before daemons: an older aihub ignores `match` and ANDs, which
+leaves the snapshot empty. `pf backup` is a SQLite-only snapshot (§4.1).
 
 ## 10. Install, release, deploy <!-- §10 -->
 

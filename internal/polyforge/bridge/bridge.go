@@ -122,6 +122,16 @@ const causeOperatorShutdown = rt.CauseOperatorAttach
 // archives nothing; every other cause is archived verbatim as an
 // audit-only attempt (it is never model-class, so it never advances the
 // candidate pointer).
+//
+// This is deliberately NOT the same list as runtime's restartExemptCause
+// (recover.go). That rule decides which recovery causes do not count
+// against the consecutive-failures budget (daemon_restart, the operator
+// attach, the operator resume). This one decides which interruptions are
+// written to execution.json attempts[] as audit-only records (every cause
+// except the operator-shutdown attach). An audit record for a
+// driver_relaunch / daemon_restart interruption is skipped by the driver's
+// own failure counting (driver/supervision.go trailingCause), so the two
+// lists need not match.
 func interruptedFromCause(cause string) *driver.InterruptedDispatch {
 	if cause == "" || cause == causeOperatorShutdown {
 		return nil

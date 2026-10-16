@@ -23,7 +23,7 @@
 | 主线 | 安装与升级 | install.sh（安装与升级均重跑它）、发版、aihub 部署 |
 | 主线 | 团队与权限 | 用户、key、项目、成员角色、agent 信任边界 |
 | 主线 | 任务管理与生命周期 | WI 状态机、依赖、就绪队列、领取（session 锁）、blocked 出口 |
-| 主线 | 记忆 | 存储与检索、recall/remember、领取时快照（`runtime-state/recalled-memories.json`，driver 以"非约束性历史"注入每个 step 提示，有界；无快照则不加该节） |
+| 主线 | 记忆 | 存储与检索、recall/remember、领取时快照（`runtime-state/recalled-memories.json`：以 goal + content 前 1500 字符为查询、`match=any` 排序检索本项目记忆取前 10 条；driver 以"非约束性历史"注入每个 step 提示，有界；无快照则不加该节） |
 | 主线 | workflow 定义 | bundle、step、gate/rewind、按步骤选模型（将来：harness） |
 | 主线 | 执行 | daemon、capsule、driver、并发、工作区映射 |
 | 主线 | 交付 | ship → git 分支 / PR (removed by polyforge#166: delivery is the workflows' deliver step. The driver checks the deliver step's recorded commands and the delivered history after the fact and escalates violations to a human; prevention rests on the step contract and the machine's local pre-push hook.) |
@@ -653,7 +653,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `runtime-state/execution.json` | 执行态唯一权威（结构：`capsule.Execution`） |
 | `runtime-state/spawn-journal.jsonl` | 每次 step 派生一行（harness、会话、transcript 路径） |
 | `runtime-state/pending-results/<spawn_n>.json` | step agent 交付结果信封的唯一通道 |
-| `runtime-state/recalled-memories.json` | 领取时的记忆快照；driver 以"非约束性历史"注入 step 提示（G3） |
+| `runtime-state/recalled-memories.json` | 领取时的记忆快照（any-term 排序检索，见 `06-memory-search.md#§8`）；driver 以"非约束性历史"注入 step 提示（G3） |
 | `artifacts/steps/<step>/s<spawn_n>/result.json` | 已接受信封的归档 |
 | `artifacts/handoff-<step>.md` | 声明 `handoff` 的步骤按路径约定写出，后续 inherit 步读取 |
 | `session/session-<token>.jsonl` | harness 会话文件，在提交边界同步进来 |
