@@ -8,7 +8,6 @@ package driver
 import (
 	"context"
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,14 +16,27 @@ import (
 	"github.com/silgrid/polyforge/internal/common/workflow"
 )
 
-// shippedStepDef reads one shipped step definition file.
+// shippedStepDef reads one shipped step definition file, rendered with
+// the shipped bundle's vars for that step (so a test bundle carrying the
+// copy needs none).
 func shippedStepDef(t *testing.T, bundle, step string) string {
 	t.Helper()
-	raw, err := os.ReadFile(workflow.StepDefinitionPath(filepath.Join("..", "..", "..", "workflows", bundle), step))
+	dir := filepath.Join("..", "..", "..", "workflows", bundle)
+	raw, err := workflow.ReadStepDefinition(dir, step, shippedVars(t, dir, step))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+// shippedVars answers the vars a shipped bundle's step entry declares.
+func shippedVars(t *testing.T, bundleDir, step string) map[string]string {
+	t.Helper()
+	wf, err := LoadWorkflow(bundleDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wf.stepVars(step)
 }
 
 // Every shipped step definition that declares an output schema compiles:
@@ -34,7 +46,7 @@ func TestShippedStepOutputSchemasCompile(t *testing.T) {
 	for _, bs := range shippedBundleSteps(t) {
 		bundleDir, step := bs[0], bs[1]
 		def := bs[0] + "/" + step
-		s, err := loadStepOutputSchema(bundleDir, step)
+		s, err := loadStepOutputSchema(bundleDir, step, shippedVars(t, bundleDir, step))
 		if err != nil {
 			t.Fatalf("%s: %v", def, err)
 		}
@@ -144,7 +156,8 @@ func TestRunEnforcedSchemaRejectsViolation(t *testing.T) {
 // null on an optional property means absent: a pass with
 // "fail_reason": null conforms.
 func TestOutputSchemaTreatsNullAsAbsent(t *testing.T) {
-	s, err := loadStepOutputSchema(filepath.Join("..", "..", "..", "workflows", "autopilot"), "verification")
+	ap := filepath.Join("..", "..", "..", "workflows", "autopilot")
+	s, err := loadStepOutputSchema(ap, "verification", shippedVars(t, ap, "verification"))
 	if err != nil || s == nil {
 		t.Fatal(err)
 	}
@@ -248,7 +261,7 @@ func TestShippedStepSchemasAcceptKnownGoodOutputs(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s has no known-good sample output", key)
 		}
-		s, err := loadStepOutputSchema(bundleDir, step)
+		s, err := loadStepOutputSchema(bundleDir, step, shippedVars(t, bundleDir, step))
 		if err != nil || s == nil {
 			t.Fatalf("%s: %v", key, err)
 		}
@@ -268,7 +281,7 @@ func TestFeatureFullMergedStepSchemasRejectContradictions(t *testing.T) {
 		"e2e-author":   `{"scenarios_path":"artifacts/e2e-scenarios.md","scenario_titles":["A"],"baseline":[{"title":"A","status":"pass","evidence":"ok"}]}`,
 		"verification": `{"verdict":"pass","checks":[{"name":"build","status":"pass"}],"authored_titles":["A"],"scenarios":[{"title":"A","status":"fail"}]}`,
 	} {
-		s, err := loadStepOutputSchema(bundle, step)
+		s, err := loadStepOutputSchema(bundle, step, shippedVars(t, bundle, step))
 		if err != nil || s == nil {
 			t.Fatalf("%s: %v", step, err)
 		}
@@ -276,7 +289,7 @@ func TestFeatureFullMergedStepSchemasRejectContradictions(t *testing.T) {
 			t.Fatalf("%s: contradictory output accepted: %s", step, bad)
 		}
 	}
-	s, _ := loadStepOutputSchema(bundle, "verification")
+	s, _ := loadStepOutputSchema(bundle, "verification", shippedVars(t, bundle, "verification"))
 	if err := checkOutputSchema(s.Schema, json.RawMessage(`{"verdict":"pass","checks":[{"name":"build","status":"pass"}]}`)); err == nil {
 		t.Fatal("verification without authored_titles/scenarios accepted")
 	}

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/harness"
@@ -36,6 +38,62 @@ func StepDefinitionPath(bundleDir, stepID string) string {
 		return shared
 	}
 	return own
+}
+
+// placeholder is one step-definition variable reference: {{name}}.
+var placeholder = regexp.MustCompile(`\{\{([a-z][a-z0-9_]*)\}\}`)
+
+// ReadStepDefinition reads the step definition StepDefinitionPath
+// resolves and renders it with the step entry's vars (RenderStepVars).
+// A read error is returned unwrapped (os.IsNotExist holds).
+func ReadStepDefinition(bundleDir, stepID string, vars map[string]string) ([]byte, error) {
+	path := StepDefinitionPath(bundleDir, stepID)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	out, err := RenderStepVars(raw, vars)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return out, nil
+}
+
+// RenderStepVars substitutes every {{name}} placeholder of a step
+// definition (frontmatter and body alike) with vars[name] — the
+// `vars:` map of the workflow.md step entry, so one shared step text
+// carries each bundle's lane-specific facts (decision 2026-10-16 G1
+// follow-up). Values are inserted verbatim (a trailing newline of a
+// YAML block scalar dropped) and never re-scanned. Fail-closed both
+// ways: a placeholder without a var and a var no placeholder uses are
+// errors, so a typo cannot ship a half-rendered prompt.
+func RenderStepVars(raw []byte, vars map[string]string) ([]byte, error) {
+	used := map[string]bool{}
+	var missing []string
+	out := placeholder.ReplaceAllFunc(raw, func(m []byte) []byte {
+		name := string(m[2 : len(m)-2])
+		v, ok := vars[name]
+		if !ok {
+			missing = append(missing, name)
+			return m
+		}
+		used[name] = true
+		return []byte(strings.TrimRight(v, "\n"))
+	})
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("step definition uses undeclared vars %v (declare them in the workflow.md step entry's vars)", missing)
+	}
+	var unused []string
+	for name := range vars {
+		if !used[name] {
+			unused = append(unused, name)
+		}
+	}
+	if len(unused) > 0 {
+		sort.Strings(unused)
+		return nil, fmt.Errorf("step entry declares vars %v the step definition never uses", unused)
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -885,7 +885,7 @@ func (d *Driver) outputSchema(stepID string) *jsonschema.Schema {
 	d.mu.Unlock()
 	if !ok {
 		var err error
-		s, err = loadStepOutputSchema(d.bundleDir, stepID)
+		s, err = loadStepOutputSchema(d.bundleDir, stepID, d.workflow.stepVars(stepID))
 		if err != nil {
 			// loud, never a silent nil: stderr AND a durable event
 			fmt.Fprintf(os.Stderr, "driver: %s: %v (output not schema-validated)\n", d.wi.ID, err)

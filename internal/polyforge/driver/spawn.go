@@ -147,7 +147,7 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 	default:
 		return nil, fmt.Errorf("driver: step %q has unknown context_policy %q", sp.StepID, policy)
 	}
-	def, err := readStepDefinition(a.BundleDir, sp.StepID)
+	def, err := readStepDefinition(a.BundleDir, sp.StepID, spec.Vars)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +170,7 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 	}
 	// H3 (polyforge#164): the declared output schema rides the prompt —
 	// the same schema the driver validates the completed output against.
-	if schema, err := loadStepOutputSchema(a.BundleDir, sp.StepID); err != nil {
+	if schema, err := loadStepOutputSchema(a.BundleDir, sp.StepID, spec.Vars); err != nil {
 		fmt.Fprintf(os.Stderr, "driver: %s/%s: %v\n", a.WI.ID, sp.StepID, err)
 	} else if schema != nil {
 		parts.OutputSchema = schema.Text
@@ -578,13 +578,17 @@ func deliveryContract(p promptParts) string {
 
 // readStepDefinition loads workflows/<bundle>/steps/<id>.md (the R9
 // path convention; falling back to workflows/_shared/steps/<id>.md when
-// the bundle carries no own file) and strips any leading frontmatter
-// block: the body is the step's instruction of record.
-func readStepDefinition(bundleDir, stepID string) (string, error) {
-	raw, err := os.ReadFile(workflow.StepDefinitionPath(bundleDir, stepID))
+// the bundle carries no own file), renders its {{name}} placeholders
+// from the step entry's vars and strips any leading frontmatter block:
+// the body is the step's instruction of record.
+func readStepDefinition(bundleDir, stepID string, vars map[string]string) (string, error) {
+	raw, err := workflow.ReadStepDefinition(bundleDir, stepID, vars)
 	if err != nil {
-		return "", fmt.Errorf("driver: step definition for %q unreadable (expected %s under the bundle, or %s beside it): %w",
-			stepID, dirStepDefs+"/"+stepID+".md", "../"+workflow.SharedDir+"/"+dirStepDefs+"/"+stepID+".md", err)
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("driver: step definition for %q unreadable (expected %s under the bundle, or %s beside it): %w",
+				stepID, dirStepDefs+"/"+stepID+".md", "../"+workflow.SharedDir+"/"+dirStepDefs+"/"+stepID+".md", err)
+		}
+		return "", fmt.Errorf("driver: step definition for %q: %w", stepID, err)
 	}
 	body := stepDefBody(raw)
 	if body == "" {

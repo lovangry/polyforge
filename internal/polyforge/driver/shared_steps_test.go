@@ -62,7 +62,7 @@ func TestShippedStepDefinitionsResolve(t *testing.T) {
 			t.Errorf("%s/%s: no step definition (own or shared): %v", filepath.Base(bs[0]), bs[1], err)
 		}
 		used[filepath.Clean(p)] = true
-		if _, err := readStepDefinition(bs[0], bs[1]); err != nil {
+		if _, err := readStepDefinition(bs[0], bs[1], shippedVars(t, bs[0], bs[1])); err != nil {
 			t.Errorf("%s/%s: %v", filepath.Base(bs[0]), bs[1], err)
 		}
 	}
@@ -182,7 +182,7 @@ func TestOldLayoutCapsuleOwnDeliverStillRuns(t *testing.T) {
 	if !strings.Contains(prompt, strings.TrimSpace(stepDefBody(shared))[:80]) {
 		t.Fatalf("deliver prompt does not carry the snapshot's deliver body\n%s", prompt)
 	}
-	s, err := loadStepOutputSchema(filepath.Join(capDir, "workflows", "autopilot"), "deliver")
+	s, err := loadStepOutputSchema(filepath.Join(capDir, "workflows", "autopilot"), "deliver", nil)
 	if err != nil || s == nil || s.Schema == nil {
 		t.Fatalf("old-layout deliver schema: %v", err)
 	}
