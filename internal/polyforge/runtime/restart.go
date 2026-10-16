@@ -181,9 +181,8 @@ func (r *Runtime) Restart(ctx context.Context) error {
 		}
 		// One bad record never aborts the daemon (v2 §6): a missing
 		// capsule / unmapped project parks that WI alone; everything else
-		// keeps its record-kept posture. The error return is the
-		// aihub-unreachable verdict only, which Restart logs and moves on.
-		_ = r.restartOne(ctx, rec)
+		// keeps its record-kept posture.
+		r.restartOne(ctx, rec)
 	}
 	if err := r.persist(); err != nil {
 		// the startup aborts: no replay may clone or install an agent
@@ -487,21 +486,21 @@ func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job, rec
 }
 
 // restartOne reconciles ONE recorded job with aihub (the body Restart
-// runs per record). The error return is the aihub-unreachable verdict only
-// — a bad capsule / unmapped project blocks the WI (blockUnrecoverable) and
-// returns nil.
-func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
+// runs per record). Nothing it meets aborts the restart: a bad capsule /
+// unmapped project blocks the WI (blockUnrecoverable), an unreachable
+// aihub defers the verify (awaitVerify).
+func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) {
 	if rec.SessionID == "" {
-		return nil
+		return
 	}
 	if j := r.jobOf(rec.WorkItemID); j != nil {
 		if j.liveAgent() {
-			return nil // already running under this daemon: not a restart case
+			return // already running under this daemon: not a restart case
 		}
 		if st, _ := j.snapshot(); st == StateClaiming {
 			// a journal replay holds the work item (resumeClaiming): its
 			// claim is the newer one, and the record was never seeded
-			return nil
+			return
 		}
 	}
 	// end_pending (v2-converge §6 bug 5): a bounded-fail whose
@@ -513,7 +512,7 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 		if j := r.jobOf(rec.WorkItemID); j != nil {
 			r.restartEndPending(j)
 		}
-		return nil
+		return
 	}
 	v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
 	if err != nil {
@@ -523,21 +522,21 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) error {
 			// with the refusal named; the owner's `pf resume` re-claims.
 			fmt.Fprintf(os.Stderr, "runtime: %s: session verify refused at restart: %v\n", rec.WorkItemID, err)
 			r.blockUnrecoverable(ctx, rec, &SessionVerifyOutageError{WI: rec.WorkItemID, Err: err})
-			return nil
+			return
 		}
 		// aihub unreachable (transport error, timeout, 5xx): NOT a
 		// verdict. The record is kept and the verify retried with backoff
 		// (v2-converge §6, repo review 2026-10-16 B-2).
 		r.awaitVerify(ctx, rec, err)
-		return nil
+		return
 	}
-	return r.restartVerified(ctx, rec, v)
+	r.restartVerified(ctx, rec, v)
 }
 
 // restartVerified is the reconciliation of ONE record against the hub's
 // verify answer v (the tail of restartOne, and of a deferred verify that
 // finally got its answer).
-func (r *Runtime) restartVerified(ctx context.Context, rec *jobRecord, v *api.SessionVerifyResponse) error {
+func (r *Runtime) restartVerified(ctx context.Context, rec *jobRecord, v *api.SessionVerifyResponse) {
 	if v.Matches {
 		switch v.Status {
 		case api.StatusRunning:
@@ -549,7 +548,7 @@ func (r *Runtime) restartVerified(ctx context.Context, rec *jobRecord, v *api.Se
 			// abort.
 			if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
 				r.blockUnrecoverable(ctx, rec, err)
-				return nil
+				return
 			}
 			if serr := r.restartRunning(ctx, rec); serr != nil {
 				fmt.Fprintf(os.Stderr, "runtime: %s: restart recovery failed: %v\n", rec.WorkItemID, serr)
@@ -583,12 +582,12 @@ func (r *Runtime) restartVerified(ctx context.Context, rec *jobRecord, v *api.Se
 					// WI is blocked instead.
 					if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
 						r.blockUnrecoverable(ctx, rec, err)
-						return nil
+						return
 					}
 					if err := r.stopOp(ctx, j, rec.StopReason, true, ""); err != nil {
 						fmt.Fprintf(os.Stderr, "runtime: %s: pending close replay failed, record kept: %v\n", rec.WorkItemID, err)
 					}
-					return nil
+					return
 				}
 				// Operator pause (Finding 2, v1.5 review): the record is
 				// RETAINED, never auto-resumed. Its state is reconciled to
@@ -618,7 +617,7 @@ func (r *Runtime) restartVerified(ctx context.Context, rec *jobRecord, v *api.Se
 				var unm *UnmappedMidflightError
 				if errors.As(aerr, &miss) || errors.As(aerr, &unm) {
 					r.blockUnrecoverable(ctx, rec, aerr)
-					return nil
+					return
 				}
 				fmt.Fprintf(os.Stderr, "runtime: %s: session attach failed, record kept: %v\n", rec.WorkItemID, aerr)
 			}
@@ -631,7 +630,7 @@ func (r *Runtime) restartVerified(ctx context.Context, rec *jobRecord, v *api.Se
 			fmt.Fprintf(os.Stderr, "runtime: %s: hub says %s with our session; record dropped\n", rec.WorkItemID, v.Status)
 			r.forgetRecord(rec)
 		}
-		return nil
+		return
 	}
 	// verify does NOT match: our session is no longer the holder (or
 	// the row is gone entirely).
@@ -668,7 +667,7 @@ func (r *Runtime) restartVerified(ctx context.Context, rec *jobRecord, v *api.Se
 		// transition: the new owner owns the work.
 		r.restartRelease(rec, v.CurrentFingerprint)
 	}
-	return nil
+	return
 }
 
 // Restart-time block reason kinds — also the durable event kinds.
@@ -766,9 +765,7 @@ func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bo
 			}
 			j.mu.Unlock()
 		}
-		if serr := r.restartVerified(ctx, rec, v); serr != nil {
-			fmt.Fprintf(os.Stderr, "runtime: %s: deferred restart reconciliation failed: %v\n", j.wi, serr)
-		}
+		r.restartVerified(ctx, rec, v)
 	}
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)

@@ -79,12 +79,11 @@ func (h *Handle) Terminate(bound time.Duration) error {
 
 // Config carries what the bridge needs from the runtime's job.
 type Config struct {
-	WI            string
-	CapsuleDir    string
-	BundleName    string
-	SessionHandle string
-	SpawnN        int64
-	Spawner       rt.Spawner
+	WI         string
+	CapsuleDir string
+	BundleName string
+	SpawnN     int64
+	Spawner    rt.Spawner
 	// StepCandidates is the polyforge#79 effective per-step candidate
 	// map the runtime computed at claim time (or rehydrated/re-derived
 	// at recovery); nil = no yaml layer, the bundle's own resolution.

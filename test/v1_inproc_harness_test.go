@@ -141,14 +141,13 @@ func newInprocRig(t *testing.T, inst *v1Install, obsTune ...inprocObsTune) *inpr
 	// scenarios run the same execution engine the daemon runs.
 	rtCfg.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
 		return bridge.Start(ctx, bridge.Config{
-			WI:            in.WI,
-			CapsuleDir:    in.CapsuleDir,
-			BundleName:    in.BundleName,
-			SessionHandle: in.SessionHandle,
-			SpawnN:        in.SpawnN,
-			Spawner:       in.Spawner,
-			Log:           rig.obs.Events(),
-			Link:          rig.sup.Link(in.WI),
+			WI:         in.WI,
+			CapsuleDir: in.CapsuleDir,
+			BundleName: in.BundleName,
+			SpawnN:     in.SpawnN,
+			Spawner:    in.Spawner,
+			Log:        rig.obs.Events(),
+			Link:       rig.sup.Link(in.WI),
 		})
 	}
 

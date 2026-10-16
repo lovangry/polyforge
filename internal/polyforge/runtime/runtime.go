@@ -226,12 +226,11 @@ type Runtime struct {
 // AgentStartInput carries the exported fields the execution engine
 // starter needs (the bridge cannot see the runtime's unexported job).
 type AgentStartInput struct {
-	WI            string
-	Project       string
-	CapsuleDir    string
-	BundleName    string
-	SessionHandle string // public fingerprint
-	SpawnN        int64
+	WI         string
+	Project    string
+	CapsuleDir string
+	BundleName string
+	SpawnN     int64
 	// StepCandidates is the polyforge#79 effective per-step candidate
 	// map this derivation dispatches under (nil = no yaml layer — the
 	// bundle's own resolution). The bridge forwards it to the driver.
@@ -1157,13 +1156,12 @@ func (r *Runtime) installClaim(ctx context.Context, wi string, j *job) error {
 		spawnN := int64(j.spawnN)
 		j.mu.Unlock()
 		h, err2 := starter(ctx, AgentStartInput{
-			WI:            j.wi,
-			Project:       j.project,
-			CapsuleDir:    j.capsuleDir,
-			BundleName:    j.bundleName,
-			SessionHandle: j.sessionFingerprint,
-			SpawnN:        spawnN,
-			Spawner:       r.spawner,
+			WI:         j.wi,
+			Project:    j.project,
+			CapsuleDir: j.capsuleDir,
+			BundleName: j.bundleName,
+			SpawnN:     spawnN,
+			Spawner:    r.spawner,
 			// polyforge#79: the claim-time compose rides to the driver —
 			// every dispatch of this derivation resolves its model from
 			// the post-precedence effective list.

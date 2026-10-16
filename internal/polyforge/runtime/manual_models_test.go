@@ -216,11 +216,7 @@ func TestManualModelsRecordDroppedOnTerminalVerdict(t *testing.T) {
 	j := seedJob(r, "wi_term")
 	r.saveManualModels("wi_term", []string{"pi:m/one"})
 	hub.hold("wi_term", "other", api.StatusWrapped)
-	var err error
-	underOpMu(r, func() { err = r.restartOne(context.Background(), j.record()) })
-	if err != nil {
-		t.Fatal(err)
-	}
+	underOpMu(r, func() { r.restartOne(context.Background(), j.record()) })
 	if got := r.loadManualModels("wi_term"); got != nil {
 		t.Fatalf("record survived a wrapped verdict: %v", got)
 	}

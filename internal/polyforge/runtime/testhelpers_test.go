@@ -465,10 +465,11 @@ func fakeSession(wi string) string {
 // shape the daemon tests' fake engine uses).
 func scriptedEngineStarter(sp Spawner) AgentStartFunc {
 	return func(ctx context.Context, in AgentStartInput) (AgentHandle, error) {
+		handle := capsuleSessionHandle(in.CapsuleDir)
 		p := SpawnParams{
 			WorkItemID:    in.WI,
 			CapsuleDir:    in.CapsuleDir,
-			SessionHandle: in.SessionHandle,
+			SessionHandle: handle,
 			SpawnN:        int(in.SpawnN),
 			InitialPrompt: "engine",
 		}
@@ -478,7 +479,7 @@ func scriptedEngineStarter(sp Spawner) AgentStartFunc {
 		}
 		// Like the real engine, journal the derivation: the capsule spawn
 		// journal is the B2 fence ledger every derivation appends to.
-		token := fmt.Sprintf("%s#%d", in.SessionHandle, in.SpawnN-1)
+		token := fmt.Sprintf("%s#%d", handle, in.SpawnN-1)
 		if jerr := writeSpawnJournal(p, h.PID(), h.StartedAt(), token); jerr != nil {
 			fmt.Fprintf(os.Stderr, "runtime: %s: scripted engine journal: %v\n", in.WI, jerr)
 		}
@@ -862,4 +863,18 @@ func replayClaims(r *Runtime) {
 	underOpMu(r, func() { rs = r.resumeClaiming(context.Background()) })
 	r.runReplays(context.Background(), rs)
 	r.replays.Wait()
+}
+
+// capsuleSessionHandle answers the session handle the capsule's
+// session.json carries — where the real driver reads it ("" when absent).
+func capsuleSessionHandle(capsuleDir string) string {
+	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.SessionJSON))
+	if err != nil {
+		return ""
+	}
+	var s capsule.Session
+	if json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return s.SessionID
 }

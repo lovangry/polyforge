@@ -494,7 +494,7 @@ func fakeEngineStarter() func(ctx context.Context, in runtime.AgentStartInput) (
 		return in.Spawner.Spawn(ctx, runtime.SpawnParams{
 			WorkItemID:    in.WI,
 			CapsuleDir:    in.CapsuleDir,
-			SessionHandle: in.SessionHandle,
+			SessionHandle: capsuleSessionHandle(in.CapsuleDir),
 			SpawnN:        int(in.SpawnN),
 			InitialPrompt: "engine",
 		})
@@ -706,4 +706,18 @@ func (td *testDaemon) waitMonitored(t *testing.T, wi string) {
 // call site uses it (production triggers name their real cause).
 func DirectShutdownCause() ShutdownCause {
 	return ShutdownCause{Kind: CauseDirect, Detail: "in-process Shutdown call"}
+}
+
+// capsuleSessionHandle answers the session handle the capsule's
+// session.json carries — where the real driver reads it ("" when absent).
+func capsuleSessionHandle(capsuleDir string) string {
+	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.SessionJSON))
+	if err != nil {
+		return ""
+	}
+	var s capsule.Session
+	if json.Unmarshal(raw, &s) != nil {
+		return ""
+	}
+	return s.SessionID
 }
