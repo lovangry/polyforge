@@ -70,14 +70,16 @@ go build -o bin/pf ./cmd/pf
 ```
 
 **2. Start aihub on a scratch data dir and port.** On first start over an
-empty data dir, aihub seeds a bootstrap admin (`usr_root`) and prints a
-one-time API key to its log — copy it now, it is never shown again:
+empty data dir, aihub seeds a bootstrap admin (`usr_root`) and writes its
+API key to `<data-dir>/bootstrap-admin.key` (mode 0600; the log names the
+file, never the key). Copy the key, then delete the file — the key is not
+stored anywhere else:
 
 ```
 mkdir -p /tmp/pf-quickstart/aihub-data
 bin/aihub --data-dir /tmp/pf-quickstart/aihub-data --listen 127.0.0.1:18420 \
   > /tmp/pf-quickstart/aihub.log 2>&1 &
-grep "one-time api key" /tmp/pf-quickstart/aihub.log
+cat /tmp/pf-quickstart/aihub-data/bootstrap-admin.key
 ```
 
 **3. Point `pf` at the server with a config file** (the flat `cli.toml`
