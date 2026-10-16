@@ -36,6 +36,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -545,6 +546,9 @@ type w174FakeDaemon struct {
 	srv      *http.Server
 	lock     *os.File
 	shutdown chan struct{}
+	// refuseShutdown makes POST /shutdown answer 500 and keep serving
+	// (a shutdown request that stops nothing).
+	refuseShutdown atomic.Bool
 }
 
 // stop closes the listener and releases the lock.
@@ -583,6 +587,10 @@ func w174StartFakeDaemon(t *testing.T, sock string, statusCode int, jobs []map[s
 		_, _ = w.Write(raw)
 	})
 	mux.HandleFunc("/shutdown", func(w http.ResponseWriter, _ *http.Request) {
+		if fd.refuseShutdown.Load() {
+			http.Error(w, `{"error":{"code":"DAEMON-500","message":"refused by the test"}}`, http.StatusInternalServerError)
+			return
+		}
 		_, _ = w.Write([]byte(`{"ok":true}`))
 		once.Do(func() {
 			close(fd.shutdown)
@@ -858,4 +866,45 @@ func TestW174InstallAbortAfterStopReportsState(t *testing.T) {
 		t.Fatalf("release/current -> %q", cur)
 	}
 	in.oneDaemon(t, 10*time.Second)
+}
+
+// TestW174InstallShutdownFailureStopsAtOnce (review of decision
+// 2026-10-16 G11): with the curl fallback gone, a `pf ops shutdown` that
+// fails while the daemon stays live must end the upgrade at once — exit 1,
+// nothing swapped, and never the "stopped" wording of a daemon that runs.
+func TestW174InstallShutdownFailureStopsAtOnce(t *testing.T) {
+	in := w174InstallV1ThenStop(t)
+	v1Bin := w174ReadFile(t, in.bin)
+	fake := w174StartFakeDaemon(t, in.sock, http.StatusOK, nil)
+	fake.refuseShutdown.Store(true)
+
+	in.release(t, "v0.0.2-w174")
+	in.resetJournal(t)
+	start := time.Now()
+	out, code := in.run(t)
+	if code != 1 {
+		t.Fatalf("a failed shutdown must exit 1, got %d:\n%s", code, out)
+	}
+	if d := time.Since(start); d > 60*time.Second {
+		t.Fatalf("the installer waited %v after a failed shutdown request", d)
+	}
+	for _, want := range []string{"pf ops shutdown failed", "nothing on this machine was changed"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output lacks %q:\n%s", want, out)
+		}
+	}
+	for _, bad := range []string{"daemon stopped", "stopped or stopping", "AFTER the daemon was asked"} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("output claims %q for a daemon that still runs:\n%s", bad, out)
+		}
+	}
+	if got := w174ReadFile(t, in.bin); got != v1Bin {
+		t.Fatal("the installed binary changed")
+	}
+	if cur, _ := os.Readlink(filepath.Join(in.data, "release", "current")); cur != "v0.0.1-w174" {
+		t.Fatalf("release/current -> %q, want v0.0.1-w174", cur)
+	}
+	if lines := in.journalLines(); journalIndex(lines, "pf daemon ensure") >= 0 {
+		t.Fatalf("ran ensure after a failed shutdown:\n%s", strings.Join(lines, "\n"))
+	}
 }

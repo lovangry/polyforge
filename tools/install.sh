@@ -248,8 +248,16 @@ if [ -n "$STAGED" ]; then
     # a pf submit) is interrupted like a forced one and recovers at the
     # next daemon start; the window is the few ms until the request.
     echo "   stopping daemon (graceful; its restart loop ends with it)"
+    # A refused/failed request (an unloadable cli.toml, a wrong socket)
+    # stops nothing: fail now instead of waiting out the budget and
+    # reporting a still-live daemon as stopped.
+    if ! SHUT_OUT=$("$BIN" ops shutdown 2>&1) && daemon_running; then
+      echo "ERROR: pf ops shutdown failed, so the daemon is still running; $UNCHANGED (the fetched release/$VER checkout is kept for the next run)."
+      printf '%s\n' "$SHUT_OUT" | sed 's/^/     /'
+      echo "   fix what it reports (check: pf doctor; pf ops status), then re-run this installer."
+      exit 1
+    fi
     STOPPED=1
-    "$BIN" ops shutdown >/dev/null 2>&1 || echo "   WARN: pf ops shutdown failed; waiting for the daemon to stop anyway"
     WAITED=0
     while daemon_running || loop_running; do
       if ! daemon_running && loop_running; then
