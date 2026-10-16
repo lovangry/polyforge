@@ -107,6 +107,14 @@ func Run(ctx context.Context, api API, opts Options) error {
 		}
 		lines, batch, err := cycle(api, &opts, &attended)
 		if err != nil {
+			// The attention notice is marked shown by the daemon when it is
+			// fetched: a cycle that fails after fetching it still prints it
+			// (repo review 2026-10-16 B-25, the WA-4 item).
+			for _, l := range batch.out {
+				if _, werr := fmt.Fprintln(opts.Out, l); werr != nil {
+					return werr
+				}
+			}
 			if !paused || opts.Now().Sub(lastNotice) >= time.Minute {
 				fmt.Fprintf(opts.Err, "polyforge watch: %s (%s); retrying in %s\n", pausedText(err), shortErr(err), backoff)
 				lastNotice = opts.Now()
@@ -235,6 +243,7 @@ func cycle(d API, o *Options, attended *bool) ([]string, batch, error) {
 			b.out = append(b.out, AttentionLine(wis))
 		}
 	}
+	attention := append([]string(nil), b.out...)
 	now := o.Now()
 	var lines []string
 	for _, sub := range subs.Subscriptions {
@@ -255,7 +264,9 @@ func cycle(d API, o *Options, attended *bool) ([]string, batch, error) {
 		if err != nil {
 			var ae *api.Error
 			if !errors.As(err, &ae) {
-				return nil, batch{}, err // transport: the daemon went away mid-cycle
+				// transport: the daemon went away mid-cycle; only the
+				// already-fetched (and daemon-marked) attention line survives
+				return nil, batch{out: attention}, err
 			}
 			lines = append(lines, safeID(api.DisplayName(sub.Slug, sub.WI))+" unavailable ("+ae.Code+")")
 			continue

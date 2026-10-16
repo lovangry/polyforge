@@ -27,7 +27,8 @@ type fakeAPI struct {
 	acks      []protocol.ChatAck
 	heartbeat int
 	snapCalls []int64
-	ackFails  int // the next ackFails Ack calls fail
+	ackFails  int   // the next ackFails Ack calls fail
+	snapErr   error // returned (once) by the next Snapshot
 }
 
 func (f *fakeAPI) Subscriptions() (protocol.ChatSubscriptions, error) {
@@ -42,6 +43,10 @@ func (f *fakeAPI) Snapshot(wi string, after int64) (*protocol.WatchSnapshot, err
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.snapCalls = append(f.snapCalls, after)
+	if err := f.snapErr; err != nil {
+		f.snapErr = nil
+		return nil, err
+	}
 	s := *f.snaps[wi]
 	var evs []protocol.EventEntry
 	for _, e := range s.Events {
@@ -749,5 +754,29 @@ func TestFailedAckDoesNotReprintTheDecision(t *testing.T) {
 	}
 	if api.subs.Subscriptions[0].Cursor != 1 {
 		t.Fatalf("the ack must be retried until it lands: cursor = %d", api.subs.Subscriptions[0].Cursor)
+	}
+}
+
+// repo review 2026-10-16 B-25 (WA-4): the daemon marks an attention
+// notice shown when the watcher fetches it; a cycle that then loses the
+// daemon mid-way must still print the notice, not drop it for good.
+func TestAttentionSurvivesAMidCycleTransportError(t *testing.T) {
+	api := &fakeAPI{
+		subs:      protocol.ChatSubscriptions{Subscriptions: []protocol.ChatSub{sub("wi_1", 0)}},
+		snaps:     map[string]*protocol.WatchSnapshot{"wi_1": running("wi_1", "s1")},
+		attention: []protocol.ChatAttentionItem{{WI: "wi_9", Reason: "blocked"}},
+		snapErr:   errors.New("dial unix: connection refused"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	polls := 0
+	var out bytes.Buffer
+	_ = Run(ctx, api, Options{Out: &out, Sleep: func(context.Context, time.Duration) {
+		if polls++; polls >= 3 {
+			cancel()
+		}
+	}})
+	if !strings.Contains(out.String(), "wi_9") {
+		t.Fatalf("the fetched attention notice was lost: %q", out.String())
 	}
 }
