@@ -97,3 +97,24 @@ func TestShippedStepDefinitionsNotDuplicated(t *testing.T) {
 		}
 	}
 }
+
+// Every shipped verification gate declares requires_command_evidence: the
+// id no longer implies it (decision 2026-10-16 G10).
+func TestShippedVerificationStepsDeclareCommandEvidence(t *testing.T) {
+	n := 0
+	for _, dir := range shippedBundleDirs(t) {
+		wf, err := LoadWorkflow(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s := wf.step(verificationStepID); s != nil {
+			n++
+			if !s.RequiresCommandEvidence {
+				t.Errorf("%s: verification must declare requires_command_evidence: true", filepath.Base(dir))
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatal("no shipped verification step found")
+	}
+}

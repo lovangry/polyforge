@@ -53,8 +53,9 @@ type StepSpec struct {
 	// bundle snapshot recovers under its claim-time snapshot instead).
 	ModelCandidates []string
 	OnFail          *OnFail
-	// Handoff marks a step that must produce a handoff artifact for the
-	// next inherit step (validated on its completed results).
+	// Handoff marks a step that must produce a handoff artifact
+	// (artifacts/handoff-<id>.md) for a later inherit step; the prompt
+	// carries the duty, nothing checks the file (resolveHandoff).
 	Handoff bool
 	// RequiresHumanAnswer mirrors `requires_human_answer: true`: the step
 	// may not complete until a human answered at least one of its
@@ -67,7 +68,7 @@ type StepSpec struct {
 	// durable EvHumanGateUnasked event, which notifies the owner.
 	HumanAnswerIfAsked bool
 	// RequiresCommandEvidence mirrors `requires_command_evidence: true`
-	// (the V4 gate; implied for a step whose id is "verification").
+	// (the V4 gate).
 	RequiresCommandEvidence bool
 	// The step's wall-budget estimate (budget.wall_minutes, T's base).
 	WallMinutes int

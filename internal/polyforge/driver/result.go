@@ -148,8 +148,10 @@ type StepResult struct {
 	schemaViolation string
 }
 
-// verificationStepID is the conventional id of the V4 verification step:
-// a completed result for it owes command evidence (ResultSpec.RequireCommandEvidence).
+// verificationStepID is the conventional id of the verification gate:
+// its accepted run anchors the deliver merge rule (verified heads, test
+// bar) and its pre-existing-failure boundary. Its command-evidence duty is
+// declared in the bundle (requires_command_evidence), not implied by the id.
 const verificationStepID = "verification"
 
 // CommandEvidence is one recorded command the step process ran, kept in
@@ -193,10 +195,10 @@ type ResultSpec struct {
 	// the step (see currentChainAnswers). Answers only enter the record
 	// through the answer transition, so every entry is a human's.
 	HumanAnswers int
-	// RequireCommandEvidence mirrors requires_command_evidence: true (or
-	// the step id "verification"): an accepted completed result must carry
-	// at least one command_evidence entry, each with a non-empty argv and
-	// duration_ms > 0 (the V4 gate; exit_code presence is not checkable).
+	// RequireCommandEvidence mirrors requires_command_evidence: true: an
+	// accepted completed result must carry at least one command_evidence
+	// entry, each with a non-empty argv and duration_ms > 0 (the V4 gate;
+	// exit_code presence is not checkable).
 	RequireCommandEvidence bool
 	// ReposDir is the capsule's task-repo root (<capsule>/repos). When
 	// set, a completed result whose output declares a non-empty

@@ -22,7 +22,7 @@
 
 ### 1.2 非目标 <!-- §1.2 -->
 
-- 不设计 step 的进程隔离与命令执行入口（权威见 `03-execution-capsule.md#§5`）；本文 frontmatter schema 不声明、也不引用任何 step 级隔离类字段——v1 面向 trusted internal repo，采用宿主机原生（host-native）执行，不引入 per-step isolation（权威裁定见 `00-architecture.md#§1.2`/INV-12、`03-execution-capsule.md#§1.2`），step skill 对宿主机工具链与网络的可达性与其余 harness-native subagent 完全一致，不做逐 step 的 OS 级能力收窄（harness 层 `tools` 声明除外，见 §4.4）。
+- 不设计 step 的进程隔离与命令执行入口（权威见 `03-execution-capsule.md#§5`）；本文 frontmatter schema 不声明、也不引用任何 step 级隔离类字段——v1 面向 trusted internal repo，采用宿主机原生（host-native）执行，不引入 per-step isolation（权威裁定见 `00-architecture.md#§1.2`/INV-12、`03-execution-capsule.md#§1.2`），step skill 对宿主机工具链与网络的可达性与其余 harness-native subagent 完全一致，不做逐 step 的 OS 级能力收窄。
 - 不定义 WI 的 bundle 引用 Core 存储 DDL、创建事务与 API 面（权威见 `02-aihub-core.md#§4.4`/`#§4.5`/`#§5.1`）；本文只定义被校验、被固化的对象（frontmatter schema 与 bundle 引用规则）。
 - 不定义 Capsule 内的物化协议、step agent 定义文件解析与防冲突（权威见 `03-execution-capsule.md#§4.5`）。
 - 不设计 step 结果如何同步到 AIHub、Revision 发布协议（权威见 `05-sync-revision-recovery.md#§4`、`#§5`）。
@@ -114,7 +114,7 @@ Step 元素字段——driver 解析的九个键（`internal/polyforge/driver/wo
 | `id` | string | 必填 | 非空，steps 内唯一（V2）；同时是 step 定义文件名绑定：`steps/<id>.md`，也是 workspace yaml `steps.<project>.<step-id>.models` 的键（同名步骤跨 bundle 共用一个键） |
 | `gate` | bool | 可选，缺省 false | true 表示本 step 产出业务判定（review/verification/grill-review 皆可） |
 | `requires_human_answer` | bool \| `if_asked` | 可选，缺省 false | 人工 gate：`true` = 本次尝试中没有人工回答之前，该 step 既不能 completed、也不能 gate_failed（否则会 rewind 或终止 workflow；这类信封被拒，repo review 2026-10-16 V-8）；`if_asked` = 提出的问题只能由人回答，零问题可完成（记 `human_gate_unasked` 事件）。**取代旧的 `interactive: true`**——后者是未知键，被忽略，写了它不会得到人工 gate |
-| `requires_command_evidence` | bool | 可选，缺省 false | true 表示 completed 结果必须带 `command_evidence`（V4 取证门禁，§4.4a；step id 为 `verification` 时隐式为 true） |
+| `requires_command_evidence` | bool | 可选，缺省 false | true 表示 completed 结果必须带 `command_evidence`（V4 取证门禁，§4.4a；没有按 step id 的隐式规则——四个交付 bundle 的 `verification` 显式声明它，2026-10-16 裁定 G10） |
 | `on_fail` | OnFail | 可选，仅 `gate: true` 的 step 允许携带（V5） | `OnFail = {target: 更早的 step id（必填）}`——声明即 rewind 边；未声明 `on_fail` 即 §6.2 第 1 步的 `failed_gate` 终止。gate FAIL 判定全文一律随 `pending_rewind_input` 送达 target（polyforge#147 C5：`action` 与 `include_verdict` 键已删除，判定转发无条件） |
 | `context_policy` | string | 可选，缺省 `inherit` | `inherit`\|`fresh`：见 §4.4a。`inherit` 的 step 续上上游交接（派发输入带 handoff 文件正文），`fresh` 从零开始；`gate: true` 的 step 必须是 `fresh`（闸只凭自己的输入判，不继承有倾向性的上下文；V11） |
 | `handoff` | bool | 可选，缺省 false | true 表示本 step 必须写交接文件 `artifacts/handoff-<step-id>.md`：见 §4.4a |
@@ -208,7 +208,7 @@ frontmatter 字段——**driver 只读 `output`**，其余为约定：
 |---|---|---|
 | `name` | 约定 | 等于文件名（即 step id）；不解析、不校验 |
 | `description` | 约定 | 一句话职责说明；不解析 |
-| `tools` | 约定（无效果） | 历史上的工具面声明；**没有任何适配器读取或落实它**，写了也不收窄工具面 |
+| `tools` | 已删除（2026-10-16 裁定 G10） | 历史上的工具面声明，从未被任何适配器读取；随附 bundle 已不再写它，旧快照里残留的 `tools:` 被忽略 |
 | `output` | 可选，唯一被读取的键 | draft-07 JSON Schema（YAML 书写）：注入派发 prompt（放在正文之前），并由 driver 校验 completed 结果的 `output`——当前只记录不拒收（`enforceOutputSchemas=false`，见下） |
 | `model` | 禁止出现 | 模型选择是流程作者的决定，唯一载体是 workflow.md frontmatter 的 `model_candidates`（§4.1，INV-1g）；`model` 键不被读取 |
 
@@ -226,9 +226,9 @@ step 之间只有两种上下文关系，两者都由 workflow.md frontmatter �
 
 - **`context_policy: inherit`（缺省）**：本 step 是上游工作的延续。派发时 driver 取**最近一个已 done 且声明了 `handoff: true` 的更早 step**，按约定路径 `artifacts/handoff-<step-id>.md` 读出其交接文件正文，原样拼进本 step 的派发 prompt（「Handoff from step …」小节）；没有这样的上游、或文件不在，就只是少了那一段，不是失败。
 - **`context_policy: fresh`**：本 step 从零开始，不注入任何上游交接正文；它要读的上游产物按**产物路径约定**自取（`artifacts/<name>.md`，§4.2 要点一）。`gate: true` 的 step 一律 `fresh`（解析器强制）。
-- **`handoff: true`**：本 step **必须**在收尾前把交接内容写成文件 `artifacts/handoff-<step-id>.md`（路径由 step id 机械决定，step 模板的 Handoff duty 一节即此约定的文案）。下游 inherit step 按这同一条路径读取。
+- **`handoff: true`**（只在某个下游 inherit step 以本 step 为最近交接源时才声明，否则文件无人读；2026-10-16 裁定 G10 删除了 7 处无读者的声明）：本 step **必须**在收尾前把交接内容写成文件 `artifacts/handoff-<step-id>.md`（路径由 step id 机械决定，step 模板的 Handoff duty 一节即此约定的文案）。下游 inherit step 按这同一条路径读取。
 
-**无摘要校验（C2/C3 裁定）**：结果信封是最小契约——`outcome` + `output`（`needs_input` 另带 `question_id` + `question`）——信封里**没有** `handoff_ref`、没有 sha256、没有 bytes、没有 artifacts 清单。driver 在最小契约之外只保留两道机械门禁。其一是 V4 命令取证门禁（owner 裁定保留在 driver）：欠取证的 step（`requires_command_evidence: true`，或 step id 为 `verification`）的 completed 结果另带 `command_evidence: [{argv, exit_code, duration_ms}]`，至少一条、每条 argv 非空且 `duration_ms > 0`，否则信封被拒；被接受的取证由 driver 写入该 step 的 `output.commands`。其二是已提交测试文件门禁（polyforge#156，作用于任意 step，同一拒收车道）：completed 结果的 `output.test_files` 非空时，每条路径必须是 repo 相对路径、至少存在于一个 task repo，且在其存在的每个 task repo 中都已提交在 HEAD（driver 只跑 `git ls-tree`，禁用 hooks/fsmonitor，不扫工作区），否则信封被拒并点名路径与 repo——resume 只按 carrier ref（HEAD）恢复 task repo，未提交的测试文件会丢失。交接文件的存在与内容由路径约定承载：写在约定路径上就算交接完成，driver 不校验摘要、不比对清单、不因为缺少摘要字段判信封不合格；交接文件缺失时 inherit step 的派发只是少了那段正文，不构成信封级失败。产物同理：step 产出一律写进 `artifacts/` 下由各 step 指令点名的路径，下游按路径读。
+**无摘要校验（C2/C3 裁定）**：结果信封是最小契约——`outcome` + `output`（`needs_input` 另带 `question_id` + `question`）——信封里**没有** `handoff_ref`、没有 sha256、没有 bytes、没有 artifacts 清单。driver 在最小契约之外只保留两道机械门禁。其一是 V4 命令取证门禁（owner 裁定保留在 driver）：欠取证的 step（声明了 `requires_command_evidence: true`）的 completed 结果另带 `command_evidence: [{argv, exit_code, duration_ms}]`，至少一条、每条 argv 非空且 `duration_ms > 0`，否则信封被拒；被接受的取证由 driver 写入该 step 的 `output.commands`。其二是已提交测试文件门禁（polyforge#156，作用于任意 step，同一拒收车道）：completed 结果的 `output.test_files` 非空时，每条路径必须是 repo 相对路径、至少存在于一个 task repo，且在其存在的每个 task repo 中都已提交在 HEAD（driver 只跑 `git ls-tree`，禁用 hooks/fsmonitor，不扫工作区），否则信封被拒并点名路径与 repo——resume 只按 carrier ref（HEAD）恢复 task repo，未提交的测试文件会丢失。交接文件的存在与内容由路径约定承载：写在约定路径上就算交接完成，driver 不校验摘要、不比对清单、不因为缺少摘要字段判信封不合格；交接文件缺失时 inherit step 的派发只是少了那段正文，不构成信封级失败。产物同理：step 产出一律写进 `artifacts/` 下由各 step 指令点名的路径，下游按路径读。
 
 ### 4.5 bundle 引用（digest 链已删除，polyforge#149 B9） <!-- §4.5 -->
 
@@ -374,7 +374,7 @@ claim 响应字段、执行侧校验分支与 `Digest`/`FileEntry` 库函数一�
 ## 8. 安全边界 <!-- §8 -->
 
 - bundle 来源：AIHub 与执行机各自读本机 aihub checkout 的 `workflows/` 目录（部署配置给定）；不存在注册面、不存在远端 bundle 上传路径。frontmatter schema 拒绝未知键与一切非数据类型节点，杜绝「schema 内嵌脚本」的可能性。
-- workflow.md frontmatter 只含数据声明；step skill 的 `tools` 声明是 harness 层工具面，OS 层文件系统读写权限完全由 `03-execution-capsule.md#§5` 的 v1 Native runner profile 统一裁定，不存在按 step skill 做 OS 级权限放大或收窄的机制。该路径级约束在 host-native 同 UID 形态下是防误写措施（权限位 + 路径不暴露），不是安全边界，不构成机制级隔离（`00-architecture.md#§2.3` INV-6、`00-architecture.md#§8`）。
+- workflow.md frontmatter 只含数据声明；step skill 不声明工具面，OS 层文件系统读写权限完全由 `03-execution-capsule.md#§5` 的 v1 Native runner profile 统一裁定，不存在按 step skill 做 OS 级权限放大或收窄的机制。该路径级约束在 host-native 同 UID 形态下是防误写措施（权限位 + 路径不暴露），不是安全边界，不构成机制级隔离（`00-architecture.md#§2.3` INV-6、`00-architecture.md#§8`）。
 - grill / grill-review 的问答记录（`artifacts/grill-qa.md`）是 Capsule 产物，随同步发布流转；本层不把问答内容发往除既定同步面之外的任何通道。
 
 ## 9. 监控 <!-- §9 -->

@@ -1,7 +1,6 @@
 ---
 name: root-cause
 description: Gate that proves (or honestly fails to prove) the cause of the reproduced failure against concrete evidence, before any fix is written.
-tools: [read, bash]
 output:
   type: object
   required: [verdict, root_cause, evidence]

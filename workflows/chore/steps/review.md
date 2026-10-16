@@ -1,7 +1,6 @@
 ---
 name: review
 description: Human-judgment gate over the completed maintenance/deletion change - plan conformance plus the fixed owner-rules checklist - after the machine gate, before delivery.
-tools: [read, bash]
 output:
   type: object
   required: [verdict]

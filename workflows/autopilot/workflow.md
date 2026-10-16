@@ -8,8 +8,8 @@ defaults:
   model_candidates: [pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5, pi:sub2api-openai/gpt-6-astra]
 steps:
   - { id: grill, context_policy: fresh, handoff: true, requires_human_answer: if_asked }
-  - { id: fix, context_policy: inherit, handoff: true }
-  - { id: verification, context_policy: fresh, handoff: false, gate: true, on_fail: { target: fix }, model_candidates: [pi:sub2api-glm/glm-5.3-flash, pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5] }
+  - { id: fix, context_policy: inherit }
+  - { id: verification, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, on_fail: { target: fix }, model_candidates: [pi:sub2api-glm/glm-5.3-flash, pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5] }
   - { id: deliver, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, on_fail: { target: fix } }
 ---
 

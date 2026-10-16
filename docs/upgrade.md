@@ -345,9 +345,9 @@ see "Per-step harness" below); any other key is refused, naming it. YAML anchors
 
 **No backward compatibility — edit all three workspace files together
 with the deploy.** A file that still has the top-level `models:` section
-is refused at every claim (DAEMON-414: "top-level `models:` was replaced
-by `steps:` (polyforge#169) — move models.<project>.<key>: [...] to
-steps.<project>.<key>.models: [...] (see docs/upgrade.md)"), the work
+is refused at every claim (DAEMON-414: `unknown top-level key "models"
+(only `steps`)`; earlier versions added a migration hint, dropped by
+decision 2026-10-16 G10 once every workspace was rewritten), the work
 item stays queued, and `pf doctor` reports the same under `workspace
 yaml`. Deploying this version therefore requires rewriting osp-ws,
 gmi-ws and yf-ws's `.polyforge.yaml` (below) at the same time; until a

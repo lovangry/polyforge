@@ -1,7 +1,6 @@
 ---
 name: verification
 description: Machine-checkable gate - build, lint, tests, and above all the original repro case must pass on the fixed tree before review is attempted.
-tools: [read, bash]
 output:
   type: object
   required: [verdict, checks]

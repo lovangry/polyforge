@@ -1,7 +1,6 @@
 ---
 name: deliver
 description: Deliver the verified change - merge the latest origin default branch, push ONLY the feature branch polyforge/<project>-<seq>, open or reuse its PR, and merge it with gh pr merge --merge when the merge rule holds; otherwise stop at a human-only question.
-tools: [read, bash, subagent]
 output:
   type: object
   required: [verdict]

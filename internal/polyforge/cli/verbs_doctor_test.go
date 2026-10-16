@@ -324,8 +324,8 @@ func TestDoctorWorkspaceYamlReportsUnknownStepKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _, doc = doctorStatus(t, env, "--json", "doctor")
-	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "fail" || !strings.Contains(detail, "`models:` was replaced by `steps:`") {
-		t.Fatalf("legacy models: section: %s %q, want fail with the migration message", st, detail)
+	if st, detail := doctorFind(t, doc, "workspace yaml"); st != "fail" || !strings.Contains(detail, `unknown top-level key "models"`) {
+		t.Fatalf("legacy models: section: %s %q, want fail naming the unknown key", st, detail)
 	}
 
 	if err := os.WriteFile(yaml, []byte("steps:\n  ghost:\n    fix: { models: [pi:b] }\n"), 0o600); err != nil {

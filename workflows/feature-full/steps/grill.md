@@ -1,7 +1,6 @@
 ---
 name: grill
 description: Interactive pre-spec questioning that turns a vague feature or bug goal into a concrete, answerable set of requirements before spec authoring starts.
-tools: [read, bash]
 output:
   type: object
   required: [qa_log, ready_for_spec]

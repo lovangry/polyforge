@@ -163,7 +163,7 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		Gate:                    spec.Gate,
 		PriorRejection:          sp.PriorRejection,
 		PriorEndedWithoutResult: sp.PriorEndedWithoutResult,
-		RequireCommandEvidence:  spec.RequiresCommandEvidence || sp.StepID == verificationStepID,
+		RequireCommandEvidence:  spec.RequiresCommandEvidence,
 		RequiresHumanAnswer:     spec.RequiresHumanAnswer,
 		HumanAnswerIfAsked:      spec.HumanAnswerIfAsked,
 	}

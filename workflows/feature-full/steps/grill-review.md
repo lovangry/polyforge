@@ -1,7 +1,6 @@
 ---
 name: grill-review
 description: Interactive summary confirmation of the spec with the requester — a single gate pass/fail judgment on whether the spec matches intent, not a quality score.
-tools: [read, bash]
 output:
   type: object
   required: [verdict, qa_log]
