@@ -94,17 +94,18 @@ func inferProjectFromCwd(ctx *Context) (string, error) {
 	return projects[0], nil
 }
 
-// requireMappedProject validates a placement-adjacent verb's --project
-// against the loaded mapping (polyforge#113): placement needs a home on
-// this machine. An unmapped (or unvalidatable — no mapping configured)
-// project is a loud naming error pointing at the [workspace] shape and
-// `pf doctor`; it never silently proceeds.
+// requireMappedProject validates a placement verb's --project (file
+// create, recall, remember) against the loaded mapping (polyforge#113).
+// An unmapped (or unvalidatable — no mapping configured) project is a
+// loud local error — wrapping the typed *mapping.UnmappedError, naming
+// the projects this machine does map and pointing at the [workspace]
+// shape and `pf doctor` — and nothing is sent to aihub.
 func requireMappedProject(ctx *Context, verb, project string) error {
 	if ctx.Cfg.Mapping.Empty() {
 		return fmt.Errorf("%s: project %q cannot be placed: no [workspace] mapping is configured in cli.toml — add a [workspace.\"<path>\"] section (`pf doctor` checks the mapping)", verb, project)
 	}
 	if _, err := ctx.Cfg.Mapping.WorkspaceFor(project); err != nil {
-		return fmt.Errorf("%s: %w", verb, err)
+		return fmt.Errorf("%s: %w; mapped here: %s", verb, err, strings.Join(ctx.Cfg.Mapping.Projects(), ", "))
 	}
 	return nil
 }
@@ -647,7 +648,7 @@ var cmdRecall = &Command{
 	Summary: "Search project memories",
 	Usage:   "pf recall --project P <query> [--type T] [--tags a,b] [--limit N]",
 	Setup: func(fs *flag.FlagSet) {
-		fs.String("project", "", "project name (required)")
+		fs.String("project", "", "project name (required; validated against the [workspace] mapping)")
 		fs.String("q", "", "query text (alternative to the positional argument)")
 		fs.String("type", "", "memory type filter: exact (experience.debug), prefix (experience.*), or * (all types)")
 		fs.String("tags", "", "comma-separated tags")
@@ -676,6 +677,9 @@ var cmdRecall = &Command{
 		proj := stringFlag(fs, "project")
 		if proj == "" {
 			return fmt.Errorf("recall: --project is required — there is no default project (polyforge#113); the routing skill derives it from the WI under discussion")
+		}
+		if err := requireMappedProject(ctx, "recall", proj); err != nil {
+			return err
 		}
 		var tagList []string
 		if tags := stringFlag(fs, "tags"); tags != "" {
@@ -737,7 +741,7 @@ var cmdRemember = &Command{
 	Usage: "pf remember --project P --type T [--title S] [--visibility V] [--tags a,b] " +
 		"[--work-item ID] <content | - (stdin) | @file>",
 	Setup: func(fs *flag.FlagSet) {
-		fs.String("project", "", "project name (required)")
+		fs.String("project", "", "project name (required; validated against the [workspace] mapping)")
 		fs.String("type", "", "memory type (required, e.g. experience.debug, fact.note)")
 		fs.String("title", "", "memory title")
 		fs.String("visibility", "project", "admin|private|project|team|public")
@@ -752,6 +756,9 @@ var cmdRemember = &Command{
 		proj := stringFlag(fs, "project")
 		if proj == "" {
 			return fmt.Errorf("remember: --project is required — there is no default project (polyforge#113)")
+		}
+		if err := requireMappedProject(ctx, "remember", proj); err != nil {
+			return err
 		}
 		// The content: positional text, '-' for stdin, '@file' for a file.
 		var content string

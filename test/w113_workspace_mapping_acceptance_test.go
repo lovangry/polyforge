@@ -1508,13 +1508,11 @@ func TestW113UnmappedMidflightWIBlocksThenResumes(t *testing.T) {
 // S17 — placement verbs without --project fail with mapping guidance.
 // ---------------------------------------------------------------------------
 
-// TestW113PlacementVerbsRequireProject pins criterion #13 (updated for
-// audit-subtraction pass B / C15): every placement verb without
-// --project fails stating --project is required. `pf file create` —
-// still placement-bound — also points at the mapping (`[workspace]`
-// sections / `pf doctor`); `pf remember` and `pf recall` are no longer
-// mapping-restricted, so their required-error carries no mapping
-// mention.
+// TestW113PlacementVerbsRequireProject pins criterion #13: every
+// placement verb without --project fails stating --project is required.
+// `pf file create` also points at the mapping (`[workspace]` sections /
+// `pf doctor`); the remember / recall required-error carries no mapping
+// mention (the mapping check runs on a given --project, S18).
 func TestW113PlacementVerbsRequireProject(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
@@ -1561,29 +1559,29 @@ func TestW113PlacementVerbsValidateProject(t *testing.T) {
 		inst.url, inst.adminKey, "",
 		[]w113WS{{key: ws, projects: []string{"e2e"}}})
 
-	// Unmapped: file create (still placement-bound) fails naming the
-	// project and the mapping requirement. remember / recall are no
-	// longer mapping-restricted (C15, audit-subtraction pass B): an
-	// aihub-known project with NO local mapping succeeds for both.
-	out, code := w113Pf(t, inst, w113Env{config: cfg},
-		"file", "create", "--project", "ghostproj", "--goal", "w113 unmapped placement")
-	if code != 1 {
-		t.Fatalf("pf file create (unmapped): exit %d, want 1 (output %q)", code, out)
-	}
-	if !strings.Contains(out, "ghostproj") {
-		t.Fatalf("pf file create (unmapped): error does not name the unmapped project (output %q)", out)
-	}
-	if !strings.Contains(out, "[workspace") && !strings.Contains(out, "doctor") && !strings.Contains(out, "mapping") {
-		t.Fatalf("pf file create (unmapped): error does not point at the mapping (output %q)", out)
-	}
+	// Unmapped: every placement verb (file create, remember, recall —
+	// repo review 2026-10-16 D-5) fails naming the project and the
+	// mapping requirement, even for an aihub-known project.
 	w113EnsureProject(t, inst, "w113offmap")
-	w113PfWant(t, inst, -1, w113Env{config: cfg},
-		"remember", "--project", "w113offmap", "--type", "experience.debug", "w113 unmapped memory")
-	w113PfWant(t, inst, -1, w113Env{config: cfg},
-		"recall", "--project", "w113offmap", "w113 unmapped query")
+	for _, argv := range [][]string{
+		{"file", "create", "--project", "w113offmap", "--goal", "w113 unmapped placement"},
+		{"remember", "--project", "w113offmap", "--type", "experience.debug", "w113 unmapped memory"},
+		{"recall", "--project", "w113offmap", "w113 unmapped query"},
+	} {
+		out, code := w113Pf(t, inst, w113Env{config: cfg}, argv...)
+		if code != 1 {
+			t.Fatalf("pf %v (unmapped): exit %d, want 1 (output %q)", argv, code, out)
+		}
+		if !strings.Contains(out, "w113offmap") {
+			t.Fatalf("pf %v (unmapped): error does not name the unmapped project (output %q)", argv, out)
+		}
+		if !strings.Contains(out, "[workspace") && !strings.Contains(out, "doctor") && !strings.Contains(out, "mapping") {
+			t.Fatalf("pf %v (unmapped): error does not point at the mapping (output %q)", argv, out)
+		}
+	}
 
 	// Mapped: each verb succeeds.
-	out = w113PfWant(t, inst, -1, w113Env{config: cfg},
+	out := w113PfWant(t, inst, -1, w113Env{config: cfg},
 		"file", "create", "--project", "e2e", "--goal", "w113 mapped placement goal")
 	if !strings.Contains(out, "w113 mapped placement goal") {
 		t.Fatalf("pf file create (mapped): output does not carry the created item (output %q)", out)
