@@ -381,18 +381,18 @@ func TestRetiredEnvCheck(t *testing.T) {
 // clean-restart fix; the allow-listed set passes; names only, never
 // values.
 func TestDaemonEnvCheck(t *testing.T) {
-	if c := daemonEnvCheck(false, nil); c.Status != "skip" {
+	if c := daemonEnvCheck(false, nil, nil); c.Status != "skip" {
 		t.Fatalf("daemon down: %+v", c)
 	}
-	if c := daemonEnvCheck(true, nil); c.Status != "skip" || !strings.Contains(c.Detail, "older daemon") {
+	if c := daemonEnvCheck(true, nil, nil); c.Status != "skip" || !strings.Contains(c.Detail, "older daemon") {
 		t.Fatalf("older daemon: %+v", c)
 	}
 	clean := []string{"HOME", "LANG", "LC_ALL", "PATH", "POLYFORGE_DATA_DIR", "POLYFORGE_SUPERVISOR", "PWD", "https_proxy", "SSH_AUTH_SOCK_DIR"}
-	if c := daemonEnvCheck(true, clean); c.Status != "pass" {
+	if c := daemonEnvCheck(true, clean, []string{"https_proxy"}); c.Status != "pass" {
 		t.Fatalf("clean daemon env: %+v", c)
 	}
 	dirty := append(clean, "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "FOO_TOKEN", "POLYFORGE_V1_API_KEY", "DB_PASSWORD", "aws_secret")
-	c := daemonEnvCheck(true, dirty)
+	c := daemonEnvCheck(true, dirty, nil)
 	if c.Status != "warn" {
 		t.Fatalf("dirty daemon env: %+v", c)
 	}
@@ -405,5 +405,14 @@ func TestDaemonEnvCheck(t *testing.T) {
 		if strings.Contains(c.Detail, clean) {
 			t.Fatalf("warn detail names the allow-listed %q: %s", clean, c.Detail)
 		}
+	}
+}
+
+// env hygiene: a pi models.json `$NAME` outside the allow-list warns
+// (pi steps see only the daemon's allow-listed environment).
+func TestDaemonEnvCheckPiModelsRefs(t *testing.T) {
+	c := daemonEnvCheck(true, []string{"HOME", "PATH"}, []string{"GOPATH", "OPENROUTER_API_KEY", "ZAI_KEY"})
+	if c.Status != "warn" || !strings.Contains(c.Detail, "$OPENROUTER_API_KEY, $ZAI_KEY") || strings.Contains(c.Detail, "$GOPATH") || !strings.Contains(c.Detail, "auth.json") {
+		t.Fatalf("pi models refs: %+v", c)
 	}
 }

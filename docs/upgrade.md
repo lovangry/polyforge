@@ -1109,8 +1109,17 @@ it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
   `ANTHROPIC_*` a claude step needs (token, base URL, model defaults) in
   `<harness-root>/claude-config/settings.json`'s `env` block. A setup that
   relied on a daemon-env token no longer authenticates — `pf doctor`'s
-  `harness claude` row warns. pi steps are unchanged (pi uses its own
-  `auth.json`).
+  `harness claude` row warns.
+- pi steps see only the daemon's environment too, so after the clean
+  restart they see only the allow-list. pi resolves a provider key from
+  `auth.json` (copied into the step agent dir from `--operator-agent-dir`
+  / `[daemon] operator_agent_dir`), a literal `apiKey` in `models.json`,
+  or the environment (a provider `*_API_KEY`, or a `$NAME` / `${NAME}`
+  reference in `models.json`). A key that only lived in the daemon's
+  environment no longer reaches pi steps: move it into `auth.json` (pi
+  `/login`) or a literal in `models.json`. `pf doctor`'s `daemon env` row
+  warns, names only, when the step agent's `models.json` references a
+  variable outside the allow-list.
 - A daemon started before this upgrade keeps its old environment until it
   is restarted: `pf doctor`'s new `daemon env` row warns on any
   `ANTHROPIC_*` or credential-looking name in it. Restart it clean:

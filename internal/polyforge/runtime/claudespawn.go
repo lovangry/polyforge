@@ -137,8 +137,13 @@ func (s *claudeSpawner) buildCmd(p SpawnParams) (*exec.Cmd, error) {
 	// certainly applied. Now nothing of it reaches the step — set every
 	// ANTHROPIC_* a step needs in settings.json. (`pf daemon ensure`
 	// also no longer hands the daemon any ANTHROPIC_*: see
-	// supervisor/env.go.) pi steps are untouched: pi authenticates from
-	// its own auth.json.
+	// supervisor/env.go.) pi steps strip nothing extra here, but they
+	// too see only the daemon's environment — for an ensure-started
+	// daemon the allow-list — so a pi provider key must be in the step
+	// agent dir's auth.json (copied from the operator agent dir) or a
+	// literal in its models.json; a key that only lived in the daemon's
+	// environment (a provider *_API_KEY, a models.json `$NAME`) no
+	// longer reaches pi steps.
 	inherited := newEnvSanitizer(s.cfg.EnvSecrets...).childEnv()
 	env := make([]string, 0, len(inherited)+len(additions))
 	for _, kv := range inherited {

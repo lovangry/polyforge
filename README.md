@@ -450,18 +450,30 @@ The daemon's environment is an explicit allow-list (defined once, in
 with only `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_*`,
 `TZ`, `TMPDIR`, the proxy variables (`http_proxy`, `https_proxy`,
 `no_proxy`, `all_proxy`, upper and lower case), `SSL_CERT_FILE`,
-`SSL_CERT_DIR`, the XDG base dirs, `POLYFORGE_DATA_DIR`, `GOCOVERDIR` and
+`SSL_CERT_DIR`, the XDG base dirs, the Go toolchain variables below, `POLYFORGE_DATA_DIR`,
+`GOCOVERDIR` and
 the `POLYFORGE_SUPERVISOR` marker, with the values of the shell that ran
 ensure (the tmux server's environment — whatever shell first started it —
 never reaches the daemon: the loop runs `env -i <allow-list> sh -c
 <loop>`). Nothing else gets through: no `ANTHROPIC_*`, no `PF_*`, no
 stale API key. A proxy or CA the daemon needs must therefore be set where
-ensure runs (the harness session, or the install.sh shell). Claude steps
-additionally drop every inherited `ANTHROPIC_*`: their credential and
-endpoint come only from `<harness-root>/claude-config/settings.json`.
+ensure runs (the harness session, or the install.sh shell). `PF_SERVER`,
+`PF_API_KEY`, `PF_USER_ID` and `PF_DAEMON_SOCKET` in that shell do steer
+ensure's own config load (which socket it probes), but are not passed to
+the daemon: it reads `cli.toml` (`--config`). The Go toolchain variables
+(`GOPATH`, `GOROOT`, `GOPROXY`, `GOPRIVATE`, `GONOSUMDB`, `GONOPROXY`,
+`GOFLAGS`, `GOTOOLCHAIN`, `GO111MODULE`, `GOCACHE`, `GOMODCACHE`) are on
+the list, so Go steps keep their caches and module settings. Step agents
+see only this environment: claude steps additionally drop every
+inherited `ANTHROPIC_*` (their credential and endpoint come only from
+`<harness-root>/claude-config/settings.json`); pi steps need their
+provider keys in `auth.json` or as literals in `models.json` — a
+`$NAME` there, or a provider `*_API_KEY`, that is not on the list never
+reaches them.
 `GET /status` reports the daemon's environment variable names (never
 values), and `pf doctor`'s `daemon env` row warns when a running daemon
-carries `ANTHROPIC_*` or another credential-looking name — restart it
+carries `ANTHROPIC_*` or another credential-looking name, or when the pi
+step agent's `models.json` references a variable off the list — restart it
 clean with `pf ops shutdown`, wait, `pf daemon ensure`.
 
 Production starts the daemon only through `pf daemon ensure`, which

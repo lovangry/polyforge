@@ -40,6 +40,11 @@ func TestClaudeHarnessCheck(t *testing.T) {
 			h.Version, h.Verified, h.MinVersion = "2.1.1", false, "2.1.296"
 			return h
 		}()}, "warn", "version 2.1.1 is older than 2.1.296 or unparsable"},
+		{"settings api key", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus {
+			h := ok
+			h.SettingsEnv = map[string]string{"ANTHROPIC_AUTH_TOKEN": "unset", "ANTHROPIC_API_KEY": "set"}
+			return h
+		}()}, "pass", "ANTHROPIC_API_KEY set"},
 		{"no settings credential", steps, true, map[string]HarnessStatus{"claude": func() HarnessStatus { h := ok; h.SettingsEnv = nil; return h }()}, "warn", "must live under the claude-config dir"},
 		// env hygiene: the daemon's own ANTHROPIC_* never reach a claude
 		// step — a daemon-env token is no credential, a daemon-env

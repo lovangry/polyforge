@@ -195,6 +195,9 @@ type StatusResponse struct {
 	// EnvNames: the NAMES (never values) of the daemon's environment
 	// (env hygiene; pf doctor's "daemon env" check).
 	EnvNames []string `json:"env_names,omitempty"`
+	// PiModelsEnvRefs: the variable NAMES the step agent dir's
+	// models.json interpolates (`$NAME` / `${NAME}`).
+	PiModelsEnvRefs []string `json:"pi_models_env_refs,omitempty"`
 	// Harnesses is the daemon's view of the step harness binaries, only
 	// on GET /status?harnesses=1 (polyforge#159).
 	Harnesses    map[string]HarnessStatus `json:"harnesses,omitempty"`

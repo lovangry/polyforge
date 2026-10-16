@@ -51,7 +51,8 @@ import (
 //     is `claude:`, "harness claude" judges the daemon's view of the
 //     Claude Code CLI (GET /status?harnesses=1: binary found → else fail;
 //     version >= the verified minimum, the claude-config settings.json
-//     env block carrying ANTHROPIC_AUTH_TOKEN → else warn; claude steps
+//     env block carrying ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY → else
+//     warn; claude steps
 //     do not inherit the daemon's ANTHROPIC_*, so those are reported
 //     only) and lists every such step
 //     with its whole candidate chain (each candidate's harness shown by
@@ -143,22 +144,41 @@ func retiredEnvCheck(getenv func(string) string, daemonWarnings []string) doctor
 // other credential-looking name outside the `pf daemon ensure`
 // allow-list (supervisor/env.go) means the daemon was started from a
 // polluted environment (e.g. an old ensure under a tmux server carrying
-// a human's credentials) — restart it clean.
-func daemonEnvCheck(daemonUp bool, names []string) doctorCheck {
+// a human's credentials) — restart it clean. It also warns when the pi
+// step agent's models.json interpolates a variable (`$NAME`) outside the
+// allow-list: pi steps would never see it.
+func daemonEnvCheck(daemonUp bool, names, piModelsRefs []string) doctorCheck {
 	c := doctorCheck{Name: docChDaemonEnv}
 	switch {
 	case !daemonUp:
 		c.Status, c.Detail = "skip", "not run: the daemon does not answer"
+		return c
 	case len(names) == 0:
 		c.Status, c.Detail = "skip", "not run: the daemon reports no environment names (an older daemon?)"
-	default:
-		home, _ := os.UserHomeDir()
-		if bad := supervisor.SuspectDaemonEnv(names); len(bad) > 0 {
-			c.Status, c.Detail = "warn", "the daemon's environment carries "+strings.Join(bad, ", ")+
-				" (names only; outside the `pf daemon ensure` allow-list) — restart it clean (graceful; running jobs are checkpointed first): "+ensureFixCommand(home)
-		} else {
-			c.Status, c.Detail = "pass", "the daemon's environment carries no ANTHROPIC_* and no credential-looking name outside the ensure allow-list"
+		return c
+	}
+	home, _ := os.UserHomeDir()
+	var notes []string
+	if bad := supervisor.SuspectDaemonEnv(names); len(bad) > 0 {
+		notes = append(notes, "the daemon's environment carries "+strings.Join(bad, ", ")+
+			" (names only; outside the `pf daemon ensure` allow-list) — restart it clean (graceful; running jobs are checkpointed first): "+ensureFixCommand(home))
+	}
+	// pi steps see only the daemon's (allow-listed) environment: a
+	// models.json `$NAME` outside the list resolves to nothing
+	var unseen []string
+	for _, r := range piModelsRefs {
+		if !supervisor.DaemonEnvAllowed(r) {
+			unseen = append(unseen, "$"+r)
 		}
+	}
+	if len(unseen) > 0 {
+		notes = append(notes, "the pi step agent's models.json references "+strings.Join(unseen, ", ")+
+			" (names only), which no `pf daemon ensure`-started daemon carries, so pi steps cannot resolve it — put the key in the operator agent dir's auth.json (pi /login) or as a literal in models.json")
+	}
+	if len(notes) > 0 {
+		c.Status, c.Detail = "warn", strings.Join(notes, "; ")
+	} else {
+		c.Status, c.Detail = "pass", "the daemon's environment carries no ANTHROPIC_* and no credential-looking name outside the ensure allow-list"
 	}
 	return c
 }
@@ -291,7 +311,7 @@ func runDoctorChecks(ctx *Context, pruneScratch bool) doctorReport {
 	// polyforge#174: a live daemon should run under the restart loop.
 	checks = append(checks, supervisionCheck(sockOK))
 	checks = append(checks, retiredEnvCheck(os.Getenv, status.EnvWarnings))
-	checks = append(checks, daemonEnvCheck(sockOK, status.EnvNames))
+	checks = append(checks, daemonEnvCheck(sockOK, status.EnvNames, status.PiModelsEnvRefs))
 
 	if cfg.Mapping.Empty() {
 		add(docChYaml, "skip", "not run: the mapping is absent")
@@ -542,9 +562,9 @@ func claudeHarnessCheck(steps []workspace.StepResolution, workflowsDir string, d
 	// (runtime/claudespawn.go), so only the claude-config settings.json
 	// env block can carry the step's credential; the daemon's own
 	// variables are reported, never counted.
-	switch {
-	case h.SettingsEnv["ANTHROPIC_AUTH_TOKEN"] != "set":
-		warn("no credential in the claude-config settings.json env block — the steps' only credential source (claude steps do not inherit the daemon's ANTHROPIC_*); the settings.json env pair (ANTHROPIC_AUTH_TOKEN + optional ANTHROPIC_BASE_URL) must live under the claude-config dir" + harnessShapeNotes())
+	// (an older daemon reports no ANTHROPIC_API_KEY fact: unset)
+	if h.SettingsEnv["ANTHROPIC_AUTH_TOKEN"] != "set" && h.SettingsEnv["ANTHROPIC_API_KEY"] != "set" {
+		warn("no credential (ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY) in the claude-config settings.json env block — the steps' only credential source (claude steps do not inherit the daemon's ANTHROPIC_*); the settings.json env pair (ANTHROPIC_AUTH_TOKEN + optional ANTHROPIC_BASE_URL) must live under the claude-config dir" + harnessShapeNotes())
 	}
 	if h.SettingsWarning != "" {
 		warn(h.SettingsWarning)
@@ -584,7 +604,7 @@ func settingsFacts(h HarnessStatus) string {
 	}
 	if len(h.SettingsEnv) > 0 {
 		rows := make([]string, 0, len(h.SettingsEnv))
-		for _, k := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR"} {
+		for _, k := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR"} {
 			if v, ok := h.SettingsEnv[k]; ok {
 				rows = append(rows, k+" "+v)
 			}
