@@ -329,7 +329,7 @@ func (s *scriptedSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle
 
 	cmd := exec.Command("sleep", "300")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(), "PF_WI_ID="+p.WorkItemID, "PF_DAEMON_ID=m-test")
+	cmd.Env = append(os.Environ(), "PF_WI_ID="+p.WorkItemID, "PF_DAEMON_ID=m-test", testOwnerEnv)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -640,7 +640,7 @@ func spawnSleeper(t *testing.T, wi string) (pid int, startedAt string) {
 	t.Helper()
 	cmd := exec.Command("sleep", "300")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(), "PF_WI_ID="+wi, "PF_DAEMON_ID=m-test")
+	cmd.Env = append(os.Environ(), "PF_WI_ID="+wi, "PF_DAEMON_ID=m-test", testOwnerEnv)
 	startedAt = nowStamp()
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -652,12 +652,19 @@ func spawnSleeper(t *testing.T, wi string) (pid int, startedAt string) {
 // testGroups records the process groups the test helpers start: a test
 // that ends on any path (a failure, a kill seam swapped for a fake, a
 // handle nobody terminated) must not leave its `sleep 300` behind.
-// reapTestGroups SIGKILLs every one at the end of the package run
-// (TestMain); syscall.Kill directly, never the swappable killFn.
+// reapTestGroups runs at the end of the package run (TestMain) and
+// SIGKILLs, process by process, only members of a recorded group that
+// still carry this run's testOwnerEnv marker — a pgid reused by an
+// unrelated process since is never signalled (syscall.Kill directly,
+// never the swappable killFn; /proc read directly, never procRoot).
 var testGroups struct {
 	mu    sync.Mutex
 	pgids []int
 }
+
+// testOwnerEnv marks every process the helpers start with this test
+// binary's pid.
+var testOwnerEnv = "PF_TEST_OWNER=" + strconv.Itoa(os.Getpid())
 
 func trackTestGroup(pgid int) {
 	testGroups.mu.Lock()
@@ -668,10 +675,45 @@ func trackTestGroup(pgid int) {
 func reapTestGroups() error {
 	testGroups.mu.Lock()
 	defer testGroups.mu.Unlock()
+	want := map[int]bool{}
 	for _, pg := range testGroups.pgids {
-		_ = syscall.Kill(-pg, syscall.SIGKILL)
+		want[pg] = true
 	}
 	testGroups.pgids = nil
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid <= 1 {
+			continue
+		}
+		stat, err := os.ReadFile("/proc/" + e.Name() + "/stat")
+		if err != nil {
+			continue
+		}
+		// fields after the parenthesised comm: state ppid pgrp ...
+		rest := string(stat)
+		if i := strings.LastIndexByte(rest, ')'); i >= 0 {
+			rest = rest[i+1:]
+		}
+		f := strings.Fields(rest)
+		if len(f) < 3 || f[0] == "Z" {
+			continue
+		}
+		pg, _ := strconv.Atoi(f[2])
+		if !want[pg] {
+			continue
+		}
+		env, _ := os.ReadFile("/proc/" + e.Name() + "/environ")
+		for _, kv := range strings.Split(string(env), "\x00") {
+			if kv == testOwnerEnv {
+				_ = syscall.Kill(pid, syscall.SIGKILL)
+				break
+			}
+		}
+	}
 	return nil
 }
 
@@ -722,7 +764,7 @@ func spawnOrphaningSleeper(wi string) (*orphaningAgent, error) {
 	pidFile := filepath.Join(dir, "child.pid")
 	cmd := exec.Command("sh", "-c", "sleep 300 & echo $! > "+pidFile)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(), "PF_WI_ID="+wi, "PF_DAEMON_ID=m-test")
+	cmd.Env = append(os.Environ(), "PF_WI_ID="+wi, "PF_DAEMON_ID=m-test", testOwnerEnv)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
