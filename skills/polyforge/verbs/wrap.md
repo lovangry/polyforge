@@ -1,7 +1,7 @@
 # wrap — close a running work item as terminal
 
 Execution-plane verb: routed to the local daemon (the wrap route). `wrap`
-is a terminal outcome: the generation closes for good, the capsule is
+is a terminal outcome: the session ends for good, the capsule is
 sealed read-only and pushed, and no re-claim happens automatically.
 
 **Closes arbitrate.** The human path is this verb (or `pause`); the
@@ -10,7 +10,7 @@ Exactly one close wins: the daemon's seal guard makes the late arrival
 answer `DAEMON-409` while the first close is in flight, and a close that
 finds the work item already terminal answers gracefully
 (`already_terminal`), never a hard error. The winner performs the final
-commit+push and ends the generation exactly once.
+commit+push and ends the session exactly once.
 
 ## Triggers
 

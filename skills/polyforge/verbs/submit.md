@@ -61,8 +61,8 @@ raw answer `{accepted, work_item_id}`.
 | `dial unix …` | The daemon is not running on this machine | Run `pf daemon ensure`, then retry once (or check `--socket` / `PF_DAEMON_SOCKET`). |
 
 The claim itself happens asynchronously in the daemon's dispatcher: a
-server-side refusal (e.g. `CORE-409`, someone else holds the active
-generation) surfaces in the daemon log and the job never appears in
+server-side refusal (e.g. `CORE-409`, another session holds the work
+item) surfaces in the daemon log and the job never appears in
 `pf ops status` — `pf watch`/`pf ops status` is the follow-up, not the submit answer.
 
 ## Recovering a work item held by a dead or stuck daemon
