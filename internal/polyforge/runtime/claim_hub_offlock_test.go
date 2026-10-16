@@ -195,7 +195,7 @@ func TestOffLockHungClaimHubCallLeavesOthersResponsive(t *testing.T) {
 				t.Fatalf("%s claimed %d times, want %d", a, n, wantClaims)
 			}
 			if ji, ok := r.Info(a); !ok || ji.State != StateRunning {
-				t.Fatalf("%s after the hub answered: %+v (ok=%v), want RUNNING", a, ji, ok)
+				t.Fatalf("%s after the hub answered: state %s (ok=%v), want RUNNING", a, ji.State, ok)
 			}
 			if journaled(r, a) != nil {
 				t.Fatal("the settled start left its claiming-journal entry")

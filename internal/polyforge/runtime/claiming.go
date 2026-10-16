@@ -157,10 +157,12 @@ func (r *Runtime) clearClaimingSession(wi, sessionID string) {
 }
 
 // resumeClaiming replays every uncleared journal entry at daemon start
-// (called from Restart, opMu held — released only around a compensation
-// SessionEnd, claimEndOffLock — BEFORE the state.json records are
-// seeded — a journaled start must win over any stale record of the same
-// WI). Per entry:
+// (called from the restart reconciliation, opMu held — released around
+// every hub call: the verify and the claim replay (hubUnlocked), a
+// compensation SessionEnd (claimEndOffLock) — BEFORE the state.json
+// records are reconciled; a journaled start wins over any stale record of
+// the same WI). A shutdown latched meanwhile stops it, every remaining
+// entry kept. Per entry:
 //
 //   - aihub unreachable → keep the entry for the next restart, never
 //     guess a verdict;
@@ -182,7 +184,15 @@ func (r *Runtime) clearClaimingSession(wi, sessionID string) {
 // owns the reconciliation then, and only the journal entry is stale.
 func (r *Runtime) resumeClaiming(ctx context.Context) (replays []claimReplay) {
 	for wi, rec := range r.loadClaiming() {
-		v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
+		if r.restartStopping(ctx) {
+			return replays // shutdown: the remaining entries stay for the next start
+		}
+		var v *api.SessionVerifyResponse
+		var err error
+		r.hubUnlocked(func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) })
+		if r.restartStopping(ctx) {
+			return replays // nothing decided: the entry stays
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "runtime: %s: claiming entry kept (aihub verify failed): %v\n", wi, err)
 			continue
@@ -200,12 +210,20 @@ func (r *Runtime) resumeClaiming(ctx context.Context) (replays []claimReplay) {
 			r.clearClaiming(wi)
 			continue
 		}
-		resp, err := r.hub.SessionClaim(api.SessionClaimRequest{
-			WorkItemID:     rec.WorkItemID,
-			SessionID:      rec.SessionID,
-			MachineID:      rec.MachineID,
-			IdempotencyKey: rec.IdempotencyKey,
+		var resp *api.SessionClaimResponse
+		r.hubUnlocked(func() {
+			resp, err = r.hub.SessionClaim(api.SessionClaimRequest{
+				WorkItemID:     rec.WorkItemID,
+				SessionID:      rec.SessionID,
+				MachineID:      rec.MachineID,
+				IdempotencyKey: rec.IdempotencyKey,
+			})
 		})
+		if r.restartStopping(ctx) {
+			// shutdown: whatever the answer, the entry stays and the next
+			// start replays it (the same key hands the same answer back)
+			return replays
+		}
 		if err != nil {
 			if !claimRefused(err) {
 				// transport loss / 5xx: the outcome is unknown and the
@@ -236,16 +254,35 @@ func (r *Runtime) resumeClaiming(ctx context.Context) (replays []claimReplay) {
 			if errors.As(werr, &ae) && ae.Detail != "" {
 				note = ae.Detail
 			}
-			id := resp.WorkItem.ID
-			if id == "" {
-				id = resp.Claim.WorkItemID
-			}
+			id := claimAnswerID(resp)
 			r.abandonClaim(&job{wi: id, sessionID: rec.SessionID}, rec.WorkItemID, werr, note)
 			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay refused (session ended blocked): %v\n", wi, werr)
 			continue
 		}
+		// A journaled start wins over a stale record of the same work item
+		// (the record predates the secret the journal carries): Restart
+		// seeded the records before this lane ran, so the still-unreconciled
+		// one is dropped here, exactly as if it had never been seeded.
+		var stale *job
+		id := claimAnswerID(resp)
+		if ex := r.jobOf(id); ex != nil {
+			ex.mu.Lock()
+			pending := ex.restartPending
+			ex.mu.Unlock()
+			if pending {
+				stale = ex
+				r.forgetRecord(&jobRecord{WorkItemID: id})
+			}
+		}
 		j, err := r.claimPlaceholder(ctx, rec.WorkItemID, rec.SessionID, resp, wcfg, rec.Models)
 		if err != nil {
+			if stale != nil && r.jobOf(id) == nil {
+				// the replay did not take the work item after all: the
+				// record is reconciled as if never dropped
+				r.mu.Lock()
+				r.jobs[id] = stale
+				r.mu.Unlock()
+			}
 			// claimPlaceholder already compensated (blocked) and cleared
 			// the entry; the log line is for the operator.
 			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay start failed (session ended blocked): %v\n", wi, err)
@@ -269,9 +306,21 @@ type claimReplay struct {
 // clone holds neither the other records' reconciliation nor the
 // daemon's socket. A shutdown meanwhile defers them (AbortClaims) with
 // their journal entries kept.
+//
+// The caller holds opMu. The shutdown latch and the WaitGroup's Add are
+// read and done under mu, so AbortClaims (which latches under mu before it
+// waits) either waits for these goroutines or they are never started: a
+// replay the shutdown caught is deferred here and then, journal kept.
 func (r *Runtime) runReplays(ctx context.Context, replays []claimReplay) {
+	r.mu.Lock()
+	if r.claimsAborted {
+		r.mu.Unlock()
+		r.deferReplays(ctx, replays)
+		return
+	}
+	r.replays.Add(len(replays))
+	r.mu.Unlock()
 	for _, cr := range replays {
-		r.replays.Add(1)
 		go func(cr claimReplay) {
 			defer r.replays.Done()
 			if err := r.runClaim(ctx, cr.wi, cr.j); err != nil {
@@ -282,6 +331,28 @@ func (r *Runtime) runReplays(ctx context.Context, replays []claimReplay) {
 			}
 		}(cr)
 	}
+}
+
+// deferReplays settles journal replays whose clones must not start — a
+// shutdown caught them, or the startup aborts (opMu held): each
+// placeholder goes, its journal entry stays for the next start
+// (finishClaim's deferral), and a Stop that requested a close meanwhile
+// still gets its close.
+func (r *Runtime) deferReplays(_ context.Context, replays []claimReplay) {
+	for _, cr := range replays {
+		cr.j.claim.cancel()
+		// the claim's own (now cancelled) context: finishClaim defers
+		// whatever the caller's context says
+		_ = r.finishClaim(cr.j.claim.ctx, cr.wi, cr.j, context.Canceled, context.Canceled.Error())
+	}
+}
+
+// claimAnswerID is the canonical work-item id a claim answer carries.
+func claimAnswerID(resp *api.SessionClaimResponse) string {
+	if resp.WorkItem.ID != "" {
+		return resp.WorkItem.ID
+	}
+	return resp.Claim.WorkItemID
 }
 
 // sessionIsRecorded reports whether a state.json record already carries

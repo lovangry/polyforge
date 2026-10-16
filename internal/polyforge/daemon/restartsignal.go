@@ -117,6 +117,12 @@ func (d *Daemon) dropReplay(e qEntry, reason string) {
 //     authority and a refused start lands a submit_rejected event).
 func (d *Daemon) replaySubmitQueue() {
 	entries := d.loadPersistedQueue()
+	// The restart reconciliation's wait ran out (aihub hung): the per-entry
+	// "still queued?" probe would hold the socket on the same hub. Skip it —
+	// the entries are enqueued, their Starts answer DAEMON-503 until the
+	// reconciliation finished, and the claim's own probe and the hub's CAS
+	// decide them then.
+	probe := !d.rt.Reconciling()
 	for _, e := range entries {
 		if e.WorkItemID == "" {
 			continue
@@ -133,8 +139,8 @@ func (d *Daemon) replaySubmitQueue() {
 			d.dropReplay(e, "the work item is already held by this daemon (claiming-journal replay or kept record)")
 			continue
 		}
-		if item, err := d.hub.GetWorkItem(e.WorkItemID); err == nil && item != nil {
-			if item.Status != api.StatusQueued {
+		if probe {
+			if item, err := d.hub.GetWorkItem(e.WorkItemID); err == nil && item != nil && item.Status != api.StatusQueued {
 				d.dropReplay(e, fmt.Sprintf("aihub shows the work item %s, no longer queued", item.Status))
 				continue
 			}

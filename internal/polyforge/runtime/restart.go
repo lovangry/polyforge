@@ -64,6 +64,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -142,38 +143,49 @@ func (r *Runtime) requireMidflightCapsule(wi, project, dir string) error {
 // reconciliation (a running WI whose capsule lives on another machine is
 // that machine's business).
 //
-// Restart holds opMu except around the network steps it reaches (a
-// close's or a recovery's pushes and SessionEnd, a claim's compensation
-// end — offLock / claimEndOffLock, B-8); the restarting latch keeps the
-// deferred verifies it schedules from running before it returned.
+// Locking (B-8): Restart seeds the records under opMu (local work only),
+// then reconciles them on a lane that holds opMu except around every
+// network step — the journal replays' verify and claim, each record's
+// session verify and attach (hubUnlocked / offLock), a close's or a
+// recovery's pushes and SessionEnd, a claim's compensation end (offLock /
+// claimEndOffLock). A seeded record is latched busy until the lane
+// reaches it, so no door acts on an unreconciled record: its Stop and
+// resume answer DAEMON-409; while the reconciliation runs every Start
+// answers DAEMON-503 and the deferred verifies wait (restarting).
+//
+// Restart waits for the lane at most cfg.RestartHubWait. A responsive hub
+// answers well within it, and Restart returns exactly as a synchronous
+// reconciliation would — the daemon's re-attachment, submit replay and
+// restart announcement see the reconciled runtime. Past it Restart
+// returns nil so the daemon serves its socket instead of hanging on a
+// hung hub: every record still unreconciled is shown waiting for aihub
+// (awaiting_hub; a running one as RECOVERING — the deferred-verify
+// posture, with its session_verify_deferred event) and the lane finishes
+// it once the hub answers, handing every job it brings back to life to
+// the observe lane itself. A shutdown meanwhile stops the lane at its
+// next step: the remaining records and journal entries stay for the next
+// start (a shutdown latched before the wait ran out makes Restart wait
+// for the step in flight instead of returning — there is nothing to
+// serve).
 func (r *Runtime) Restart(ctx context.Context) error {
 	r.mu.Lock()
 	r.restarting = true
+	r.restartServed = false
 	r.mu.Unlock()
-	defer func() {
-		r.mu.Lock()
-		r.restarting = false
-		r.mu.Unlock()
-	}()
 	r.opMu.Lock()
-	defer r.opMu.Unlock()
 	st, err := loadState(r.statePath)
 	if err != nil {
+		r.opMu.Unlock()
+		r.endRestarting()
 		return err
 	}
-	// B1 journal replay FIRST, before the state.json records: a journaled
-	// start (crash between the claim call and the spawn) must win over any
-	// stale record of the same WI — the replay carries the secret the
-	// record may predate. resumeClaiming's sessionIsRecorded guard keeps
-	// the crash-past-registration window honest (see claiming.go). The
-	// replays it answered sit CLAIMING in the table; their clones start
-	// once the records are reconciled, outside opMu (runReplays, B-8).
-	replays := r.resumeClaiming(ctx)
 	// Seed every recorded job into the live map first: persist() rewrites
 	// state.json from the map, so records that must SURVIVE the
 	// reconciliation (blocked, aihub-unreachable) are preserved by simply
-	// staying in it. A record whose WI is already live (the journal replay
-	// just adopted it, or Start ran before Restart) is left alone.
+	// staying in it. A record whose WI is already live (Start ran before
+	// Restart) is left alone. The B1 journal replay still runs FIRST on
+	// the lane, and a replay that adopts a work item drops its seeded
+	// record (resumeClaiming).
 	for _, rec := range st.Jobs {
 		if r.jobOf(rec.WorkItemID) != nil {
 			continue
@@ -184,30 +196,175 @@ func (r *Runtime) Restart(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "runtime: %s: record without a session dropped\n", rec.WorkItemID)
 			continue
 		}
+		j := r.restoredJob(rec)
+		j.restartPending = true
+		j.busy = 1 // released when the lane reaches the record (restartOne)
 		r.mu.Lock()
-		r.jobs[rec.WorkItemID] = r.restoredJob(rec)
+		r.jobs[rec.WorkItemID] = j
 		r.mu.Unlock()
 	}
+	r.opMu.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- r.reconcile(ctx, st) }()
+	timer := time.NewTimer(r.cfg.RestartHubWait)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+	}
+	if r.restartStopping(ctx) {
+		// a shutdown is under way: there is nothing to serve, and the
+		// lane stops at its next step — let the step in flight (a push)
+		// land before the daemon unwinds, as a synchronous reconciliation
+		// would
+		return <-done
+	}
+	r.opMu.Lock()
+	select {
+	case err := <-done:
+		// the lane finished while the wait ran out: its answer (a persist
+		// failure aborts the startup) is Restart's
+		r.opMu.Unlock()
+		return err
+	default:
+	}
+	r.mu.Lock()
+	r.restartServed = true
+	r.mu.Unlock()
+	n := r.postureUnreconciled()
+	if err := r.persist(); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: state persist failed: %v\n", err)
+	}
+	r.opMu.Unlock()
+	fmt.Fprintf(os.Stderr, "runtime: restart reconciliation still waiting for aihub after %s (%d record(s) shown waiting); serving meanwhile\n", r.cfg.RestartHubWait, n)
+	go func() {
+		if err := <-done; err != nil {
+			fmt.Fprintf(os.Stderr, "runtime: restart reconciliation (finished in the background) failed: %v\n", err)
+		}
+	}()
+	return nil
+}
+
+// reconcile is the restart reconciliation lane (see Restart): the journal
+// replays, then every seeded record, then the persist and the replays'
+// clones. opMu is held except around the network steps.
+func (r *Runtime) reconcile(ctx context.Context, st *stateFile) error {
+	defer r.endRestarting()
+	r.opMu.Lock()
+	defer r.opMu.Unlock()
+	// B1 journal replay FIRST, before the state.json records: a journaled
+	// start (crash between the claim call and the spawn) must win over any
+	// stale record of the same WI — the replay carries the secret the
+	// record may predate. resumeClaiming's sessionIsRecorded guard keeps
+	// the crash-past-registration window honest (see claiming.go). The
+	// replays it answered sit CLAIMING in the table; their clones start
+	// once the records are reconciled, outside opMu (runReplays, B-8).
+	replays := r.resumeClaiming(ctx)
 	for _, rec := range st.Jobs {
 		if rec.SessionID == "" {
 			continue
+		}
+		if r.restartStopping(ctx) {
+			break
 		}
 		// One bad record never aborts the daemon (v2 §6): a missing
 		// capsule / unmapped project parks that WI alone; everything else
 		// keeps its record-kept posture.
 		r.restartOne(ctx, rec)
+		r.announceReconciled(rec.WorkItemID)
+	}
+	if r.restartStopping(ctx) {
+		// a shutdown during the reconciliation: the records not reached
+		// keep their seeded form (the shutdown persists them), the journal
+		// entries stay — the next start reconciles afresh
+		r.deferReplays(ctx, replays)
+		return nil
 	}
 	if err := r.persist(); err != nil {
 		// the startup aborts: no replay may clone or install an agent
 		// behind it — the journal entries stay for the next start.
-		for _, cr := range replays {
-			cr.j.claim.cancel()
-			r.dropJob(cr.j)
-		}
+		r.deferReplays(ctx, replays)
 		return err
 	}
 	r.runReplays(ctx, replays)
 	return nil
+}
+
+func (r *Runtime) endRestarting() {
+	r.mu.Lock()
+	r.restarting = false
+	r.mu.Unlock()
+}
+
+func (r *Runtime) isRestarting() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.restarting
+}
+
+// restartStopping reports whether a shutdown caught the reconciliation:
+// it decides nothing further.
+func (r *Runtime) restartStopping(ctx context.Context) bool {
+	return ctx.Err() != nil || r.abortedClaims()
+}
+
+// postureUnreconciled shows every record the reconciliation has not
+// verified yet as waiting for aihub (opMu held; Restart returning before
+// its lane finished): awaiting_hub latched — status and watch name it, a
+// close answers "waiting for aihub" — and a running record RECOVERING,
+// the awaitVerify posture. An end_pending record keeps its own state (its
+// close retry is its posture). It answers how many records it marked.
+func (r *Runtime) postureUnreconciled() int {
+	r.mu.Lock()
+	js := make([]*job, 0, len(r.jobs))
+	for _, j := range r.jobs {
+		js = append(js, j)
+	}
+	r.mu.Unlock()
+	n := 0
+	for _, j := range js {
+		j.mu.Lock()
+		if !j.restartPending || j.state == StateEndPending {
+			j.mu.Unlock()
+			continue
+		}
+		if j.state == StateRunning {
+			j.state = StateRecovering
+		}
+		j.awaitingHub = true
+		j.restartDeferNoted = true
+		wi := j.wi
+		j.mu.Unlock()
+		n++
+		if r.cfg.EventTap != nil {
+			r.cfg.EventTap(wi, EventSessionVerifyDeferred, map[string]any{
+				"error": fmt.Sprintf("no answer from aihub within the startup wait (%s)", r.cfg.RestartHubWait),
+				"note":  "aihub did not answer the restart's session verify in time: the record is kept and the verify continues; the work item resumes once the hub answers",
+			})
+		}
+	}
+	return n
+}
+
+// announceReconciled hands a job the reconciliation brought back to life
+// to the observe lane (opMu held) once Restart already returned — the
+// daemon's startup re-attachment pass ran before it; before that, the pass
+// itself attaches it.
+func (r *Runtime) announceReconciled(wi string) {
+	r.mu.Lock()
+	served := r.restartServed
+	r.mu.Unlock()
+	if !served {
+		return
+	}
+	if cur := r.jobOf(wi); cur != nil && cur.liveAgent() {
+		cur.mu.Lock()
+		msg := protocol.RTMsg{Kind: protocol.RTStarted, SpawnN: cur.spawnN, WorkItem: cur.wi,
+			AgentPID: cur.agentPID, SessionID: cur.sessionID}
+		cur.mu.Unlock()
+		r.send(msg)
+	}
 }
 
 // restartRelease is the superseded-at-restart path: the WI is held by
@@ -274,6 +431,12 @@ func (r *Runtime) attachPaused(ctx context.Context, rec *jobRecord, cause, detai
 	}) {
 		// defensive: a busy job leaves the table through no other door
 		return fmt.Errorf("runtime: %s: the record left the job table during its session attach", rec.WorkItemID)
+	}
+	if err == nil && r.abortedClaims() {
+		// the shutdown latched while the attach was on the wire: resume
+		// nothing behind its teardown. The hub now says running under our
+		// session, so the next daemon start recovers the record.
+		return &api.Error{Code: api.ErrDaemonGone, Detail: fmt.Sprintf("%s: the session was attached but the daemon is shutting down; nothing was resumed here (the next daemon start resumes it)", rec.WorkItemID)}
 	}
 	if err != nil {
 		var ae *api.Error
@@ -547,6 +710,20 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) {
 	if rec.SessionID == "" {
 		return
 	}
+	// release Restart's seed latch: from here on the record is this lane's
+	// to reconcile (its network steps latch it busy again themselves)
+	if j := r.jobOf(rec.WorkItemID); j != nil {
+		j.mu.Lock()
+		if j.restartPending {
+			j.busy--
+		}
+		j.mu.Unlock()
+		defer func() {
+			j.mu.Lock()
+			j.restartPending = false
+			j.mu.Unlock()
+		}()
+	}
 	if j := r.jobOf(rec.WorkItemID); j != nil {
 		if j.liveAgent() {
 			return // already running under this daemon: not a restart case
@@ -568,7 +745,34 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) {
 		}
 		return
 	}
-	v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
+	// The verify runs with opMu released and the record latched busy
+	// (offLock): one hung verify holds neither the other work items'
+	// doors nor — past RestartHubWait — the daemon's socket.
+	var v *api.SessionVerifyResponse
+	var err error
+	verify := func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) }
+	if j := r.jobOf(rec.WorkItemID); j != nil {
+		if !r.offLock(j, verify) {
+			return // defensive: a busy record leaves the table through no other door
+		}
+	} else {
+		r.hubUnlocked(verify)
+	}
+	if r.restartStopping(ctx) {
+		return // a shutdown meanwhile: nothing is decided, the record is kept
+	}
+	if j := r.jobOf(rec.WorkItemID); j != nil {
+		j.mu.Lock()
+		// answered: Restart's wait must not show it waiting for aihub
+		// any more while its reconciliation's own network steps run
+		j.restartPending = false
+		if j.restartDeferNoted && j.state == StateRecovering {
+			// Restart showed it waiting for aihub: back to the recorded
+			// state the reconciliation below acts on
+			j.state = JobState(rec.State)
+		}
+		j.mu.Unlock()
+	}
 	if err == nil || verifyRefused(err) {
 		// the hub answered: a deferral persisted by the previous run is
 		// over (awaitVerify re-latches it when the hub is unreachable)
@@ -779,9 +983,10 @@ func (r *Runtime) awaitVerify(ctx context.Context, rec *jobRecord, cause error) 
 		j.state = StateRecovering
 	}
 	j.awaitingHub = true
+	noted := j.restartDeferNoted // Restart's wait already raised the event
 	j.mu.Unlock()
 	fmt.Fprintf(os.Stderr, "runtime: %s: session verify failed at restart (aihub unreachable) — record kept, retrying the verify: %v\n", rec.WorkItemID, cause)
-	if r.cfg.EventTap != nil {
+	if r.cfg.EventTap != nil && !noted {
 		r.cfg.EventTap(rec.WorkItemID, EventSessionVerifyDeferred, map[string]any{
 			"error": cause.Error(),
 			"note":  "aihub unreachable at restart: the record is kept and the session verify retried; the work item resumes once the hub answers",
@@ -804,7 +1009,7 @@ func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bo
 	restarting := r.restarting
 	r.mu.Unlock()
 	if restarting {
-		return false // Restart is still reconciling (it releases opMu around network steps)
+		return false // the restart reconciliation is still running (it releases opMu around network steps)
 	}
 	if r.jobOf(j.wi) != j {
 		return true // closed or replaced by another door meanwhile
@@ -819,7 +1024,16 @@ func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bo
 		return false // another door's network step is in flight (B-8)
 	}
 	rec := j.record()
-	v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
+	// the verify runs with opMu released and the job latched busy
+	// (offLock, B-8): a hung hub holds no other work item's door
+	var v *api.SessionVerifyResponse
+	var err error
+	if !r.offLock(j, func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) }) {
+		return true // defensive: a busy job leaves the table through no other door
+	}
+	if ctx.Err() != nil || r.closing() || r.abortedClaims() {
+		return true // shutting down meanwhile: the record persists, the next start verifies afresh
+	}
 	if err != nil {
 		if !verifyRefused(err) {
 			fmt.Fprintf(os.Stderr, "runtime: %s: deferred session verify failed (will retry): %v\n", j.wi, err)

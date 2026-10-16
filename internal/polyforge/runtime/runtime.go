@@ -98,6 +98,12 @@ type Config struct {
 	// (defaults 2s / 60s). Retries run until the hub accepts the close.
 	EndRetryBase time.Duration
 	EndRetryMax  time.Duration
+	// RestartHubWait bounds how long Restart waits for its reconciliation
+	// — whose session verifies, attaches and journal replays need aihub —
+	// before it returns and lets the daemon serve (default 5s). A
+	// reconciliation still waiting on the hub then finishes in the
+	// background, its records shown waiting for aihub (restart.go).
+	RestartHubWait time.Duration
 	// EventTap, when non-nil, receives runtime-sourced diagnostic events
 	// (kind "push_failed" on a seal push that failed after its retries)
 	// so they land in the daemon's durable events log next to the
@@ -150,6 +156,9 @@ func (c *Config) fill() {
 	if c.EndRetryMax <= 0 {
 		c.EndRetryMax = 60 * time.Second
 	}
+	if c.RestartHubWait <= 0 {
+		c.RestartHubWait = 5 * time.Second
+	}
 }
 
 // Runtime is the per-daemon WI lifecycle manager.
@@ -185,9 +194,12 @@ type Runtime struct {
 	// compensation SessionEnd runs with its work item latched ending
 	// (claimEndOffLock); the claim's own hub calls (probe, journal verify,
 	// SessionClaim) run with the work item latched starting
-	// (startingClaims); a resume's verify and attach with the job latched
-	// busy. Each re-takes the lock and re-checks what it relies on (the
-	// job's identity, the start's admission) before mutating.
+	// (startingClaims); a resume's verify and attach, the restart
+	// reconciliation's and the deferred retry's verifies with the job
+	// latched busy (the restart's journal replays under the restarting
+	// latch). Each re-takes the lock and re-checks what it relies on (the
+	// job's identity, the start's admission, the shutdown latch) before
+	// mutating. No aihub call runs under opMu.
 	opMu      sync.Mutex
 	statePath string
 	// persistMu serializes persist's snapshot and write: with the network
@@ -218,11 +230,16 @@ type Runtime struct {
 	// replays tracks the restart's journal-replay claim goroutines
 	// (runReplays).
 	replays sync.WaitGroup
-	// restarting (under mu) is latched while Restart reconciles: Restart
-	// releases opMu around its network steps (offLock, claimEndOffLock),
-	// and a deferred verify must not run mid-reconciliation (it waits —
-	// retries — until Restart returned).
+	// restarting (under mu) is latched while the restart reconciliation
+	// runs (Restart, then its lane past RestartHubWait): it releases opMu
+	// around every network step, and meanwhile a deferred verify waits
+	// (retries) and a Start answers the typed transient.
 	restarting bool
+	// restartServed (under mu): Restart returned before its
+	// reconciliation finished — the daemon serves, its startup
+	// re-attachment pass already ran, and the lane hands every job it
+	// brings back to life to the observe lane itself.
+	restartServed bool
 
 	// The durable-close retry lane (endpending.go): WIs whose
 	// SessionEnd(blocked) retry goroutine is running (one per WI), and
@@ -347,6 +364,13 @@ type job struct {
 	awaitingHub bool
 	// claim is the CLAIMING placeholder's lane (B-8); nil otherwise.
 	claim *claimLane
+	// restartPending: a record Restart seeded whose session verify has
+	// not been answered yet (the reconciliation lane, restart.go). The
+	// seed latches it busy until the lane reaches it.
+	restartPending bool
+	// restartDeferNoted: Restart returned with this record still pending
+	// and showed it waiting for aihub (its deferred event is out).
+	restartDeferNoted bool
 	// busy counts the slow network steps of this job running outside
 	// opMu (offLock): while it is non-zero no other door may act on the
 	// job — Stop answers 409, recovery / supersession / resume / the
@@ -946,6 +970,13 @@ func (r *Runtime) claimLocked(ctx context.Context, wi string) (*job, error) {
 func (r *Runtime) startGate(key string, own *job) error {
 	if r.abortedClaims() {
 		return claimDeferredError(key)
+	}
+	if r.isRestarting() {
+		// the restart reconciliation is still waiting on aihub (its
+		// journal replays and records decide which work items are ours):
+		// transient — the dispatcher and the resume-blocked door retry
+		return &api.Error{Code: api.ErrDaemonHubUnavailable,
+			Detail: fmt.Sprintf("%s: the daemon's restart reconciliation is still waiting for aihub; retry later", key)}
 	}
 	if r.claimEnding(key) {
 		return &api.Error{Code: api.ErrDaemonHubUnavailable,

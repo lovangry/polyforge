@@ -919,8 +919,10 @@ func underOpMu(r *Runtime, fn func()) {
 // waits for every replay to settle.
 func replayClaims(r *Runtime) {
 	var rs []claimReplay
-	underOpMu(r, func() { rs = r.resumeClaiming(context.Background()) })
-	r.runReplays(context.Background(), rs)
+	underOpMu(r, func() {
+		rs = r.resumeClaiming(context.Background())
+		r.runReplays(context.Background(), rs)
+	})
 	r.replays.Wait()
 }
 
