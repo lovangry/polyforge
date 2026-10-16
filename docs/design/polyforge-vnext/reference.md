@@ -343,8 +343,15 @@ read — injected into the prompt and checked record-only (`driver/outputschema.
 `inherit` steps get the body of the nearest earlier `handoff: true` step's `artifacts/handoff-<id>.md`
 (producer must be done; a missing file only omits the section); `fresh` steps get none
 (`driver/spawn.go`). The claim-time memory snapshot `runtime-state/recalled-memories.json` is rendered
-into every step prompt as non-binding history (§9) — only when it has items; at most 400 runes per
-excerpt and 6000 bytes per section (`driver/spawn.go`). Retry shape: first retry resumes the transcript,
+into every step prompt as non-binding history (§9) — one `[type] title` line per memory (no ids or
+bodies; a blank title falls back to the excerpt's first non-empty line), id-only noise titles
+(`^Verification Report — \S+$`, `^Controller-sink artifact`) dropped, at most 10 lines, no section when
+none is left (`driver/spawn.go`). Every step prompt also carries the shared memory duty
+(`workflows/_shared/memory.md`: `pf recall --any` 2–3 phrasings at the start; at most one
+`experience.<kind>` memory at the end, judged against the project's memory policy from
+`runtime-state/memory-policy.json`); the workflow's last step adds `workflows/_shared/memory-wrap.md`
+(exactly one `experience.wrap` per work item). The step agent runs `pf` itself: data-plane verbs go
+straight to aihub with the operator's cli.toml (the UDS step-origin guard is not involved). Retry shape: first retry resumes the transcript,
 later retries start fresh with the old transcript as read-only reference (`v2-converge.md#§2.3`).
 
 ### 7.5 Model candidates <!-- §7.5 -->

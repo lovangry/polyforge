@@ -102,6 +102,15 @@ func (w *Workflow) step(id string) *StepSpec {
 	return nil
 }
 
+// lastStep reports whether id is the workflow's last declared step.
+func (w *Workflow) lastStep(id string) bool {
+	if w == nil {
+		return false
+	}
+	i, ok := w.indexOf(id)
+	return ok && i == len(w.Steps)-1
+}
+
 // stepVars answers the vars step id declares (nil for none, an unknown
 // step or a nil workflow).
 func (w *Workflow) stepVars(id string) map[string]string {

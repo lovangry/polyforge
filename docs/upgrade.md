@@ -351,7 +351,7 @@ see "Per-step harness" below); any other key is refused, naming it. YAML anchors
 **No backward compatibility — edit all three workspace files together
 with the deploy.** A file that still has the top-level `models:` section
 is refused at every claim (DAEMON-414: `unknown top-level key "models"
-(only `steps`)`; earlier versions added a migration hint, dropped by
+(only `steps` and `memory_policy`)`; earlier versions added a migration hint, dropped by
 decision 2026-10-16 G10 once every workspace was rewritten), the work
 item stays queued, and `pf doctor` reports the same under `workspace
 yaml`. Deploying this version therefore requires rewriting osp-ws,
@@ -1137,3 +1137,24 @@ it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
   `ANTHROPIC_*` or credential-looking name in it. Restart it clean:
   `pf ops shutdown`, wait until it is gone, `pf daemon ensure`
   (tools/install.sh restarts it when it stages a new binary).
+
+## Memory write-back: `memory_policy` and the step memory duty
+
+- Every step prompt now asks the step agent to run `pf recall --any`
+  itself at the start and to write at most one `experience.*` memory at
+  the end (`workflows/_shared/memory.md`); the workflow's last step also
+  writes one `experience.wrap` summary per work item
+  (`workflows/_shared/memory-wrap.md`). The step's `pf` reads the
+  operator's `cli.toml` (`HOME` / `XDG_CONFIG_HOME` reach the step; `PF_*`
+  does not): a machine whose aihub key lives only in `PF_API_KEY` must put
+  it in `cli.toml` as `api_key` for these calls to authenticate. A failing
+  call never fails the step.
+- `.polyforge.yaml` gains the optional `memory_policy:` section (README,
+  "Memory policy"). Nothing is required: a missing section is the
+  built-in default. Run `pf init <ws>` once per workspace to append the
+  default section (as text — existing bytes and comments are kept), then
+  tune it; `pf doctor`'s new `workspace memory policy` row warns until a
+  workspace has one.
+- The claim-time recall section of the step prompt is now `[type] title`
+  lines only (at most 10, id-only noise titles dropped); ids and excerpts
+  stay in `runtime-state/recalled-memories.json`.

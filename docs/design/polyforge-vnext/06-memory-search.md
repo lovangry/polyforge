@@ -88,7 +88,22 @@ aihub 启动后在后台运行 `Store.RebuildIndex`（`cmd/aihub/main.go`；先�
 - 领取时 daemon 以 WI 的 goal + content 的前 1500 字符为查询，用 `match=any`、限定该 WI 的项目，取前 10 条（`-recall-topk`，上限 50）写入
   capsule `runtime-state/recalled-memories.json`（`{work_item_id, query, top_k, items[{id,type,title,excerpt}], notice,
   created_at}`，摘录 1200 字符）；出错或无命中时写空列表 + notice，从不让领取失败（`runtime/recall.go`、
-  `daemon/memface.go`）。driver 把它作为「非约束性历史」注入每个 step 的 prompt（`v2-converge.md#§1`）——只在有条目时
-  渲染该节，每条摘录至多 400 字符、整节至多 6000 字节（`driver/spawn.go`）。
-  daemon 的 UDS 上没有 recall/remember 通道。部署顺序：先升级 aihub 再升级 daemon——旧 aihub 忽略 `match=`、按 AND 检索，
+  `daemon/memface.go`）。driver 把它作为「非约束性历史」注入每个 step 的 prompt（`v2-converge.md#§1`）——每条只渲染一行
+  `[type] title`（不含 id 与正文；title 为空时取摘录的第一个非空行），丢弃 id-only 噪声标题
+  （`^Verification Report — \S+$`、`^Controller-sink artifact`），至多 10 行，无条目则不加该节（`driver/spawn.go`）。
+  daemon 的 UDS 上没有 recall/remember 通道。
+- step agent 自己的 `pf recall` / `pf remember`：数据面动词直连 aihub，不经 daemon UDS，所以 step-origin 守卫
+  （只拦 UDS 上的非读请求）不涉及；step 进程的环境剥掉了 `PF_*` / `POLYFORGE_*`，但保留 `HOME` / `XDG_CONFIG_HOME`，
+  `pf` 读操作者的 `cli.toml`（server、`api_key`、`[workspace]` 映射）——`api_key` 只放在 `PF_API_KEY` 环境变量里的机器上，
+  step 的 `pf` 拿不到凭据。每个 step 的 prompt 带共享的记忆职责节（`workflows/_shared/memory.md`，变量
+  `{{project}}` `{{work_item}}` `{{record}}` `{{skip}}` 经 `workflow.RenderStepVars` 渲染）：开工前用 2–3 组不同关键词
+  （含中英文）`pf recall --any`，读相关条目正文；收工前按记忆策略判断，至多写一条 `experience.<kind>`（先查重，正文 ≤2KB，
+  不写密钥），不在 `record` 里但有价值的照写并打 `policy-proposal` 标签、正文加「建议新增条目：…」，并在
+  `artifacts/memory-log.md` 记一行。workflow 的最后一步另带 `workflows/_shared/memory-wrap.md`：每个 WI 恰好一条
+  `experience.wrap`（title `<wi slug>: <做了什么>`，正文：做了什么、关键决定、遗留，并列出本 WI 的 `policy-proposal` 记忆）。
+- 记忆策略：`.polyforge.yaml` 的可选段 `memory_policy:`（`default` / `<project>`: `{record: [...], skip: [...]}`；
+  `default` 未声明的列表取内置默认，项目的列表追加到 `default` 之后、去重）。领取时 daemon 把该项目的生效策略写入
+  capsule `runtime-state/memory-policy.json`（`runtime/memorypolicy.go`），driver 渲染进记忆职责节；缺段＝内置默认
+  （`workspace.DefaultMemoryPolicySection`），从不拒绝领取；段格式错误同整个文件无效一样拒绝领取（DAEMON-414）。
+  `pf init` 在缺段时把默认段以文本追加到文件末尾（不重写原有字节）；`pf doctor` 只读，缺段报 warn 并提示 `pf init`。部署顺序：先升级 aihub 再升级 daemon——旧 aihub 忽略 `match=`、按 AND 检索，
   长查询于是没有命中，快照为空。

@@ -654,7 +654,8 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `runtime-state/execution.json` | 执行态唯一权威（结构：`capsule.Execution`） |
 | `runtime-state/spawn-journal.jsonl` | 每次 step 派生一行（harness、会话、transcript 路径） |
 | `runtime-state/pending-results/<spawn_n>.json` | step agent 交付结果信封的唯一通道 |
-| `runtime-state/recalled-memories.json` | 领取时的记忆快照（any-term 排序检索，见 `06-memory-search.md#§8`）；driver 以"非约束性历史"注入 step 提示（G3） |
+| `runtime-state/recalled-memories.json` | 领取时的记忆快照（any-term 排序检索，见 `06-memory-search.md#§8`）；driver 以"非约束性历史"注入 step 提示（G3），每条一行 `[type] title`，至多 10 行 |
+| `runtime-state/memory-policy.json` | 领取时该项目生效的记忆策略（`.polyforge.yaml` 的 `memory_policy`，缺段为内置默认）；driver 渲染进每个 step 的记忆职责节 |
 | `artifacts/steps/<step>/s<spawn_n>/result.json` | 已接受信封的归档 |
 | `artifacts/handoff-<step>.md` | 声明 `handoff` 的步骤按路径约定写出，后续 inherit 步读取 |
 | `session/session-<token>.jsonl` | harness 会话文件，在提交边界同步进来 |

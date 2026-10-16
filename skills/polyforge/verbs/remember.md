@@ -53,6 +53,19 @@ Pass the body as `@file` (≤1 MiB). A memory cannot be edited — store a
 new one (or redact). Local disposable output belongs in the workspace's
 `scratch/` only (`pf doctor` reports entries older than 14 days).
 
+## Step agents write memories too
+
+Every workflow step's prompt carries a memory duty: at the end of the
+step the agent writes at most ONE `experience.<kind>` memory, judged
+against the workspace's `memory_policy` (`.polyforge.yaml`; `verbs/init.md`),
+after a `pf recall --any` near-duplicate check; a lesson outside the
+policy's `record` list carries the `policy-proposal` tag and a
+"建议新增条目：…" line. The workflow's last step writes the work item's one
+`experience.wrap` summary (title `<wi slug>: <what was done>`). Such
+memories are attributed with `--work-item`; filter them with
+`pf recall --project P --any '<words>' --type experience.wrap` or
+`--tags policy-proposal`.
+
 ## Success
 
 `--json`: the server body raw. Human mode: `stored <id> (type T,
