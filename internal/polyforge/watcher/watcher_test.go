@@ -702,3 +702,18 @@ func TestNeedsInputWakeLineCarriesTheQuestionID(t *testing.T) {
 		t.Fatalf("non-needs_input line changed: %q", got)
 	}
 }
+
+// repo review 2026-10-16 B-9: execution.json and the hub status naming
+// the same class in one poll (the ordinary terminal close) is ONE
+// decision, not two wake-ups.
+func TestSameClassFromExecutionAndHubFiresOnce(t *testing.T) {
+	for _, tc := range [][2]string{{"completed", "wrapped"}, {"failed_gate", "failed"}, {"blocked", "blocked"}} {
+		snap := running("wi_1", "s1")
+		snap.Execution.WorkflowStatus = tc[0]
+		snap.HubStatus = tc[1]
+		res := Evaluate(sub("wi_1", 0), snap)
+		if len(res.Decisions) != 1 {
+			t.Fatalf("%s+%s: decisions = %+v, want exactly one", tc[0], tc[1], res.Decisions)
+		}
+	}
+}
