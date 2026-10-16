@@ -19,6 +19,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
 // endBlockedAtHub sends SessionEnd(blocked) fenced on the secret and
@@ -81,14 +82,39 @@ func (r *Runtime) goRetry(key string, attempt func() bool) {
 }
 
 // endPendingAttempt is one retry of an end_pending job's close; true =
-// settled (record dropped).
+// settled (record dropped). The local chain is pushed FIRST, with the
+// session credential that dies with the close (repo review 2026-10-16
+// B-2): boundedFail commits the dirty capsule before the verdict, and
+// when that push failed (the hub was unreachable — the same outage that
+// parked the close here) the commits would otherwise stay local forever
+// while the hub's blocked WI is re-claimed elsewhere from the remote
+// chain. A failed push is retried like the close itself, unless the
+// session no longer holds the WI (then nothing can be pushed under it and
+// the close is settled exactly as endBlockedAtHub settles it).
 func (r *Runtime) endPendingAttempt(j *job) bool {
 	j.mu.Lock()
-	secret, note, head := j.sessionID, j.endNote, j.endHead
+	secret, note, head, chain := j.sessionID, j.endNote, j.endHead, j.git
 	j.mu.Unlock()
+	if dirExists(j.capsuleDir) && dirExists(chain.GitDir) {
+		if _, perr := gitops.Push(chain); perr != nil {
+			if v, verr := r.hub.SessionVerify(j.wi, secret); verr == nil && !v.Matches {
+				fmt.Fprintf(os.Stderr, "runtime: %s: end_pending chain push failed (%v) and the session no longer holds the work item (status %s) — settled without it\n", j.wi, perr, v.Status)
+				r.settleEndPending(j)
+				return true
+			}
+			fmt.Fprintf(os.Stderr, "runtime: %s: end_pending chain push failed (will retry before the close): %v\n", j.wi, perr)
+			return false
+		}
+	}
 	if !r.endBlockedAtHub(j.wi, secret, note, head) {
 		return false
 	}
+	r.settleEndPending(j)
+	return true
+}
+
+// settleEndPending drops an end_pending job whose close is settled.
+func (r *Runtime) settleEndPending(j *job) {
 	if err := j.transition(StateDone); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: end_pending job could not reach DONE: %v\n", j.wi, err)
 	}
@@ -96,7 +122,6 @@ func (r *Runtime) endPendingAttempt(j *job) bool {
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
-	return true
 }
 
 // retryEndPending starts the background retry of an end_pending job.

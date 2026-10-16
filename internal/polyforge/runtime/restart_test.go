@@ -10,9 +10,11 @@ package runtime
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -420,62 +422,104 @@ func TestRestartFinishesInterruptedSeal(t *testing.T) {
 	unseal(t, testWorkspace(r))
 }
 
-// TestRestartVerifyOutageParksBlocked (the C6 posture): a failed
-// restart-time session verify — aihub unreachable — parks the WI in the
-// ordinary blocked state. No local verify-pending state, no background
-// retry: the agent tree is killed, the blocked verdict (its reason naming
-// the unreachable-aihub restart and the incomplete session verify) is
-// attempted at the hub, and with the hub still down the record is kept
-// end_pending for the durable retry. Once aihub answers, the verdict
-// lands and the owner's `pf resume` takes the ordinary blocked → resume
-// path.
-func TestRestartVerifyOutageParksBlocked(t *testing.T) {
+// TestRestartVerifyOutageKeepsRecordAndResumes (v2-converge §6, repo
+// review 2026-10-16 B-2): an unreachable aihub at restart is NOT a
+// verdict. The record is kept, the crash orphans are reaped first (single
+// writer), the job shows RECOVERING, nothing spawns and nothing is sent
+// to the hub — and once aihub answers, the deferred verify runs the
+// ordinary reconciliation: the WI resumes in its own capsule with no
+// `pf resume`, its unpushed local commit intact (never quarantined,
+// never re-cloned), and observe is handed the job (RTStarted).
+func TestRestartVerifyOutageKeepsRecordAndResumes(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
 	r, toOB, _ := newTestRuntime(t, hub, sp)
+	r.cfg.EndRetryBase = 10 * time.Millisecond
+	r.cfg.EndRetryMax = 20 * time.Millisecond
+	t.Cleanup(func() { r.Close(); terminateJobAgent(r, "wi_verify_outage") })
 	wi := "wi_verify_outage"
+	pid, startedAt := spawnSleeper(t, wi)
+	rec := matrixRecord(r, wi, pid, startedAt)
+	hub.hold(wi, rec.SessionID, api.StatusRunning)
 	hub.lookupErr[wi] = errLookupBoom
+	writeStateFile(t, r, []*jobRecord{rec})
+	// the capsule holds a local commit the hub never received
+	initGitCapsule(t, r.restoredJob(rec))
+	local := gitHead(t, rec.GitDir)
+
+	if err := r.Restart(context.Background()); err != nil {
+		t.Fatalf("Restart must survive an unreachable aihub per record: %v", err)
+	}
+	waitDead(t, pid) // orphans reaped before anything else
+	if ji, ok := r.Info(wi); !ok || ji.State != StateRecovering {
+		t.Fatalf("the deferred job = %+v (ok=%v), want RECOVERING", ji, ok)
+	}
+	if recs := loadRecords(t, r); len(recs) != 1 || recs[0].SessionID != rec.SessionID {
+		t.Fatalf("the record (the only copy of the secret) must be kept, got %+v", recs)
+	}
+	time.Sleep(60 * time.Millisecond) // several retry rounds against the dead hub
+	if sp.callCount() != 0 || hub.endCount() != 0 {
+		t.Fatalf("an unreachable hub must decide nothing: %d spawns, %d ends", sp.callCount(), hub.endCount())
+	}
+	assertNoRT(t, toOB)
+
+	// aihub answers: the deferred verify matches and the WI resumes.
+	hub.mu.Lock()
+	delete(hub.lookupErr, wi)
+	hub.mu.Unlock()
+	waitFor(t, "the deferred verify to resume the work item", func() bool {
+		ji, ok := r.Info(wi)
+		return ok && ji.State == StateRunning && ji.Agent != nil
+	})
+	waitRetryIdle(t, r)
+	if hub.endCount() != 0 {
+		t.Fatalf("the resume must not close the session, got %+v", hub.lastEnd())
+	}
+	if ji, _ := r.Info(wi); ji.CapsuleDir != rec.CapsuleDir || ji.SessionID != rec.SessionID {
+		t.Fatalf("the WI must resume in its own capsule under its own session, got %+v", ji)
+	}
+	if out, err := exec.Command("git", "--git-dir", rec.GitDir, "cat-file", "-e", local).CombinedOutput(); err != nil {
+		t.Fatalf("the unpushed local commit %s was lost: %v %s", local, err, out)
+	}
+	if m, _ := filepath.Glob(rec.CapsuleDir + ".quarantined.*"); len(m) != 0 {
+		t.Fatalf("the capsule must not be quarantined: %v", m)
+	}
+	var kinds []protocol.RTMsgKind
+	for len(kinds) < 2 {
+		kinds = append(kinds, recvRT(t, toOB).Kind)
+	}
+	if kinds[len(kinds)-1] != protocol.RTStarted {
+		t.Fatalf("observe must be handed the late-resumed job (RTStarted last), got %v", kinds)
+	}
+}
+
+// A typed refusal of the restart verify (4xx) is the hub's answer, not an
+// outage: the WI parks blocked with the refusal named (today's path).
+func TestRestartVerifyRefusedParksBlocked(t *testing.T) {
+	hub := newFakeHub()
+	sp := &scriptedSpawner{}
+	r, toOB, _ := newTestRuntime(t, hub, sp)
+	wi := "wi_verify_refused"
+	hub.lookupErr[wi] = &api.Error{Code: api.ErrCoreForbidden, Detail: "not your work item"}
 	pid, startedAt := spawnSleeper(t, wi)
 	rec := matrixRecord(r, wi, pid, startedAt)
 	writeStateFile(t, r, []*jobRecord{rec})
 
 	if err := r.Restart(context.Background()); err != nil {
-		t.Fatalf("Restart must survive an unreachable aihub per record: %v", err)
+		t.Fatalf("Restart: %v", err)
 	}
-	// the parked WI holds no agent: the tree is killed, nothing spawns
 	waitDead(t, pid)
 	if sp.callCount() != 0 {
-		t.Fatal("a verify outage must not spawn")
+		t.Fatal("a refused verify must not spawn")
 	}
-	// the blocked verdict is pending at the (unreachable) hub: the record
-	// is kept end_pending, carrying the outage reason verbatim
 	recs := loadRecords(t, r)
-	if len(recs) != 1 || recs[0].State != string(StateEndPending) {
-		t.Fatalf("the verify-outage record must be kept end_pending, got %+v", recs)
+	if len(recs) != 1 || recs[0].State != string(StateEndPending) || !strings.Contains(recs[0].EndNote, "refused") {
+		t.Fatalf("the refused-verify record must be blocked (end_pending at the refusing hub) naming the refusal, got %+v", recs)
 	}
-	if !strings.Contains(recs[0].EndNote, "unreachable") || !strings.Contains(recs[0].EndNote, "verify") {
-		t.Fatalf("the parked reason must name the unreachable-aihub restart and the incomplete verify: %q", recs[0].EndNote)
-	}
-	msg := recvRT(t, toOB)
-	if msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked {
+	if msg := recvRT(t, toOB); msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked {
 		t.Fatalf("expected RTFinished(blocked), got %+v", msg)
 	}
-
-	// aihub answers: the durable retry lands the blocked verdict, and the
-	// job leaves the live set (the owner's `pf resume` takes it from here)
-	hub.mu.Lock()
-	delete(hub.lookupErr, wi)
-	hub.mu.Unlock()
-	waitFor(t, "the end-pending blocked close to settle once aihub answers", func() bool {
-		_, ok := r.Info(wi)
-		return !ok
-	})
-	if hub.endCount() != 1 || hub.lastEnd().Status != protocol.FinishBlocked {
-		t.Fatalf("the blocked close must land once the hub answers, got %+v", hub.lastEnd())
-	}
-	if !strings.Contains(hub.lastEnd().Note, "unreachable") {
-		t.Fatalf("the hub-side blocked reason must name the outage: %q", hub.lastEnd().Note)
-	}
+	r.Close()
 }
 
 // A blocked verdict reaps the crash orphans named only by the spawn
@@ -508,4 +552,14 @@ func TestRestartBlockedReapsJournaledOrphansOnly(t *testing.T) {
 		t.Fatal("blocked must not spawn")
 	}
 	assertNoRT(t, toOB)
+}
+
+// gitHead answers the HEAD commit of an external git-dir.
+func gitHead(t *testing.T, gitDir string) string {
+	t.Helper()
+	out, err := exec.Command("git", "--git-dir", gitDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD in %s: %v", gitDir, err)
+	}
+	return strings.TrimSpace(string(out))
 }

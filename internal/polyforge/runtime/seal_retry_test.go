@@ -62,6 +62,7 @@ func waitJobGone(t *testing.T, r *Runtime, wi string) {
 		gone := r.jobOf(wi) == nil
 		r.opMu.Unlock()
 		if gone {
+			waitRetryIdle(t, r)
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
