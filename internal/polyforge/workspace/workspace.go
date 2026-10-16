@@ -137,8 +137,12 @@ func parse(raw []byte, projects []string) (*Config, string) {
 		return nil, strings.ReplaceAll(err.Error(), "\n", "; ")
 	}
 	var second yaml.Node
-	if err := dec.Decode(&second); !errors.Is(err, io.EOF) {
+	switch err := dec.Decode(&second); {
+	case err == nil:
 		return nil, "the file must hold exactly one YAML document (found a second `---` document)"
+	case !errors.Is(err, io.EOF):
+		return nil, "content after the end of the top-level document does not parse (a flow-style `{...}` top level or a `...` end marker cannot be followed by more keys): " +
+			strings.ReplaceAll(err.Error(), "\n", "; ")
 	}
 	if len(doc.Content) == 0 {
 		return nil, ""

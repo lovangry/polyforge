@@ -94,7 +94,9 @@ the user saying "init workspace".
    none — as text after the existing bytes (comments and layout are kept
    exactly, never re-marshalled) — or creates the file holding only it.
    A file that already declares `memory_policy` is left alone; one that
-   does not load is refused (fix it first — `pf doctor` names the defect).
+   does not load is left untouched too and reported as a `warning:` line
+   (exit 0 — scratch/ and CLAUDE.md are still laid out; fix the file —
+   `pf doctor` names the defect — and re-run `pf init`).
 
 ## Verify
 

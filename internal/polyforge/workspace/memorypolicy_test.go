@@ -136,27 +136,45 @@ func TestEnsureMemoryPolicyAppends(t *testing.T) {
 
 // TestEnsureMemoryPolicyLeavesDeclaredAndBrokenFiles pins that a file
 // already declaring the key (even invalidly) and a file that does not
-// load are never written.
+// load are never written; a broken file is reported as a warning while
+// scratch/ and CLAUDE.md are still laid out.
 func TestEnsureMemoryPolicyLeavesDeclaredAndBrokenFiles(t *testing.T) {
 	declared := "memory_policy:\n  default:\n    record: [mine]\n"
 	ws := writeYaml(t, declared)
 	if res, err := Init(ws); err != nil || res.Yaml != "unchanged" || readFile(t, PathFor(ws)) != declared {
 		t.Fatalf("declared: %+v, %v", res, err)
 	}
-	for _, broken := range []string{"steps: [\n", "x\n", "{steps: {}}\n"} {
+	for broken, want := range map[string]string{
+		"steps: [\n":    "fix it first",
+		"x\n":           "fix it first",
+		"{steps: {}}\n": "add it by hand",
+		"steps:\n...\n": "add it by hand",
+	} {
 		ws := writeYaml(t, broken)
-		_, err := Init(ws)
-		if broken == "{steps: {}}\n" {
-			// a flow mapping cannot take a block key after it
-			if err == nil || !strings.Contains(err.Error(), "add it by hand") {
-				t.Fatalf("flow mapping: err = %v", err)
-			}
-		} else if err == nil || !strings.Contains(err.Error(), "fix it first") {
-			t.Fatalf("%q: err = %v", broken, err)
+		res, err := Init(ws)
+		if err != nil || res.Yaml != "skipped" || !strings.Contains(res.YamlWarning, want) {
+			t.Fatalf("%q: %+v, %v; want a skipped yaml warning containing %q", broken, res, err, want)
 		}
 		if readFile(t, PathFor(ws)) != broken {
 			t.Fatalf("%q was rewritten", broken)
 		}
+		if res.Scratch != "created" || res.NotesFile != "created" {
+			t.Fatalf("%q: the layout half did not run: %+v", broken, res)
+		}
+	}
+}
+
+// TestParseTrailingContentReason pins the refusal of content after the
+// top-level document: it names the parse failure, not a second document.
+func TestParseTrailingContentReason(t *testing.T) {
+	for _, raw := range []string{"{steps: {}}\nmemory_policy:\n  default:\n    skip: [a]\n", "steps:\n...\nmemory_policy: {}\n"} {
+		_, reason := parse([]byte(raw), nil)
+		if !strings.Contains(reason, "content after the end of the top-level document does not parse") || strings.Contains(reason, "second `---`") {
+			t.Fatalf("%q: reason %q", raw, reason)
+		}
+	}
+	if _, reason := parse([]byte("a: 1\n---\nb: 2\n"), nil); !strings.Contains(reason, "found a second `---` document") {
+		t.Fatalf("two documents: %q", reason)
 	}
 }
 

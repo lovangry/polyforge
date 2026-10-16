@@ -250,6 +250,15 @@ func TestInitVerb(t *testing.T) {
 	if code != 0 || !strings.Contains(stdout, "scratch/  exists") || !strings.Contains(stdout, "layout section unchanged") || !strings.Contains(stdout, "memory_policy section unchanged") {
 		t.Fatalf("second pf init: exit %d output %s", code, stdout)
 	}
+	bad := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bad, workspace.FileName), []byte("steps: [\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr = runPf(t, nil, "init", bad)
+	if code != 0 || !strings.Contains(stdout, "layout section created") || !strings.Contains(stdout, "memory_policy section skipped") ||
+		!strings.Contains(stdout, "warning: .polyforge.yaml left untouched:") {
+		t.Fatalf("pf init over a broken yaml: exit %d output %s (%s)", code, stdout, stderr)
+	}
 	if code, _, stderr := runPf(t, nil, "init", filepath.Join(ws, "nope")); code != 1 || !strings.Contains(stderr, "does not exist") {
 		t.Fatalf("pf init on a missing dir: exit %d (%s)", code, stderr)
 	}

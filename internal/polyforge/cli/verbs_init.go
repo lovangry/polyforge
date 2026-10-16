@@ -58,6 +58,9 @@ var cmdInit = &Command{
 		fmt.Fprintf(ctx.Stdout, "  %s/  %s\n", workspace.ScratchDir, res.Scratch)
 		fmt.Fprintf(ctx.Stdout, "  %s  layout section %s\n", workspace.NotesFile, res.NotesFile)
 		fmt.Fprintf(ctx.Stdout, "  %s  %s section %s\n", workspace.FileName, workspace.MemoryPolicyKey, res.Yaml)
+		if res.YamlWarning != "" {
+			fmt.Fprintf(ctx.Stdout, "  warning: %s left untouched: %s\n", workspace.FileName, res.YamlWarning)
+		}
 		return nil
 	},
 }

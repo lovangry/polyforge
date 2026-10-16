@@ -256,42 +256,54 @@ func declaresPolicy(raw []byte) (bool, error) {
 	return false, nil
 }
 
-// ensureMemoryPolicy gives the workspace's `.polyforge.yaml` the default
-// memory_policy section when it declares none: an absent file is created
-// with it; an existing one gets it APPENDED as text — its bytes before
-// the section are kept exactly (hand-written comments included), never
-// re-marshalled. A file that already declares the key is untouched, as
-// is one that does not load (it is refused, not repaired). It answers
-// created | appended | unchanged.
-func ensureMemoryPolicy(root string) (string, error) {
-	path := PathFor(root)
-	if fi, err := os.Lstat(path); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
-		target, err := filepath.EvalSymlinks(path)
+// policyPlan is the planned memory_policy write of one workspace: how
+// is created | appended | unchanged; data is the whole new file (nil
+// when unchanged).
+type policyPlan struct {
+	path string
+	data []byte
+	mode fs.FileMode
+	how  string
+}
+
+// planMemoryPolicy plans giving the workspace's `.polyforge.yaml` the
+// default memory_policy section when it declares none, writing nothing:
+// an absent file is created with it; an existing one gets it APPENDED as
+// text — its bytes before the section are kept exactly (hand-written
+// comments included), never re-marshalled. A file that already declares
+// the key is left alone; one that does not load (or would not load with
+// the section appended) answers an error naming the reason, and nothing
+// is to be written.
+func planMemoryPolicy(root string) (policyPlan, error) {
+	plan := policyPlan{path: PathFor(root), mode: 0o644}
+	if fi, err := os.Lstat(plan.path); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+		target, err := filepath.EvalSymlinks(plan.path)
 		if err != nil {
-			return "", fmt.Errorf("%s is a symlink that does not resolve: %w", path, err)
+			return plan, fmt.Errorf("%s is a symlink that does not resolve: %w", plan.path, err)
 		}
-		path = target
+		plan.path = target
 	}
-	raw, err := os.ReadFile(path)
-	var mode fs.FileMode = 0o644
+	raw, err := os.ReadFile(plan.path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return "created", writeAtomic(path, []byte(DefaultMemoryPolicySection), mode)
+		plan.how, plan.data = "created", []byte(DefaultMemoryPolicySection)
+		return plan, nil
 	case err != nil:
-		return "", err
+		return plan, err
 	}
-	if fi, serr := os.Stat(path); serr == nil {
-		mode = fi.Mode().Perm()
+	if fi, serr := os.Stat(plan.path); serr == nil {
+		plan.mode = fi.Mode().Perm()
 	}
 	if _, reason := parse(raw, nil); reason != "" {
-		return "", fmt.Errorf("%s: %s — fix it first (`pf doctor` names the defect); the memory_policy section was not added", path, reason)
+		return plan, fmt.Errorf("%s: %s — fix it first (`pf doctor` names the defect)", plan.path, reason)
 	}
 	has, err := declaresPolicy(raw)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", path, err)
+		return plan, fmt.Errorf("%s: %w", plan.path, err)
 	}
 	if has {
-		return "unchanged", nil
+		plan.how = "unchanged"
+		return plan, nil
 	}
 	out := append([]byte(nil), raw...)
 	if len(out) > 0 {
@@ -302,7 +314,16 @@ func ensureMemoryPolicy(root string) (string, error) {
 	}
 	out = append(out, DefaultMemoryPolicySection...)
 	if _, reason := parse(out, nil); reason != "" {
-		return "", fmt.Errorf("%s: appending the memory_policy section would not load (%s) — add it by hand; the file was not changed", path, reason)
+		return plan, fmt.Errorf("%s: appending the memory_policy section would not load (%s) — add it by hand", plan.path, reason)
 	}
-	return "appended", writeAtomic(path, out, mode)
+	plan.how, plan.data = "appended", out
+	return plan, nil
+}
+
+// write carries the plan out (nothing for unchanged).
+func (p policyPlan) write() error {
+	if p.data == nil {
+		return nil
+	}
+	return writeAtomic(p.path, p.data, p.mode)
 }

@@ -1155,6 +1155,15 @@ it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
   default section (as text — existing bytes and comments are kept), then
   tune it; `pf doctor`'s new `workspace memory policy` row warns until a
   workspace has one.
+- **Rollback hazard:** a pf/daemon binary older than this version parses
+  `.polyforge.yaml` strictly and does not know `memory_policy`, so after
+  `pf init` appended the section an older daemon refuses EVERY claim of
+  that workspace's projects (DAEMON-414: `unknown top-level key
+  "memory_policy"`) until the section is removed. Remedy before (or right
+  after) rolling back, per workspace — the appended section is the file's
+  tail, starting at its `# memory_policy:` comment line:
+  `sed -i '/^# memory_policy:/,$d' <workspace>/.polyforge.yaml`
+  (a hand-written section elsewhere in the file: delete it by hand).
 - The claim-time recall section of the step prompt is now `[type] title`
   lines only (at most 10, id-only noise titles dropped); ids and excerpts
   stay in `runtime-state/recalled-memories.json`.

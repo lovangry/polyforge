@@ -314,8 +314,10 @@ type InitResult struct {
 	Scratch   string `json:"scratch"`   // created | exists
 	NotesFile string `json:"claude_md"` // created | inserted | updated | unchanged
 	// Yaml is what happened to .polyforge.yaml's memory_policy section:
-	// created (a new file holding only it) | appended | unchanged.
-	Yaml string `json:"polyforge_yaml"`
+	// created (a new file holding only it) | appended | unchanged |
+	// skipped (the file does not load: YamlWarning says why).
+	Yaml        string `json:"polyforge_yaml"`
+	YamlWarning string `json:"polyforge_yaml_warning,omitempty"`
 }
 
 // Init gives an existing workspace directory its local layout: scratch/,
@@ -326,7 +328,10 @@ type InitResult struct {
 // one gets that section replaced. CLAUDE.md is written atomically (temp
 // file + rename, mode kept); a symlinked CLAUDE.md has its target
 // written, the link stays. .polyforge.yaml only ever gains the default
-// memory_policy section, appended as text (ensureMemoryPolicy).
+// memory_policy section, appended as text (planMemoryPolicy); that step
+// is planned before anything is written, and a yaml that cannot take it
+// (it does not load) is left untouched and reported in YamlWarning
+// while scratch/ and CLAUDE.md are still laid out.
 func Init(root string) (InitResult, error) {
 	res := InitResult{Workspace: root}
 	st, err := os.Stat(root)
@@ -336,6 +341,7 @@ func Init(root string) (InitResult, error) {
 	if !st.IsDir() {
 		return res, fmt.Errorf("%s is not a directory", root)
 	}
+	yamlPlan, yerr := planMemoryPolicy(root)
 	scratch := filepath.Join(root, ScratchDir)
 	switch st, err := os.Lstat(scratch); {
 	case err == nil && st.IsDir():
@@ -381,8 +387,12 @@ func Init(root string) (InitResult, error) {
 			return res, err
 		}
 	}
-	res.Yaml, err = ensureMemoryPolicy(root)
-	return res, err
+	if yerr != nil {
+		res.Yaml, res.YamlWarning = "skipped", yerr.Error()
+		return res, nil
+	}
+	res.Yaml = yamlPlan.how
+	return res, yamlPlan.write()
 }
 
 // writeAtomic replaces path with data through a temp file in the same
