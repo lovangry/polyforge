@@ -89,9 +89,19 @@ func (d *Daemon) sendHeartbeat() error {
 // unit test — the loop's timer arithmetic must not need a flaky sleep
 // ladder to be pinned.
 func nextHeartbeatDelay(base time.Duration, failStreak int) time.Duration {
+	return cappedBackoff(base, failStreak, heartbeatBackoffCap)
+}
+
+// cappedBackoff doubles base once per failure, never past capMult×base
+// (exact for any cap, power of two or not).
+func cappedBackoff(base time.Duration, failStreak, capMult int) time.Duration {
+	limit := base * time.Duration(capMult)
 	d := base
-	for i := 0; i < failStreak && d < base*heartbeatBackoffCap; i++ {
+	for i := 0; i < failStreak && d < limit; i++ {
 		d *= 2
+	}
+	if d > limit {
+		d = limit
 	}
 	return d
 }
