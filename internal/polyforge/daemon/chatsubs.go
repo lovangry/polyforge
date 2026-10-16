@@ -55,9 +55,18 @@ type subsDoc struct {
 
 type chatDoc struct {
 	Subs map[string]*protocol.ChatSub `json:"subs"`
-	// AttentionShown lists "<wi>|<reason>" notices this chat was shown.
+	// AttentionShown lists "<wi>|<reason>|<question>" notices this chat
+	// was shown (acked by its watcher, or marked at fetch by a legacy one).
 	AttentionShown []string `json:"attention_shown,omitempty"`
+	// AttentionPending lists the notices delivered to a fetch-then-ack
+	// watcher (GET attention?ack=1) and not yet acked: they stay listed on
+	// every fetch until POST attention/ack moves them to AttentionShown.
+	// It only scopes which keys an ack may record.
+	AttentionPending []string `json:"attention_pending,omitempty"`
 }
+
+// attentionKeep bounds AttentionShown and AttentionPending per chat.
+const attentionKeep = 200
 
 // subStore persists subscriptions and cursors.
 type subStore struct {
@@ -196,27 +205,89 @@ func (s *subStore) Covered(wi string) bool {
 	return false
 }
 
-// MarkShown records an attention notice as shown to chat; it answers true
-// when the notice was new for that chat.
-func (s *subStore) MarkShown(chat, key string, record bool) (fresh bool, err error) {
+// attnMode is how one attention fetch treats the notices it lists.
+type attnMode int
+
+const (
+	// attnPeek lists without recording anything.
+	attnPeek attnMode = iota
+	// attnMark (legacy ?mark=1) records each listed notice shown at fetch.
+	attnMark
+	// attnDeliver (?ack=1, fetch-then-ack) records each listed notice
+	// pending; it is shown only once the watcher acks it after printing.
+	attnDeliver
+)
+
+// MarkShown answers whether the attention notice key is new for chat (not
+// yet shown) and records it per mode: attnMark marks it shown, attnDeliver
+// marks it pending (still new until acked), attnPeek records nothing.
+func (s *subStore) MarkShown(chat, key string, mode attnMode) (fresh bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c := s.chatLocked(chat, record)
-	if c != nil {
-		for _, k := range c.AttentionShown {
-			if k == key {
-				return false, nil
-			}
-		}
+	c := s.chatLocked(chat, mode != attnPeek)
+	if c != nil && contains(c.AttentionShown, key) {
+		return false, nil
 	}
-	if !record {
+	switch mode {
+	case attnMark:
+		c.AttentionShown = appendBounded(c.AttentionShown, key)
+	case attnDeliver:
+		if contains(c.AttentionPending, key) {
+			return true, nil
+		}
+		c.AttentionPending = appendBounded(c.AttentionPending, key)
+	default:
 		return true, nil
 	}
-	c.AttentionShown = append(c.AttentionShown, key)
-	if len(c.AttentionShown) > 200 {
-		c.AttentionShown = c.AttentionShown[len(c.AttentionShown)-200:]
-	}
 	return true, s.persistLocked()
+}
+
+// AckShown records the pending attention notices among keys as shown to
+// chat (the watcher printed them). Idempotent: a key already shown, or one
+// the chat was never delivered (unknown, garbage, from another chat), is
+// ignored. Answers how many keys were newly recorded.
+func (s *subStore) AckShown(chat string, keys []string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.chatLocked(chat, false)
+	if c == nil {
+		return 0, nil
+	}
+	n := 0
+	for _, k := range keys {
+		i := indexOf(c.AttentionPending, k)
+		if i < 0 {
+			continue
+		}
+		c.AttentionPending = append(c.AttentionPending[:i:i], c.AttentionPending[i+1:]...)
+		if !contains(c.AttentionShown, k) {
+			c.AttentionShown = appendBounded(c.AttentionShown, k)
+		}
+		n++
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	return n, s.persistLocked()
+}
+
+func indexOf(list []string, k string) int {
+	for i, v := range list {
+		if v == k {
+			return i
+		}
+	}
+	return -1
+}
+
+func contains(list []string, k string) bool { return indexOf(list, k) >= 0 }
+
+func appendBounded(list []string, k string) []string {
+	list = append(list, k)
+	if len(list) > attentionKeep {
+		list = list[len(list)-attentionKeep:]
+	}
+	return list
 }
 
 // ---------------------------------------------------------------------------
@@ -316,8 +387,19 @@ func (d *Daemon) attentionRoute(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	owner := strings.TrimSpace(r.URL.Query().Get("owner"))
-	items, err := d.attention(id, owner, r.URL.Query().Get("mark") == "1")
+	q := r.URL.Query()
+	owner := strings.TrimSpace(q.Get("owner"))
+	// ack=1 (a fetch-then-ack watcher) wins over mark=1, which such a
+	// watcher also sends so an older daemon, ignoring ack=1, still marks
+	// at fetch as before.
+	mode := attnPeek
+	switch {
+	case q.Get("ack") == "1":
+		mode = attnDeliver
+	case q.Get("mark") == "1":
+		mode = attnMark
+	}
+	items, err := d.attention(id, owner, mode)
 	if err != nil {
 		writeErr(w, api.ErrDaemonInternal, err.Error())
 		return
@@ -325,12 +407,33 @@ func (d *Daemon) attentionRoute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, protocol.ChatAttention{ChatID: id, Items: items})
 }
 
+// attentionAckRoute records the delivered attention notices the watcher
+// printed (POST /chats/{id}/attention/ack {"keys":[...]}). Idempotent;
+// keys the chat was not delivered are ignored.
+func (d *Daemon) attentionAckRoute(w http.ResponseWriter, r *http.Request) {
+	id, ok := chatID(w, r)
+	if !ok {
+		return
+	}
+	var a protocol.ChatAttentionAck
+	if !decodeBody(w, r, &a) {
+		return
+	}
+	if _, err := d.subs.AckShown(id, a.Keys); err != nil {
+		writeErr(w, api.ErrDaemonInternal, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 // attention lists the WIs that need a human, have no live subscribed
 // watcher, and belong to this chat (origin) or this owner (origin owner,
 // falling back to the WI reporter), skipping what the chat was already
-// shown. mark records the listed notices as shown. The reminder covers
-// every decision class the held job presents (D9), not only needs_input.
-func (d *Daemon) attention(chat, owner string, mark bool) ([]protocol.ChatAttentionItem, error) {
+// shown. mode says whether the listed notices are recorded shown at
+// fetch (legacy), pending until acked (fetch-then-ack), or not at all.
+// The reminder covers every decision class the held job presents (D9),
+// not only needs_input.
+func (d *Daemon) attention(chat, owner string, mode attnMode) ([]protocol.ChatAttentionItem, error) {
 	items := []protocol.ChatAttentionItem{}
 	jobs, _ := d.statusJobs()
 	for _, j := range jobs {
@@ -353,12 +456,12 @@ func (d *Daemon) attention(chat, owner string, mark bool) ([]protocol.ChatAttent
 			continue
 		}
 		key := j.WorkItemID + "|" + reason + "|" + j.QuestionID
-		fresh, err := d.subs.MarkShown(chat, key, mark)
+		fresh, err := d.subs.MarkShown(chat, key, mode)
 		if err != nil {
 			return nil, err
 		}
 		if fresh {
-			items = append(items, protocol.ChatAttentionItem{WI: j.WorkItemID, Slug: j.Slug, Reason: reason})
+			items = append(items, protocol.ChatAttentionItem{WI: j.WorkItemID, Slug: j.Slug, Reason: reason, Key: key})
 		}
 	}
 	sort.Slice(items, func(i, k int) bool { return items[i].WI < items[k].WI })

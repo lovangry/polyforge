@@ -1,8 +1,14 @@
 package daemon
 
 import (
+	"context"
+	"encoding/json"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -193,7 +199,11 @@ func TestAttentionRoutingAndOwnerFallback(t *testing.T) {
 	waitNeedsInput(t, td, "wi_chat", "wi_auto")
 
 	ids := func(chat, owner string, mark bool) map[string]bool {
-		items, err := td.attention(chat, owner, mark)
+		mode := attnPeek
+		if mark {
+			mode = attnMark
+		}
+		items, err := td.attention(chat, owner, mode)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -356,7 +366,7 @@ func TestAttentionAllDecisionClasses(t *testing.T) {
 	waitState(t, td, wiHold, "paused")
 	td.hub.reporters[wiHold] = "bob"
 	td.hub.status[wiHold] = "canceled"
-	items, err := td.attention("chat_z", "bob", false)
+	items, err := td.attention("chat_z", "bob", attnPeek)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,4 +402,133 @@ func TestLastSeqAndAttentionPastHistoryCap(t *testing.T) {
 	if got := td.attentionClass(statusJob{WorkItemID: wi, Status: "running"}); got != "step_dead" {
 		t.Fatalf("attention class = %q, want the newest event step_dead", got)
 	}
+}
+
+// repo review 2026-10-16 B-25 (WA-4), fetch-then-ack: a delivered attention
+// notice keeps being listed until the watcher acks it; the ack (and the
+// pending delivery) survive a daemon restart; acks are idempotent and
+// unknown keys change nothing; the legacy mark-at-fetch stays as it was.
+func TestSubStoreAttentionFetchThenAck(t *testing.T) {
+	path := filepath.Join(t.TempDir(), chatSubsFile)
+	s, err := newSubStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const k = "wi_1|blocked|"
+	fresh := func(s *subStore, mode attnMode) bool {
+		t.Helper()
+		f, err := s.MarkShown("chat_a", k, mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	if !fresh(s, attnDeliver) || !fresh(s, attnDeliver) {
+		t.Fatal("an un-acked delivery must be re-delivered")
+	}
+	// the watcher crashed; the daemon restarts before anyone acks
+	s, _ = newSubStore(path)
+	if !fresh(s, attnDeliver) {
+		t.Fatal("still un-acked after a daemon restart: re-delivered")
+	}
+	if n, err := s.AckShown("chat_a", []string{"wi_x|nope|", "garbage"}); err != nil || n != 0 {
+		t.Fatalf("unknown keys: n=%d err=%v", n, err)
+	}
+	if n, err := s.AckShown("chat_nobody", []string{k}); err != nil || n != 0 {
+		t.Fatalf("unknown chat: n=%d err=%v", n, err)
+	}
+	if !fresh(s, attnDeliver) {
+		t.Fatal("an unknown-key ack must not ack the real notice")
+	}
+	if n, err := s.AckShown("chat_a", []string{k}); err != nil || n != 1 {
+		t.Fatalf("ack: n=%d err=%v", n, err)
+	}
+	if n, err := s.AckShown("chat_a", []string{k}); err != nil || n != 0 {
+		t.Fatalf("a repeated ack is a no-op: n=%d err=%v", n, err)
+	}
+	if fresh(s, attnDeliver) || fresh(s, attnPeek) {
+		t.Fatal("an acked notice must not be listed again")
+	}
+	s, _ = newSubStore(path)
+	if fresh(s, attnDeliver) {
+		t.Fatal("the ack must survive a daemon restart")
+	}
+	if c := s.doc.Chats["chat_a"]; len(c.AttentionPending) != 0 || len(c.AttentionShown) != 1 {
+		t.Fatalf("store after ack: %+v", c)
+	}
+	// legacy (an older watcher: mark=1, no ack=1): shown at fetch
+	if f, _ := s.MarkShown("chat_b", k, attnMark); !f {
+		t.Fatal("legacy first fetch lists it")
+	}
+	if f, _ := s.MarkShown("chat_b", k, attnMark); f {
+		t.Fatal("legacy second fetch must not repeat it")
+	}
+}
+
+// udsDo speaks to the test daemon's socket directly (the wire a
+// watcher of another version would send).
+func udsDo(t *testing.T, sock, method, path, body string) []byte {
+	t.Helper()
+	hc := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+	}}}
+	defer hc.CloseIdleConnections()
+	req, err := http.NewRequest(method, "http://daemon"+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("%s %s: %d %s", method, path, resp.StatusCode, raw)
+	}
+	return raw
+}
+
+func TestAttentionRouteCompat(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.client.Origin = &cli.SubmitOrigin{ChatID: "chat_a", Owner: "alice"}
+	td.submitClaim(t, "wi_c")
+	td.waitMonitored(t, "wi_c")
+	td.seedPendingQuestion(t, "wi_c", "q-1", "s1", "?")
+	waitNeedsInput(t, td, "wi_c")
+
+	list := func(chat, query string) []protocol.ChatAttentionItem {
+		t.Helper()
+		var a protocol.ChatAttention
+		if err := json.Unmarshal(udsDo(t, td.sock, "GET", "/chats/"+chat+"/attention?owner=alice"+query, ""), &a); err != nil {
+			t.Fatal(err)
+		}
+		return a.Items
+	}
+	// an older watcher (mark=1 only): marked at fetch, as before
+	if got := list("chat_old", "&mark=1"); len(got) != 1 || got[0].WI != "wi_c" {
+		t.Fatalf("legacy first fetch: %+v", got)
+	}
+	if got := list("chat_old", "&mark=1"); len(got) != 0 {
+		t.Fatalf("legacy second fetch must not repeat: %+v", got)
+	}
+	// a fetch-then-ack watcher (mark=1&ack=1): listed until acked
+	got := list("chat_new", "&mark=1&ack=1")
+	if len(got) != 1 || got[0].Key == "" {
+		t.Fatalf("fetch-then-ack items carry a key: %+v", got)
+	}
+	if again := list("chat_new", "&mark=1&ack=1"); len(again) != 1 {
+		t.Fatalf("un-acked: re-delivered: %+v", again)
+	}
+	udsDo(t, td.sock, "POST", "/chats/chat_new/attention/ack", `{"keys":["bogus|x|"]}`)
+	if again := list("chat_new", "&mark=1&ack=1"); len(again) != 1 {
+		t.Fatalf("an unknown-key ack acks nothing: %+v", again)
+	}
+	for i := 0; i < 2; i++ { // idempotent
+		udsDo(t, td.sock, "POST", "/chats/chat_new/attention/ack", `{"keys":["`+got[0].Key+`"]}`)
+	}
+	if again := list("chat_new", "&mark=1&ack=1"); len(again) != 0 {
+		t.Fatalf("acked: not listed again: %+v", again)
+	}
+	udsDo(t, td.sock, "POST", "/chats/chat_none/attention/ack", `{}`) // empty ack is harmless
 }

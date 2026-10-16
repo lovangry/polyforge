@@ -29,6 +29,12 @@ type watchDaemon struct {
 	acks []protocol.ChatAck
 	sock string
 	init int
+	// attention: attn is answered on every fetch (the query recorded);
+	// attnAckRoute false plays an older daemon without POST attention/ack.
+	attn         []protocol.ChatAttentionItem
+	attnQuery    string
+	attnAckRoute bool
+	attnAcks     []protocol.ChatAttentionAck
 }
 
 func newWatchDaemon(t *testing.T, snap protocol.WatchSnapshot, subs ...protocol.ChatSub) *watchDaemon {
@@ -56,7 +62,22 @@ func newWatchDaemon(t *testing.T, snap protocol.WatchSnapshot, subs ...protocol.
 	})
 	mux.HandleFunc("POST /chats/{id}/heartbeat", func(rw http.ResponseWriter, r *http.Request) { io.WriteString(rw, `{"ok":true}`) })
 	mux.HandleFunc("GET /chats/{id}/attention", func(rw http.ResponseWriter, r *http.Request) {
-		io.WriteString(rw, `{"chat_id":"c","items":[]}`)
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.attnQuery = r.URL.RawQuery
+		_ = json.NewEncoder(rw).Encode(protocol.ChatAttention{ChatID: "c", Items: append([]protocol.ChatAttentionItem{}, w.attn...)})
+	})
+	mux.HandleFunc("POST /chats/{id}/attention/ack", func(rw http.ResponseWriter, r *http.Request) {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if !w.attnAckRoute {
+			http.NotFound(rw, r)
+			return
+		}
+		var a protocol.ChatAttentionAck
+		_ = json.NewDecoder(r.Body).Decode(&a)
+		w.attnAcks = append(w.attnAcks, a)
+		io.WriteString(rw, `{"ok":true}`)
 	})
 	mux.HandleFunc("POST /chats/{id}/subscribe", func(rw http.ResponseWriter, r *http.Request) {
 		var b struct{ WI string }
@@ -408,5 +429,39 @@ func TestWatchHarnessSessionNotFoundBeatsEnv(t *testing.T) {
 	code, out, stderr := runPf(t, env, "watch", "list", "--harness-session", "sess_gone")
 	if code == 0 || strings.Contains(out, "chat chat_env") || !strings.Contains(stderr, "sess_gone") {
 		t.Fatalf("the session-lookup error must win over PF_CHAT_ID: %d %q %q", code, out, stderr)
+	}
+}
+
+// repo review 2026-10-16 B-25 (WA-4): the watcher asks for fetch-then-ack
+// (ack=1, plus mark=1 for an older daemon) and acks the printed notice by
+// key; against an older daemon (no keys, no ack route) it prints the same
+// line and sends no attention ack.
+func TestWatchAttentionFetchThenAckAndOlderDaemon(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+		ack  bool
+	}{{"new daemon", "wi_9|blocked|", true}, {"older daemon", "", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWatchDaemon(t, completedSnap())
+			w.attn = []protocol.ChatAttentionItem{{WI: "wi_9", Reason: "blocked", Key: tc.key}}
+			w.attnAckRoute = tc.ack
+			code, out, stderr := runPf(t, watchEnv(w, t, map[string]string{"PF_CHAT_ID": "chat_a"}),
+				"watch", "--wait-decision", "--no-parent-check", "--poll", "10ms")
+			if code != 0 || !strings.Contains(out, "needs you: wi_9") {
+				t.Fatalf("code=%d out=%q stderr=%q", code, out, stderr)
+			}
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			if !strings.Contains(w.attnQuery, "ack=1") || !strings.Contains(w.attnQuery, "mark=1") {
+				t.Fatalf("query = %q", w.attnQuery)
+			}
+			if tc.ack && (len(w.attnAcks) != 1 || len(w.attnAcks[0].Keys) != 1 || w.attnAcks[0].Keys[0] != tc.key) {
+				t.Fatalf("attention acks = %+v", w.attnAcks)
+			}
+			if !tc.ack && (len(w.attnAcks) != 0 || strings.Contains(stderr, "attention ack failed")) {
+				t.Fatalf("older daemon: no attention ack expected: %+v %q", w.attnAcks, stderr)
+			}
+		})
 	}
 }

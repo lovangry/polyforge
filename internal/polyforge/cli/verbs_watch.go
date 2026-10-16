@@ -59,6 +59,7 @@ func (c chatAPI) Heartbeat(pid int) error      { return c.d.ChatHeartbeat(c.chat
 func (c chatAPI) Attention(owner string) ([]protocol.ChatAttentionItem, error) {
 	return c.d.ChatAttention(c.chat, owner)
 }
+func (c chatAPI) AckAttention(keys []string) error { return c.d.ChatAttentionAck(c.chat, keys) }
 
 var cmdWatch = &Command{
 	Name:    "watch",

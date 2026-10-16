@@ -276,6 +276,7 @@ func (d *Daemon) routes() *http.ServeMux {
 	mux.HandleFunc("POST /chats/{id}/ack", d.ackRoute)
 	mux.HandleFunc("POST /chats/{id}/heartbeat", d.heartbeatRoute)
 	mux.HandleFunc("GET /chats/{id}/attention", d.attentionRoute)
+	mux.HandleFunc("POST /chats/{id}/attention/ack", d.attentionAckRoute)
 	return mux
 }
 

@@ -29,6 +29,10 @@ type fakeAPI struct {
 	snapCalls []int64
 	ackFails  int   // the next ackFails Ack calls fail
 	snapErr   error // returned (once) by the next Snapshot
+	// fetch-then-ack attention: items with a Key stay listed until acked
+	attnAcked    map[string]bool
+	attnAckCalls [][]string
+	attnAckFails int // the next attnAckFails AckAttention calls fail
 }
 
 func (f *fakeAPI) Subscriptions() (protocol.ChatSubscriptions, error) {
@@ -75,8 +79,38 @@ func (f *fakeAPI) Ack(a protocol.ChatAck) error {
 }
 func (f *fakeAPI) Heartbeat(int) error { f.mu.Lock(); f.heartbeat++; f.mu.Unlock(); return nil }
 func (f *fakeAPI) Attention(string) ([]protocol.ChatAttentionItem, error) {
-	return f.attention, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []protocol.ChatAttentionItem
+	for _, it := range f.attention {
+		if it.Key == "" || !f.attnAcked[it.Key] {
+			out = append(out, it)
+		}
+	}
+	return out, nil
 }
+func (f *fakeAPI) AckAttention(keys []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.attnAckCalls = append(f.attnAckCalls, append([]string(nil), keys...))
+	if f.attnAckFails > 0 {
+		f.attnAckFails--
+		return errors.New("attention ack: daemon hiccup")
+	}
+	if f.attnAcked == nil {
+		f.attnAcked = map[string]bool{}
+	}
+	for _, k := range keys {
+		f.attnAcked[k] = true
+	}
+	return nil
+}
+
+// failWriter is a stdout that dies on the first write: the watcher
+// "crashes" after fetching and before anything is printed.
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("write: broken pipe") }
 
 func sub(wi string, cursor int64, notified ...string) protocol.ChatSub {
 	return protocol.ChatSub{WI: wi, Cursor: cursor, Notified: notified}
@@ -778,5 +812,124 @@ func TestAttentionSurvivesAMidCycleTransportError(t *testing.T) {
 	}})
 	if !strings.Contains(out.String(), "wi_9") {
 		t.Fatalf("the fetched attention notice was lost: %q", out.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// fetch-then-ack (repo review 2026-10-16 B-25 WA-4)
+// ---------------------------------------------------------------------------
+
+// runUntil runs the resident watcher for polls sleeps and answers stdout.
+func runUntil(t *testing.T, api API, polls int, wait bool) string {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	n := 0
+	var out bytes.Buffer
+	_ = Run(ctx, api, Options{WaitDecision: wait, Out: &out, Sleep: func(context.Context, time.Duration) {
+		if n++; n >= polls {
+			cancel()
+		}
+	}})
+	return out.String()
+}
+
+func TestAttentionCrashBetweenFetchAndPrintIsPrintedOnNextStart(t *testing.T) {
+	api := &fakeAPI{attention: []protocol.ChatAttentionItem{{WI: "wi_9", Reason: "blocked", Key: "wi_9|blocked|"}}}
+	if err := Run(context.Background(), api, Options{Out: failWriter{}, Sleep: func(context.Context, time.Duration) {}}); err == nil {
+		t.Fatal("a dead stdout must end the run")
+	}
+	if len(api.attnAckCalls) != 0 {
+		t.Fatalf("nothing printed, nothing may be acked: %v", api.attnAckCalls)
+	}
+	if out := runUntil(t, api, 3, false); strings.Count(out, "wi_9") != 1 {
+		t.Fatalf("the next start must print the notice once: %q", out)
+	}
+	if !api.attnAcked["wi_9|blocked|"] {
+		t.Fatalf("printed notice must be acked: %v", api.attnAckCalls)
+	}
+	if out := runUntil(t, api, 3, false); out != "" {
+		t.Fatalf("an acked notice must not repeat: %q", out)
+	}
+}
+
+func TestDecisionCrashBetweenFetchAndPrintIsPrintedOnNextStart(t *testing.T) {
+	snap := running("wi_1", "s1")
+	snap.Events = []protocol.EventEntry{ev(1, "step_dead")}
+	snap.LastSeq = 1
+	api := &fakeAPI{
+		subs:  protocol.ChatSubscriptions{Subscriptions: []protocol.ChatSub{sub("wi_1", 0)}},
+		snaps: map[string]*protocol.WatchSnapshot{"wi_1": snap},
+	}
+	if err := Run(context.Background(), api, Options{Out: failWriter{}, Sleep: func(context.Context, time.Duration) {}}); err == nil {
+		t.Fatal("a dead stdout must end the run")
+	}
+	if len(api.acks) != 0 || api.subs.Subscriptions[0].Cursor != 0 {
+		t.Fatalf("an unprinted decision must not be acked: %+v", api.acks)
+	}
+	if out := runUntil(t, api, 3, false); strings.Count(out, "step_dead") != 1 {
+		t.Fatalf("the next start must print the decision once: %q", out)
+	}
+	if out := runUntil(t, api, 3, false); out != "" {
+		t.Fatalf("an acked decision must not repeat: %q", out)
+	}
+}
+
+// A crash between print and ack: the next start prints the line once more
+// (the documented at-least-once duplicate), acks it, and that is the end.
+func TestCrashBetweenPrintAndAckRepeatsOnceOnly(t *testing.T) {
+	api := &fakeAPI{attention: []protocol.ChatAttentionItem{{WI: "wi_9", Reason: "blocked", Key: "wi_9|blocked|"}},
+		attnAckFails: 1}
+	if out := runUntil(t, api, 1, true); strings.Count(out, "wi_9") != 1 {
+		t.Fatalf("first run: %q", out)
+	}
+	if out := runUntil(t, api, 1, true); strings.Count(out, "wi_9") != 1 {
+		t.Fatalf("the un-acked notice is re-delivered once: %q", out)
+	}
+	if out := runUntil(t, api, 3, false); out != "" {
+		t.Fatalf("after the ack lands it must not repeat: %q", out)
+	}
+}
+
+// B-23 for attention: a failed attention ack is retried every cycle, the
+// notice is not printed again within the run.
+func TestFailedAttentionAckIsRetriedWithoutReprint(t *testing.T) {
+	api := &fakeAPI{attention: []protocol.ChatAttentionItem{{WI: "wi_9", Reason: "blocked", Key: "wi_9|blocked|"}},
+		attnAckFails: 2}
+	if out := runUntil(t, api, 5, false); strings.Count(out, "wi_9") != 1 {
+		t.Fatalf("printed once: %q", out)
+	}
+	if len(api.attnAckCalls) != 3 || !api.attnAcked["wi_9|blocked|"] {
+		t.Fatalf("the ack must be retried until it lands: %v", api.attnAckCalls)
+	}
+}
+
+// The ack of a notice fetched by a cycle that then lost the daemon is
+// sent once the daemon is back.
+func TestAttentionFetchedBeforeATransportErrorIsAckedLater(t *testing.T) {
+	api := &fakeAPI{
+		subs:      protocol.ChatSubscriptions{Subscriptions: []protocol.ChatSub{sub("wi_1", 0)}},
+		snaps:     map[string]*protocol.WatchSnapshot{"wi_1": running("wi_1", "s1")},
+		attention: []protocol.ChatAttentionItem{{WI: "wi_9", Reason: "blocked", Key: "wi_9|blocked|"}},
+		snapErr:   errors.New("dial unix: connection refused"),
+	}
+	if out := runUntil(t, api, 3, false); strings.Count(out, "wi_9") != 1 {
+		t.Fatalf("printed once: %q", out)
+	}
+	if !api.attnAcked["wi_9|blocked|"] {
+		t.Fatalf("acked after the daemon came back: %v", api.attnAckCalls)
+	}
+}
+
+// New watcher, older daemon: items come without a Key (the daemon marked
+// them shown at fetch, ignoring ack=1) — nothing is acked, the notice
+// still prints once.
+func TestOlderDaemonWithoutAttentionKeysIsNotAcked(t *testing.T) {
+	api := &fakeAPI{attention: []protocol.ChatAttentionItem{{WI: "wi_9", Reason: "blocked"}}}
+	if out := runUntil(t, api, 3, false); strings.Count(out, "wi_9") != 1 {
+		t.Fatalf("printed once: %q", out)
+	}
+	if len(api.attnAckCalls) != 0 {
+		t.Fatalf("no Key, no attention ack: %v", api.attnAckCalls)
 	}
 }
