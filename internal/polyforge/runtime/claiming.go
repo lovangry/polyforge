@@ -25,8 +25,9 @@ package runtime
 // The file is a map keyed by the SUBMITTED id spelling (a slug is legal:
 // the claim endpoint accepts id-or-slug), so clearClaiming and the
 // restart replay agree on keys. opMu serializes every writer (Start
-// and Restart both hold it), so no lock beyond the file's own atomic
-// write is needed.
+// and Restart both hold it — Start releases it only for the clone and
+// the materialize, which never touch the journal), so no lock beyond
+// the file's own atomic write is needed.
 
 import (
 	"context"
@@ -232,6 +233,10 @@ func (r *Runtime) resumeClaiming(ctx context.Context) {
 			continue
 		}
 		if err := r.startClaimed(ctx, rec.WorkItemID, rec.SessionID, resp, wcfg, rec.Models); err != nil {
+			if IsClaimDeferred(err) {
+				// a shutdown during the replay (B-8): the entry stays
+				continue
+			}
 			// startClaimed already compensated (blocked) and cleared
 			// the entry; the log line is for the operator.
 			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay start failed (session ended blocked): %v\n", wi, err)

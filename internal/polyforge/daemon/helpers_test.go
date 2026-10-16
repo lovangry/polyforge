@@ -117,6 +117,9 @@ type fakeHub struct {
 	// claim and then fail with a transport-class error (the answer lost
 	// in transit, repo review 2026-10-16 B-1).
 	claimLost int
+	// claimRepos maps a canonical id to the task-repo inventory its
+	// claim answer serves (B-8 tests: a hanging remote); unmapped = none.
+	claimRepos map[string][]api.ProjectRepo
 	// endFails, when > 0, makes the next N SessionEnd calls fail with a
 	// transport-class error and no effect (a hub blip at the close).
 	endFails int
@@ -205,6 +208,7 @@ func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimRe
 			WorkItemID:         id,
 			SessionFingerprint: api.SessionFingerprint(req.SessionID),
 			BundleName:         "demo-bundle",
+			Repos:              h.claimRepos[id],
 		},
 		WorkItem: api.WorkItem{ID: id, Slug: h.slugs[id], ProjectName: "proj"},
 	}, nil
@@ -658,7 +662,8 @@ func (td *testDaemon) seedPendingQuestion(t *testing.T, wi, qid, step, question 
 	td.sup.Link(wi).Fact(supervise.ExecCommitted{Version: exec.Version, Step: step})
 }
 
-// waitLive blocks until the work item holds a runtime job.
+// waitLive blocks until the work item holds a runtime job past its
+// claim (a CLAIMING job is still cloning, B-8: not live yet).
 func (td *testDaemon) waitLive(t *testing.T, wi string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -668,7 +673,7 @@ func (td *testDaemon) waitLive(t *testing.T, wi string) {
 			var st cli.StatusResponse
 			if json.Unmarshal(raw, &st) == nil {
 				for _, j := range st.Jobs {
-					if j.WorkItemID == wi {
+					if j.WorkItemID == wi && j.Status != string(runtime.StateClaiming) {
 						return
 					}
 				}

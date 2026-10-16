@@ -31,6 +31,13 @@ type JobState string
 //	RUNNING → PAUSED                          (operator pause close, Finding 2)
 //	PAUSED → RUNNING                          (restart attach/resume, M3)
 //	PAUSED → DONE                             (later close of a retained record)
+//	CLAIMING → RUNNING                        (the claim's agent started)
+//
+// CLAIMING is the in-memory placeholder of a start whose claim landed and
+// whose capsule clone/materialize runs outside opMu (repo review
+// 2026-10-16 B-8). It occupies the work item's slot and refuses a second
+// start, but it is never persisted: the claiming journal is its durable
+// form, and every way out of it other than RUNNING drops the record.
 //
 // Every other edge is illegal and transition() refuses it.
 const (
@@ -51,6 +58,8 @@ const (
 	// and retries the close (in-process with backoff, and at every daemon
 	// start) until the hub accepts it. Only then is the record dropped.
 	StateEndPending JobState = "end_pending"
+	// StateClaiming: see the state-machine comment above (B-8).
+	StateClaiming JobState = "claiming"
 )
 
 var legalEdges = map[JobState][]JobState{
@@ -59,6 +68,7 @@ var legalEdges = map[JobState][]JobState{
 	StateRecovering: {StateRunning, StateSealing, StateDone, StateEndPending},
 	StateEndPending: {StateDone},
 	StatePaused:     {StateRunning, StateDone},
+	StateClaiming:   {StateRunning},
 }
 
 // can reports whether s → to is a legal edge of the state machine.

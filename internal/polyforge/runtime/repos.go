@@ -49,6 +49,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
@@ -294,10 +296,10 @@ func gitTask(ctx context.Context, dir string, args ...string) (string, error) {
 
 // taskGitEnv is the environment of every task-repo git call: the daemon's
 // own environ (the machine's default credential context) made
-// non-interactive (repo review 2026-10-16 B-8). These calls run on the
-// claim lane under the runtime's opMu; a credential prompt on the
-// daemon's tmux tty, or a stalled transfer, would otherwise freeze every
-// other work item's stop/resume/recovery and the next claims. So: git's
+// non-interactive (repo review 2026-10-16 B-8). The claim lane runs
+// them outside the runtime's opMu, but a credential prompt on the
+// daemon's tmux tty, or a stalled transfer, would still pin the claim
+// (and its slot) until a stop or a shutdown cancels it. So: git's
 // own credential prompt is off (fail instead), and an HTTP transfer below
 // 1 KB/s for 60 s aborts. An operator's explicit setting of either
 // variable wins.
@@ -365,9 +367,17 @@ func repoCloneErr(wi string, pr api.ProjectRepo, format string, args ...any) *ap
 // gitClone runs a plain full clone with the daemon's own environment:
 // the machine's default git credential context, made non-interactive
 // (taskGitEnv).
+//
+// A cancelled ctx (a stop or a shutdown during the claim, repo review
+// 2026-10-16 B-8) kills the whole process group — git hands the transfer
+// to a remote helper that would otherwise keep running and keep the
+// output pipe open.
 func gitClone(ctx context.Context, url, dir string) error {
 	cmd := exec.CommandContext(ctx, "git", "clone", "--", url, dir)
 	cmd.Env = taskGitEnv()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s", strings.TrimSpace(string(out)))

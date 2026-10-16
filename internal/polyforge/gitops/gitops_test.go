@@ -8,6 +8,7 @@ package gitops
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -640,7 +641,7 @@ func TestPushAndCloneOverHTTPWithCredential(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(o.CapsuleDir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := Clone(o); err != nil {
+	if err := Clone(context.Background(), o); err != nil {
 		t.Fatalf("clone over http:// must receive the credential: %v", err)
 	}
 	// re-externalize: Clone leaves the git-dir inside the worktree
@@ -666,7 +667,7 @@ func TestPushAndCloneOverHTTPWithCredential(t *testing.T) {
 	noCred.Username, noCred.Secret = "", ""
 	capsule2 := filepath.Join(base, "capsules", "wi_http2")
 	noCred.CapsuleDir = capsule2
-	if err := Clone(noCred); err == nil {
+	if err := Clone(context.Background(), noCred); err == nil {
 		t.Fatal("clone without a credential must fail against the authed server")
 	}
 }

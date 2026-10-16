@@ -222,6 +222,13 @@ type Daemon struct {
 	cancelRun context.CancelFunc
 	rtDone    chan struct{} // closed when the runtime message loop exited
 
+	// claims tracks the dispatcher's per-claim goroutines (repo review
+	// 2026-10-16 B-8); claimsClosed (under claimMu) refuses new ones once
+	// the shutdown sequence waits for them.
+	claimMu      sync.Mutex
+	claims       sync.WaitGroup
+	claimsClosed bool
+
 	shutOnce    sync.Once
 	shutDone    chan struct{} // closed when the FIRST shutdown sequence finished
 	shutMu      sync.Mutex
@@ -906,44 +913,94 @@ func (d *Daemon) occupiedSlots() map[string]bool {
 }
 
 // dispatch starts pending jobs into free slots, priority-desc then FIFO.
+// Each claim runs in its own goroutine (repo review 2026-10-16 B-8): a
+// slow capsule or task-repo clone no longer holds the Run loop, so the
+// loop keeps serving shutdown, drain and the next dispatch ticks. The
+// queue counts a Take()n entry against the slots until it settles, so
+// the concurrency cap holds across the goroutines.
 func (d *Daemon) dispatch() {
 	if d.modes.ShuttingDown() {
 		return
 	}
 	for {
-		e := d.q.Take()
-		if e == nil {
+		d.claimMu.Lock()
+		if d.claimsClosed {
+			d.claimMu.Unlock()
 			return
 		}
-		d.rt.NoteOrigin(e.WorkItemID, e.Origin)
-		d.rt.NoteModels(e.WorkItemID, e.Models)
-		err := d.rt.Start(d.runCtx, e.WorkItemID)
-		var ae *api.Error
-		if errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable {
-			// The hub could not be reached, or the claim's answer was
-			// lost: the accepted submit stays queued and is retried with
-			// backoff (never dropped on a transient blip, never blocking
-			// the other entries). A claim that may have landed keeps its
-			// claiming-journal entry, so the retry replays the SAME claim
-			// and adopts the session (repo review 2026-10-16 B-1). One
-			// log line per episode.
-			if e.Deferrals == 0 {
-				fmt.Fprintf(os.Stderr, "daemon: start %s (%s) deferred, will retry with backoff: %v\n", e.WorkItemID, e.Intent, err)
-			}
-			if rerr := d.q.Requeue(e.WorkItemID); rerr != nil {
-				fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, rerr)
-			}
-			continue
+		e := d.q.Take()
+		if e == nil {
+			d.claimMu.Unlock()
+			return
 		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "daemon: start %s (%s) failed: %v\n", e.WorkItemID, e.Intent, err)
-			// The submit was answered `accepted`: record the refusal as a
-			// durable event on the WI so watchers can surface it (v2 §5).
-			d.recordSubmitRejected(*e, err)
-		}
+		d.claims.Add(1)
+		d.claimMu.Unlock()
+		go func(e qEntry) {
+			defer d.claims.Done()
+			d.startEntry(e)
+		}(*e)
+	}
+}
+
+// waitClaims stops the dispatcher from starting claims and waits, bounded
+// by ctx, for the ones under way (the runtime's AbortClaims has already
+// cancelled their clones, so they settle promptly).
+func (d *Daemon) waitClaims(ctx context.Context) {
+	d.claimMu.Lock()
+	d.claimsClosed = true
+	d.claimMu.Unlock()
+	done := make(chan struct{})
+	go func() { d.claims.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
+// startEntry runs one Take()n queue entry's claim to its verdict and
+// settles the entry.
+func (d *Daemon) startEntry(e qEntry) {
+	d.rt.NoteOrigin(e.WorkItemID, e.Origin)
+	d.rt.NoteModels(e.WorkItemID, e.Models)
+	err := d.rt.Start(d.runCtx, e.WorkItemID)
+	if runtime.IsClaimDeferred(err) {
+		// the shutdown stopped the claim: the entry stays in flight on
+		// disk (the queue file keeps it) and a claim that landed stays
+		// in the claiming journal — the next start replays them.
+		return
+	}
+	if errors.Is(err, runtime.ErrClaimClosed) {
+		// an operator close settled the claim (Stop during CLAIMING)
 		if serr := d.q.Settle(e.WorkItemID); serr != nil {
 			fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, serr)
 		}
+		return
+	}
+	var ae *api.Error
+	if errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable {
+		// The hub could not be reached, or the claim's answer was
+		// lost: the accepted submit stays queued and is retried with
+		// backoff (never dropped on a transient blip, never blocking
+		// the other entries). A claim that may have landed keeps its
+		// claiming-journal entry, so the retry replays the SAME claim
+		// and adopts the session (repo review 2026-10-16 B-1). One
+		// log line per episode.
+		if e.Deferrals == 0 {
+			fmt.Fprintf(os.Stderr, "daemon: start %s (%s) deferred, will retry with backoff: %v\n", e.WorkItemID, e.Intent, err)
+		}
+		if rerr := d.q.Requeue(e.WorkItemID); rerr != nil {
+			fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, rerr)
+		}
+		return
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: start %s (%s) failed: %v\n", e.WorkItemID, e.Intent, err)
+		// The submit was answered `accepted`: record the refusal as a
+		// durable event on the WI so watchers can surface it (v2 §5).
+		d.recordSubmitRejected(e, err)
+	}
+	if serr := d.q.Settle(e.WorkItemID); serr != nil {
+		fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, serr)
 	}
 }
 

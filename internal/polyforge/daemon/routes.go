@@ -453,6 +453,11 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, resumeBlockedResponse{Resumed: true, WorkItemID: canonical, Deferred: true})
 			return
 		}
+		if errors.Is(err, runtime.ErrClaimClosed) {
+			// a pf wrap/pause landed while this claim was materializing
+			writeErr(w, api.ErrDaemonConflict, err.Error())
+			return
+		}
 		writeErrOf(w, err)
 		return
 	}

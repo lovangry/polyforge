@@ -226,7 +226,13 @@ var gitTimed = func(timeout time.Duration, env []string, dir string, args ...str
 
 // runGit runs git once; timeout 0 = unbounded.
 func runGit(timeout time.Duration, env []string, dir string, args ...string) (string, error) {
-	ctx := context.Background()
+	return runGitCtx(context.Background(), timeout, env, dir, args...)
+}
+
+// runGitCtx is runGit under a caller context as well: cancelling ctx
+// kills the git process group like the timeout does (the claim lane's
+// capsule clone, which a stop or a shutdown must be able to abort).
+func runGitCtx(ctx context.Context, timeout time.Duration, env []string, dir string, args ...string) (string, error) {
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -245,7 +251,11 @@ func runGit(timeout time.Duration, env []string, dir string, args ...string) (st
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if err != nil && ctx.Err() != nil {
-		err = fmt.Errorf("timed out after %s: %w", timeout, err)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			err = fmt.Errorf("timed out after %s: %w", timeout, err)
+		} else {
+			err = fmt.Errorf("canceled: %w", err)
+		}
 	}
 	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
@@ -1120,7 +1130,10 @@ func refCasRejected(out string) bool {
 
 // Clone materializes a fresh capsule worktree from the aihub bare repo
 // (fresh-derivation path of the recovery engine). Takes the per-WI lock.
-func Clone(o Opts) error {
+// Cancelling ctx kills the clone (repo review 2026-10-16 B-8: the claim
+// lane runs it outside the runtime's global lock, and a stop or a
+// shutdown during the claim aborts it).
+func Clone(ctx context.Context, o Opts) error {
 	release := Lock(o.WorkItemID)
 	defer release()
 	additions, cleanup, err := credentialEnv(o)
@@ -1129,7 +1142,7 @@ func Clone(o Opts) error {
 	}
 	defer cleanup()
 	env := hubEnv(o, false, additions)
-	_, err = gitTimed(chainRemoteTimeout, env, "", "clone", o.RemoteURL, o.CapsuleDir)
+	_, err = runGitCtx(ctx, chainRemoteTimeout, env, "", "clone", o.RemoteURL, o.CapsuleDir)
 	return err
 }
 
