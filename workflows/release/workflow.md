@@ -4,9 +4,9 @@ description: Release lane - cut a release from the verified origin head via the 
 defaults:
   model_candidates: [pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5, pi:sub2api-openai/gpt-6-astra]
 steps:
-  - { id: release, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, budget: { wall_minutes: 45 }, model_candidates: [pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5] }
-  - { id: verify, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, model_candidates: [pi:sub2api-claude/pi-claude-opus-5, pi:sub2api-openai/gpt-6-astra, pi:sub2api-glm/glm-5.3] }
-  - { id: deploy, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, model_candidates: [pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5] }
+  - { id: release, context_policy: fresh, gate: true, requires_command_evidence: true, budget: { wall_minutes: 45 }, model_candidates: [pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5] }
+  - { id: verify, context_policy: fresh, gate: true, requires_command_evidence: true, model_candidates: [pi:sub2api-claude/pi-claude-opus-5, pi:sub2api-openai/gpt-6-astra, pi:sub2api-glm/glm-5.3] }
+  - { id: deploy, context_policy: fresh, gate: true, requires_command_evidence: true, model_candidates: [pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5] }
 ---
 
 # release - release lane

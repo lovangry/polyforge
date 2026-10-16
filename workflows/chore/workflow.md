@@ -9,9 +9,55 @@ defaults:
 steps:
   - { id: plan, context_policy: fresh, handoff: true }
   - { id: code, context_policy: inherit }
-  - { id: verification, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, on_fail: { target: code }, model_candidates: [pi:sub2api-glm/glm-5.3-flash, pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5] }
-  - { id: review, context_policy: fresh, handoff: false, gate: true, on_fail: { target: code } }
-  - { id: deliver, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, on_fail: { target: code } }
+  - id: verification
+    context_policy: fresh
+    gate: true
+    requires_command_evidence: true
+    on_fail: { target: code }
+    model_candidates: [pi:sub2api-glm/glm-5.3-flash, pi:sub2api-glm/glm-5.3, pi:sub2api-claude/pi-claude-opus-5]
+    vars:
+      output_required: verdict, checks
+      build_step: code
+      position: >-
+        `review` judges the change after you (reading your report), and there is no
+        release slot behind you: the full set runs here or not at all.
+      lane_checks: |-
+        **Plan conformance.** Check the diff `code` reported against `artifacts/plan.md`'s
+        touched-files declaration: undeclared writes are a finding worth recording even when
+        the checks pass — they signal a lock-scope gap. Record this as a `plan-conformance`
+        check.
+      never_pre_existing: any test the plan names as pinning this change, and any repro check
+  - id: review
+    context_policy: fresh
+    gate: true
+    on_fail: { target: code }
+    vars:
+      build_step: code
+      scope_source: the WI and the plan
+      intro: |-
+        Judge whether this maintenance/deletion change is ready to ship. Unlike
+        `verification`, this step is a judgment call, not a mechanical check — and on this
+        lane it carries the same fixed owner-rules checklist the other delivery lanes'
+        reviews carry, so a deletion-type change cannot dodge the rules by riding the light
+        lane.
+      judge: |-
+        1. Read, in this order: `artifacts/plan.md` (the declared units and touched files),
+           the full diff (in each task repo `git diff $(git merge-base HEAD origin/HEAD)..HEAD`,
+           falling back to `origin/main` or `origin/master` when `origin/HEAD` is unset — this
+           includes any commit `code` did not report), `artifacts/code-summary.md` (the code
+           step's own account of what it did and why) and `artifacts/verification-report.md`
+           (the machine gate's results).
+        2. Judge plan conformance: the diff covers the plan's declared steps, touches no
+           files the plan did not declare (an undeclared write is a lock-scope gap, not a
+           paperwork gap), and a declared deletion is actually complete — no half-removed
+           feature left compiling against ghosts of itself.
+        3. Judge the deletion-type acceptance bar: the existing test suite stays meaningful
+           after the deletion, and the few targeted tests for behavior the deletion actually
+           changes exist where the project expects tests. A full acceptance suite or an e2e
+           lane is NOT this lane's bar — demanding one here is scope creep, not rigor. A test
+           that asserts nothing real (vacuous) is a blocking finding; a redundant one is
+           non-blocking.
+  - { id: deliver, context_policy: fresh, gate: true, requires_command_evidence: true, on_fail: { target: code } }
 ---
 
 # chore — deletion-type maintenance flow
@@ -101,20 +147,12 @@ honestly instead of burning the budget.
 No workflow-level budget and no step `budget.wall_minutes`: the bounds are the rewind limits
 above and the daemon's per-step runtime bound T (README, `pf daemon` flags).
 
-## Delivery: the `deliver` step
+## Delivery and releases
 
-`deliver` runs last, after every gate passed (a failing gate never reaches it). Per declared
-repo it fetches and merges the latest origin default branch (a conflict is resolved in the
-capsule, then the full test bar is re-run and a fresh-context reviewer checks the
-resolution), pushes ONLY the feature branch `polyforge/<project>-<seq>`, opens or reuses
-the PR, and merges it with `gh pr merge --merge` iff the independent review passed with no
-blocking finding, the tests passed, no conflict was LLM-resolved and its mechanical
-pre-flight (nothing uncommitted, no release residue) found nothing. Otherwise it asks a
-human-only question (merge / don't merge / back to code). The independent review is this workflow's `review` gate (`steps.review.output`). "Back to code" is a
-`gate_failed` verdict that rewinds to `code`; a re-run reuses the same branch and PR. The
-result records branch, PR URL and merge commit (or why not merged) per repo, plus the
-delivery note (`artifacts/delivery.md`). The driver refuses a completed `deliver` whose
-recorded commands push anything but the feature branch, merge other than `--merge`, or
-merge/leave unmerged outside the rule without a human answer. Step definition:
-`steps/deliver.md`. Releases stay in the separate `release` bundle, cut from the merged
-origin head.
+`deliver` runs last, after every gate passed; its contract (merge the latest default branch,
+push only the feature branch, open or reuse the PR, merge under the merge rule or ask a
+human) is the shared step definition `workflows/_shared/steps/deliver.md`. Lane facts:
+its "back to code" answer rewinds to `code`, and the independent review it reads is this
+workflow's `review` gate (`steps.review.output`). There is no release slot: releases and
+deploys happen only through the separate `release` bundle (a separate WI), cut from the
+merged origin head.

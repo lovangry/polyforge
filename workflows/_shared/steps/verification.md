@@ -1,14 +1,14 @@
 ---
 name: verification
-description: Machine-checkable gate - build, lint, tests, and above all the original repro case must pass on the fixed tree before review is attempted.
+description: Machine-checkable gate - the build, lint, and tests (plus the lane's own checks named in the step entry's vars) pass on the tree the build step produced - the machine gate before review or delivery. Shared by every delivery bundle; the lane-specific text comes from the workflow.md step entry's vars.
 output:
   type: object
-  required: [verdict, checks]
+  required: [{{output_required}}]
   properties:
     verdict:
       type: string
       enum: [pass, fail]
-      description: pass means build/lint/tests AND the original repro all succeeded on the current tree; fail means at least one did not.
+      description: pass means every check run (build/lint/tests and every lane check the instructions below name) succeeded on the current tree; fail means at least one did not.
     checks:
       type: array
       minItems: 1
@@ -19,10 +19,10 @@ output:
           name: { type: string }
           status: { type: string, enum: [pass, fail, skipped, pre_existing] }
           detail: { type: string }
-      description: Per-check breakdown, in the order run. At least one check must be recorded (minItems 1) - a verdict over zero checks is an unfilled template. Must include the repro re-run as its own named check (e.g. "repro").
+      description: Per-check breakdown (build, lint, tests, and every lane check the instructions below name, each as its own named check), in the order run. At least one check must be recorded (minItems 1) - a verdict over zero checks is an unfilled template.
     fail_reason:
       type: string
-      description: Required when verdict is fail - a precise description of what failed, to be carried back to fix as its pending_rewind_input. The oneOf split below makes the requirement mechanical - a fail verdict without a non-empty fail_reason does not validate.
+      description: Required when verdict is fail - a precise description of what failed, to be carried back to the step this gate rewinds to as its pending_rewind_input. The oneOf split below makes the requirement mechanical - a fail verdict without a non-empty fail_reason does not validate.
     pre_existing_failures:
       type: array
       items: { type: string }
@@ -36,6 +36,32 @@ output:
           repo: { type: string, description: "The task repo (repos/<repo>) the command runs in." }
           command: { type: string, description: "The command exactly as you ran it inside that repo (no leading cd)." }
       description: The full test bar - the build/lint/test commands that make this verdict, one entry per command per repo, exactly as run. The deliver step re-runs exactly these after merging the latest default branch, and the driver only accepts that re-run as covering the tests when the commands match; without a test_bar a moved default branch always needs a human.
+    authored_titles:
+      type: array
+      minItems: 1
+      uniqueItems: true
+      items: { type: string }
+      description: "Only on a lane with an authored acceptance suite (an e2e-author step; the instructions below say so, and the required list above then names this field) - omit it otherwise. Verbatim echo of e2e-author's scenario_titles, read from execution.json's steps.e2e-author.output.scenario_titles. Must equal it element for element and in order - the cross-check that one result exists per authored scenario, no more and no fewer. uniqueItems mirrors the producer's own schema, so a verbatim echo of a valid authored list can never violate it. Compare the two lists element for element before returning completed: a mismatch means this step did not exercise the authored suite."
+    scenarios:
+      type: array
+      minItems: 1
+      items:
+        type: object
+        required: [title, status]
+        properties:
+          title: { type: string }
+          status: { type: string, enum: [pass, fail, skipped] }
+          detail: { type: string }
+        oneOf:
+          - description: A pass or fail entry - detail optional (recommended for a fail).
+            properties:
+              status: { type: string, enum: [pass, fail] }
+          - description: A skipped entry - only legal with a non-empty detail recording why the scenario was skipped and what review should weigh.
+            properties:
+              status: { type: string, enum: [skipped] }
+              detail: { type: string, minLength: 1 }
+            required: [status, detail]
+      description: Only on a lane with an authored acceptance suite (as authored_titles) - omit it otherwise. Per-scenario outcome of the authored acceptance suite, one entry per authored title, same order as authored_titles. A failing scenario is also a failing check (authored-scenarios), so it fails the verdict.
   oneOf:
     - description: A pass verdict - every recorded check must itself be pass or an honestly-marked skipped; no check may be recorded as fail.
       properties:
@@ -46,6 +72,12 @@ output:
             type: object
             properties:
               status: { type: string, enum: [pass, skipped, pre_existing] }
+        scenarios:
+          type: array
+          items:
+            type: object
+            properties:
+              status: { type: string, enum: [pass, skipped] }
       required: [verdict]
     - description: A fail verdict - at least one check failed; requires a non-empty fail_reason. The contains constraint mechanically requires at least one check with status fail, so an all-pass checks array cannot ride a fail verdict (draft-07 mechanical only).
       properties:
@@ -65,10 +97,10 @@ output:
 # verification
 
 You are a machine-checkable gate, not a human-style code review. Your job is to run the
-project's build, lint, and test commands against the tree `fix` produced — and, specific
-to this lane, to re-run the original reproduction. The lane's core acceptance signal is:
-*the artifact that originally failed now passes*. No subjective judgment about design
-quality belongs here (`review` handles that next).
+project's build, lint, and test commands against the tree `{{build_step}}` produced and
+report whether they pass — the full standard set, not a smoke subset. No subjective
+judgment about design quality belongs here.
+{{position}}
 
 ## What to do
 
@@ -77,30 +109,34 @@ quality belongs here (`review` handles that next).
    actually how this repo is built).
 2. Run each command via `bash`, working inside the relevant `repos/<name>/` worktree(s).
    Do not modify any files — this step observes, it does not fix.
-3. **Re-run the repro.** Read `artifacts/repro.md` and execute its `## Steps` verbatim
-   against the fixed tree; if `repro` authored a failing test, run that test. Record the
-   outcome as its own named check. The observed behavior must match `## Expected` — a
-   repro that now fails *differently* is a fail, not a pass.
+3. Run this lane's own checks (the "Lane checks" section below), each recorded as its
+   own named check.
 4. **No untracked test files (mechanical).** In EACH declared repo worktree
    (`repos/<name>/`), run `git status --porcelain --untracked-files=all` and FAIL on any
    `??` line that is a test file by the repo's own conventions — e.g. `*_test.go`,
    `*.test.*`, `*.spec.*`, or any file under a `test/` or `tests/` directory (use the
-   repo's actual test-file patterns where they differ). In addition, read
-   `execution.json`'s `steps.repro.output.test_files` — repo-relative paths, each
-   resolved inside its own repo worktree — and require `git ls-files --error-unmatch
-   <path>` to succeed for every listed path in that worktree; an empty list trivially
-   passes this part. `repro` is required to commit its authored tests itself and `fix`
-   may not touch them, so any untracked or missing test file at this gate is residue the
-   flow must not ship. Record this as its own named check (e.g.
-   `no-untracked-test-files`).
-5. Record every check run (name, pass/fail/skipped, detail) in `checks` - at least one
-   entry is required, repro included.
+   repo's actual test-file patterns where they differ). In addition, for every earlier
+   step of this lane whose output lists `test_files` (`execution.json`'s
+   `steps.<step>.output.test_files` — on a lane that has one, `repro` or `e2e-author`):
+   those are repo-relative paths, each resolved inside its own repo worktree, and
+   `git ls-files --error-unmatch <path>` must succeed for every listed path in that
+   worktree; an empty or absent list trivially passes this part. The step that authors
+   tests is required to commit them itself and later steps may not touch them, so any
+   untracked or missing test file at this gate is residue the flow must not ship.
+   Record this as its own named check (e.g. `no-untracked-test-files`).
+5. Record every check run (name, pass/fail/skipped, and enough detail to reproduce a
+   failure) in `checks` - at least one entry is required, every lane check included.
 6. If every check passes: `verdict: pass`. No check may be recorded as `fail` under a
    pass verdict - the schema's oneOf rejects that combination as self-contradictory.
-7. If any check fails: `verdict: fail` with a precise `fail_reason` - exact command,
-   output excerpt, and which part of the fix it implicates. The schema requires
-   `fail_reason` here. This text becomes `fix`'s `pending_rewind_input`; vague language
-   wastes the rewind.
+7. If any check fails: `verdict: fail`, and write a precise `fail_reason` — the exact
+   failing command, its output excerpt, and which part of `{{build_step}}`'s work it
+   implicates if that is discernible. The schema requires `fail_reason` here. This text
+   becomes `{{build_step}}`'s `pending_rewind_input` on the next attempt; vague language
+   like "tests failed" without specifics wastes the rewind.
+
+## Lane checks
+
+{{lane_checks}}
 
 ## Pre-existing failures (reported, never a rewind)
 
@@ -119,13 +155,10 @@ reported. Only a failure that does not occur on the base (or a test the base doe
 have) is this change's `fail`; a check with both kinds is `fail`, and `fail_reason`
 names only the new failures. The base runs are command evidence like any other.
 
-**Never pre_existing:** the repro re-run (its check and the original repro case), every test in `steps.repro.output.test_files`, and the `steps.fix.output.regression_test` test(s). These pin THIS change and fail on the base by design
+**Never pre_existing:** {{never_pre_existing}}. These pin THIS change and fail on the base by design
 — a repro that still fails is an unfixed bug, not a pre-existing failure. Report them
 `pass` or `fail`, never `pre_existing`; the driver rejects a result that classifies a
-repro check or an authored/regression test as pre_existing. When `repro` reproduced the
-bug (`reproduces: true`), a `pass` verdict must record the repro re-run as a check named
-`repro` with status `pass` — the driver rejects a pass whose repro check is skipped or
-missing.
+repro check or an authored/regression test as pre_existing.
 
 ## Test bar for delivery
 
@@ -142,8 +175,10 @@ default branch to a human.
 
 ## Honesty
 
-Do not report `pass` on a check you skipped because it seemed slow — mark it `skipped`
-with a reason. A false `pass` here hands a broken fix to `review` and, from there, to whoever ships it.
+Do not report `pass` on a check you skipped because it seemed slow or you assumed it
+would pass — mark it `skipped` with a reason, and let that visibly not-checked status be
+what it is. A false `pass` here defeats the entire purpose of the machine gate: every
+step after you trusts your report, and the change would ship unchecked.
 
 ## Evidence obligation (hard gate)
 
