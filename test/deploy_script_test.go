@@ -164,6 +164,16 @@ func TestDeployHappyPathHoldsAndReleasesLock(t *testing.T) {
 	if !strings.Contains(d.logOf("log-docker"), "stop -t 15 ") {
 		t.Errorf("the switch-window stop does not wait 15s:\n%s", d.logOf("log-docker"))
 	}
+	// the off-host copy is 0700 (repo review 2026-10-16 V-12)
+	baks, _ := filepath.Glob(filepath.Join(d.w, "backups", "aihub-backup-*"))
+	for _, p := range append(baks, filepath.Join(d.w, "backups")) {
+		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != 0o700 {
+			t.Errorf("%s mode = %v (%v), want 0700", p, fi.Mode().Perm(), err)
+		}
+	}
+	if len(baks) != 1 {
+		t.Errorf("local backups = %v, want one", baks)
+	}
 	// the repo's reference compose file says the same
 	if b, err := os.ReadFile(filepath.Join(v1Root(t), "deploy", "docker-compose.yml")); err != nil || !strings.Contains(string(b), "stop_grace_period: 15s") {
 		t.Errorf("deploy/docker-compose.yml stop_grace_period is not 15s (%v)", err)

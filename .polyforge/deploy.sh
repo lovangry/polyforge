@@ -1172,12 +1172,16 @@ note "consistent"
 # ---------------------------------------------------------------- step 5
 step 5 "off-host copy"
 check_lock
-mkdir -p "$BACKUP_ROOT" || die "cannot create $BACKUP_ROOT"
+# the off-host copy holds the whole data dir (team source in git/, memory/):
+# a new BACKUP_ROOT is created 0700, and each copy is made 0700 below
+# (rsync -a gives it the server data dir's mode)
+( umask 077; mkdir -p "$BACKUP_ROOT" ) || die "cannot create $BACKUP_ROOT"
 [ ! -e "$LOCAL_BACKUP" ] || die "$LOCAL_BACKUP already exists"
 manifest_cmd() { printf "cd '%s' && find . -type f -exec sha256sum {} + | LC_ALL=C sort -k2" "$1"; }
 rssh "$(manifest_cmd "$SRV_BACKUP")" >"$WORK/srvbak.manifest" || die "manifest of $SRV_BACKUP failed"
 rsync -a -e "ssh -o BatchMode=yes" "$AIHUB_HOST:$SRV_BACKUP/" "$LOCAL_BACKUP/" >"$WORK/rsync.log" 2>&1 \
   || die "rsync to $LOCAL_BACKUP failed: $(tail -5 "$WORK/rsync.log")"
+chmod 700 "$LOCAL_BACKUP" || die "cannot restrict $LOCAL_BACKUP to 0700"
 (cd "$LOCAL_BACKUP" && find . -type f -exec sha256sum {} + | LC_ALL=C sort -k2) >"$WORK/local.manifest" || die "local manifest failed"
 if ! cmp -s "$WORK/srvbak.manifest" "$WORK/local.manifest"; then
   diff "$WORK/srvbak.manifest" "$WORK/local.manifest" | head -20 >&2 || true
