@@ -78,7 +78,7 @@
 
 ### 2.2 与 WI 的绑定关系 <!-- §2.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、CAP-* 码、Revision/CAS/manifest、publish_request）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **PARTIALLY ARCHIVED（2026-10-16）— `capsule.json` 作为 capsule 身份文件是现行机制，但形状以 `internal/common/capsule/capsule.go` 的 `Identity` 为准：`work_item_id`、`capsule_id`、`project`、`bundle_name`、`repos`（认领时各任务仓库 SHA）、`created_at`。**已删除、do not build from this 的部分**：`generation`/`machine_id`/`status` 字段、`CAP-409`、WI Agent 与本地认证代理的凭证面。
 
 `capsule.json` 是 Capsule 自我描述的唯一权威文件：
 
@@ -154,7 +154,7 @@ WI 创建时可声明 repo inventory：`[{name}]`（项目仓库名），1 ≤ �
 
 ### 4.2 `runtime-state/execution.json`：完整文件格式（权威，INV-1 的唯一执行权威文件） <!-- §4.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、WF-* 码、watcher dirty 位、RunCommand、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **PARTIALLY ARCHIVED（2026-10-16）— `runtime-state/execution.json` 本身与其 steps 结构是现行机制**（权威是 `internal/common/capsule/capsule.go` 的 `Execution`/`Step`，单写者是 daemon 内的 Go driver）：`current_step`、`workflow_status`、`steps.<id>.{status, output, attempts, answers, pending_question, pending_rewind_input, supervision}`、`rewind_stats`、`version` 等。**已删除、do not build from this 的部分**：`generation` 字段、WI Agent 作为写者、`WF-*` 码、watcher dirty 位与发布触发、RunCommand。字段集以 capsule.go 为准（例如 `steps.<id>.supervision` 本节没有）。
 
 ```json
 {
@@ -284,7 +284,7 @@ WI 创建时可声明 repo inventory：`[{name}]`（项目仓库名），1 ≤ �
 
 ### 4.5 subagent 定义文件与 workflow 快照：第 0 步物化与防冲突三层（本节权威=物化协议与防冲突；workflow.md frontmatter schema 与 step skill 定义的权威在 `01-workflow-skills.md#§4.1`/`#§4.4`，本文不重复定义） <!-- §4.5 -->
 
-> **ARCHIVED — 本节描述已删除的物化机制（WI Agent 第 0 步、`.pi/agents/`、`.claude/agents/`、根 `workflow.md`）；do not build from this.** 现行：daemon 把 bundle 整树物化到 capsule 的 `workflows/<bundle>/`，并把其 `steps/` 另拷一份到 capsule 的 `agents/`（`runtime/materialize.go`）；driver 直接读 `workflows/<bundle>/steps/<id>.md`。
+> **PARTIALLY ARCHIVED（2026-10-16）— 物化的原子集合 + 完成标记（信任门：没有完成标记的物化不被信任、整体重做）是现行机制**（`runtime/materialize.go`）：daemon 把 bundle 整树物化到 capsule 的 `workflows/<bundle>/`，并把其 `steps/` 另拷一份到 capsule 的 `agents/`；driver 直接读 `workflows/<bundle>/steps/<id>.md`。**已删除、do not build from this 的部分**：WI Agent 第 0 步、`.pi/agents/`、`.claude/agents/`、根 `workflow.md` 等物化目标。
 
 本节裁定 Capsule 内三个物化目标（`.pi/agents/`、`.claude/agents/`、`workflow.md` 或 `workflow/`）的内容来源、校验口径、文件模型与防冲突机制；目录本身的建立时机见 §6.1 第 5 步，同步侧排除见 `05-sync-revision-recovery.md#§4.1`。
 
@@ -333,7 +333,7 @@ WI Agent 是唯一调用方；harness-native subagent 的命令都经其所属 s
 
 ### 5.2 v1 Native runner profile：文件系统读写权限（唯一 v1 执行 profile） <!-- §5.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **PARTIALLY ARCHIVED（2026-10-16）— 没有任何 runner 或文件系统权限强制**：step 与 daemon 同 uid、host-native 运行，按 2026-10-14 信任模型不做隔离（v2-converge §0）。代码仍沿用的只有布局约定——`sync/` 与 `runtime-state/` 是 daemon/driver 私有区，不进入 agent 的工作面（`runtime/materialize.go`）。本表其余权限条目与 RunCommand、WI Agent do not build from this。
 
 Native runner：v1 trusted internal repo，host-native，不引入 per-step isolation；它是在宿主机上以普通子进程方式启动的命令执行器，Linux 与 macOS 同一形态（`00` INV-12）。
 

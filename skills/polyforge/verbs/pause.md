@@ -20,9 +20,10 @@ down attaches on its next start).
 pf pause <id>
 ```
 
-No flags. The daemon holds the session and performs the close itself: the
-final commit and the push of the capsule's revision history. The session is
-NOT ended — a paused WI keeps it for the resume.
+No flags. The daemon performs the close itself: the final commit and the
+push of the capsule's revision history, then its local run (the agent
+process tree) stops. The hub keeps the work item's session, marked
+`clean_pause`, so the holder daemon can re-attach it on `pf resume`.
 
 ## Success
 

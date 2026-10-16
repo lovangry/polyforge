@@ -79,7 +79,7 @@
 
 ### 2.5 状态机（WI 生命周期，Core 权威） <!-- §2.5 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **PARTIALLY ARCHIVED（2026-10-16）— 状态集合（`queued`/`running`/`paused`/`blocked`/`wrapped`/`failed`/`canceled`）与 claim / pause / resume / block / wrap / fail / cancel 迁移是现行机制。**已删除、do not build from this 的部分**：「对活跃 generation 的影响」一列（现为 session 模型：WI 行上的 session hash/fingerprint 与 `clean_pause`，paused 保留 session）、`force-takeover` 行（已删，替代为 `force-end-session` + 重新 submit）、`unblock`（blocked 的继续走 `resume-blocked` 门）、事件 payload 中的 `generation`。
 
 状态集合：`queued`、`running`、`paused`、`blocked`，以及三个终态 `wrapped`、`failed`、`canceled`。合法迁移：
 
@@ -251,7 +251,7 @@ CREATE TABLE claim_idempotency (
 
 ### 4.4 `work_items` 的 workflow 引用列与预算基线（WI 记录瘦身为引用） <!-- §4.4 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、WF-* 码、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **PARTIALLY ARCHIVED（2026-10-16）— `bundle_name` 是 WI 对 workflow 的唯一引用、NULL = 纯登记票（不可认领，`CORE-409 NOT_CLAIMABLE`）、首次认领冻结——这些是现行机制。**已删除、do not build from this 的部分**：digest、预算基线与 `WF-*` 码的残余描述。
 
 **WI 记录对 workflow 只保留引用**（skill 层定稿裁决；polyforge#149 B9 收窄）：`bundle_name` 一列（DDL 见 §4.2）**是 WI 引用的唯一数据模型**——不存在任何第二张表或第二组列承载 WI 对 workflow 的固定信息，resolved steps、frontmatter 解析结果、任何 digest 一律不落库。digest 列与预算基线列已删。Core 不存储 resolved steps 大 JSON，也不保留任何 bundle 目录/注册/文件内容职责——原 `workflow_bundles`/`workflow_bundle_versions`/`workflow_bundle_files`/`workflow_pins` 四表整体删除，对应端点（bundle 注册表、bundle 文件取回、workflow-pin）一并删除（§5.1）。
 
@@ -408,7 +408,7 @@ CREATE VIRTUAL TABLE memory_fts USING fts5(
 
 ### 4.10 身份、机器与 service 自注册 <!-- §4.10 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **PARTIALLY ARCHIVED（2026-10-16）— projects / users / membership / api key 等身份与权限表是现行机制（DDL 以 `internal/aihub/core/store.go` 为准）。**已删除、do not build from this 的部分**：涉及 owner generation、Revision 登记与 service 密钥 epoch 的内容。
 
 ```sql
 CREATE TABLE projects (
@@ -509,7 +509,7 @@ CREATE TABLE service_secret_epochs (
 
 ### 5.1 API 全集（26 端点）——canonical inventory <!-- §5.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、HMAC 令牌、SYNC-* 码、Revision/CAS/manifest、flush 证据、backupBarrier、takeover、rotate-secret、read-through、本地认证代理）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **PARTIALLY ARCHIVED（2026-10-16）— 本清单已过期**：11 行无路由（progress、force-takeover、unblock、budget、repo-inventory、SYNC 各行、PATCH /memories、share、rotate-secret），6 条真路由未列（session-verify/attach、force-end-session、resume-blocked、GET /machines、`/git/` 代理）。仍描述现行端点的行（例如行 3 的可 PATCH 字段）可作参考；路由权威是 `internal/aihub/server/server.go` 的注册表。do not build from the removed rows.
 
 **计数口径（权威，A6 修复；B06 裁定后计数为 25；基线修订 polyforge#3 补 G 组行 26 后为 26——理由：§4.2a 定义了 wi_dependencies 完整写路径，原清单漏列其路由）**：本表是 AIHub HTTP API 的唯一 canonical 端点清单（`00-architecture.md#§5` 所引「26 个端点分组」即本表），任何文档不得在别处另行枚举 AIHub 端点。计数单位 = **端点行**：A–D 组每行是一个 method+path 端点（唯一例外：行 3 把 `/work-items/{id}` 同路径的 GET（详情）与 PATCH（更新）合并计 1 行——两方法共享同一路径、同一鉴权与 §4.10 权限面）；E 组每行是一个**操作组**（组内可含多条 method+path，计 1 行）；F 组每行是一个资源的 CRUD 面（同资源路径族计 1 行）。业务面 26 行逐字可复算：
 
@@ -624,7 +624,7 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 
 ### 5.1a 事件与执行态键名附录（§2.6 INV-2c 引用的权威表） <!-- §5.1a -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（owner generation、WF-* 码、takeover、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **PARTIALLY ARCHIVED（2026-10-16）— 执行态字段黑名单（`work_items.attrs` / 事件 payload 不得承载执行态，`core/workitem.go`）是现行机制。**已删除、do not build from this 的部分**：事件表中的 `{generation}` payload、`capsule_takeover`、`budget_incremented`、`secret_rotated` 等事件类型。
 
 `wi_events.event_type` 允许枚举（部署/生命周期/审计类，无 step/attempt/review 语义）：
 
@@ -719,7 +719,7 @@ include 拼装与基本记录读取在同一读事务内完成，保证一致性
 
 ### 6.5 非活跃 WI 的终止（cancel）契约（B05 修复） <!-- §6.5 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、flush 证据、takeover、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **PARTIALLY ARCHIVED（2026-10-16）— cancel 契约是现行机制**：只适用于 `queued`/`paused`/`blocked`，授权为 reporter、该 project 的 maintainer 或 admin（`server.go`），`running` 的 cancel 答 `CORE-409`。**已删除、do not build from this 的部分**：以 owner generation 表述的前置条件（现为 session 模型）与 `force-takeover` 路径。
 
 `cancel` 只适用于 `queued`/`paused`/`blocked` 三种非活跃状态（`running` 需先 `pause`/`block` 或被 `force-takeover` 后再 cancel，不在本契约范围内）。三种状态的授权与前置条件完全一致，不需要持有任何活跃 generation 令牌：
 

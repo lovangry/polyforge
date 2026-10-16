@@ -99,7 +99,7 @@ cmd/pf/             # 入口：`pf` CLI 动词 + `daemon` 子命令（单文件�
 
 ### 4.1 Daemon state（存储位置与内容，权威） <!-- §4.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **PARTIALLY ARCHIVED（2026-10-16）— 关于 workspace 映射（`[workspace."<path>"]`，polyforge#113）的段落是现行机制。**已删除、do not build from this 的部分**：`$POLYFORGE_HOME/daemon/`、`daemon/state.json`、`credentials/` 与 WI Agent/generation 字段——现行状态文件在 `--data-dir`（缺省 `~/.local/share/polyforge`）：`daemon-id`、`runtime-state.json`、`daemon-state.json`（auto 开关 + 并发上限，`daemon/modes.go`）、events 日志等；daemon 不管理凭证。
 
 存储于 **Daemon 数据目录**（缺省 `$POLYFORGE_HOME/daemon/`，本机路径，**不在任何 Capsule 内**）。
 Workspace（Capsule 基底）自 polyforge#113 起由**共享配置的 `[workspace."<path>"]` 映射**唯一决定：
@@ -162,7 +162,7 @@ session 数据。
 
 ### 5.1 Daemon 操作面（路由 Skill / CLI → Daemon；本机 Unix domain socket `/run/polyforge.sock`） <!-- §5.1 -->
 
-> **ARCHIVED — 本表描述已删除的操作面（`claim/resume/takeover/observe/mode/batch_submit/publish_request`、WI Agent、generation、flush）；do not build from this.** 现行 daemon UDS 路由以 `internal/polyforge/daemon/routes.go` 的挂载表与 README「Daemon UDS routes」为准（repo review 2026-10-16 G-3）。
+> **ARCHIVED — 本表描述已删除的操作面（`claim/resume/takeover/observe/mode/batch_submit/publish_request`、WI Agent、generation、flush）；do not build from this.** 现行 daemon UDS 路由以 `internal/polyforge/daemon/routes.go` 的挂载表与 README「Daemon UDS routes」为准（repo review 2026-10-16 G-3）。仍然成立的只有：本机 Unix domain socket（缺省 `/run/polyforge.sock`，`--socket` / `PF_DAEMON_SOCKET`），只服务本机。
 
 | 操作 | 语义 | 错误码 |
 |---|---|---|
@@ -207,7 +207,7 @@ session 数据。
 
 ### 5.2 错误码表（前缀 `DAEMON`，`00-architecture.md#§5` 分配） <!-- §5.2 -->
 
-> **ARCHIVED — 本表的错误码含义已不成立：`DAEMON-511/512/513` 不存在，503/507/403 含义全错（现行：503 = 认领前 hub 不可达的重试、507 = 任务仓 clone 失败、403 = step 进程护栏），且缺 412/414/500/516/518；do not build from this.** 现行码表以 `internal/common/api/errors.go`、README「Failure codes of the recovery / re-claim paths」与各 verb fragment 为准（repo review 2026-10-16 G-3）。
+> **ARCHIVED — 本表的错误码含义已不成立：`DAEMON-511/512/513` 不存在，503/507/403 含义全错（现行：503 = 认领前 hub 不可达的重试、507 = 任务仓 clone 失败、403 = step 进程护栏），且缺 412/414/500/516/518；do not build from this.** 现行码表以 `internal/common/api/errors.go`、README「Failure codes of the recovery / re-claim paths」与各 verb fragment 为准（repo review 2026-10-16 G-3）。仍然成立的是本节开头的信封规则：daemon 面的每个失败都是顶层 `{code, detail}` 的 `api.Error`，码为 `DAEMON-*`。
 
 **错误信封是唯一的**（审计减法 pass B，D12）：Daemon 本机面的每一个失败响应都是顶层 `{code, detail}` 的 `api.Error`，`code` 一律是 `DAEMON-*`。`POST /jobs/{wi}/answer` 过去自造的 `BAD-400` / `ANSWER-400` / `ANSWER-409` 字面量已删除——报文无法解码、没有待答问题、多个待答问题未用 `--question` 指名，都是 `DAEMON-400`（HTTP 400）；已被消费/无活动派生是 `DAEMON-409`（HTTP 409）；该 WI 不在本机运行是 `DAEMON-404`。HTTP 状态码由 `code` 推出，不另设本地变体。
 
@@ -226,7 +226,7 @@ session 数据。
 
 ### 5.3 WI Agent → Daemon authenticated local proxy（凭证最小暴露，呼应 `00-architecture.md#§5`/`#§8`、`01-workflow-skills.md#§5.1`） <!-- §5.3 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据、publish_request、本地认证代理）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本地认证代理与 WI Agent 对端已删除；do not build from this.** 代码只沿用了其中的 SO_PEERCRED 对端识别：daemon UDS 面用它拒绝来自 step 进程树的一切变更请求（`DAEMON-403`，`daemon/peercred.go`、`routes.go` 的 `refuseStepOrigin`；v2-converge 附录 C(b)）。
 
 **存在理由**：执行侧自始至终不持有 AIHub API key 或 Revision 发布凭证（与 §8 一致），但执行引擎
 需要调用一组有限的 WI 生命周期/只读操作（读取该 WI 的 workflow 引用与预算（`bundle_name`/
@@ -368,7 +368,7 @@ Daemon 在第 6 步派生持久 WI Agent 时，按该 WI 配置选定的 harness
 
 ### 6.1c Drain：自动连续取批 <!-- §6.1c -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **PARTIALLY ARCHIVED（2026-10-16）— 本节的取批循环今天是 **auto-pull**（`pf ops auto on`，`daemon.go` 的 auto-pull loop）：从 ready queue 取可认领 WI、每次取批前检查 `shutting_down` 闩、置位后不再取批——这部分是现行机制。**已删除、do not build from this 的部分**：Drain 模式本身、`mode(drain)` / `mode(abort-drain)`、claim→持久 WI Agent 序列、`drain_fetch_degraded` 信号名（现为持久事件 `queue_fetch_denied`）。
 
 `mode(drain)` 开启后，Daemon 进入一个内部循环（不是对外暴露的轮询端点）：反复调用 AIHub 现有
 调度器的 ready queue 取下一批可执行 WI，取到后直接对每个 WI 走 §6.1 的 claim→Capsule→持久
@@ -386,7 +386,7 @@ ready queue 请求，也不再创建新 Job——这是优雅停机对「禁止�
 
 ### 6.1d Job 队列（jobq）：簿记、并发上限、pending 排序与补位 <!-- §6.1d -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（Interactive/Batch/Drain、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **PARTIALLY ARCHIVED（2026-10-16）— 本节的队列规则是现行机制**（daemon 的持久化 submit 队列与 dispatcher，`daemon/modes.go`、`daemon.go`）：并发上限默认 4（`--max-concurrent-jobs` / `pf ops max N`）、pending 按 priority 降序且同级 FIFO、无抢占、空出配额即补位、所有来源共用一个队列。**已删除、do not build from this 的部分**：Interactive/Batch/Drain 三模式与 `batch_submit`、`takeover`、`mode(set, …)`、`daemon/state.json` 路径（现为 `runtime-state.json` / `daemon-state.json`）。
 
 - **jobs[] 是簿记不是执行状态**（INV-D1 同口径）：§4.1 `daemon/state.json` 的 `jobs[]` 记录「本机当前在管哪些 Job」；已接受、尚未派生的排队条目记录在 pending 部分，同样只是簿记，不含任何 workflow 执行状态字段。
 - **并发上限**：`max_concurrent_jobs` 默认 4（同一机器，跨 Interactive/Batch/Drain 共享一个计数器，即同时在跑的 Job 数上限），可通过 `mode(set, max_concurrent_jobs=<n>)` 覆盖（§12 第 0 项）。
@@ -519,7 +519,7 @@ WI Agent 与 Daemon 之间唯一的同步接缝，其余时间两者各自独立
 
 ### 6.5 优雅停机（quiesce/shutdown）：实现序列（`00-architecture.md#§3.5` 权威定义的落地，与 Drain 严格区分，INV-13） <!-- §6.5 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、Revision/CAS/manifest、flush 证据、Interactive/Batch/Drain、takeover）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **PARTIALLY ARCHIVED（2026-10-16）— 第 1–2 步是现行机制**（`daemon/shutdown.go`、`modes.go`、`routes.go`）：收到 SIGTERM/SIGINT 或 `pf ops shutdown` 先置 `shutting_down` 闩，此后外部提交一律 `DAEMON-410 SHUTTING_DOWN`，auto-pull 不再取批。**已删除、do not build from this 的部分**：第 2b 步的 Drain 循环、第 3 步起的 WI Agent 停止通知与安全边界等待、代发 final flush / write freeze / 发布、结束 generation。现行停机：5 分钟总预算内杀掉各 job 的 agent 树、为每个任务仓库拍 `refs/pf-wip` 快照（v2-converge §14.3）、WI **不**结束 session（下次启动原地恢复，v2-converge §6）。
 
 1. Daemon 进程收到终止信号（SIGTERM/SIGINT）或人工发起的 `shutdown()` 请求后，**第一时间**（先于任何其它动作）将进程内的 `shutting_down` 标志置位。
 2. 该标志置位的同一时刻产生两个直接后果，二者一起构成「禁止一切来源创建新 Job」：
@@ -690,7 +690,7 @@ Daemon 在整个 Job 生命周期中**不直接执行任何 step 命令**。命�
 
 ## 12. 未决问题（OQ2/OQ5 已在本次修订中裁定，不再是开放项） <!-- §12 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **PARTIALLY ARCHIVED（2026-10-16）— 第 0 项裁定（所有来源共用一个 pending 队列与同一排序/补位规则、并发上限可调）是现行机制（见 §6.1d）。其余条目涉及的 Interactive/Batch/Drain 已删除，do not build from them。
 
 0. **（已裁定，OQ2；B12 复审统一入队规则）并发上限默认值与 `batch_submit` 入队规则**：缺省
    `max_concurrent_jobs = 4`（同一机器，跨 Interactive/Batch/Drain 共享一个计数器），可通过

@@ -45,8 +45,8 @@ swaps the binary, then ensures again; meanwhile it holds the ensure lock,
 so a harness session starting mid-upgrade starts nothing. A daemon already running with a different workflows
 dir, or without its loop, is reported, never auto-restarted. Finally it
 verifies connectivity. If the machine's daemon id is new to aihub, an admin
-registers it afterwards — the installer prints the id (`pf ops status` shows
-it) when the daemon does not answer or a heartbeat fails. Re-running the same command upgrades
+registers it afterwards — the installer prints a note to that effect pointing
+at `pf ops status`, which shows the daemon's id. Re-running the same command upgrades
 and is idempotent. Daily use from a session is natural language via the
 `polyforge` routing skill; from a terminal it's
 `pf queue`, `pf submit`, `pf answer`, `pf ops status`, …
