@@ -80,6 +80,7 @@ SEALING 丢弃同 attempt-id 的 WINeedsRecovery（如果 push 已落地）
 - **per-WI git mutex**：Runtime 和 Observe 串行化
 - **stale index.lock 清理**：重启时检查持锁 PID 是否已死
 - **commit-dirty-on-recover**：恢复前先把脏的 capsule 状态 commit + push
+- **无 trailer 提交自愈（repo review 2026-10-16 V-2）**：capsule 根的 `.git` 指针使 step 在根目录的 `git commit` 落到链分支且无 seq trailer；CommitPush 在一切之前检查 HEAD，若不是最新的带 trailer 提交，则 `git reset --soft` 回该提交（内容保留在暂存区，随下一个带正确 seq 的提交发布），并发 `untrailered_commits_folded` 事件。**不自愈**：step 对已推送的带 trailer 提交做 `git commit --amend`（或其他改写）——推送是 non-fast-forward，被 hook 拒绝，需人工处理。
 
 ### aihub git 服务
 - git http-backend 代理过 aihub 现有 HTTP 端口

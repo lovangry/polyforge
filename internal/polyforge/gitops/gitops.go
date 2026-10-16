@@ -431,12 +431,22 @@ const EventUntrailedCommitsFolded = "untrailered_commits_folded"
 // of those can be on the server (the hook refuses them), so the reset
 // never rewrites published history. An unborn branch, or a history with
 // no trailered commit at all, is left alone (nothing safe to reset onto;
-// the hook answers loudly). The pointer file itself stays: without it a
+// the hook answers loudly). NOT healed: a step's `git commit --amend` (or
+// any rewrite) of an already-PUSHED trailered commit — the amended tip
+// may still carry a trailer, and the push is then a non-fast-forward the
+// hook refuses; resetting onto the server's tip would be a history
+// rewrite this function never makes. The pointer file itself stays: without it a
 // step's git would walk up into whatever repository encloses the
 // workspace, which is worse.
 func foldUntrailered(o Opts, env []string) error {
-	if _, err := git(env, o.CapsuleDir, "rev-parse", "--verify", "-q", "HEAD"); err != nil {
+	// The steady state costs one call: HEAD carries its trailer.
+	tip, err := git(env, o.CapsuleDir, "log", "-1",
+		"--format=%(trailers:key="+capsule.SeqTrailer+",valueonly)", "HEAD")
+	if err != nil {
 		return nil // unborn branch: nothing committed, nothing to fold
+	}
+	if integerTrailer(tip) {
+		return nil
 	}
 	out, err := git(env, o.CapsuleDir, "log", "--first-parent",
 		"--format=%H%x1f%(trailers:key="+capsule.SeqTrailer+",valueonly)%x1e", "HEAD")
@@ -1403,6 +1413,22 @@ func (a *CarrierAlerts) clear(repo string) {
 	a.mu.Lock()
 	delete(a.m, repo)
 	a.mu.Unlock()
+}
+
+// IsPermanentPushRejection reports a push the server answered and refused
+// for a reason no retry can change: the pre-receive hook declined it (seq
+// trailer, gitlink, blob size limit, session fence) or the ref moved
+// non-fast-forward. A transport failure (unreachable, timeout, auth
+// against a down proxy) is NOT permanent. Matches git's C-locale output
+// as carried in the push error (callers run git under CEnv).
+func IsPermanentPushRejection(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "[remote rejected]") ||
+		strings.Contains(msg, "pre-receive hook declined") ||
+		IsNonFastForward(err, "")
 }
 
 // IsNonFastForward reports a push refused because the remote ref is not an

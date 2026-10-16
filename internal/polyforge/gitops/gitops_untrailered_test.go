@@ -134,3 +134,69 @@ func TestCommitPushCleanTreeFoldsUntrailedStepCommit(t *testing.T) {
 		t.Fatalf("the capsule .git pointer must stay: %v", err)
 	}
 }
+
+func gitIn(t *testing.T, o Opts, args ...string) {
+	t.Helper()
+	full := append([]string{"git", "-C", o.CapsuleDir}, args...)
+	if out, err := run(full...); err != nil {
+		t.Fatalf("%v: %v: %s", full, err, out)
+	}
+}
+
+// A step that branches and merges at the capsule root: the merge commit
+// and the main-side commit (first-parent walk) are folded; both sides'
+// content reaches the server under one proper seq.
+func TestCommitPushFoldsUntrailedMergeCommit(t *testing.T) {
+	setIdentity(t)
+	o, _ := testOpts(t, "wi_foldmerge")
+	bare := realHookBare(t, &o)
+	mkCapsule(t, o)
+	events := eventRecorder(&o)
+	writeDirty(t, o, "base.txt", "base\n")
+	if _, pushed, _, err := CommitPush(o, "observe: v1"); err != nil || !pushed {
+		t.Fatalf("seed CommitPush: pushed=%v err=%v", pushed, err)
+	}
+	gitIn(t, o, "checkout", "-q", "-b", "side")
+	stepCommit(t, o, "side.txt", "side\n")
+	gitIn(t, o, "checkout", "-q", "-")
+	stepCommit(t, o, "main.txt", "main\n")
+	gitIn(t, o, "merge", "-q", "--no-ff", "-m", "agent merge", "side")
+
+	if _, pushed, _, err := CommitPush(o, "observe: v2"); err != nil || !pushed {
+		t.Fatalf("CommitPush over a merge: pushed=%v err=%v", pushed, err)
+	}
+	if got := bare.tipSeq(t); got != 2 {
+		t.Fatalf("tip seq = %d, want 2", got)
+	}
+	for _, f := range []string{"side.txt", "main.txt", "base.txt"} {
+		if out, err := run("git", "--git-dir", bare.dir, "cat-file", "-e", "main:"+f); err != nil {
+			t.Errorf("server main lacks %s: %v %s", f, err, out)
+		}
+	}
+	if len(*events) != 1 || (*events)[0]["count"] != 2 {
+		t.Fatalf("fold events = %v, want one with count 2 (merge + main-side commit)", *events)
+	}
+}
+
+// A history with no trailered commit at all has nothing safe to reset
+// onto: it is left alone (no fold, no event) and the hook answers loudly.
+func TestCommitPushLeavesFullyUntrailedHistoryAlone(t *testing.T) {
+	setIdentity(t)
+	o, _ := testOpts(t, "wi_foldnone")
+	realHookBare(t, &o)
+	mkCapsule(t, o)
+	events := eventRecorder(&o)
+	stepCommit(t, o, "agent.txt", "agent\n")
+	before, _ := run("git", "-C", o.CapsuleDir, "rev-parse", "HEAD")
+
+	_, pushed, _, err := CommitPush(o, "observe: v1")
+	if err == nil || pushed || !strings.Contains(err.Error(), "Polyforge-Seq") {
+		t.Fatalf("a fully untrailered chain must be refused by the hook: pushed=%v err=%v", pushed, err)
+	}
+	if len(*events) != 0 {
+		t.Fatalf("nothing may be folded without a trailered commit: %v", *events)
+	}
+	if out, err := run("git", "-C", o.CapsuleDir, "cat-file", "-e", strings.TrimSpace(before)); err != nil {
+		t.Fatalf("the step commit must stay in history: %v %s", err, out)
+	}
+}
