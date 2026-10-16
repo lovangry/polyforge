@@ -135,9 +135,9 @@ type Config struct {
 	DispatchTick   time.Duration // dispatcher/backfill period (200ms)
 	ShutdownBudget time.Duration // whole-shutdown ceiling (5min)
 	ExitPoll       time.Duration // adapter exit-poll period (200ms)
-	// RestartHubWait bounds the startup's wait for the restart
-	// reconciliation's hub calls before the socket serves (0 = the
-	// runtime's default, 5s; see runtime.Config.RestartHubWait).
+	// RestartHubWait is how long one hub call of the restart
+	// reconciliation may go unanswered before the socket serves anyway
+	// (0 = the runtime's default, 5s; see runtime.Config.RestartHubWait).
 	RestartHubWait time.Duration
 }
 
@@ -587,11 +587,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// the socket (see the guard note above), and before the face serves
 	// a single request: a client that reaches the daemon must see a
 	// reconciled runtime, never a seeded record's pre-reconciliation
-	// snapshot (stale agent pids, superseded lineages). The wait is
-	// bounded (RestartHubWait): past it a hung hub no longer holds the
-	// socket — the records still unreconciled are shown waiting for
-	// aihub, refuse their closes meanwhile, and the runtime finishes them
-	// (re-attaching what it brings back) once the hub answers.
+	// snapshot (stale agent pids, superseded lineages). Only a hung hub
+	// cuts the wait short (one reconciliation hub call unanswered for
+	// RestartHubWait): the records still unverified are then shown waiting
+	// for aihub, refuse their closes meanwhile, and the runtime finishes
+	// them (announcing what it brings back) once the hub answers.
 	// The previous run's shutdown record is consumed only once the
 	// reconciliation succeeded: an aborted start must not make every
 	// later start report "the previous process crashed".
@@ -732,6 +732,9 @@ func (d *Daemon) abortStartup() {
 // them through the same RTStarted shape observe builds monitors on.
 func (d *Daemon) reattachRecovered() {
 	for _, ji := range d.rt.List() {
+		if !d.rt.RestartAttach(ji.WorkItem) {
+			continue // the runtime's reconciliation lane announces it itself
+		}
 		d.reattachJob(ji)
 	}
 }
@@ -819,6 +822,17 @@ func (d *Daemon) bridge() {
 			msg, ok := d.rtMsgs.Pop()
 			if !ok {
 				break
+			}
+			if msg.Kind == protocol.RTRecovered {
+				if _, monitored := d.obs.Progress(msg.WorkItem); !monitored {
+					// a recovery of a job no monitor watches yet — the
+					// restart reconciliation's, a deferred verify's, a live
+					// resume's: its RTStarted attachment (the startup
+					// re-attachment, the runtime's own announcement, the
+					// resume route) builds the monitor; observe would only
+					// log the message as dropped
+					continue
+				}
 			}
 			at := observe.Attach{Msg: msg}
 			if msg.Kind == protocol.RTStarted || msg.Kind == protocol.RTRecovered {

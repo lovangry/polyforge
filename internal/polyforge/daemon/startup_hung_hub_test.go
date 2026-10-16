@@ -16,6 +16,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
+	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
@@ -145,6 +146,21 @@ func TestStartupWithHungHubServesStatusPromptly(t *testing.T) {
 	})
 	if hub.endCount() != 0 {
 		t.Fatalf("the recovery must not end the session, got %+v", hub.lastEnd())
+	}
+	// announced exactly once, with a monitor present: one job_started, no
+	// "dropped" job_stopped for a recovery nobody watched yet
+	time.Sleep(200 * time.Millisecond) // a duplicate attachment would land by now
+	starts, stops := 0, 0
+	for _, k := range eventKinds(d, wi) {
+		switch k {
+		case observe.EvJobStarted:
+			starts++
+		case observe.EvJobStopped:
+			stops++
+		}
+	}
+	if starts != 1 || stops != 0 {
+		t.Fatalf("%s observe events: %d job_started, %d job_stopped (want 1, 0): %v", wi, starts, stops, eventKinds(d, wi))
 	}
 	// the unprobed queue entry is claimed once the reconciliation is over
 	waitFor(t, "the replayed submit to be claimed", 20*time.Second, func() bool {
