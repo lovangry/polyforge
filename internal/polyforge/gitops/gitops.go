@@ -599,7 +599,7 @@ func pushLocked(o Opts) (bool, int64, error) {
 func pushChainLocked(env []string, capsuleDir string, args []string) (bool, int64, error) {
 	for attempt := 1; ; attempt++ {
 		pushStart := time.Now()
-		out, perr := git(env, capsuleDir, args...)
+		out, perr := gitTimed(chainRemoteTimeout, env, capsuleDir, args...)
 		pushMS := time.Since(pushStart).Milliseconds()
 		if perr == nil {
 			return true, pushMS, nil
@@ -758,6 +758,15 @@ var (
 	carrierCheckTimeout = time.Minute
 	carrierPushTimeout  = 10 * time.Minute
 )
+
+// chainRemoteTimeout bounds every git call of the chain lane that talks
+// to the hub — the chain push, the capsule clone, the carrier ls-remote
+// and fetch (repo review 2026-10-16 B-15). Each runs under the per-WI
+// lock; unbounded, a hung remote held the lock forever (observe abandons
+// a timed-out push goroutine that still holds it, and the shutdown's WIP
+// snapshot then blocked on Lock). On expiry the git process group is
+// killed, like the carrier lane's calls.
+var chainRemoteTimeout = 10 * time.Minute
 
 // carrierFlags lead every git call on the carrier lane: no hooks, no
 // fsmonitor (both would run programs), no credential helper (an empty
@@ -1019,13 +1028,13 @@ func fetchCarrierRef(o Opts, dir, ref string) (string, error) {
 	env := append(os.Environ(), additions...)
 	// ls-remote --exit-code answers 2 when no ref matches: the
 	// language-independent "no carrier yet" signal (never git's message).
-	if _, err := git(env, dir, "ls-remote", "--exit-code", o.RemoteURL, ref); err != nil {
+	if _, err := gitTimed(o.bound(chainRemoteTimeout), env, dir, "ls-remote", "--exit-code", o.RemoteURL, ref); err != nil {
 		if exitCode(err) == 2 {
 			return "", nil // no carrier recorded yet: first claim, nothing to restore
 		}
 		return "", err
 	}
-	if _, err := git(env, dir, "fetch", "--quiet", "--no-tags", o.RemoteURL, ref); err != nil {
+	if _, err := gitTimed(o.bound(chainRemoteTimeout), env, dir, "fetch", "--quiet", "--no-tags", o.RemoteURL, ref); err != nil {
 		return "", err
 	}
 	out, err := git(env, dir, "rev-parse", "FETCH_HEAD")
@@ -1066,7 +1075,7 @@ func Clone(o Opts) error {
 	}
 	defer cleanup()
 	env := append(os.Environ(), additions...)
-	_, err = git(env, "", "clone", o.RemoteURL, o.CapsuleDir)
+	_, err = gitTimed(chainRemoteTimeout, env, "", "clone", o.RemoteURL, o.CapsuleDir)
 	return err
 }
 

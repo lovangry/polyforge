@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -858,5 +859,54 @@ func TestCrossDeviceMoveFallback(t *testing.T) {
 	}
 	if _, serr := os.Stat(filepath.Join(src, "HEAD")); !os.IsNotExist(serr) {
 		t.Fatal("the source must be gone after the move")
+	}
+}
+
+// repo review 2026-10-16 B-15: the chain push runs under the per-WI lock
+// and must be bounded — a hung remote (here: a pre-receive hook that
+// never returns) fails the push after chainRemoteTimeout, its process
+// group killed, instead of holding the lock forever.
+func TestChainPushIsBounded(t *testing.T) {
+	setIdentity(t)
+	o, barePath := testOpts(t, "wi_hang")
+	mkBare(t, barePath, false)
+	marker := filepath.Join(t.TempDir(), "hook-alive")
+	hook := "#!/bin/sh\necho $$ > " + marker + "\nexec sleep 300\n"
+	if err := os.WriteFile(filepath.Join(barePath, "hooks", "pre-receive"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mkCapsule(t, o)
+	writeDirty(t, o, "f.txt", "x\n")
+	old := chainRemoteTimeout
+	chainRemoteTimeout = time.Second
+	defer func() { chainRemoteTimeout = old }()
+	start := time.Now()
+	_, pushed, _, err := CommitPush(o, "observe: hang")
+	if err == nil || pushed {
+		t.Fatalf("a hung remote must fail the push: pushed=%v err=%v", pushed, err)
+	}
+	if took := time.Since(start); took > 20*time.Second {
+		t.Fatalf("push took %s: not bounded", took)
+	}
+	// the lock is free again
+	done := make(chan struct{})
+	go func() { Lock(o.WorkItemID)(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the per-WI lock is still held after the bounded push")
+	}
+	raw, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("the hook never ran: %v", err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	deadline := time.Now().Add(5 * time.Second)
+	for pid > 0 && syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("the hook's sleeper %d survived the push timeout", pid)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
