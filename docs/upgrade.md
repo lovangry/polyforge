@@ -1144,17 +1144,23 @@ it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
   itself at the start and to write at most one `experience.*` memory at
   the end (`workflows/_shared/memory.md`); the workflow's last step also
   writes one `experience.wrap` summary per work item
-  (`workflows/_shared/memory-wrap.md`). The step's `pf` reads the
-  operator's `cli.toml` (`HOME` / `XDG_CONFIG_HOME` reach the step; `PF_*`
-  does not): a machine whose aihub key lives only in `PF_API_KEY` must put
-  it in `cli.toml` as `api_key` for these calls to authenticate. A failing
-  call never fails the step.
+  (`workflows/_shared/memory-wrap.md`). Step agents hold no aihub
+  credential path: inside a step (`PF_WI_ID` set) `pf recall` / `pf memory
+  show` read through the daemon socket, `pf remember` queues a file in
+  `artifacts/memory-outbox/` that the daemon uploads with its machine
+  credential after the step (outcomes in `artifacts/memory-log.md`), and
+  every other aihub verb is refused (DAEMON-403). Nothing to configure;
+  the machine credential needs memory read and writer access on the
+  project. A failing call or upload never fails the step. `cli.toml` stays
+  readable under the shared HOME — this guards against accidents, not
+  against an agent that reads it on purpose.
 - `.polyforge.yaml` gains the optional `memory_policy:` section (README,
   "Memory policy"). Nothing is required: a missing section is the
   built-in default. Run `pf init <ws>` once per workspace to append the
   default section (as text — existing bytes and comments are kept), then
-  tune it; `pf doctor`'s new `workspace memory policy` row warns until a
-  workspace has one.
+  tune it; `pf doctor`'s new `workspace memory policy` row warns about a
+  `.polyforge.yaml` without the section (no file at all passes: the
+  built-in default applies).
 - **Rollback hazard:** a pf/daemon binary older than this version parses
   `.polyforge.yaml` strictly and does not know `memory_policy`, so after
   `pf init` appended the section an older daemon refuses EVERY claim of

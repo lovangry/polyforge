@@ -1032,7 +1032,7 @@ func TestSpawnStepPromptCarriesMemoryDuty(t *testing.T) {
 		"# Project memory", "non-binding history",
 		"pf recall --project e2e --any '<keyword set 1>'", "中文",
 		"Record (worth a memory):\n- sqlite pitfalls\n- owner rulings\n", "Skip (never a memory):\n- step logs\n",
-		"at most ONE memory", "near-duplicate",
+		"at most ONE memory", "artifacts/memory-outbox/", "the daemon uploads it after this step",
 		"pf remember --project e2e --type experience.<kind> --work-item 'e2e#7' --title '<one-line title>' @<file>",
 		"≤ 2 KB", "--tags policy-proposal", "建议新增条目：", "Never put a secret",
 	} {
@@ -1056,7 +1056,7 @@ func TestSpawnStepPromptCarriesMemoryDuty(t *testing.T) {
 		"- 踩坑和根因（现象→原因→解法）", "- 密钥和凭据的值",
 		"# Work item wrap summary", "exactly ONE `experience.wrap` memory",
 		"--type experience.wrap --work-item 'e2e#7' --title 'e2e#7: <what was done, one line>'",
-		"做了什么", "关键决定", "遗留", "policy-proposal memories:",
+		"做了什么", "关键决定", "遗留", "policy-proposal memories:", "before the work item is sealed",
 	} {
 		if !strings.Contains(p.InitialPrompt, want) {
 			t.Fatalf("last-step prompt missing %q\n%s", want, p.InitialPrompt)

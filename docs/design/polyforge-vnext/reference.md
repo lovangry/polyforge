@@ -350,8 +350,14 @@ none is left (`driver/spawn.go`). Every step prompt also carries the shared memo
 (`workflows/_shared/memory.md`: `pf recall --any` 2–3 phrasings at the start; at most one
 `experience.<kind>` memory at the end, judged against the project's memory policy from
 `runtime-state/memory-policy.json`); the workflow's last step adds `workflows/_shared/memory-wrap.md`
-(exactly one `experience.wrap` per work item). The step agent runs `pf` itself: data-plane verbs go
-straight to aihub with the operator's cli.toml (the UDS step-origin guard is not involved). Retry shape: first retry resumes the transcript,
+(exactly one `experience.wrap` per work item). Step agents hold no aihub credential path; memory
+access is daemon-mediated: inside a step (`PF_WI_ID` set) `pf recall` / `pf memory show` read through
+the UDS read face `GET /step/memories/search|{id}` (scoped to the calling step's work item and project,
+resolved from the peer credential; `daemon/stepmem.go`), `pf remember` queues a file in
+`artifacts/memory-outbox/` that the daemon validates, dedupes and uploads after each step result, at
+the terminal transition (before the seal) and on an operator close (`daemon/memoutbox.go`; outcomes in
+`artifacts/memory-log.md`, outages retried at the next flush), and every other aihub verb is refused
+(DAEMON-403). `cli.toml` stays readable under the shared HOME: a guard against accidents, not malice. Retry shape: first retry resumes the transcript,
 later retries start fresh with the old transcript as read-only reference (`v2-converge.md#§2.3`).
 
 ### 7.5 Model candidates <!-- §7.5 -->

@@ -196,17 +196,26 @@ func TestDoctorScratchSymlinkNeverPruned(t *testing.T) {
 }
 
 // TestDoctorMemoryPolicyWarnsUntilInit pins the read-only memory policy
-// row: a workspace without the section warns with the `pf init` fix and
-// doctor writes nothing; after `pf init` the row passes.
+// row: no .polyforge.yaml passes on the built-in default; a file without
+// the section warns with the `pf init` fix and doctor writes nothing;
+// after `pf init` the row passes.
 func TestDoctorMemoryPolicyWarnsUntilInit(t *testing.T) {
 	env, ws := doctorWorkspace(t)
 	_, _, doc := doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, docChMemPolicy); st != "pass" || !strings.Contains(detail, "built-in default") || !strings.Contains(detail, "editable copy") {
+		t.Fatalf("no yaml: memory policy = %s (%s), want pass on the built-in default", st, detail)
+	}
+	steps := "# mine\nsteps:\n  polyforge:\n    default: { models: [pi:a] }\n"
+	if err := os.WriteFile(workspace.PathFor(ws), []byte(steps), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, doc = doctorStatus(t, env, "--json", "doctor")
 	st, detail := doctorFind(t, doc, docChMemPolicy)
 	if st != "warn" || !strings.Contains(detail, "declares no memory_policy") || !strings.Contains(detail, "run `pf init "+ws+"`") {
 		t.Fatalf("memory policy = %s (%s), want warn with the pf init fix", st, detail)
 	}
-	if _, err := os.Stat(workspace.PathFor(ws)); !os.IsNotExist(err) {
-		t.Fatalf("doctor wrote %s (%v)", workspace.PathFor(ws), err)
+	if raw, _ := os.ReadFile(workspace.PathFor(ws)); string(raw) != steps {
+		t.Fatalf("doctor rewrote %s", workspace.PathFor(ws))
 	}
 	if code, _, stderr := runPf(t, env, "init", ws); code != 0 {
 		t.Fatalf("pf init: exit %d (%s)", code, stderr)

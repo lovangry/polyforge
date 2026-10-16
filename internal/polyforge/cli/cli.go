@@ -28,10 +28,17 @@ type Context struct {
 	// default location). Only the NoConfigLoad verbs (doctor, init) need it;
 	// everything else reads the resolved Cfg.
 	ConfigPath string
+	// Step is the work item of the workflow step this invocation runs in
+	// ("" = not inside a step; stepctx.go).
+	Step string
 }
 
-// aihub returns the direct-aihub client for the resolved config.
+// aihub returns the direct-aihub client for the resolved config — inside
+// a workflow step, a client that refuses every request (stepctx.go).
 func (ctx *Context) aihub() *aihubclient.Client {
+	if ctx.Step != "" {
+		return stepAihubClient()
+	}
 	return aihubclient.New(ctx.Cfg.Server, ctx.Cfg.APIKey)
 }
 
@@ -185,6 +192,14 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		Stderr:     stderr,
 		Stdin:      stdin,
 		ConfigPath: *cfgFlag,
+	}
+	if wi := stepWorkItem(); wi != "" {
+		if err := stepRefusal(cmd); err != nil {
+			renderError(ctx, err)
+			return exitCode(err)
+		}
+		ctx.Step = wi
+		ctx.Cfg.APIKey = ""
 	}
 
 	fs := flag.NewFlagSet("pf "+cmd.Name, flag.ContinueOnError)

@@ -107,19 +107,34 @@ rowid 与 rank，再沿 rank 顺序分批读取条目元数据，直到下界 (1
   `daemon/memface.go`）。driver 把它作为「非约束性历史」注入每个 step 的 prompt（`v2-converge.md#§1`）——每条只渲染一行
   `[type] title`（不含 id 与正文；title 为空时取摘录的第一个非空行），丢弃 id-only 噪声标题
   （`^Verification Report — \S+$`、`^Controller-sink artifact`），至多 10 行，无条目则不加该节（`driver/spawn.go`）。
-  daemon 的 UDS 上没有 recall/remember 通道。
-- step agent 自己的 `pf recall` / `pf remember`：数据面动词直连 aihub，不经 daemon UDS，所以 step-origin 守卫
-  （只拦 UDS 上的非读请求）不涉及；step 进程的环境剥掉了 `PF_*` / `POLYFORGE_*`，但保留 `HOME` / `XDG_CONFIG_HOME`，
-  `pf` 读操作者的 `cli.toml`（server、`api_key`、`[workspace]` 映射）——`api_key` 只放在 `PF_API_KEY` 环境变量里的机器上，
-  step 的 `pf` 拿不到凭据。每个 step 的 prompt 带共享的记忆职责节（`workflows/_shared/memory.md`，变量
+  部署顺序：先升级 aihub 再升级 daemon——旧 aihub 忽略 `match=`、按 AND 检索，长查询于是没有命中，快照为空。
+- step agent 不持有 aihub 凭据路径，记忆访问全部由 daemon 代理（owner 裁决 option C）。step 进程带 `PF_WI_ID` /
+  `PF_DAEMON_ID` 标记（与 step-origin 守卫、reaper 用的是同一组；其余 `PF_*` / `POLYFORGE_*` 被剥掉），`pf` 据此进入
+  step 模式（`cli/stepctx.go`）：`pf recall` / `pf memory show` 走 daemon UDS 的只读面
+  `GET /step/memories/search`、`GET /step/memories/{id}`（`daemon/stepmem.go`）——daemon 以自己的机器凭据转发，
+  work item 取自调用方的 UDS 对端凭据（`runtime.StepProcessOrigin`），项目取自该 job、不取自请求（请求里别的项目 →
+  DAEMON-403，别项目的记忆 → MEM-404）；GET 是读，过 step-origin 守卫，非 step 调用方被拒（人直接读 aihub）。
+  `pf remember` 不联网：写一个文件到 capsule `artifacts/memory-outbox/<n>.md`（frontmatter type/title/tags + 正文，
+  `capsule/memoryoutbox.go`）。其余直连 aihub 的动词（file、queue、cancel、管理面…）在 step 内一律 DAEMON-403，
+  该次调用的 aihub client 拒绝一切请求，`cli.toml` 的 `api_key` 不被使用。`cli.toml` 仍在共享 HOME 下可读——这是防误用，
+  不防恶意。
+- outbox 上传（`daemon/memoutbox.go`）：每个 step 结果（`step_done` / `gate_verdict`，后台）、workflow 终态（有界等待，
+  保证封存前上传）和每次操作者 close（wrap / fail / pause，teardown 前）都 flush 一次。校验：type `experience.<kind>`、
+  单行 title、正文 ≤2KB、tag 为普通名字、无疑似凭据内容（私钥头、常见 token 前缀、`key=…` 形式、daemon 自己的 key）；
+  每次 flush 至多一条非 wrap 记忆，每个 WI 至多一条 `experience.wrap`。去重：同 WI 已上传/待传的同 title，及 aihub 里同
+  WI、同 type、同 title 的记忆。上传时 `work_item_id` = job 的 WI、`project` = job 的项目。结果逐行写入
+  `artifacts/memory-log.md`；文件移到 `pending/`（已接受待传）、`done/`（已传或重复）、`rejected/`（拒绝，log 写原因）。
+  aihub 故障（传输错误、5xx、408、429）保留在 `pending/`，下次 flush 重试；4xx 为终局拒绝。上传失败从不让 step 失败。
+  WI 在仍有待传文件时被封存：留在封存 capsule 的 `pending/`，封存后不再 flush（尽力而为）。
+- 每个 step 的 prompt 带共享的记忆职责节（`workflows/_shared/memory.md`，变量
   `{{project}}` `{{work_item}}` `{{record}}` `{{skip}}` 经 `workflow.RenderStepVars` 渲染）：开工前用 2–3 组不同关键词
-  （含中英文）`pf recall --any`，读相关条目正文；收工前按记忆策略判断，至多写一条 `experience.<kind>`（先查重，正文 ≤2KB，
-  不写密钥），不在 `record` 里但有价值的照写并打 `policy-proposal` 标签、正文加「建议新增条目：…」，并在
-  `artifacts/memory-log.md` 记一行。workflow 的最后一步另带 `workflows/_shared/memory-wrap.md`：每个 WI 恰好一条
+  （含中英文）`pf recall --any`，读相关条目正文；收工前按记忆策略判断，至多 `pf remember` 一条 `experience.<kind>`
+  （正文 ≤2KB，不写密钥；写前 recall 查重可选，去重在 daemon 侧），不在 `record` 里但有价值的照写并打 `policy-proposal`
+  标签、正文加「建议新增条目：…」。workflow 的最后一步另带 `workflows/_shared/memory-wrap.md`：每个 WI 恰好一条
   `experience.wrap`（title `<wi slug>: <做了什么>`，正文：做了什么、关键决定、遗留，并列出本 WI 的 `policy-proposal` 记忆）。
 - 记忆策略：`.polyforge.yaml` 的可选段 `memory_policy:`（`default` / `<project>`: `{record: [...], skip: [...]}`；
   `default` 未声明的列表取内置默认，项目的列表追加到 `default` 之后、去重）。领取时 daemon 把该项目的生效策略写入
   capsule `runtime-state/memory-policy.json`（`runtime/memorypolicy.go`），driver 渲染进记忆职责节；缺段＝内置默认
   （`workspace.DefaultMemoryPolicySection`），从不拒绝领取；段格式错误同整个文件无效一样拒绝领取（DAEMON-414）。
-  `pf init` 在缺段时把默认段以文本追加到文件末尾（不重写原有字节）；`pf doctor` 只读，缺段报 warn 并提示 `pf init`。部署顺序：先升级 aihub 再升级 daemon——旧 aihub 忽略 `match=`、按 AND 检索，
-  长查询于是没有命中，快照为空。
+  `pf init` 在缺段时把默认段以文本追加到文件末尾（不重写原有字节）；`pf doctor` 只读：无文件 pass（内置默认），
+  文件缺段 warn 并提示 `pf init`，有段 pass。

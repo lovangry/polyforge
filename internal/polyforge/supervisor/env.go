@@ -13,7 +13,8 @@ package supervisor
 // Adding a variable is one line in daemonEnvNames (or daemonEnvPrefixes
 // for a family). Never add a credential: step harnesses take theirs from
 // their own files (claude: <harness-root>/claude-config/settings.json,
-// pi: the step agent dir's auth.json), aihub's key is in cli.toml.
+// pi: the step agent dir's auth.json), aihub's key is in cli.toml and is
+// used by the daemon only (a step's memory access is daemon-mediated).
 
 import (
 	"regexp"
@@ -33,9 +34,11 @@ var daemonEnvNames = []string{
 	"http_proxy", "https_proxy", "no_proxy", "all_proxy",
 	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
 	"SSL_CERT_FILE", "SSL_CERT_DIR",
-	// XDG base dirs: where cli.toml (XDG_CONFIG_HOME, read by the steps'
-	// own `pf`), the watcher state (XDG_RUNTIME_DIR) and the harnesses'
-	// files are looked up — dropping one would silently move them
+	// XDG base dirs: where cli.toml (XDG_CONFIG_HOME — the daemon's own
+	// config; a step's `pf` reads only its daemon_socket from it, its
+	// memory access goes through the daemon), the watcher state
+	// (XDG_RUNTIME_DIR) and the harnesses' files are looked up —
+	// dropping one would silently move them
 	"XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
 	// polyforge: the data dir default the daemon still reads (main.go;
 	// ensure passes -data-dir as well) — the retired

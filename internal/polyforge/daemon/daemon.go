@@ -287,6 +287,15 @@ type Daemon struct {
 	// The probe alone races (both processes can observe a dead socket
 	// and both bind); the flock is the kernel-serialized half.
 	dataLock *os.File
+
+	// stepOriginOf resolves a /step/* caller to its work item (nil = the
+	// UDS peer credential, peerStepOrigin; tests bind a stub).
+	stepOriginOf func(*http.Request) (string, bool)
+	// projectIDs caches project name → aihub id for the step memory read.
+	projectIDs sync.Map
+	// outboxLocks holds one *sync.Mutex per work item: one memory-outbox
+	// flush at a time per capsule.
+	outboxLocks sync.Map
 }
 
 // New validates and assembles the daemon. Restart reconciliation is NOT
@@ -386,7 +395,7 @@ func New(cfg Config) (*Daemon, error) {
 				// driver events land in the durable per-WI event log
 				// (monotonic ids); the supervision link is the WI's
 				// shared driver <-> supervisor channel
-				Log:    d.driverLog(),
+				Log:    d.driverLogFor(in.CapsuleDir),
 				Link:   d.sup.Link(in.WI),
 				Limits: cfg.Supervision.limits(),
 			})
@@ -905,13 +914,32 @@ func (a *agentAdapter) pollDone(interval time.Duration) {
 
 func (a *agentAdapter) Exit() <-chan struct{} { return a.exit }
 
-// driverLog is the driver's EventLogger: it resolves the observe event
-// log at call time (the log exists only after observe.New).
-func (d *Daemon) driverLog() driver.EventLogger { return driverEventLog{d} }
+// driverLogFor is the driver's EventLogger of one capsule: it resolves
+// the observe event log at call time (the log exists only after
+// observe.New), and besides the event log
+// it flushes the capsule's memory outbox (memoutbox.go) after every step
+// result — in the background — and at the terminal transition, bounded,
+// so the last step's memories are uploaded before the seal.
+func (d *Daemon) driverLogFor(capsuleDir string) driver.EventLogger {
+	return driverEventLog{d: d, capsuleDir: capsuleDir}
+}
 
-type driverEventLog struct{ d *Daemon }
+type driverEventLog struct {
+	d          *Daemon
+	capsuleDir string
+}
 
 func (l driverEventLog) Append(wi, kind string, body any) error {
+	if l.capsuleDir != "" {
+		if t, ok := outboxTargetOf(l.capsuleDir); ok {
+			switch kind {
+			case "step_done", "gate_verdict":
+				go l.d.flushOutbox(t)
+			case "terminal":
+				l.d.flushOutboxBounded(t, outboxFlushWait)
+			}
+		}
+	}
 	if l.d.obs == nil {
 		return nil
 	}

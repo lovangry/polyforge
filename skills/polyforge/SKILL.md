@@ -243,7 +243,11 @@ Five standing rules, binding on every polyforge session:
    `{ record: [...], skip: [...] }`, a project's lists appended to
    `default`'s), says what a step agent writes as a project memory; a
    missing section is the built-in default policy, never a refusal, and
-   `pf init` appends the default section (see `verbs/init.md`).
+   `pf init` appends the default section (see `verbs/init.md`). Step
+   agents hold no aihub credential path: inside a workflow step
+   (`PF_WI_ID` set) `pf recall` / `pf memory show` go through the daemon,
+   `pf remember` queues into the capsule outbox the daemon uploads, and
+   every other data-plane verb is refused (DAEMON-403).
    The repo inventory and clone URLs always come from the aihub project
    registry; the cli.toml `[workspace]` mapping is the only placement source.
 

@@ -680,7 +680,13 @@ claimed project's effective policy to the capsule
 prompt's memory duty (`workflows/_shared/memory.md`; the last step adds
 `workflows/_shared/memory-wrap.md`). `pf init <ws>` appends the default
 section as text when the file has none (existing bytes kept exactly) and
-`pf doctor` warns about a workspace without one.
+`pf doctor` warns about a `.polyforge.yaml` without one (no file at all
+passes on the built-in default). Step agents hold no aihub credential
+path: inside a step `pf recall` / `pf memory show` read through the
+daemon (scoped to the step's own project), `pf remember` queues the
+memory in `artifacts/memory-outbox/` and the daemon validates, dedupes
+and uploads it after the step (outcomes in `artifacts/memory-log.md`);
+every other aihub verb is refused there (DAEMON-403).
 
 Supervision bounds (v2-converge 2.4) — Go duration strings (e.g. `700ms`,
 `5m`), no environment fallbacks. Omitting a flag, or passing `0`, keeps

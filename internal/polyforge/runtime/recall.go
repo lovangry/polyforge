@@ -7,9 +7,11 @@ package runtime
 // snapshot into the capsule: runtime-state/recalled-memories.json, which
 // the driver renders into every step prompt as `[type] title` lines of
 // non-binding history (driver/spawn.go recalledMemoriesSection, decision
-// 2026-10-16 G3). The live half is the step agent's own `pf recall` /
-// `pf remember` (data-plane verbs straight to aihub with the operator's
-// cli.toml), which the step prompt's memory duty asks for.
+// 2026-10-16 G3). The live half is daemon-mediated too: inside a step
+// `pf recall` reads through the daemon's /step/memories face and
+// `pf remember` queues into the capsule's memory outbox, which the daemon
+// uploads with its own credential (daemon/stepmem.go, memoutbox.go) —
+// the step agent holds no aihub credential path.
 //
 // The snapshot is an ENRICHMENT, never a gate: an unreachable aihub, a
 // refused search or a zero-hit query all degrade to an empty list plus a

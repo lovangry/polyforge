@@ -28,9 +28,9 @@ import (
 //     any time without side effects; deletion is an explicit operator
 //     act.
 //   - "workspace memory policy": a .polyforge.yaml without a
-//     memory_policy section (or no file at all) — the daemon then renders
-//     the built-in default policy into the step prompts; `pf init <ws>`
-//     appends the default section. Read-only: doctor never writes it.
+//     memory_policy section warns (`pf init <ws>` appends the default
+//     section); a workspace without the file passes on the built-in
+//     default. Read-only: doctor never writes it.
 
 const (
 	docChLayout    = "workspace layout"
@@ -107,14 +107,22 @@ func workspaceLayoutCheck(wss []string) doctorCheck {
 func memoryPolicyCheck(wss []string) doctorCheck {
 	c := doctorCheck{Name: docChMemPolicy, Status: "pass"}
 	var missing []string
+	builtin := 0
 	for _, ws := range existingWorkspaces(wss) {
-		_, declared, err := workspace.MemoryPolicyDeclared(ws)
-		if err == nil && !declared {
+		exists, declared, err := workspace.MemoryPolicyDeclared(ws)
+		switch {
+		case err != nil:
+		case !exists:
+			builtin++
+		case !declared:
 			missing = append(missing, ws)
 		}
 	}
 	if len(missing) == 0 {
 		c.Detail = "every mapped workspace's " + workspace.FileName + " declares " + workspace.MemoryPolicyKey
+		if builtin > 0 {
+			c.Detail = fmt.Sprintf("%s; %d workspace(s) without a %s use the built-in default (`pf init <ws>` writes an editable copy)", c.Detail, builtin, workspace.FileName)
+		}
 		return c
 	}
 	c.Status = "warn"

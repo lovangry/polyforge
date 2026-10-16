@@ -286,6 +286,11 @@ func (d *Daemon) routes() *http.ServeMux {
 	mux.HandleFunc("POST /chats/{id}/ack", d.ackRoute)
 	mux.HandleFunc("POST /chats/{id}/heartbeat", d.heartbeatRoute)
 	mux.HandleFunc("GET /chats/{id}/attention", d.attentionRoute)
+	// the step agent's memory read face (stepmem.go): reads only, scoped
+	// to the calling step's own work item and project
+	mux.HandleFunc("GET /step/context", d.stepContextRoute)
+	mux.HandleFunc("GET /step/memories/search", d.stepSearchRoute)
+	mux.HandleFunc("GET /step/memories/{id}", d.stepMemoryRoute)
 	mux.HandleFunc("POST /chats/{id}/attention/ack", d.attentionAckRoute)
 	return mux
 }
@@ -600,6 +605,9 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 		return
 	}
 	defer d.releaseSeal(wi)
+	// the memories the run's steps left in the outbox go up before the
+	// teardown seals the capsule (bounded; best effort)
+	d.flushOutboxBounded(outboxTarget{wi: ji.WorkItem, project: ji.Project, capsuleDir: ji.CapsuleDir}, outboxFlushWait)
 	// The agent's death in this close is expected: arm the monitor's
 	// suppression BEFORE the teardown starts, so a fast exit poll can
 	// never win the race against the RTFinished teardown and journal a

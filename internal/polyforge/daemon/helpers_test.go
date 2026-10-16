@@ -146,6 +146,8 @@ type fakeHub struct {
 	// adapters make (search + memory create); nil answers a typed
 	// refusal. The tests that exercise the memory lanes script it.
 	memDo func(method, path string, body, out any) error
+	// memContent scripts GetMemoryContent (the step memory read).
+	memContent func(id string) ([]byte, error)
 	// queueErr, when non-nil, is what Queue answers instead of the
 	// seeded list — the drain degraded-signal test scripts denials with
 	// it.
@@ -403,6 +405,17 @@ func (h *fakeHub) Do(method, path string, body, out any) error {
 		return &api.Error{Code: api.ErrDaemonInternal, Detail: "fakeHub: Do call not scripted"}
 	}
 	return fn(method, path, body, out)
+}
+
+// GetMemoryContent serves the per-id memory body read (memContent).
+func (h *fakeHub) GetMemoryContent(id string) ([]byte, error) {
+	h.mu.Lock()
+	fn := h.memContent
+	h.mu.Unlock()
+	if fn == nil {
+		return nil, &api.Error{Code: api.ErrDaemonInternal, Detail: "fakeHub: GetMemoryContent not scripted"}
+	}
+	return fn(id)
 }
 
 func (h *fakeHub) verifyCount() int {

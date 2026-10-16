@@ -55,16 +55,23 @@ Pass the body as `@file` (≤1 MiB). A memory cannot be edited — store a
 new one (or redact). Local disposable output belongs in the workspace's
 `scratch/` only (`pf doctor` reports entries older than 14 days).
 
-## Step agents write memories too
+## Step agents write memories too (daemon-mediated)
 
 Every workflow step's prompt carries a memory duty: at the end of the
 step the agent writes at most ONE `experience.<kind>` memory, judged
-against the workspace's `memory_policy` (`.polyforge.yaml`; `verbs/init.md`),
-after a `pf recall --any` near-duplicate check; a lesson outside the
-policy's `record` list carries the `policy-proposal` tag and a
-"建议新增条目：…" line. The workflow's last step writes the work item's one
-`experience.wrap` summary (title `<wi slug>: <what was done>`). Such
-memories are attributed with `--work-item`; filter them with
+against the workspace's `memory_policy` (`.polyforge.yaml`; `verbs/init.md`);
+a lesson outside the policy's `record` list carries the `policy-proposal`
+tag and a "建议新增条目：…" line. The workflow's last step writes the work
+item's one `experience.wrap` summary (title `<wi slug>: <what was done>`).
+A step agent holds no aihub credential path: inside a step (`PF_WI_ID`
+set) the same `pf remember` command queues the memory in the capsule's
+`artifacts/memory-outbox/` and prints `queued <path>`; the daemon
+validates it (`--type experience.*`, `--title` required, body ≤ 2 KB, no
+credential-looking content, one per step plus the wrap), skips a
+duplicate title of the same work item, uploads it with its own credential
+attributed to the step's work item and project, and logs the outcome in
+`artifacts/memory-log.md` (an aihub outage retries at the next step end).
+Such memories are attributed with `--work-item`; filter them with
 `pf recall --project P --any '<words>' --type experience.wrap` or
 `--tags policy-proposal`.
 
