@@ -39,21 +39,26 @@ func (d *Daemon) recordLastShutdown(cause ShutdownCause) {
 	_ = atomicfile.Write(path, blob, 0o600)
 }
 
-// takeLastShutdown reads and consumes the previous run's shutdown record.
+// peekLastShutdown reads the previous run's shutdown record (Run consumes
+// it with consumeLastShutdown once the start succeeded).
 // Absent = the previous process did not shut down through the graceful
 // sequence (crash / SIGKILL) or this is a first boot.
-func (d *Daemon) takeLastShutdown() map[string]any {
+func (d *Daemon) peekLastShutdown() map[string]any {
 	path := filepath.Join(d.cfg.DataDir, lastShutdownFile)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return map[string]any{"cause": "unknown", "note": "no graceful-shutdown record: the previous process crashed or was killed, or this is a first start"}
 	}
-	_ = os.Remove(path)
 	var ls lastShutdown
 	if json.Unmarshal(raw, &ls) != nil {
 		return map[string]any{"cause": "unknown", "note": "last-shutdown record unparsable"}
 	}
 	return map[string]any{"cause": ls.Kind, "detail": ls.Detail, "at": ls.At}
+}
+
+// consumeLastShutdown removes the previous run's shutdown record.
+func (d *Daemon) consumeLastShutdown() {
+	_ = os.Remove(filepath.Join(d.cfg.DataDir, lastShutdownFile))
 }
 
 // announceRestart writes the durable daemon_restarted event into every WI

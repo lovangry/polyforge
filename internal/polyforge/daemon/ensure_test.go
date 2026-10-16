@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -93,6 +94,39 @@ func TestEnsureLoopRestartsFailuresAndEndsOnCleanExit(t *testing.T) {
 	}
 	log, _ := os.ReadFile(filepath.Join(dir, "daemon.log"))
 	if !strings.Contains(string(log), "failed (exit 3); restarting") || !strings.Contains(string(log), "exited cleanly; the loop ends") {
+		t.Fatalf("loop log:\n%s", log)
+	}
+}
+
+// repo review 2026-10-16 B-14: a daemon that refuses to start for a
+// cause only an operator can fix (ExitNeedsOperator) ends the loop
+// instead of restarting into the same failure every few seconds.
+func TestEnsureLoopEndsOnNeedsOperatorExit(t *testing.T) {
+	dir := t.TempDir()
+	fake := filepath.Join(dir, "pf")
+	body := "#!/bin/sh\nn=$(cat " + dir + "/n 2>/dev/null || echo 0); n=$((n+1)); echo $n > " + dir + "/n\nexit " + strconv.Itoa(ExitNeedsOperator) + "\n"
+	if err := os.WriteFile(fake, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := &ensurePlan{pfBin: fake, configPath: "/c", dataDir: dir, socket: dir + "/s", workflowsDir: dir, machineID: "m-x", home: dir}
+	cmd := exec.Command("sh", "-c", p.loopScript())
+	done := make(chan error, 1)
+	go func() { _, err := cmd.CombinedOutput(); done <- err }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("loop: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		_ = cmd.Process.Kill()
+		<-done
+		t.Fatal("the loop restarted a needs-operator refusal instead of ending")
+	}
+	if n, _ := os.ReadFile(filepath.Join(dir, "n")); strings.TrimSpace(string(n)) != "1" {
+		t.Fatalf("daemon runs = %q, want 1", n)
+	}
+	log, _ := os.ReadFile(filepath.Join(dir, "daemon.log"))
+	if !strings.Contains(string(log), "needs an operator fix") {
 		t.Fatalf("loop log:\n%s", log)
 	}
 }

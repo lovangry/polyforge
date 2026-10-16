@@ -574,7 +574,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// a single request: a client that reaches the daemon must see a
 	// reconciled runtime, never a seeded record's pre-reconciliation
 	// snapshot (stale agent pids, superseded lineages).
-	prevShutdown := d.takeLastShutdown()
+	// The previous run's shutdown record is consumed only once the
+	// reconciliation succeeded: an aborted start must not make every
+	// later start report "the previous process crashed".
+	prevShutdown := d.peekLastShutdown()
 	if err := d.rt.Restart(d.runCtx); err != nil {
 		// Startup abort: the runtime could not be reconciled as a whole
 		// (a missing capsule or an unmapped project is NOT such a case —
@@ -595,8 +598,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 				_ = ji.Agent.Terminate(10 * time.Second)
 			}
 		}
-		return fmt.Errorf("restart reconciliation failed: %w", err)
+		return &needsOperatorError{fmt.Errorf("restart reconciliation failed: %w", err)}
 	}
+	d.consumeLastShutdown()
 	d.reattachRecovered()
 	// v2 §5/§6: replay the persisted submit queue (after the B1 claiming
 	// journal replay inside Restart, so a WI is never claimed twice) and

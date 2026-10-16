@@ -314,6 +314,7 @@ func (p *ensurePlan) loopScript() string {
 	fmt.Fprintf(&b, "  %s < /dev/null >> %s 2>&1\n", strings.Join(argv, " "), log)
 	b.WriteString("  rc=$?\n")
 	fmt.Fprintf(&b, "  if [ \"$rc\" -eq 0 ]; then echo \"pf daemon ensure loop: the daemon exited cleanly; the loop ends\" >> %s; break; fi\n", log)
+	fmt.Fprintf(&b, "  if [ \"$rc\" -eq %d ]; then echo \"pf daemon ensure loop: the daemon refused to start (exit $rc: needs an operator fix, see above); the loop ends — fix the cause, then run pf daemon ensure\" >> %s; break; fi\n", ExitNeedsOperator, log)
 	fmt.Fprintf(&b, "  echo \"pf daemon ensure loop: the daemon failed (exit $rc); restarting in %ds\" >> %s\n", restartDelay, log)
 	fmt.Fprintf(&b, "  sleep %d\n", restartDelay)
 	b.WriteString("done\n")
