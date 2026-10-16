@@ -110,7 +110,10 @@ func TestDeployDryRunNeedsNoConfirmAndTakesNoLock(t *testing.T) {
 func TestDeployLockHeldFailsFastNothingMutated(t *testing.T) {
 	d := newReadyWorld(t)
 	lock := filepath.Join(d.w, "srv", "deploy.lock")
-	holder := exec.Command("flock", "-n", lock, "sleep", "120")
+	// Blocking flock, not -n: lockFree's probe takes the lock for an
+	// instant, and a non-blocking holder that starts in that instant would
+	// exit at once and never hold it (the test then failed "could not hold").
+	holder := exec.Command("flock", lock, "sleep", "120")
 	ownGroup(holder) // flock forks `sleep`: killing flock alone orphans it
 	if err := holder.Start(); err != nil {
 		t.Fatal(err)
