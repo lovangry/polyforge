@@ -353,69 +353,96 @@ func (s *Store) Search(q string, memType string, tags []string, limit int, allow
 			short = append(short, tok)
 		}
 	}
-	var cands []candRow
-	if len(long) > 0 {
-		rows, err := s.db.Query(`SELECT f.mem_id, f.body FROM memories m
-			JOIN memory_fts f ON f.mem_id = m.id
-			WHERE memory_fts MATCH ?1 AND m.status='active'
-			ORDER BY rank LIMIT ?2`, ftsQuery(long), limit*4)
-		if err != nil {
-			// A typed refusal, never a degrade to a full scan: answering
-			// every memory for a query FTS could not parse is a leak.
-			return nil, errf(api.ErrMemUnavailable, "", "fts: %v", err)
-		} else {
-			for rows.Next() {
-				var c candRow
-				if err := rows.Scan(&c.id, &c.body); err != nil {
-					rows.Close()
-					return nil, err
-				}
-				cands = append(cands, c)
+	out := []Entry{}
+	// seen: a write between two FTS pages can shift ranks, so the same
+	// entry may appear on consecutive pages — it is answered once.
+	seen := map[string]bool{}
+	// take filters one candidate batch into out; true once out is full.
+	take := func(cands []candRow) bool {
+		for _, c := range cands {
+			if seen[c.id] {
+				continue
 			}
-			rows.Close()
+			seen[c.id] = true
+			stale := false
+			for _, tok := range short {
+				if !strings.Contains(c.body, tok) {
+					stale = true
+					break
+				}
+			}
+			if stale {
+				continue
+			}
+			e, err := s.load(c.id)
+			if err != nil || e.Status != "active" {
+				continue
+			}
+			e, ok := s.serveConsistent(e)
+			if !ok {
+				continue
+			}
+			if !typeMatches(e.Type, memType) {
+				continue
+			}
+			if len(tags) > 0 && !containsAll(e.Tags, tags) {
+				continue
+			}
+			if allowed != nil && !allowed(e) {
+				continue
+			}
+			out = append(out, *e)
+			if len(out) >= limit {
+				return true
+			}
 		}
-	} else {
+		return false
+	}
+	if len(long) == 0 {
 		scanned, serr := s.scanBodies()
 		if serr != nil {
 			return nil, serr
 		}
-		cands = scanned
+		take(scanned)
+		return out, nil
 	}
-	out := []Entry{}
-	for _, c := range cands {
-		stale := false
-		for _, tok := range short {
-			if !strings.Contains(c.body, tok) {
-				stale = true
-				break
-			}
+	// FTS candidates are paged in rank order until limit entries survive
+	// the filters or the matches run out: the type/tag/membership/project
+	// filters run after the MATCH, so one fixed-size candidate window
+	// could silently answer fewer than limit hits while more exist.
+	batch := limit * 4
+	for offset := 0; ; offset += batch {
+		cands, err := s.ftsPage(ftsQuery(long), batch, offset)
+		if err != nil {
+			return nil, err
 		}
-		if stale {
-			continue
-		}
-		e, err := s.load(c.id)
-		if err != nil || e.Status != "active" {
-			continue
-		}
-		e, ok := s.serveConsistent(e)
-		if !ok {
-			continue
-		}
-		if !typeMatches(e.Type, memType) {
-			continue
-		}
-		if len(tags) > 0 && !containsAll(e.Tags, tags) {
-			continue
-		}
-		if allowed != nil && !allowed(e) {
-			continue
-		}
-		out = append(out, *e)
-		if len(out) >= limit {
-			break
+		if take(cands) || len(cands) < batch {
+			return out, nil
 		}
 	}
-	return out, nil
+}
+
+// ftsPage reads one rank-ordered page of FTS candidates.
+func (s *Store) ftsPage(match string, limit, offset int) ([]candRow, error) {
+	rows, err := s.db.Query(`SELECT f.mem_id, f.body FROM memories m
+		JOIN memory_fts f ON f.mem_id = m.id
+		WHERE memory_fts MATCH ?1 AND m.status='active'
+		ORDER BY rank LIMIT ?2 OFFSET ?3`, match, limit, offset)
+	if err != nil {
+		// A typed refusal, never a degrade to a full scan: answering
+		// every memory for a query FTS could not parse is a leak.
+		return nil, errf(api.ErrMemUnavailable, "", "fts: %v", err)
+	}
+	defer rows.Close()
+	var out []candRow
+	for rows.Next() {
+		var c candRow
+		if err := rows.Scan(&c.id, &c.body); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // typeMatches answers the type filter for one entry. An empty filter
