@@ -978,7 +978,7 @@ removed automatically. Restart the harness sessions afterwards.
 
 Shared content — designs, reviews, decision sheets, audits, experience —
 belongs in aihub; a workspace keeps locally only `.repo/`, `capsules/`,
-`.polyforge/` (polyforge-generated: `repo-map/`, `watchers/`) and
+`.polyforge/` (polyforge-generated only) and
 `scratch/` (disposable). The README's "Workspace layout" paragraph has
 the full convention. Per existing workspace, after upgrading `pf`:
 
@@ -1005,7 +1005,10 @@ the full convention. Per existing workspace, after upgrading `pf`:
    --project <p> --type doc.design "<title words>"` (or `doc.review`,
    …), then delete the local file.
 4. Move logs, briefs, downloads and `.polyforge.yaml.bak-*` backups into
-   `scratch/`. `pf doctor` reports scratch entries older than 14 days;
+   `scratch/`. `.polyforge/repo-map/` and `.polyforge/watchers/` are
+   legacy v1 artifacts — nothing in v2 generates or reads them; doctor
+   tolerates them, and you may delete them (CLAUDE.md lines pointing at
+   `repo-map/*.md` then dangle — drop them too). `pf doctor` reports scratch entries older than 14 days;
    `pf doctor --prune-scratch` deletes them and lists what it deleted.
 
 ## Hub git calls ignore the operator's git config (repo review 2026-10-16 V-5)

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // doctorWorkspace answers a scratch config mapping one existing
@@ -95,7 +97,17 @@ func toChecks(doc doctorDoc) []doctorCheck {
 	return out
 }
 
+// mtimeOnlyScratch makes the scratch age judge by mtime alone (a test
+// cannot backdate a ctime).
+func mtimeOnlyScratch(t *testing.T) {
+	t.Helper()
+	orig := workspace.ChangeTime
+	workspace.ChangeTime = func(os.FileInfo) time.Time { return time.Time{} }
+	t.Cleanup(func() { workspace.ChangeTime = orig })
+}
+
 func TestDoctorScratchReportsThenPrunesOnFlag(t *testing.T) {
+	mtimeOnlyScratch(t)
 	env, ws := doctorWorkspace(t)
 	old := time.Now().Add(-15 * 24 * time.Hour)
 	touch(t, filepath.Join(ws, "scratch", "old.log"), old)
@@ -135,6 +147,24 @@ func TestDoctorScratchReportsThenPrunesOnFlag(t *testing.T) {
 	_, _, doc = doctorStatus(t, env, "--json", "doctor")
 	if st, detail := doctorFind(t, doc, docChScratch); st != "pass" {
 		t.Fatalf("after prune scratch = %s (%s)", st, detail)
+	}
+}
+
+func TestDoctorScratchSymlinkNeverPruned(t *testing.T) {
+	mtimeOnlyScratch(t)
+	env, ws := doctorWorkspace(t)
+	target := t.TempDir()
+	precious := filepath.Join(target, "precious")
+	touch(t, precious, time.Now().Add(-30*24*time.Hour))
+	if err := os.Symlink(target, filepath.Join(ws, "scratch")); err != nil {
+		t.Fatal(err)
+	}
+	_, _, doc := doctorStatus(t, env, "--json", "doctor", "--prune-scratch")
+	if st, detail := doctorFind(t, doc, docChScratch); st != "warn" || !strings.Contains(detail, "not a plain directory") {
+		t.Fatalf("scratch symlink = %s (%s)", st, detail)
+	}
+	if _, err := os.Stat(precious); err != nil {
+		t.Fatalf("doctor --prune-scratch deleted through the symlink: %v", err)
 	}
 }
 

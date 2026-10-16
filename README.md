@@ -534,7 +534,7 @@ locally only:
   CLAUDE.md         workspace notes (polyforge-managed block + the human part)
   .repo/<repo>/     clones for humans and interactive agents
   capsules/<wi>/    work item workspaces (daemon-managed)
-  .polyforge/       polyforge-generated files only (repo-map/, watchers/) — no documents
+  .polyforge/       polyforge-generated files only — no documents (legacy v1 repo-map/, watchers/ are tolerated)
   scratch/          disposable output (logs, briefs, e2e output, downloads)
 ```
 
@@ -545,8 +545,9 @@ section. `pf doctor` warns (never fails, never moves anything) about root
 entries outside the layout — dot-entries such as `.gitignore`, `.pi`,
 `.claude` and `.mcp.json` are tolerated, `.polyforge.yaml.*` backups are
 not — and about non-generated entries under `.polyforge/`, naming each
-one's destination; it reports `scratch/` entries whose newest
-modification is older than 14 days, and `pf doctor --prune-scratch`
+one's destination; it reports `scratch/` entries whose newest change
+(mtime or ctime, of the entry and everything under it) is older than 14
+days — a `scratch` that is a symlink is never scanned or pruned — and `pf doctor --prune-scratch`
 removes them, listing each. Step agents are unaffected: they work inside
 their capsule.
 

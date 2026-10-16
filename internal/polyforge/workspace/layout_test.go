@@ -108,7 +108,7 @@ func TestInitWithoutManagedBlockPrependsOne(t *testing.T) {
 
 func TestInitRefusesBrokenMarkersAndScratchFile(t *testing.T) {
 	ws := t.TempDir()
-	broken := "x\n" + layoutOpen + "\nno end\n"
+	broken := "x\n" + managedOpen + "\n" + layoutOpen + "\nno end\n" + managedClose + "\n"
 	writeFile(t, filepath.Join(ws, NotesFile), broken)
 	if _, err := Init(ws); err == nil {
 		t.Fatal("init accepted an unclosed layout section")
@@ -159,7 +159,17 @@ func TestStrayEntries(t *testing.T) {
 	}
 }
 
+// mtimeOnly makes the scratch age judge by mtime alone for the test
+// (a test cannot backdate a ctime: Chtimes itself sets it to now).
+func mtimeOnly(t *testing.T) {
+	t.Helper()
+	orig := ChangeTime
+	ChangeTime = func(os.FileInfo) time.Time { return time.Time{} }
+	t.Cleanup(func() { ChangeTime = orig })
+}
+
 func TestStaleScratchAndPrune(t *testing.T) {
+	mtimeOnly(t)
 	ws := t.TempDir()
 	now := time.Now()
 	old := now.Add(-15 * 24 * time.Hour)
@@ -179,16 +189,16 @@ func TestStaleScratchAndPrune(t *testing.T) {
 	set("olddir", old)
 	set("mixed/old.txt", old)
 	set("mixed", old) // the dir is old, but new.txt under it is fresh
-	stale, err := StaleScratch(ws, now, ScratchMaxAge)
+	rep, err := StaleScratch(ws, now, ScratchMaxAge)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"old.log", "olddir"}; !reflect.DeepEqual(stale, want) {
-		t.Fatalf("stale = %v, want %v", stale, want)
+	if want := []string{"old.log", "olddir"}; !reflect.DeepEqual(rep.Stale, want) || len(rep.Skipped) != 0 {
+		t.Fatalf("stale = %+v, want %v", rep, want)
 	}
-	removed, err := PruneScratch(ws, stale)
-	if err != nil || !reflect.DeepEqual(removed, stale) {
-		t.Fatalf("prune = %v, %v", removed, err)
+	pruned, err := PruneScratch(ws, now, ScratchMaxAge)
+	if err != nil || !reflect.DeepEqual(pruned.Stale, rep.Stale) {
+		t.Fatalf("prune = %+v, %v", pruned, err)
 	}
 	left, _ := os.ReadDir(filepath.Join(ws, ScratchDir))
 	var names []string
@@ -198,10 +208,127 @@ func TestStaleScratchAndPrune(t *testing.T) {
 	if want := []string{"fresh.log", "mixed"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("scratch after prune = %v, want %v", names, want)
 	}
-	if _, err := PruneScratch(ws, []string{"../x"}); err == nil {
-		t.Fatal("prune accepted a path outside scratch/")
+	if rep, err := StaleScratch(t.TempDir(), now, ScratchMaxAge); err != nil || rep.Stale != nil {
+		t.Fatalf("no scratch/: %+v %v", rep, err)
 	}
-	if stale, err := StaleScratch(t.TempDir(), now, ScratchMaxAge); err != nil || stale != nil {
-		t.Fatalf("no scratch/: %v %v", stale, err)
+}
+
+// TestScratchCountsCtime: a download or an extracted archive keeps an
+// old mtime but arrives now (its ctime) — it is not stale on arrival.
+func TestScratchCountsCtime(t *testing.T) {
+	ws := t.TempDir()
+	old := time.Now().Add(-30 * 24 * time.Hour)
+	writeFile(t, filepath.Join(ws, ScratchDir, "download.tar"), "x")
+	if err := os.Chtimes(filepath.Join(ws, ScratchDir, "download.tar"), old, old); err != nil {
+		t.Fatal(err)
 	}
+	rep, err := StaleScratch(ws, time.Now(), ScratchMaxAge)
+	if err != nil || len(rep.Stale) != 0 {
+		t.Fatalf("a backdated-mtime arrival is stale: %+v %v", rep, err)
+	}
+	rep, err = PruneScratch(ws, time.Now(), ScratchMaxAge)
+	if err != nil || len(rep.Stale) != 0 {
+		t.Fatalf("prune removed a fresh arrival: %+v %v", rep, err)
+	}
+	if _, err := os.Stat(filepath.Join(ws, ScratchDir, "download.tar")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestScratchSymlinkNeverFollowed: a scratch that is a symlink is never
+// scanned or pruned — its target may be anything ($HOME, /).
+func TestScratchSymlinkNeverFollowed(t *testing.T) {
+	mtimeOnly(t)
+	ws := t.TempDir()
+	target := t.TempDir()
+	old := time.Now().Add(-30 * 24 * time.Hour)
+	precious := filepath.Join(target, "precious")
+	writeFile(t, precious, "x")
+	if err := os.Chtimes(precious, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(ws, ScratchDir)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := StaleScratch(ws, time.Now(), ScratchMaxAge); err == nil || !strings.Contains(err.Error(), "not a plain directory") {
+		t.Fatalf("StaleScratch on a symlinked scratch: %v", err)
+	}
+	if rep, err := PruneScratch(ws, time.Now(), ScratchMaxAge); err == nil || len(rep.Stale) != 0 {
+		t.Fatalf("PruneScratch on a symlinked scratch: %+v %v", rep, err)
+	}
+	if _, err := os.Stat(precious); err != nil {
+		t.Fatalf("the symlink target lost its file: %v", err)
+	}
+	if _, err := Init(ws); err == nil {
+		t.Fatal("init accepted a symlinked scratch")
+	}
+}
+
+func TestInitMarkerEdgeCases(t *testing.T) {
+	t.Run("two layout sections refused", func(t *testing.T) {
+		ws := t.TempDir()
+		body := managedOpen + "\n" + LayoutBlock() + LayoutBlock() + managedClose + "\n"
+		writeFile(t, filepath.Join(ws, NotesFile), body)
+		if _, err := Init(ws); err == nil || !strings.Contains(err.Error(), "2") {
+			t.Fatalf("init on two sections: %v", err)
+		}
+		if readFile(t, filepath.Join(ws, NotesFile)) != body {
+			t.Fatal("a refused init wrote CLAUDE.md")
+		}
+	})
+	t.Run("marker quoted in the human part is ignored", func(t *testing.T) {
+		ws := t.TempDir()
+		human := "\n## notes\n\nthe section starts at `" + layoutOpen + "` and ends at `" + layoutClose + "`\n"
+		writeFile(t, filepath.Join(ws, NotesFile), managedOpen+"\nlisting\n"+managedClose+"\n"+human)
+		if res, err := Init(ws); err != nil || res.NotesFile != "inserted" {
+			t.Fatalf("init = %+v %v", res, err)
+		}
+		want := managedOpen + "\nlisting\n\n" + LayoutBlock() + managedClose + "\n" + human
+		if got := readFile(t, filepath.Join(ws, NotesFile)); got != want {
+			t.Fatalf("CLAUDE.md =\n%s\nwant\n%s", got, want)
+		}
+		if res, err := Init(ws); err != nil || res.NotesFile != "unchanged" {
+			t.Fatalf("second init = %+v %v", res, err)
+		}
+	})
+	t.Run("CRLF kept", func(t *testing.T) {
+		ws := t.TempDir()
+		writeFile(t, filepath.Join(ws, NotesFile), managedOpen+"\r\nlisting\r\n"+managedClose+"\r\n# me\r\n")
+		if _, err := Init(ws); err != nil {
+			t.Fatal(err)
+		}
+		got := readFile(t, filepath.Join(ws, NotesFile))
+		if strings.Count(got, "\n") != strings.Count(got, "\r\n") {
+			t.Fatalf("mixed line endings after init: %q", got)
+		}
+		if res, err := Init(ws); err != nil || res.NotesFile != "unchanged" {
+			t.Fatalf("second init on CRLF = %+v %v", res, err)
+		}
+	})
+	t.Run("symlinked CLAUDE.md: target written, link kept, mode kept", func(t *testing.T) {
+		ws := t.TempDir()
+		real := filepath.Join(t.TempDir(), "notes.md")
+		writeFile(t, real, "# shared notes\n")
+		if err := os.Chmod(real, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(ws, NotesFile)
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Init(ws); err != nil {
+			t.Fatal(err)
+		}
+		if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("CLAUDE.md is no longer a symlink: %v", err)
+		}
+		fi, _ := os.Stat(real)
+		if got := readFile(t, real); !strings.Contains(got, layoutOpen) || !strings.HasSuffix(got, "# shared notes\n") || fi.Mode().Perm() != 0o640 {
+			t.Fatalf("target = %q mode %v", got, fi.Mode().Perm())
+		}
+		left, _ := os.ReadDir(filepath.Dir(real))
+		if len(left) != 1 {
+			t.Fatalf("temp files left beside the target: %v", left)
+		}
+	})
 }

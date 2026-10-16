@@ -18,7 +18,7 @@ import (
 //   - "workspace layout": root entries outside the convention and
 //     non-generated entries under .polyforge/, each named with its
 //     suggested destination. Read-only: nothing is moved or deleted.
-//   - "workspace scratch": scratch/ entries whose newest modification is
+//   - "workspace scratch": scratch/ entries whose newest change (mtime or ctime) is
 //     older than 14 days. By default they are only REPORTED (warn);
 //     `pf doctor --prune-scratch` removes them and lists what it removed.
 //     Report-by-default keeps doctor a read-only probe anyone may run at
@@ -80,7 +80,7 @@ func workspaceLayoutCheck(wss []string) doctorCheck {
 		c.Detail = strings.Join(parts, "; ")
 	default:
 		c.Status = "pass"
-		c.Detail = fmt.Sprintf("every mapped workspace keeps the layout (root: .repo/, capsules/, scratch/, .polyforge/, CLAUDE.md, CLAUDE.local.md, AGENTS.md, %s and dot-entries other than %s backups; .polyforge/: repo-map/, watchers/)", workspace.FileName, workspace.FileName)
+		c.Detail = fmt.Sprintf("every mapped workspace keeps the layout (root: .repo/, capsules/, scratch/, .polyforge/, CLAUDE.md, CLAUDE.local.md, AGENTS.md, %s and dot-entries other than %s backups; .polyforge/: the legacy v1 repo-map/, watchers/)", workspace.FileName, workspace.FileName)
 	}
 	return c
 }
@@ -91,23 +91,25 @@ func scratchCheck(wss []string, now time.Time, prune bool) doctorCheck {
 	c := doctorCheck{Name: docChScratch, Status: "pass"}
 	var stale, pruned, errs []string
 	for _, ws := range existingWorkspaces(wss) {
-		names, err := workspace.StaleScratch(ws, now, workspace.ScratchMaxAge)
+		scan := workspace.StaleScratch
+		if prune {
+			scan = workspace.PruneScratch
+		}
+		rep, err := scan(ws, now, workspace.ScratchMaxAge)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", ws, err))
 			continue
 		}
-		if !prune {
-			for _, n := range names {
-				stale = append(stale, filepath.Join(ws, workspace.ScratchDir, n))
+		for _, n := range rep.Stale {
+			p := filepath.Join(ws, workspace.ScratchDir, n)
+			if prune {
+				pruned = append(pruned, p)
+			} else {
+				stale = append(stale, p)
 			}
-			continue
 		}
-		removed, err := workspace.PruneScratch(ws, names)
-		for _, n := range removed {
-			pruned = append(pruned, filepath.Join(ws, workspace.ScratchDir, n))
-		}
-		if err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", ws, err))
+		for _, sk := range rep.Skipped {
+			errs = append(errs, filepath.Join(ws, workspace.ScratchDir, sk))
 		}
 	}
 	var parts []string
@@ -124,7 +126,7 @@ func scratchCheck(wss []string, now time.Time, prune bool) doctorCheck {
 	}
 	if len(errs) > 0 {
 		c.Status = "warn"
-		parts = append(parts, "unreadable: "+strings.Join(errs, "; "))
+		parts = append(parts, "not checked: "+strings.Join(errs, "; "))
 	}
 	c.Detail = strings.Join(parts, "; ")
 	return c

@@ -12,7 +12,7 @@ package workspace
 //	  CLAUDE.md         the workspace notes (polyforge-managed block + human part)
 //	  .repo/<repo>/     clones for humans and interactive agents
 //	  capsules/<wi>/    work item workspaces (daemon-managed)
-//	  .polyforge/       polyforge-generated files only (repo-map, watcher state)
+//	  .polyforge/       polyforge-generated files only (no documents)
 //	  scratch/          disposable output; entries older than 14 days are stale
 //
 // `pf init` creates scratch/ and writes the convention into CLAUDE.md
@@ -43,12 +43,13 @@ const (
 )
 
 // ScratchMaxAge is the age past which a scratch entry is stale: its
-// newest modification (the entry and everything under it) is older.
+// newest change (mtime or ctime, of the entry and everything under it)
+// is older.
 const ScratchMaxAge = 14 * 24 * time.Hour
 
 // rootAllowed are the non-dot root entries of the convention. Every
 // dot-entry is tolerated too (harnesses and tools own .pi, .claude,
-// .mcp.json, .gitignore, .git, …) except the config backups rootStray
+// .mcp.json, .gitignore, .git, …) except the config backups StrayEntries
 // names — those are disposable.
 var rootAllowed = map[string]bool{
 	CapsulesDir:       true,
@@ -58,8 +59,10 @@ var rootAllowed = map[string]bool{
 	"AGENTS.md":       true,
 }
 
-// generatedAllowed are the entries polyforge itself generates under
-// .polyforge/.
+// generatedAllowed are the entries tolerated under .polyforge/. Both are
+// legacy v1 artifacts — nothing in v2 generates them any more (the v1
+// repo-map generator and watcher logs are gone); they stay allowed so
+// existing workspaces do not warn, and may be removed by hand.
 var generatedAllowed = map[string]bool{
 	"repo-map": true,
 	"watchers": true,
@@ -131,37 +134,73 @@ func destFor(path string, e fs.DirEntry) string {
 	return DestScratch
 }
 
-// StaleScratch answers the scratch/ entries (names, sorted) whose newest
-// modification — the entry's own and, for a directory, every path under
-// it (symlinks are not followed) — is older than maxAge at now. A
-// workspace without scratch/ has none.
-func StaleScratch(root string, now time.Time, maxAge time.Duration) ([]string, error) {
-	dir := filepath.Join(root, ScratchDir)
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	cutoff := now.Add(-maxAge)
-	var stale []string
-	for _, e := range entries {
-		newest, err := newestMtime(filepath.Join(dir, e.Name()))
-		if err != nil {
-			return nil, err
-		}
-		if newest.Before(cutoff) {
-			stale = append(stale, e.Name())
-		}
-	}
-	sort.Strings(stale)
-	return stale, nil
+// ScratchReport is the outcome of a scratch/ scan or prune.
+type ScratchReport struct {
+	Stale   []string // stale entry names, sorted (PruneScratch: the ones it removed)
+	Skipped []string // "name: reason" for entries that could not be judged or removed
 }
 
-// newestMtime walks path (without following symlinks) and answers the
-// newest modification time seen.
-func newestMtime(path string) (time.Time, error) {
+// scratchRoot answers the resolved path of <root>/scratch, or "" when
+// there is none. Anything but a plain directory — a symlink above all,
+// whose target may be anything — is refused: it is never scanned or
+// pruned.
+func scratchRoot(root string) (string, error) {
+	p := filepath.Join(root, ScratchDir)
+	fi, err := os.Lstat(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !fi.IsDir() {
+		return "", fmt.Errorf("%s is not a plain directory (a symlink or a file) — not scanned or pruned", p)
+	}
+	// the workspace path itself may run through symlinks; removal
+	// targets are checked against the resolved scratch dir
+	return filepath.EvalSymlinks(p)
+}
+
+// StaleScratch answers the scratch/ entries whose newest change — the
+// later of mtime and ctime, of the entry and, for a directory, of every
+// path under it (symlinks are not followed) — is older than maxAge at
+// now. ctime counts because a download or an extracted archive keeps
+// its old mtimes yet arrived just now. An entry that cannot be read (or
+// vanished meanwhile) is skipped and reported, never fatal. A workspace
+// without scratch/ has none.
+func StaleScratch(root string, now time.Time, maxAge time.Duration) (ScratchReport, error) {
+	var rep ScratchReport
+	dir, err := scratchRoot(root)
+	if err != nil || dir == "" {
+		return rep, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return rep, err
+	}
+	cutoff := now.Add(-maxAge)
+	for _, e := range entries {
+		newest, err := newestChange(filepath.Join(dir, e.Name()))
+		if err != nil {
+			rep.Skipped = append(rep.Skipped, fmt.Sprintf("%s: %v", e.Name(), err))
+			continue
+		}
+		if newest.Before(cutoff) {
+			rep.Stale = append(rep.Stale, e.Name())
+		}
+	}
+	sort.Strings(rep.Stale)
+	return rep, nil
+}
+
+// ChangeTime answers a file's ctime (zero where the platform does not
+// report it). A variable only so tests — which cannot backdate a ctime —
+// can judge by mtime alone.
+var ChangeTime = changeTime
+
+// newestChange walks path (without following symlinks) and answers the
+// newest mtime or ctime seen.
+func newestChange(path string) (time.Time, error) {
 	var newest time.Time
 	err := filepath.WalkDir(path, func(_ string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -171,29 +210,57 @@ func newestMtime(path string) (time.Time, error) {
 		if err != nil {
 			return err
 		}
-		if info.ModTime().After(newest) {
-			newest = info.ModTime()
+		for _, t := range []time.Time{info.ModTime(), ChangeTime(info)} {
+			if t.After(newest) {
+				newest = t
+			}
 		}
 		return nil
 	})
 	return newest, err
 }
 
-// PruneScratch removes the named scratch/ entries (as StaleScratch
-// answered them) and answers the ones it removed. Only plain names are
-// accepted: nothing outside scratch/ is ever touched.
-func PruneScratch(root string, names []string) ([]string, error) {
-	var removed []string
-	for _, name := range names {
-		if name == "" || name == "." || name == ".." || strings.ContainsRune(name, filepath.Separator) {
-			return removed, fmt.Errorf("prune scratch: %q is not a scratch entry name", name)
-		}
-		if err := os.RemoveAll(filepath.Join(root, ScratchDir, name)); err != nil {
-			return removed, err
-		}
-		removed = append(removed, name)
+// PruneScratch removes the stale scratch/ entries and reports the ones
+// it removed. Each entry is re-judged immediately before its removal, so
+// one that got fresh content since a preceding StaleScratch report is
+// kept. A race remains between that re-check and RemoveAll (a file
+// written into a stale directory in that window is removed with it);
+// scratch/ is disposable by convention, so that window is accepted.
+// Every target is verified to sit directly under the resolved scratch
+// dir; nothing outside it is ever touched.
+func PruneScratch(root string, now time.Time, maxAge time.Duration) (ScratchReport, error) {
+	var rep ScratchReport
+	dir, err := scratchRoot(root)
+	if err != nil || dir == "" {
+		return rep, err
 	}
-	return removed, nil
+	found, err := StaleScratch(root, now, maxAge)
+	if err != nil {
+		return rep, err
+	}
+	rep.Skipped = found.Skipped
+	cutoff := now.Add(-maxAge)
+	for _, name := range found.Stale {
+		target := filepath.Join(dir, name)
+		if rel, err := filepath.Rel(dir, target); err != nil || rel != name || name == "." || name == ".." || strings.ContainsRune(name, filepath.Separator) {
+			rep.Skipped = append(rep.Skipped, fmt.Sprintf("%s: not an entry directly under %s", name, dir))
+			continue
+		}
+		newest, err := newestChange(target)
+		if err != nil {
+			rep.Skipped = append(rep.Skipped, fmt.Sprintf("%s: %v", name, err))
+			continue
+		}
+		if !newest.Before(cutoff) {
+			continue // changed since the scan: no longer stale
+		}
+		if err := os.RemoveAll(target); err != nil {
+			rep.Skipped = append(rep.Skipped, fmt.Sprintf("%s: %v", name, err))
+			continue
+		}
+		rep.Stale = append(rep.Stale, name)
+	}
+	return rep, nil
 }
 
 // The CLAUDE.md markers: the polyforge-managed block (shared with the
@@ -247,7 +314,9 @@ type InitResult struct {
 // and the layout section of CLAUDE.md. It is idempotent and never
 // touches CLAUDE.md outside the layout section: a file without one gets
 // it inside its polyforge-managed block (or a new managed block on top);
-// a file with one gets that section replaced.
+// a file with one gets that section replaced. CLAUDE.md is written
+// atomically (temp file + rename, mode kept); a symlinked CLAUDE.md has
+// its target written, the link stays.
 func Init(root string) (InitResult, error) {
 	res := InitResult{Workspace: root}
 	st, err := os.Stat(root)
@@ -258,11 +327,11 @@ func Init(root string) (InitResult, error) {
 		return res, fmt.Errorf("%s is not a directory", root)
 	}
 	scratch := filepath.Join(root, ScratchDir)
-	switch st, err := os.Stat(scratch); {
+	switch st, err := os.Lstat(scratch); {
 	case err == nil && st.IsDir():
 		res.Scratch = "exists"
 	case err == nil:
-		return res, fmt.Errorf("%s exists and is not a directory", scratch)
+		return res, fmt.Errorf("%s exists and is not a plain directory (a symlink or a file)", scratch)
 	case errors.Is(err, fs.ErrNotExist):
 		if err := os.Mkdir(scratch, 0o755); err != nil {
 			return res, err
@@ -273,6 +342,13 @@ func Init(root string) (InitResult, error) {
 	}
 
 	notes := filepath.Join(root, NotesFile)
+	if fi, err := os.Lstat(notes); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+		target, err := filepath.EvalSymlinks(notes)
+		if err != nil {
+			return res, fmt.Errorf("%s is a symlink that does not resolve: %w", notes, err)
+		}
+		notes = target
+	}
 	raw, err := os.ReadFile(notes)
 	var mode fs.FileMode = 0o644
 	switch {
@@ -293,48 +369,100 @@ func Init(root string) (InitResult, error) {
 	if how == "unchanged" {
 		return res, nil
 	}
-	return res, os.WriteFile(notes, []byte(text), mode)
+	return res, writeAtomic(notes, []byte(text), mode)
+}
+
+// writeAtomic replaces path with data through a temp file in the same
+// directory (fsync, chmod, rename).
+func writeAtomic(path string, data []byte, mode fs.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			os.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Chmod(mode); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	ok = true
+	return nil
 }
 
 // upsertLayout answers the CLAUDE.md text with the layout section in
-// place and how it got there.
+// place and how it got there. The layout markers count only inside the
+// polyforge-managed block (one quoted in the human part is ignored);
+// more than one layout section there is refused. A CRLF file gets a CRLF
+// section.
 func upsertLayout(text string, absent bool) (string, string, error) {
-	block := LayoutBlock()
-	if absent {
-		return managedOpen + "\n" + block + managedClose + "\n", "created", nil
+	nl := "\n"
+	if strings.Contains(text, "\r\n") {
+		nl = "\r\n"
 	}
-	if i := strings.Index(text, layoutOpen); i >= 0 {
-		j := strings.Index(text[i:], layoutClose)
-		if j < 0 {
-			return "", "", fmt.Errorf("%s has no closing %s — fix the file by hand, then re-run", layoutOpen, layoutClose)
+	block := strings.ReplaceAll(LayoutBlock(), "\n", nl)
+	if absent {
+		return managedOpen + nl + block + managedClose + nl, "created", nil
+	}
+	i := strings.Index(text, managedOpenP)
+	if i < 0 {
+		sep := nl
+		if text == "" {
+			sep = ""
 		}
-		end := i + j + len(layoutClose)
-		if end < len(text) && text[end] == '\n' {
-			end++
+		return managedOpen + nl + block + managedClose + nl + sep + text, "inserted", nil
+	}
+	j := strings.Index(text[i:], managedClose)
+	if j < 0 {
+		return "", "", fmt.Errorf("the polyforge-managed block has no closing %s — fix the file by hand, then re-run", managedClose)
+	}
+	at := i + j // the managed block's closing marker
+	inner := text[i:at]
+	switch n := strings.Count(inner, layoutOpen); {
+	case n > 1:
+		return "", "", fmt.Errorf("the polyforge-managed block carries %d %s sections — keep one, then re-run", n, layoutOpen)
+	case n == 1:
+		s := i + strings.Index(inner, layoutOpen)
+		k := strings.Index(text[s:at], layoutClose)
+		if k < 0 {
+			return "", "", fmt.Errorf("%s has no closing %s inside the polyforge-managed block — fix the file by hand, then re-run", layoutOpen, layoutClose)
 		}
-		if text[i:end] == block {
+		end := s + k + len(layoutClose)
+		if strings.HasPrefix(text[end:], nl) {
+			end += len(nl)
+		}
+		if text[s:end] == block {
 			return text, "unchanged", nil
 		}
-		return text[:i] + block + text[end:], "updated", nil
+		return text[:s] + block + text[end:], "updated", nil
 	}
-	if i := strings.Index(text, managedOpenP); i >= 0 {
-		j := strings.Index(text[i:], managedClose)
-		if j < 0 {
-			return "", "", fmt.Errorf("the polyforge-managed block has no closing %s — fix the file by hand, then re-run", managedClose)
-		}
-		at := i + j
-		before := text[:at]
-		if !strings.HasSuffix(before, "\n") {
-			before += "\n"
-		}
-		if !strings.HasSuffix(before, "\n\n") {
-			before += "\n"
-		}
-		return before + block + text[at:], "inserted", nil
+	if strings.Contains(inner, layoutClose) {
+		return "", "", fmt.Errorf("a stray %s sits in the polyforge-managed block — fix the file by hand, then re-run", layoutClose)
 	}
-	sep := "\n"
-	if text == "" {
-		sep = ""
+	before := text[:at]
+	if !strings.HasSuffix(before, "\n") {
+		before += nl
 	}
-	return managedOpen + "\n" + block + managedClose + "\n" + sep + text, "inserted", nil
+	if !strings.HasSuffix(before, nl+nl) {
+		before += nl
+	}
+	return before + block + text[at:], "inserted", nil
 }
