@@ -341,6 +341,7 @@ func (s *scriptedSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	trackTestGroup(cmd.Process.Pid)
 	// fidelity with the production spawner: the identity journal runs
 	// before Spawn answers (its failure tears the fresh process down).
 	if p.Journal != nil {
@@ -644,7 +645,34 @@ func spawnSleeper(t *testing.T, wi string) (pid int, startedAt string) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	trackTestGroup(cmd.Process.Pid)
 	return cmd.Process.Pid, startedAt
+}
+
+// testGroups records the process groups the test helpers start: a test
+// that ends on any path (a failure, a kill seam swapped for a fake, a
+// handle nobody terminated) must not leave its `sleep 300` behind.
+// reapTestGroups SIGKILLs every one at the end of the package run
+// (TestMain); syscall.Kill directly, never the swappable killFn.
+var testGroups struct {
+	mu    sync.Mutex
+	pgids []int
+}
+
+func trackTestGroup(pgid int) {
+	testGroups.mu.Lock()
+	testGroups.pgids = append(testGroups.pgids, pgid)
+	testGroups.mu.Unlock()
+}
+
+func reapTestGroups() error {
+	testGroups.mu.Lock()
+	defer testGroups.mu.Unlock()
+	for _, pg := range testGroups.pgids {
+		_ = syscall.Kill(-pg, syscall.SIGKILL)
+	}
+	testGroups.pgids = nil
+	return nil
 }
 
 func writeStateFile(t *testing.T, r *Runtime, recs []*jobRecord) {
@@ -706,6 +734,7 @@ func spawnOrphaningSleeper(wi string) (*orphaningAgent, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	trackTestGroup(cmd.Process.Pid) // the orphan stays in the leader's group
 	h := newProc(cmd, stdin, stdout)
 	// the leader exits on its own; wait for it and read the orphan's pid
 	deadline := time.Now().Add(5 * time.Second)
