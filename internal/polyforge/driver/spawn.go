@@ -874,8 +874,12 @@ func (r *stepRun) exited(defect error) error {
 }
 
 func (r *stepRun) Wait(ctx context.Context) (*StepResult, error) {
+	var lastDefect error
 	for {
 		res, defect := r.collect()
+		if defect != nil {
+			lastDefect = defect
+		}
 		if res != nil {
 			if err := r.archive(res); err != nil {
 				_ = r.handle.Terminate(teardownBound)
@@ -911,6 +915,9 @@ func (r *stepRun) Wait(ctx context.Context) (*StepResult, error) {
 		}
 		select {
 		case <-ctx.Done():
+			if lastDefect != nil {
+				return nil, &EnvelopeDefectError{Defect: lastDefect, Cause: ctx.Err()}
+			}
 			return nil, ctx.Err()
 		case <-time.After(r.poll):
 		}
