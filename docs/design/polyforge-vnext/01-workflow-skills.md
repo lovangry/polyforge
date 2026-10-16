@@ -113,7 +113,7 @@ Step 元素字段——driver 解析的九个键（`internal/polyforge/driver/wo
 |---|---|---|---|
 | `id` | string | 必填 | 非空，steps 内唯一（V2）；同时是 step 定义文件名绑定：`steps/<id>.md`，也是 workspace yaml `steps.<project>.<step-id>.models` 的键（同名步骤跨 bundle 共用一个键） |
 | `gate` | bool | 可选，缺省 false | true 表示本 step 产出业务判定（review/verification/grill-review 皆可） |
-| `requires_human_answer` | bool \| `if_asked` | 可选，缺省 false | 人工 gate：`true` = 完成前必须有人工回答；`if_asked` = 提出的问题只能由人回答，零问题可完成（记 `human_gate_unasked` 事件）。**取代旧的 `interactive: true`**——后者是未知键，被忽略，写了它不会得到人工 gate |
+| `requires_human_answer` | bool \| `if_asked` | 可选，缺省 false | 人工 gate：`true` = 本次尝试中没有人工回答之前，该 step 既不能 completed、也不能 gate_failed（否则会 rewind 或终止 workflow；这类信封被拒，repo review 2026-10-16 V-8）；`if_asked` = 提出的问题只能由人回答，零问题可完成（记 `human_gate_unasked` 事件）。**取代旧的 `interactive: true`**——后者是未知键，被忽略，写了它不会得到人工 gate |
 | `requires_command_evidence` | bool | 可选，缺省 false | true 表示 completed 结果必须带 `command_evidence`（V4 取证门禁，§4.4a；step id 为 `verification` 时隐式为 true） |
 | `on_fail` | OnFail | 可选，仅 `gate: true` 的 step 允许携带（V5） | `OnFail = {target: 更早的 step id（必填）}`——声明即 rewind 边；未声明 `on_fail` 即 §6.2 第 1 步的 `failed_gate` 终止。gate FAIL 判定全文一律随 `pending_rewind_input` 送达 target（polyforge#147 C5：`action` 与 `include_verdict` 键已删除，判定转发无条件） |
 | `context_policy` | string | 可选，缺省 `inherit` | `inherit`\|`fresh`：见 §4.4a。`inherit` 的 step 续上上游交接（派发输入带 handoff 文件正文），`fresh` 从零开始；`gate: true` 的 step 必须是 `fresh`（闸只凭自己的输入判，不继承有倾向性的上下文；V11） |

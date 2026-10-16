@@ -125,6 +125,14 @@ in, never calls a model and never reports a credential value.
 | `warn` | unverified version; no credential visible (neither the `<harness-root>/claude-config/settings.json` `env` block's `ANTHROPIC_AUTH_TOKEN` nor the daemon env's `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY`); both a token and an API key set; a rejected token / gateway pairing or a `CLAUDE_CONFIG_DIR` in that `env` block; `ANTHROPIC_BASE_URL` set in the daemon env | Relay the note. The claude-config `settings.json` `env` block is the single credential authority (polyforge#171; the daemon reports its keys as set/unset, never values): put ONE `ANTHROPIC_AUTH_TOKEN` (+ optional `ANTHROPIC_BASE_URL`) there, never `CLAUDE_CONFIG_DIR` — see docs/upgrade.md. |
 | `skip` | claude steps exist but the daemon is unreachable | Start the daemon and re-run. |
 
+Note (V-11): the daemon's environment — and so every claude step's — is the
+environment of the `polyforge-daemon` tmux server, captured when that server
+first started (possibly from a human's shell). `ANTHROPIC_*` set there pass
+through to the steps; whether the settings.json `env` block overrides a
+same-named process variable is not verified. Keep credentials out of the
+tmux server's environment, or set every needed `ANTHROPIC_*` in the
+claude-config `settings.json` (docs/upgrade.md, #171 section).
+
 ## Success
 
 `ok: true` and every check `pass` (exit 0). Human mode prints one line

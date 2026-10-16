@@ -239,7 +239,7 @@ One row per sub-package, exactly as `internal/` exists today:
 | `internal/polyforge/supervise` | The driver↔supervisor contract: facts, verdicts and the per-WI link (v2-converge §2.2–2.5). |
 | `internal/polyforge/workspace` | The `.polyforge.yaml` loader (`steps.<project>.<default\|step-id>.models`), read and validated by the daemon before every claim and by `pf doctor` (an invalid file refuses the claim without claiming). |
 | `internal/polyforge/observe` | Observe lane: the events log, per-WI monitor goroutines, live-transcript streaming, session verification, and the live activity / pending-question / progress views the daemon reads. |
-| `internal/polyforge/driver` | The Go execution driver: owns `runtime-state/execution.json`, spawns one step process per workflow step and validates each result envelope (needs_input rules, human gate, command-evidence gate). |
+| `internal/polyforge/driver` | The Go execution driver: owns `runtime-state/execution.json`, spawns one step process per workflow step and validates each result envelope (needs_input rules; the human gate — a `requires_human_answer: true` step can neither complete nor gate-fail without a human answer in the current attempt, such an envelope is rejected; the command-evidence gate). |
 | `internal/polyforge/watcher` | The `pf watch` engine: decision classification (fixed-template wake-up lines) and the resident per-chat watcher with its progress file. |
 | `internal/polyforge/runtime` | Runtime lane: the WI lifecycle manager (Start/Stop/Recover/Restart), the pi-harness agent spawner, the layered (L1–L5) process cleanup and the recovery engine. |
 
@@ -469,7 +469,20 @@ restart reconciliation. The `pf daemon ensure` supervision loop then STOPS
 (it logs `the daemon refused to start (exit 78 …); the loop ends`) instead of
 restarting into the same failure every 5s; any other non-zero exit is still
 restarted after 5s. To recover: read `<data-dir>/daemon.log`, fix the cause,
-then run `pf daemon ensure` (the next harness session start also runs it). Every setting is a flag; where an environment variable is listed
+then run `pf daemon ensure` (the next harness session start also runs it).
+
+Git on the work machine (repo review 2026-10-16 V-5). The daemon's git calls
+that talk to aihub with the session credential — the capsule chain push, the
+capsule clone and the carrier ls-remote/fetch/push — run with no system or
+global git config (`GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`) and
+with every inherited `GIT_*` variable stripped. So `http.proxy`,
+`http.sslCAInfo`, `url.*.insteadOf` and `credential.helper` from
+`~/.gitconfig` do NOT apply to them: give the daemon a proxy through
+`https_proxy` / `HTTPS_PROXY` in its environment, and since `GIT_SSL_CAINFO`
+is stripped too, an aihub behind an internal CA needs that CA in the system
+trust store. The capsule commit itself still reads the global config, so
+`user.name` / `user.email` must be set for the daemon user; task-repo git
+(inside `repos/<name>`) also still uses the global config. Every setting is a flag; where an environment variable is listed
 the flag wins over it, and the shared CLI config file
 (`~/.config/polyforge/cli.toml`, or `--config`) is the last fallback for
 the `PF_*` entries.
