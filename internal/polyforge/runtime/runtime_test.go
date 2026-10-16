@@ -101,7 +101,7 @@ func TestStartStopEndToEnd(t *testing.T) {
 	if !dirExists(r.gitDirFor(wi)) {
 		t.Fatalf("external git-dir missing at %s", r.gitDirFor(wi))
 	}
-	// state.json recorded the job: the v1.5 §4.1 shape — the secret, the
+	// state.json recorded the job: the reference.md §3.5 shape — the secret, the
 	// fingerprint, the derivation counter, and NO attempt/generation/
 	// instance/credential fields.
 	recs := loadRecords(t, r)

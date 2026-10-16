@@ -675,7 +675,7 @@ func (m *AdminManager) Backup(dataDir string) (string, error) {
 	name := sanitizeFilename("aihub-" + Now() + ".db")
 	target := filepath.Join(dataDir, "backups", name)
 	if _, err := m.db.Exec(`VACUUM INTO ?1`, target); err != nil {
-		return "", Fail("CORE-507", "", "vacuum into %s: %v", target, err)
+		return "", Fail(api.ErrCoreStorage, "", "vacuum into %s: %v", target, err)
 	}
 	return name, nil
 }

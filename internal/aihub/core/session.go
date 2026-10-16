@@ -1,9 +1,9 @@
 package core
 
 // session.go — the v1.5 session-id ownership model (Lane A):
-// docs/design/polyforge-vnext/v1.5-api-contract.md §1 (frozen wire
-// contract) over the design rationale in v1.5-session-model.md
-// (B1 pre-claim journal is client-side; B3 identity/credential split and
+// docs/design/polyforge-vnext/reference.md §3 (the archived
+// v1.5-api-contract.md / v1.5-session-model.md hold the original rulings;
+// B1 pre-claim journal is client-side; B3 identity/credential split and
 // the M1–M5 rulings are enforced here).
 //
 //   - Claim  (POST .../claim, replaced handler): CAS in ONE transaction —
@@ -366,7 +366,7 @@ func (m *WIManager) Views(wis []api.WorkItem) ([]WIView, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Claim (contract §1.1)
+// Claim (reference.md §3.2)
 
 // Claim executes the v1.5 CAS claim. callerIdentity is the api-key's
 // user id (idempotency triple binding). The response carries the public
@@ -592,7 +592,7 @@ func projectReposTx(tx queryRower, projectID string) ([]api.ProjectRepo, error) 
 }
 
 // ---------------------------------------------------------------------------
-// Verify (contract §1.2, compare-only B3)
+// Verify (reference.md §3.3, compare-only B3)
 
 // Verify compares the presented secret's hash against the stored one.
 // No state change, no event, no secret echo: the answer says whether the
@@ -619,7 +619,7 @@ func (m *SessionManager) Verify(wiID, sessionID string) (*api.SessionVerifyRespo
 }
 
 // ---------------------------------------------------------------------------
-// Attach (contract §1.3, M3 same-session resume)
+// Attach (reference.md §3.3, M3 same-session resume)
 
 // Attach resumes a paused WI under the SAME session: hash matches AND
 // status==paused AND clean_pause==0 → running. Machine/owner refresh to
@@ -744,7 +744,7 @@ func (m *SessionManager) ForceEnd(wiID, reason, callerIdentity string) error {
 }
 
 // ---------------------------------------------------------------------------
-// Session end (contract §1.5) and pause (M3)
+// Session end (reference.md §3.3) and pause (M3)
 
 // blockedSealKey is the WI attrs key carrying the blocked verdict's sealed
 // capsule head (v2-converge §7): {"head": sha, "machine": id}. It rides the

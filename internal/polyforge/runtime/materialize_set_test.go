@@ -1,7 +1,7 @@
 package runtime
 
 // materialize_set_test.go: the F7 lane — the bundle materialization as
-// one atomic set with a completion marker (03 §4.5 semantics): the full
+// one atomic set with a completion marker (reference.md §7.1 semantics): the full
 // materialization shape (workflows/<bundle> + marker targets), the trust gate's reuse rule (marker present
 // and targets whole → untouched), the torn-snapshot rebuild (marker
 // gone → re-materialize + marker rewritten), and the adoption of the

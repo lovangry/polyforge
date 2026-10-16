@@ -14,7 +14,7 @@
 //     executions ride tool_execution_start/tool_execution_end;
 //   - capsule-side execution state: runtime-state/execution.json is
 //     written atomically (tmp+rename) with a MONOTONIC Version per
-//     write — the v1 zero-blocking agent contract (ruling C3) the
+//     write — the v1 zero-blocking agent contract (v1 ruling C3 (archive/v1-architecture-spec.md)) the
 //     observe lane polls;
 //   - a harness transcript is appended at the session path the driver's
 //     derivation declares (--session on a resume, the token-named

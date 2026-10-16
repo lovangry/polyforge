@@ -1,7 +1,7 @@
 // Command aihub is the v1 server binary: single-active, SQLite-backed,
 // one HTTP port for the business face, the admin face and the git proxy.
 //
-// Architecture: docs/design/polyforge-vnext/v1-architecture-spec.md.
+// Architecture: docs/design/polyforge-vnext/reference.md §4.
 // Modules: internal/aihub/{core,memory,git,server}.
 package main
 

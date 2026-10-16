@@ -294,7 +294,7 @@ func TestPatchBundleWithChildrenRefused(t *testing.T) {
 		t.Fatalf("child parent_id = %v, want %s", rc.ParentID, r.ID)
 	}
 
-	// Depth is one level (02 §4.2a): a child is never a parent, and the
+	// Depth is one level (wi-kind-contract.md §2): a child is never a parent, and the
 	// refused create persists nothing.
 	before, err = env2.WIs.List(ListFilters{Project: "alpha"})
 	if err != nil {

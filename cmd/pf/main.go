@@ -1,6 +1,6 @@
 // Command pf is the v1 work-machine client binary: 13 user verbs plus
-// the M1-M5 management face, routed per the v1 architecture
-// (docs/design/polyforge-vnext/v1-architecture-spec.md):
+// the M1-M5 management face, routed as described in
+// docs/design/polyforge-vnext/reference.md §1 and §11:
 //
 //   - direct-to-aihub verbs speak the shared HTTP contract
 //     (internal/common/api) through internal/polyforge/aihubclient;

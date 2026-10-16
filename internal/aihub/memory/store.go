@@ -147,21 +147,21 @@ type CreateRequest struct {
 // state is ever served (INV-7f); crash residue is swept by reconcile.
 func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	if strings.TrimSpace(req.Content) == "" {
-		return nil, errf("MEM-400", "", "content required")
+		return nil, errf(api.ErrMemBadInput, "", "content required")
 	}
 	if req.Type == "" {
-		return nil, errf("MEM-400", "", "type required")
+		return nil, errf(api.ErrMemBadInput, "", "type required")
 	}
 	if !visibilities[req.Visibility] {
-		return nil, errf("MEM-400", "", "bad visibility %q", req.Visibility)
+		return nil, errf(api.ErrMemBadInput, "", "bad visibility %q", req.Visibility)
 	}
 	if len(req.Content) > maxContentBytes {
-		return nil, errf("MEM-413", "", "content exceeds 1 MiB")
+		return nil, errf(api.ErrMemTooLarge, "", "content exceeds 1 MiB")
 	}
 	var projectID string
 	if err := s.db.QueryRow(`SELECT id FROM projects WHERE name=?1 OR id=?1`, req.Project).Scan(&projectID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, errf("MEM-404", "", "project %q", req.Project)
+			return nil, errf(api.ErrMemNotFound, "", "project %q", req.Project)
 		}
 		return nil, err
 	}
@@ -172,7 +172,7 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 			*req.IdempotencyKey).Scan(&existing, &proj, &own)
 		if qerr == nil {
 			if proj != projectID || own != owner {
-				return nil, errf("MEM-409", "IDEMPOTENCY_KEY_REUSED",
+				return nil, errf(api.ErrMemConflict, "IDEMPOTENCY_KEY_REUSED",
 					"idempotency_key belongs to another owner or project")
 			}
 			return s.Get(existing)
@@ -189,7 +189,7 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 			return nil, err
 		}
 		if _, has := raw["id"]; has {
-			return nil, errf("MEM-400", "CLIENT_ID_NOT_ALLOWED", "content frontmatter must not carry an id")
+			return nil, errf(api.ErrMemBadInput, "CLIENT_ID_NOT_ALLOWED", "content frontmatter must not carry an id")
 		}
 		body = rest
 	} else {
@@ -219,17 +219,17 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 		return nil, err
 	}
 	if len(authorityBytes) > maxContentBytes {
-		return nil, errf("MEM-413", "", "authority document exceeds 1 MiB")
+		return nil, errf(api.ErrMemTooLarge, "", "authority document exceeds 1 MiB")
 	}
 	dir := s.authorityDir(projectID, memID)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return nil, errf("MEM-500", "", "mkdir: %v", err)
+		return nil, errf(api.ErrMemInternal, "", "mkdir: %v", err)
 	}
 	tmp := filepath.Join(dir, "memory.md.tmp")
 	authority := filepath.Join(dir, "memory.md")
 	// ①
 	if err := writeTmpSync(tmp, authorityBytes); err != nil {
-		return nil, errf("MEM-500", "", "write authority: %v", err)
+		return nil, errf(api.ErrMemInternal, "", "write authority: %v", err)
 	}
 	contentSHA := shaHex(authorityBytes)
 	// Freshness stamp (polyforge#129): the tmp file's mtime+size ARE the
@@ -266,10 +266,10 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	}
 	// ③
 	if err := os.Rename(tmp, authority); err != nil {
-		return nil, errf("MEM-500", "", "rename authority: %v", err)
+		return nil, errf(api.ErrMemInternal, "", "rename authority: %v", err)
 	}
 	if err := syncDir(dir); err != nil {
-		return nil, errf("MEM-500", "", "fsync authority dir: %v", err)
+		return nil, errf(api.ErrMemInternal, "", "fsync authority dir: %v", err)
 	}
 	return s.load(memID)
 }
@@ -306,7 +306,7 @@ func (s *Store) load(memID string) (*Entry, error) {
 			&e.apath, &e.ContentSHA, &e.ContentLen, &tags, &related, &e.Status, &e.CreatedAt, &e.UpdatedAt,
 			&fsM, &fsS)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, errf("MEM-404", "", "memory %s", memID)
+		return nil, errf(api.ErrMemNotFound, "", "memory %s", memID)
 	}
 	if err != nil {
 		return nil, err
@@ -339,11 +339,32 @@ func (s *Store) load(memID string) (*Entry, error) {
 // allowed filters candidates (membership/visibility, applied by the
 // server layer).
 func (s *Store) Search(q string, memType string, tags []string, limit int, allowed func(*Entry) bool) ([]Entry, error) {
+	return s.SearchMode(MatchAll, "", q, memType, tags, limit, allowed)
+}
+
+// SearchMode is the search face's single entry: match picks the mode
+// (MatchAll / "" — Search's every-token AND; MatchAny — SearchAny's
+// ranked any-term OR; anything else is MEM-400). project, when
+// non-empty, is a project id narrowing the candidates INSIDE the FTS /
+// scan SQL — a pure narrowing (the caller's allowed predicate still
+// enforces membership, visibility and the same project), so the answer
+// is identical to filtering afterwards, minus the per-candidate load
+// of every other project's matches.
+func (s *Store) SearchMode(match, project, q, memType string, tags []string, limit int, allowed func(*Entry) bool) ([]Entry, error) {
+	switch match {
+	case "", MatchAll, MatchAny:
+	default:
+		return nil, errf("MEM-400", "", "match must be %q or %q", MatchAll, MatchAny)
+	}
 	if strings.TrimSpace(q) == "" {
-		return nil, errf("MEM-400", "", "q required")
+		return nil, errf(api.ErrMemBadInput, "", "q required")
 	}
 	if limit <= 0 || limit > 200 {
 		limit = 50
+	}
+	f := searchFilter{project: project, memType: memType, tags: tags, limit: limit, allowed: allowed}
+	if match == MatchAny {
+		return s.searchAny(q, f)
 	}
 	var long, short []string
 	for _, tok := range strings.Fields(q) {
@@ -353,6 +374,30 @@ func (s *Store) Search(q string, memType string, tags []string, limit int, allow
 			short = append(short, tok)
 		}
 	}
+	fts := ""
+	if len(long) > 0 {
+		fts = ftsQuery(long)
+	}
+	return s.collect(fts, short, 0, f)
+}
+
+// searchFilter is one search's post-MATCH filter set plus its limit.
+type searchFilter struct {
+	project string // project id narrowing the SQL candidates; "" = all
+	memType string
+	tags    []string
+	limit   int
+	allowed func(*Entry) bool
+}
+
+// collect answers the filtered hits for one search. match is the FTS5
+// MATCH expression ("" = no FTS step: every active body is scanned);
+// short tokens must each appear as a substring of the indexed body.
+// maxCands > 0 bounds the FTS candidates examined in total (one
+// rank-ordered window, no further paging); 0 pages until the limit is
+// filled or the matches run out.
+func (s *Store) collect(match string, short []string, maxCands int, f searchFilter) ([]Entry, error) {
+	memType, tags, limit, allowed := f.memType, f.tags, f.limit, f.allowed
 	out := []Entry{}
 	// seen: a write between two FTS pages can shift ranks, so the same
 	// entry may appear on consecutive pages — it is answered once.
@@ -398,12 +443,21 @@ func (s *Store) Search(q string, memType string, tags []string, limit int, allow
 		}
 		return false
 	}
-	if len(long) == 0 {
-		scanned, serr := s.scanBodies()
+	if match == "" {
+		scanned, serr := s.scanBodies(f.project)
 		if serr != nil {
 			return nil, serr
 		}
 		take(scanned)
+		return out, nil
+	}
+	// A bounded search examines one best-ranked window and stops there.
+	if maxCands > 0 {
+		cands, err := s.ftsPage(match, f.project, maxCands, 0)
+		if err != nil {
+			return nil, err
+		}
+		take(cands)
 		return out, nil
 	}
 	// FTS candidates are paged in rank order until limit entries survive
@@ -412,7 +466,7 @@ func (s *Store) Search(q string, memType string, tags []string, limit int, allow
 	// could silently answer fewer than limit hits while more exist.
 	batch := limit * 4
 	for offset := 0; ; offset += batch {
-		cands, err := s.ftsPage(ftsQuery(long), batch, offset)
+		cands, err := s.ftsPage(match, f.project, batch, offset)
 		if err != nil {
 			return nil, err
 		}
@@ -423,11 +477,13 @@ func (s *Store) Search(q string, memType string, tags []string, limit int, allow
 }
 
 // ftsPage reads one rank-ordered page of FTS candidates.
-func (s *Store) ftsPage(match string, limit, offset int) ([]candRow, error) {
+// project, when non-empty, keeps only that project's rows.
+func (s *Store) ftsPage(match, project string, limit, offset int) ([]candRow, error) {
 	rows, err := s.db.Query(`SELECT f.mem_id, f.body FROM memories m
 		JOIN memory_fts f ON f.mem_id = m.id
 		WHERE memory_fts MATCH ?1 AND m.status='active'
-		ORDER BY rank LIMIT ?2 OFFSET ?3`, match, limit, offset)
+		AND (?4 = '' OR m.project_id = ?4)
+		ORDER BY rank LIMIT ?2 OFFSET ?3`, match, limit, offset, project)
 	if err != nil {
 		// A typed refusal, never a degrade to a full scan: answering
 		// every memory for a query FTS could not parse is a leak.
@@ -465,10 +521,12 @@ func typeMatches(entryType, memType string) bool {
 type candRow struct{ id, body string }
 
 // scanBodies returns every active entry's indexed body for substring
-// filtering (the short-token path).
-func (s *Store) scanBodies() ([]candRow, error) {
+// filtering (the short-token path); project, when non-empty, keeps only
+// that project's rows.
+func (s *Store) scanBodies(project string) ([]candRow, error) {
 	rows, err := s.db.Query(`SELECT f.mem_id, f.body FROM memories m
-		JOIN memory_fts f ON f.mem_id = m.id WHERE m.status='active'`)
+		JOIN memory_fts f ON f.mem_id = m.id WHERE m.status='active'
+		AND (?1 = '' OR m.project_id = ?1)`, project)
 	if err != nil {
 		return nil, errf(api.ErrMemUnavailable, "", "scan: %v", err)
 	}
@@ -485,15 +543,19 @@ func (s *Store) scanBodies() ([]candRow, error) {
 	return out, nil
 }
 
-// ftsQuery ANDs the tokens as quoted phrases for the trigram MATCH. Every
-// token is an FTS5 string literal (embedded `"` doubled), so operator
-// characters such as - : * ( ) never reach the FTS5 expression parser.
-func ftsQuery(tokens []string) string {
+// ftsQuery ANDs the tokens as quoted phrases for the trigram MATCH.
+func ftsQuery(tokens []string) string { return ftsJoin(tokens, " AND ") }
+
+// ftsJoin joins the tokens with op (" AND " / " OR ") as quoted phrases.
+// Every token is an FTS5 string literal (embedded `"` doubled), so
+// operator characters such as - : * ( ) never reach the FTS5 expression
+// parser.
+func ftsJoin(tokens []string, op string) string {
 	parts := make([]string, len(tokens))
 	for i, p := range tokens {
 		parts[i] = `body:"` + strings.ReplaceAll(p, `"`, `""`) + `"`
 	}
-	return strings.Join(parts, " AND ")
+	return strings.Join(parts, op)
 }
 
 func containsAll(have, want []string) bool {
@@ -528,7 +590,7 @@ func (s *Store) Redact(memID string) error {
 		return err
 	}
 	if e.Status != "active" {
-		return errf("MEM-409", "", "memory is %s", e.Status)
+		return errf(api.ErrMemConflict, "", "memory is %s", e.Status)
 	}
 	if !s.entryConsistent(e) {
 		// Crash residue on the entry being redacted: resolve it under the
@@ -537,12 +599,12 @@ func (s *Store) Redact(memID string) error {
 			if ferr := s.forwardCompleteRedact(e); ferr != nil {
 				return ferr
 			}
-			return errf("MEM-409", "", "memory is redacted")
+			return errf(api.ErrMemConflict, "", "memory is redacted")
 		}
 		if derr := s.deleteOrphanRow(memID); derr != nil {
 			return derr
 		}
-		return errf("MEM-404", "", "memory %s", memID)
+		return errf(api.ErrMemNotFound, "", "memory %s", memID)
 	}
 	// ① file move (the file location IS the authoritative state).
 	src := filepath.Join(s.dataDir, filepath.FromSlash(e.apath))
@@ -551,7 +613,7 @@ func (s *Store) Redact(memID string) error {
 		return err
 	}
 	if err := os.Rename(src, dst); err != nil {
-		return errf("MEM-500", "", "redact move: %v", err)
+		return errf(api.ErrMemInternal, "", "redact move: %v", err)
 	}
 	// ② metadata + FTS removal in one tx.
 	tx, err := s.db.Begin()

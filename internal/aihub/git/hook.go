@@ -1,8 +1,8 @@
 package git
 
 // The pre-receive hook installed into every bare repo. It enforces the
-// v1 capsule-chain invariants (v1-spec-full §六; secret scanning is NOT
-// among them — dropped by ruling C1):
+// v1 capsule-chain invariants (reference.md §8; secret scanning is NOT
+// among them — dropped by v1 ruling C1 (archive/v1-architecture-spec.md)):
 //
 //   - FF-only: a pushed ref must move fast-forward (refs/pf-wip/*
 //     excepted, see below);
@@ -63,7 +63,7 @@ TRAILER="${GIT_PF_SEQ_TRAILER:-Polyforge-Seq}"
 zero=0000000000000000000000000000000000000000
 reject() { echo "aihub: $*" >&2; exit 1; }
 
-# Session fencing (v1.5 §1.6): the proxy exports
+# Session fencing (reference.md §3.4): the proxy exports
 # PF_EXPECTED_FINGERPRINT — the public session fingerprint the Basic
 # credential authenticated against — and git exposes the push's options
 # as GIT_PUSH_OPTION_COUNT + GIT_PUSH_OPTION_0..N (only when the repo

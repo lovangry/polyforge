@@ -3,6 +3,10 @@
 # registry the v1 implementation should have been audited against)
 
 > **注意（2026-10-12）**：`docs/pilot/` 已删除；本文引用的 pilot 路径请到 git 历史查看（tag `v2.1.0`）。
+>
+> **Superseded marks (repo review 2026-10-16 wave 4)**: entries whose *mechanism* no longer exists carry a
+> `〔SUPERSEDED …〕` line naming what replaced it; the lesson itself still applies. Paths such as
+> `03-execution-capsule` now live under [archive/](archive/); the current system is [reference.md](reference.md).
 
 ## Protocol/harness class
 P1  Real pi rejects invented RPC envelopes (v0 first pilot ticket:
@@ -21,6 +25,7 @@ P5  WI Agent inherits the operator's GLOBAL pi config unless isolated:
     registrations leak other systems' toolfaces (the operator's
     mcp-adapter.json). --no-extensions must STAY absent (subagent tool
     is extension-provided) — residual exposure closed by instruction.
+    〔SUPERSEDED (2026-10-16): the WI Agent is deleted; step agents run with a dedicated step-agent dir (no settings.json, only extensions/subagent) and PF_* stripped — reference.md §7.6. The lesson stands.〕
 P6  Model selection is per-step bundle business (model_candidates with
     ordinal advancement on INFRA failure only — business FAIL never
     advances). The agent must not silently run on the operator's
@@ -46,9 +51,11 @@ S2  Sync roots excluded repos/ and release trees from the capsule
 S3  Stale-generation quarantine: pushes with superseded credentials
     must be fenced server-side (attempt-scoped credentials; takeover
     revokes).
+    〔SUPERSEDED (2026-10-16): generations/attempt credentials and takeover are deleted; pushes are fenced by the live session secret (GIT-401) and recovery is force-end-session + a normal claim — reference.md §3.4. The lesson stands.〕
 S4  Publish/flush semantics: wrap/shutdown flushes are blocking with
     typed timeout (60s); shutdown with dead agents must not wedge
     (v0 #32: 20min wedge -> 5min bounded shutdown budget).
+    〔SUPERSEDED (2026-10-16): the flush lane is deleted; pushes are event-triggered with a 60s bound and the shutdown has a 5-minute budget — reference.md §6.2, §8. The lesson stands.〕
 
 ## Daemon/lifecycle class
 D1  Dead agent + detached bash descendants escape the process group —
@@ -56,17 +63,21 @@ D1  Dead agent + detached bash descendants escape the process group —
 D2  Agent death mid-answer-relay: answers must not be lost — idempotent
     3-state ledger, failure never consumes the answer id; new attempt
     must see the pending question (re-injection).
+    〔SUPERSEDED (2026-10-16): the answer ledger is deleted; answers are archived in execution.json by the driver bridge and a re-dispatch re-asks the pending question — reference.md §7.3. The lesson stands.〕
 D3  Restart must reconcile with aihub before reviving (wrapped -> don't
     revive; running -> kill+recover; blocked -> leave).
 D4  Claim idempotency: re-sending the same key returns the same attempt
     (network retries); takeover requeue idempotency.
+    〔SUPERSEDED (2026-10-16): claim idempotency now replays the same session claim response (CORE-409 IDEMPOTENCY_KEY_REUSED on misuse); takeover is deleted — reference.md §3.2. The lesson stands.〕
 D5  Stale claim detection: a crash between claim and spawn must not
     orphan a generation forever (v0 known gap #Start-crash).
+    〔SUPERSEDED (2026-10-16): the pre-claim claiming journal (claiming.json) is the fix — reference.md §3.5. The lesson stands.〕
 D6  needs_input had NO proactive owner notification in v0 (watcher
     scripts filled the gap). v1 answer: check at turn start / events
     file — the events file exists; owner-facing surface?
 D7  Shutdown sequence: stop_notice -> flush(shutdown) -> seal; never
     let observe re-derive an agent after seal.
+    〔SUPERSEDED (2026-10-16): the shutdown sequence is latch → stop observe → kill agent trees → refs/pf-wip snapshot → persist, no flush, no session end — reference.md §6.2. The lesson stands.〕
 
 ## Data/capsule class
 C1' (v0 lesson, superseded by v1 C1 ruling) transcripts are valuable:
@@ -79,6 +90,7 @@ C3' execution.json is the only progress authority; Version must bump
     on every change the daemon should observe.
 C4  Digest integrity: bundle digest pinned at claim must be verifiable
     (v0 verified server-side; v1 wires it at materialize).
+    〔SUPERSEDED (2026-10-16): the bundle digest chain is deleted (polyforge#149 B9); bundles are referenced by name only — 01-workflow-skills.md §4.5. The lesson stands.〕
 
 ## Process class
 X1  Smoke commands given to agents need timeout + explicit stdin close
@@ -174,6 +186,7 @@ F12 停机 push 竞态（S1/#46 re-hit）：daemon 停机时 flush(shutdown) pus
     ship.go ls-remote 校验 remote==sealed commit、绝不 force-push 已移动
     的分支（~lines 160–200）；重启和解补完 seal——测试 fa9ed17「s17
     SIGKILL inside the SEALING window」）。
+    〔SUPERSEDED (2026-10-16): flush(shutdown) is deleted with the flush lane; see S4. The lesson stands.〕
 
 F13 maxTokens 双事故（P6 re-hit ×2）：操作员全局模型配置两起分别设
     maxTokens 超过/等于模型 contextWindow（163840 > 131072、
@@ -221,6 +234,7 @@ F16 flush 栅栏收养窗洞（S3 同型：被取代的世代必须被栅栏挡�
     收养事件（wi_agent_rederived）而非 spawn journal；
     flush_recovery_window HTTP 测试钉死收紧语义；同 commit 另将 s19
     ShipPR 的 gh 建仓限流按可用性门处理——skip 不 fail）。
+    〔SUPERSEDED (2026-10-16): the flush fence is deleted with the flush lane; dispatch fencing is spawn_n in the driver — v2-converge.md §2.2. The lesson stands.〕
 
 F17 M4 证据链断裂（C3' 同型：执行权威文件里该有的证据从未落进）：39 个
     已执行 verification step 中 17 个无结构化命令证据（12 个旧 schema
@@ -244,7 +258,7 @@ F19 M6 观测字段从未随事件面发出：整个窗口 events.log 共 33 条
     memory_remember 事件、携带 write_ms 字段 0 条（旧 schema 事件面未含
     该观测字段；迁移 CLI 直写与服务端 reconcile 回写不产生事件——已
     登记的样本集边界），PILOT-V6 本窗口无样本、不参与判定：检索实时性
-    面（`06-memory-search.md#§4.5` p99 ≤ 5s）全程不可观测。状态注记：
+    面（2026-10-16 前版本的 06-memory-search §4.5 p99 ≤ 5s，见 git 历史）全程不可观测。状态注记：
     未修——已登记为 phase-1 输入（`docs/pilot/v1-phase-0-report.md`
     §5.2「M6 样本集边界」：需新事件 kind 或样本面补齐，未获授权前不动）。
 
@@ -270,6 +284,7 @@ F21 V4 证据契约机械强制（PILOT-V4 否决门槛的修复面；对应发�
     verification 不可能再通过 wrap。回归：observe 单测 + e2e
     `v1_s22_evidence_gitlink_test.go` S22a。状态注记：已修
     （分支 v1-v4v8；合入后回填 commit）。
+    〔SUPERSEDED (2026-10-16): the evidence gate lives in the driver envelope check (requires_command_evidence), not in observe flush(wrap); skills/pf-execute and tools/gate-metrics are deleted — reference.md §7.3. The lesson stands.〕
 
 F22 毒链本地预检 + 同错误重试上限（PILOT-V8 否决门槛的修复面；对应
     发现 F18）：gitops 的 CommitPush 在 `git add -A` 后、commit 前扫描

@@ -214,7 +214,7 @@ func (e *gitEnv) claimSessionWI(t *testing.T, secret string) (wiID, fingerprint 
 
 // pushWithFingerprint pushes HEAD:main carrying
 // --push-option=session-fingerprint=<fp>, exactly the way the v1.5 pf
-// gitops choke point does (contract §1.6 backup layer).
+// gitops choke point does (reference.md §3.4 backup layer).
 func pushWithFingerprint(t *testing.T, dir, remote, fp string) (string, error) {
 	t.Helper()
 	return runGit(t, dir, "push", "--push-option=session-fingerprint="+fp, remote, "HEAD:refs/heads/main")

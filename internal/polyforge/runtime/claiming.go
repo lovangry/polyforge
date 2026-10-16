@@ -1,6 +1,6 @@
 package runtime
 
-// claiming.go: the B1 pre-claim durable journal (v1.5 contract §4.2). A
+// claiming.go: the B1 pre-claim durable journal (reference.md §3.5). A
 // crash anywhere between the aihub session claim and the first spawned
 // agent would otherwise orphan a RUNNING session that nobody can name
 // again — the v0 known gap "#Start-crash" (D5). The journal closes it
@@ -52,7 +52,7 @@ type claimingFile struct {
 }
 
 // claimingRec is one journaled, not-yet-settled claim intention (the
-// v1.5 §4.2 shape): the minted session secret is the replay anchor — a
+// reference.md §3.5 shape): the minted session secret is the replay anchor — a
 // verify of it answers "did our claim land, and is it still ours?".
 type claimingRec struct {
 	WorkItemID     string `json:"work_item_id"`    // the SUBMITTED spelling (id-or-slug)

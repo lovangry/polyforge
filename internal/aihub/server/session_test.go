@@ -1,7 +1,7 @@
 package server
 
 // session_test.go — the v1.5 session endpoints over real HTTP: the five
-// contract §1 routes, their typed refusals, the paused verdict on
+// reference.md §3 routes, their typed refusals, the paused verdict on
 // session-end (the M3 pause transition), and the m4 read surface (public
 // session block on every WorkItem JSON; never a hash, never the secret).
 

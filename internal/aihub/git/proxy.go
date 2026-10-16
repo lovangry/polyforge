@@ -3,7 +3,7 @@ package git
 // The git-http-backend smart-protocol proxy: aihub mounts /git/{wi}.git/…
 // and execs the real `git http-backend` CGI. Basic auth: username must be
 // the work-item id and the password must be the WI's LIVE session secret
-// (v1.5 §1.6 fencing-on-use) — a superseded or ended session's secret is
+// (reference.md §3.4 fencing-on-use) — a superseded or ended session's secret is
 // rejected here (GIT-401).
 
 import (
@@ -72,7 +72,7 @@ func (m *Manager) HandleGit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Basic auth against the session (v1.5 §1.6): the password is the
+	// Basic auth against the session (reference.md §3.4): the password is the
 	// session secret. The returned handle is the push-option fence's
 	// expected value (REQUIRED on every proxied push): the session's PUBLIC
 	// fingerprint. It rides the
@@ -225,7 +225,7 @@ func writeGitErr(w http.ResponseWriter, code, format string, args ...any) {
 // reads HTTP_ACCEPT etc.). Credential headers are dropped: the caller is
 // already authenticated (REMOTE_USER carries the WI), and http-backend,
 // receive-pack and the pre-receive hook all inherit this environment —
-// the session secret stays out of it (v1.5-api-contract §0).
+// the session secret stays out of it (reference.md §3.1).
 func cgiHeaderEnv(h http.Header) []string {
 	var env []string
 	for k, v := range h {

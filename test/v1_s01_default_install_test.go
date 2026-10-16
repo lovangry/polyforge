@@ -64,7 +64,7 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 	// fields from the frozen Identity shape, so the correct pin is the
 	// KEYS' ABSENCE — the runtime no longer writes generation/attempt_id
 	// into capsule.json at all, and session ownership lives in the
-	// daemon-private sync/session-handle marker (contract §5).
+	// daemon-private sync/session-handle marker (v2-converge.md Appendix E.5).
 	for _, gone := range []string{"generation", "attempt_id"} {
 		if _, ok := idnMap[gone]; ok {
 			t.Fatalf("capsule.json still carries the deleted v1 lineage key %q: %v", gone, idnMap)
@@ -175,7 +175,7 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 	if !strings.Contains(transcript, wi) || !strings.Contains(transcript, "work_item_id") {
 		t.Fatalf("execution.json at main is not this work item's: %s", transcript)
 	}
-	// The harness transcript rides the chain (ruling C1).
+	// The harness transcript rides the chain (v1 ruling C1 (archive/v1-architecture-spec.md)).
 	hasTranscript := false
 	out3 := gitRun(t, inst.bareRepo(wi), "ls-tree", "--name-only", "-r", "main", "session")
 	for _, l := range strings.Split(out3, "\n") {

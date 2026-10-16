@@ -60,7 +60,7 @@ func New(db *core.DB, dataDir string, gitMgr *git.Manager) *Server {
 func (s *Server) routes() {
 	m := http.NewServeMux()
 
-	// Business face (02 §5.1 minus SYNC rows; git replaces the chain).
+	// Business face (reference.md §4.1; git replaces the chain).
 	m.HandleFunc("POST /api/v1/work-items", s.auth(s.hCreateWI))
 	m.HandleFunc("GET /api/v1/work-items", s.auth(s.hListWIs))
 	m.HandleFunc("GET /api/v1/work-items/{id}", s.auth(s.hGetWI))
@@ -501,7 +501,7 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity
 		writeErr(w, err)
 		return
 	}
-	// Cancel authorization: reporter, project maintainer, or admin (02 §6.5).
+	// Cancel authorization: reporter, project maintainer, or admin (reference.md §2.1).
 	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
 		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "cancel requires reporter, maintainer or admin"))
 		return
@@ -515,8 +515,9 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity
 }
 
 // ---------------------------------------------------------------------------
-// v1.5 session endpoints (contract §1). The claim path is the machine
-// execution surface (any valid key, scope-checked); force-end-session keeps
+// v1.5 session endpoints (reference.md §3). The claim path is the machine
+// execution surface (a scope-checked key with writer/maintainer membership
+// or admin — hSessionClaim's requireWrite); force-end-session keeps
 // the human decision gate (admin or project maintainer).
 
 // sessionClaimEnvelope is the claim/attach response: the SAME
@@ -997,7 +998,7 @@ func (s *Server) memAllowed(idn *identity) func(*memory.Entry) bool {
 
 // memReadAllowed is the coarse project gate of a memory READ. A denied
 // gate must answer the same not-found shape as a genuinely missing
-// memory — object existence must not leak (02-aihub-core.md §4.10: a
+// memory — object existence must not leak (reference.md §4.1: a
 // non-member's read is 404, only writes are 403) — so membership
 // denial and project-scope mismatch both land as MEM-404 carrying the
 // memory's own id, indistinguishable from memRead's visibility-tier
@@ -1160,7 +1161,7 @@ func (s *Server) hSearchMemory(w http.ResponseWriter, r *http.Request, idn *iden
 	// the read face uses (an unresolvable and an inaccessible project
 	// answer identically), and applied in the candidate predicate IN
 	// ADDITION to — never instead of — the membership and visibility
-	// layers (06-memory-search.md §7's fixed two-layer order).
+	// layers (06-memory-search.md §6's fixed two-layer order).
 	project := ""
 	if p := q.Get("project"); p != "" {
 		projectID, err := s.projectIDOf(p)
@@ -1173,7 +1174,12 @@ func (s *Server) hSearchMemory(w http.ResponseWriter, r *http.Request, idn *iden
 		}
 		project = projectID
 	}
-	s.hSearchRun(w, q.Get("q"), q.Get("type"), tags, project, limit, excerpt, idn)
+	// match= picks the search mode: "all" (the default — every token
+	// must match, the shape of a short human query) or "any" (ranked
+	// any-term — the daemon's claim-time recall over a whole task
+	// description). An unknown mode is refused (MEM-400 from the store),
+	// never silently ANDed.
+	s.hSearchRun(w, q.Get("match"), q.Get("q"), q.Get("type"), tags, project, limit, excerpt, idn)
 }
 
 // maxMemoryExcerptRunes bounds the content excerpt a search answer may
@@ -1196,7 +1202,7 @@ type memoryHitList struct {
 	Total int         `json:"total"`
 }
 
-func (s *Server) hSearchRun(w http.ResponseWriter, query, memType string, tags []string, project string, limit, excerpt int, idn *identity) {
+func (s *Server) hSearchRun(w http.ResponseWriter, match, query, memType string, tags []string, project string, limit, excerpt int, idn *identity) {
 	// Membership-first filtering: restrict to the projects the caller can
 	// read before visibility tiers apply.
 	allowed := s.memAllowed(idn)
@@ -1215,7 +1221,10 @@ func (s *Server) hSearchRun(w http.ResponseWriter, query, memType string, tags [
 		}
 		return baseAllowed(e)
 	}
-	items, err := s.Mems.Search(query, memType, tags, limit, allowed)
+	// The project also narrows the store's candidate SQL (a pure
+	// narrowing: allowed above still enforces it), so other projects'
+	// matches never cost a per-candidate load.
+	items, err := s.Mems.SearchMode(match, project, query, memType, tags, limit, allowed)
 	if err != nil {
 		writeErr(w, err)
 		return

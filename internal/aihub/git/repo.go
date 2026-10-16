@@ -1,6 +1,6 @@
 // Package git is the aihub git surface: per-WI bare-repo lifecycle,
 // the git-http-backend smart-protocol proxy, session-scoped credential
-// auth (v1.5 fencing-on-use, contract §1.6) and the pre-receive hook
+// auth (fencing-on-use, reference.md §3.4) and the pre-receive hook
 // that enforces the capsule-chain invariants.
 //
 // All git access goes through the real git binary (no embedded library).

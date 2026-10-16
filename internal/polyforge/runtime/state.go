@@ -1,4 +1,4 @@
-// state.go: the per-WI state machine (v1-spec-full §三) plus the Runtime's
+// state.go: the per-WI state machine (reference.md §3.5) plus the Runtime's
 // own bookkeeping file (state.json). Daemon state is BOOKKEEPING ONLY —
 // workflow execution progress lives in the capsule's
 // runtime-state/execution.json and is never mirrored here.
@@ -130,7 +130,7 @@ type stateFile struct {
 	Jobs      []*jobRecord `json:"jobs"`
 }
 
-// jobRecord is one persisted job (v1.5 contract §4.1): the session
+// jobRecord is one persisted job (reference.md §3.5): the session
 // identity replaces the v1 attempt/generation/instance/credential
 // lineage. The SECRET never leaves this file (0600) and the one-shot
 // GIT_ASKPASS.
@@ -157,7 +157,7 @@ type jobRecord struct {
 	CapsuleDir string `json:"capsule_dir"`
 	GitDir     string `json:"git_dir"`
 	RemoteURL  string `json:"remote_url"`
-	// CleanPause mirrors the hub's operator-pause flag (contract §4.1).
+	// CleanPause mirrors the hub's operator-pause flag (reference.md §3.5).
 	// Since the v1.5 review Finding 2 an operator pause RETAINS the
 	// record (StatePaused): the flag is latched true at the pause close
 	// — exactly the marker the restart reconciliation reads alongside

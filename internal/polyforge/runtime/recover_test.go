@@ -1,6 +1,6 @@
 package runtime
 
-// Recovery-engine regressions (v1-spec-full §七) driven with REAL child
+// Recovery-engine regressions (reference.md §6.2) driven with REAL child
 // processes as the "agents": transcript present → resume; absent → fresh;
 // two consecutive resume failures → fresh; the single consecutive-failures
 // ledger (C7) → bounded fail (RTFinished(blocked)).

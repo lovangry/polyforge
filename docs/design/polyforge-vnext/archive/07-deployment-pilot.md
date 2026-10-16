@@ -1,6 +1,8 @@
 # 07 — Deployment / Pilot：一期部署形态、回归清单与否决门槛
 
-> **ARCHIVED（repo review 2026-10-16 G-1）— 本文大部分描述已删除的机制：`pf upgrade`、`DEPLOY-*` 码、`aihub migrate` / `schema_version`、`rotate-secret` 回滚、`machines register`、Interactive/Batch/Drain（§3、§6.5 已按 #174 更新）。标有 ARCHIVED 横幅的节 do not build from this；未标横幅的节也只作历史与溯源参考。现行设计权威：[v2-converge.md](v2-converge.md)、[wi-kind-contract.md](wi-kind-contract.md)、[08-capsule-base-migration.md](08-capsule-base-migration.md)；与代码冲突时一律以代码为准。**
+> **ARCHIVED 2026-10-16** (repo review 2026-10-16 wave 4): describes the v0/v1 design and is kept for history only — do not build from it. Current reference: [reference.md](../reference.md); decisions: [v2-converge.md](../v2-converge.md). Live mechanisms this file still held were moved there before archiving; section anchors are unchanged.
+
+> **ARCHIVED（repo review 2026-10-16 G-1）— 本文大部分描述已删除的机制：`pf upgrade`、`DEPLOY-*` 码、`aihub migrate` / `schema_version`、`rotate-secret` 回滚、`machines register`、Interactive/Batch/Drain（§3、§6.5 已按 #174 更新）。标有 ARCHIVED 横幅的节 do not build from this；未标横幅的节也只作历史与溯源参考。现行设计权威：[v2-converge.md](../v2-converge.md)、[wi-kind-contract.md](../wi-kind-contract.md)、[08-capsule-base-migration.md](../08-capsule-base-migration.md)；与代码冲突时一律以代码为准。**
 > Most of this document describes deleted mechanisms. Sections bannered ARCHIVED must not be built from; the live authority is v2-converge.md plus the code.
 
 | 权威项 | 值 |
@@ -13,7 +15,7 @@
 
 ### 1.1 范围 <!-- §1.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（PILOT-* 码、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（PILOT-* 码、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - 一期部署形态：单 active AIHub + SQLite + 本地目录，**无 PostgreSQL / JuiceFS / S3**（INV-10），
   Daemon 统一作为 Interactive / Batch / Drain 三种 WI Job 执行模式的唯一执行者（`00-architecture.md#§3.4`），
@@ -72,7 +74,7 @@
 
 ### 2.1 一期部署形态（权威） <!-- §2.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、CAP-* 码、Revision/CAS/manifest、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、CAP-* 码、Revision/CAS/manifest、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 单主机运行 `aihub` 服务进程（单 active Service，INV-2，`02-aihub-core.md#§2.2`）；Core 是单个 SQLite 文件 +
 WAL，**不保存任何 workflow 执行状态**（INV-1）。远端数据——Capsule Revision 的 CAS 存储、Memory
@@ -122,7 +124,7 @@ tracker sync 等 v1 不含的能力）是两个互不共享代码与数据的独
 
 ### 2.2 本文新增不变量 <!-- §2.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、RunCommand）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 | 编号 | 不变式 |
 |---|---|
@@ -134,7 +136,7 @@ tracker sync 等 v1 不含的能力）是两个互不共享代码与数据的独
 
 ### 2.3 部署单元与 WI Agent 的关系 <!-- §2.3 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 WI Agent（`00-architecture.md#§3.6`）**不是**独立安装的部署单元：它是 Daemon 在创建 Job 时按需派生的每 WI
 一个的宿主机原生子进程，运行的是与 Daemon 同一份分发物中的驱动代码，不单独打包、不单独安装、不
@@ -185,7 +187,7 @@ Interactive / Batch / Drain 模式均已删除）。
 
 ## 4. 数据结构：部署单元文件清单与目录布局 <!-- §4 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（Revision/CAS/manifest）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 ```
 主机侧（AIHub）：<data_dir>/           # 缺省 /var/lib/polyforge/aihub/
@@ -217,7 +219,7 @@ workspace 旗标或环境变量（旧 `-workspace` / `POLYFORGE_WORKSPACE` 已�
 
 ## 5. API 与错误码（部署 CLI 面） <!-- §5 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（SYNC-* 码、DEPLOY-* 码、PILOT-* 码、backupBarrier、pf upgrade）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（SYNC-* 码、DEPLOY-* 码、PILOT-* 码、backupBarrier、pf upgrade）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 | 操作 | 语义 | 可能错误码 |
 |---|---|---|
@@ -248,7 +250,7 @@ workspace 旗标或环境变量（旧 `-workspace` / `POLYFORGE_WORKSPACE` 已�
 
 ### 6.1 安装 <!-- §6.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 1. 在主机创建 `<data_dir>`（权限 `0750`，属主为服务运行用户）。
 2. 部署 `aihub`：以 docker compose 服务 `aihub` 运行已发布镜像（`deploy/docker-compose.yml`，
@@ -289,7 +291,7 @@ workspace 旗标或环境变量（旧 `-workspace` / `POLYFORGE_WORKSPACE` 已�
 
 ### 6.2 一致性备份（`pf backup` 与 `.polyforge/deploy.sh` 在线备份，升级/回滚均以此为前置步骤） <!-- §6.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（DEPLOY-* 码、Revision/CAS/manifest、backupBarrier）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（DEPLOY-* 码、Revision/CAS/manifest、backupBarrier）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 现行实现：升级前的全量备份是 `.polyforge/deploy.sh` 第 3–5 步（服务不停：rsync `memory/` 与 `git/`
 → SQLite backup API 快照 `aihub.db` → rsync 追平 → 快照完整性与计数校验 → 异机副本）；`pf backup`
@@ -335,7 +337,7 @@ workspace 旗标或环境变量（旧 `-workspace` / `POLYFORGE_WORKSPACE` 已�
 
 ### 6.3 升级 <!-- §6.3 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、DEPLOY-* 码、Revision/CAS/manifest、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、DEPLOY-* 码、Revision/CAS/manifest、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 1. 执行一次 §6.2 一致性备份（必做，不可跳过）。
 2. 经 `.polyforge/deploy.sh` 的切换窗口停止旧 `aihub` 容器（优雅排空）；确认 `service.lock` 已释放（INV-D1）——若检测到锁未释放
@@ -363,7 +365,7 @@ workspace 旗标或环境变量（旧 `-workspace` / `POLYFORGE_WORKSPACE` 已�
 
 ### 6.4 回滚 <!-- §6.4 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、HMAC 令牌、DEPLOY-* 码、Revision/CAS/manifest、takeover、rotate-secret）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、HMAC 令牌、DEPLOY-* 码、Revision/CAS/manifest、takeover、rotate-secret）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 1. 确认回滚安全前置条件：查询机器身份表，全部机器的最近心跳时间距当前超过 5 分钟，或操作者已
    手动确认接受跨过该检查；若存在近期心跳且未手动确认，中止回滚并返回
@@ -452,7 +454,7 @@ docker 拉起，升级只在 `.polyforge/deploy.sh` 的秒级切换窗口中断�
 
 ## 7. 并发与崩溃恢复（升级窗口） <!-- §7 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、watcher dirty 位）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - **升级窗内 Core 不可用**：WI Agent 一侧的 Revision 发布请求失败后按 `05-sync-revision-recovery.md#§6` 的六步流程原地
   重试（幂等，`05-sync-revision-recovery.md#§2.8`）；watcher 标记的 dirty 状态在此期间只是持续累积，不丢失（`00-architecture.md#§4.3`：
@@ -492,7 +494,7 @@ docker 拉起，升级只在 `.polyforge/deploy.sh` 的秒级切换窗口中断�
 
 ### 9.1 Pilot 范围与参与面 <!-- §9.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（Interactive/Batch/Drain、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（Interactive/Batch/Drain、read-through）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - 范围：1 个 project、3 个内部仓库、4 名工程师（经路由 Skill 会话使用 **Interactive** 模式：
   submit/observe/answer，`00-architecture.md#§3.4a`）+ 2 台常驻工作机（分别运行 **Batch**——人显式确认 wave 后
@@ -525,7 +527,7 @@ docker 拉起，升级只在 `.polyforge/deploy.sh` 的秒级切换窗口中断�
 
 ### 9.2 观测指标 <!-- §9.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（SYNC-* 码、Interactive/Batch/Drain、watcher dirty 位、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（SYNC-* 码、Interactive/Batch/Drain、watcher dirty 位、read-through）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 指标分层遵循 `00-architecture.md#§9` 的总则（AIHub / Daemon / Sync / Workflow / Capsule / Memory 六层各自的
 权威指标定义分别在 `02`/`04`/`05`/`01`/`03`/`06-memory-search.md#§9`）；本节只定义 Pilot 期间额外聚合、用于
@@ -580,7 +582,7 @@ M1–M9 无一依赖旧多段结构——M3 的卡死判定来自 step 状态与
 
 ### 9.3 否决门槛（每条均给出机械判定公式） <!-- §9.3 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（WF-* 码、PILOT-* 码）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（WF-* 码、PILOT-* 码）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 | 门槛 | 判定（机械） | 触发动作 |
 |---|---|---|
@@ -599,7 +601,7 @@ M1–M9 无一依赖旧多段结构——M3 的卡死判定来自 step 状态与
 
 ### 9.2a M4/M5 的机械可判定性与证据来源（INV-D3/INV-D4 落实） <!-- §9.2a -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、RunCommand、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、Revision/CAS/manifest、RunCommand、read-through）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 **M5（谎报逃逸）的判定不依赖任何形式的人工抽查**，也**不以「调用了多少次 `RunCommand`」作为
 可疑信号**（该口径的问题：产出代码或文档的 step（如 `code`、`fix`、`plan`、`e2e-author`）完全
@@ -652,7 +654,7 @@ Agent 独占写入的 `runtime-state/execution.json`（INV-6）才具备 INV-D3 
 
 ### 10.1 部署域测试与故障注入 <!-- §10.1 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、SYNC-* 码、Revision/CAS/manifest、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、SYNC-* 码、Revision/CAS/manifest、Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - 升级序端到端：单机升级 → 断言 INV-D1（升级窗内任意时刻查询 Core 写路径，不存在两个进程同时
   持有 `service.lock` 的窗口）、Capsule 现场零丢失（`05-sync-revision-recovery.md#§7.1` 收敛断言）。
@@ -708,7 +710,7 @@ Agent 独占写入的 `runtime-state/execution.json`（INV-6）才具备 INV-D3 
 
 ### 10.2 回归清单（13 条，逐条含缺陷摘要 / vNext 交叉引用 / 机械反例断言） <!-- §10.2 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、SYNC-* 码、CAP-* 码、WF-* 码、Revision/CAS/manifest、RunCommand、takeover、read-through）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（持久 WI Agent、owner generation、SYNC-* 码、CAP-* 码、WF-* 码、Revision/CAS/manifest、RunCommand、takeover、read-through）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 > 考证方法（B19 修复：逐条经本仓 git 历史考证，不用「仅按编号可追溯」作声明）：13 个编号均为本 aihub
 > 部署自身的真实 polyforge 工作项（work item，非 GitHub issue）。撰写本文档时在当前 worktree（即
@@ -946,7 +948,7 @@ Core 侧转为 `blocked`/`waiting_on=owner`；Core 事件流中不出现 `WF-101
 
 ## 11. 迁移与 rollout <!-- §11 -->
 
-> **ARCHIVED — 本节描述或依赖已删除的机制（Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](v2-converge.md) 与代码为准。
+> **ARCHIVED — 本节描述或依赖已删除的机制（Interactive/Batch/Drain）；do not build from this.** 现行设计以 [v2-converge.md](../v2-converge.md) 与代码为准。
 
 - rollout 顺序（权威，`00-architecture.md#§11` 总则的展开，按顺序描述，不绑定具体日历日期）：`aihub` 装机
   （`02`）→ Memory 面就绪（`06`）→ 参考 bundle 就位（checkout 内 `workflows/<bundle-name>/`，无注册面，`01-workflow-skills.md#§2.1`）→ 工作机 Daemon + Capsule 就绪（`04`/

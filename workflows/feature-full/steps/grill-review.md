@@ -66,5 +66,5 @@ recording a verdict; do not guess which way to resolve it.
 
 Emit the final JSON object per the schema above. On fail, `fail_reason` is required and
 becomes the verdict text propagated back to `spec` as its `pending_rewind_input`
-(`03-execution-capsule.md` §4.2) — write it as if `spec` will read only this string and
+(in `runtime-state/execution.json`) — write it as if `spec` will read only this string and
 nothing else from the conversation.

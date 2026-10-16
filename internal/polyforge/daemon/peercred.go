@@ -2,7 +2,7 @@ package daemon
 
 // peercred.go: SO_PEERCRED plumbing for the daemon's UDS face
 // (polyforge#110). The v1 daemon lost the v0 capability
-// (v0/internal/daemon/api.go in git history, 04 §5.3): with a bare net.Listen served
+// (v0/internal/daemon/api.go in git history, reference.md §6.1): with a bare net.Listen served
 // by &http.Server{Handler: ...} there is no ConnContext hook and no
 // credential-capturing Accept, so the POST /shutdown handler has no
 // net.Conn to read the dialing process's credential from — a UDS

@@ -3,7 +3,8 @@ package workspace
 // compose.go: the model-candidate precedence chain as a PURE function
 // over the bundle frontmatter, the parsed workspace yaml and the claimed
 // project — no I/O, no state, fully table-testable. The runtime computes
-// it once per claim and snapshots the result into capsule.json; recovery
+// it once per claim and snapshots the result into the daemon job record
+// (runtime-state.json, runtime/state.go StepCandidates); recovery
 // rehydrates that snapshot, never a second composition.
 //
 // The chain, outermost first (five levels):

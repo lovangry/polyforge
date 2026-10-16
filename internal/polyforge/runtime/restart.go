@@ -1,7 +1,7 @@
 package runtime
 
-// restart.go: daemon-startup reconciliation (v1-spec-full §十一, re-keyed
-// onto the v1.5 session model — contract §1.2/§1.3). The Runtime never
+// restart.go: daemon-startup reconciliation (reference.md §6.2, re-keyed
+// onto the v1.5 session model — reference.md §3.3). The Runtime never
 // revives from state.json alone — every recorded job is reconciled
 // against aihub's own verdict first, and the verdict is the SESSION
 // verify (compare-only, B3: the hub stores only the hash of our secret):
@@ -826,11 +826,16 @@ const (
 	ResumeClosed = "closed"
 )
 
+// CauseOperatorAttach is the recovery cause of a session attach after a
+// graceful operator shutdown; the bridge (internal/polyforge/bridge) imports
+// it so an interruption under this cause archives no attempt.
+const CauseOperatorAttach = "operator daemon shutdown"
+
 // Recovery causes that are lifecycle events, exempt from the
 // consecutive-failures ledger.
 const (
 	causeDaemonRestart  = "daemon_restart"
-	causeOperatorAttach = "operator daemon shutdown"
+	causeOperatorAttach = CauseOperatorAttach
 	// causeOperatorResume is the live-holder operator resume
 	// (wi_seWTgHeKtaa8): a deliberate stop's deliberate continuation —
 	// a lifecycle event like the operator attach, never a failure the
