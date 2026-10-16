@@ -203,10 +203,16 @@ type Runtime struct {
 	// mutating. No aihub call runs under opMu.
 	opMu      sync.Mutex
 	statePath string
-	// persistMu serializes persist's snapshot and write: with the network
-	// steps outside opMu (B-8) closes of different work items persist
-	// concurrently, and an older snapshot must never land last.
-	persistMu sync.Mutex
+	// persistGen (under mu) numbers persist's snapshots in the order they
+	// were taken; persistMu serializes the writes, and a write whose
+	// snapshot is older than the one already on disk (persistDone) is
+	// skipped — its change is part of that newer snapshot — so an older
+	// snapshot never lands last. persistErr is the outcome of the write
+	// that landed persistDone.
+	persistGen  uint64
+	persistMu   sync.Mutex
+	persistDone uint64
+	persistErr  error
 
 	// claimsAborted latches the shutdown's AbortClaims (under mu): once
 	// latched, a new Start answers DAEMON-410 without claiming and a
@@ -592,10 +598,16 @@ func (r *Runtime) jobOf(wi string) *job {
 // persist rewrites state.json from the live job set. A CLAIMING
 // placeholder is never written: its durable form is the claiming journal
 // (B-8), which the next start replays.
+//
+// The snapshot is taken and numbered under mu (no I/O there); the write
+// runs under persistMu alone. A caller whose snapshot is older than the
+// one already written returns that write's outcome without writing: it
+// changed the job set before the newer snapshot was taken, so its change
+// is on disk.
 func (r *Runtime) persist() error {
-	r.persistMu.Lock()
-	defer r.persistMu.Unlock()
 	r.mu.Lock()
+	r.persistGen++
+	gen := r.persistGen
 	recs := make([]*jobRecord, 0, len(r.jobs))
 	for _, j := range r.jobs {
 		if st, _ := j.snapshot(); st == StateClaiming {
@@ -605,11 +617,27 @@ func (r *Runtime) persist() error {
 	}
 	r.mu.Unlock()
 	blob, err := json.MarshalIndent(&stateFile{Version: 1, MachineID: r.cfg.MachineID, Jobs: recs}, "", "  ")
-	if err != nil {
-		return err
+	if persistSnapped != nil {
+		persistSnapped(gen)
 	}
-	return atomicfile.Write(r.statePath, blob, stateFilePerm)
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
+	if gen <= r.persistDone {
+		return r.persistErr
+	}
+	if err == nil {
+		err = writeStateFn(r.statePath, blob, stateFilePerm)
+	}
+	r.persistDone, r.persistErr = gen, err
+	return err
 }
+
+// writeStateFn is persist's file write; persistSnapped, when set, runs
+// between a snapshot and its write (seams for the write-ordering tests).
+var (
+	writeStateFn   = atomicfile.Write
+	persistSnapped func(gen uint64)
+)
 
 func (r *Runtime) dropJob(j *job) {
 	r.mu.Lock()
