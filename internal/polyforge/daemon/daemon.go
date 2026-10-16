@@ -636,6 +636,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 				_ = d.Shutdown(context.Background(), ServeErrorShutdownCause(err))
 				return err
 			}
+			// Only the shutdown sequence closes the face (its step 5),
+			// and it still has the runtime drain and the final agent
+			// sweep to run: returning here let the process exit
+			// mid-sequence (repo review 2026-10-16 B-16).
+			<-d.shutDone
 			return nil
 		case <-dispatch.C:
 			d.dispatch()
