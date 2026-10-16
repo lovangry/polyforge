@@ -258,7 +258,7 @@ F19 M6 观测字段从未随事件面发出：整个窗口 events.log 共 33 条
     memory_remember 事件、携带 write_ms 字段 0 条（旧 schema 事件面未含
     该观测字段；迁移 CLI 直写与服务端 reconcile 回写不产生事件——已
     登记的样本集边界），PILOT-V6 本窗口无样本、不参与判定：检索实时性
-    面（`06-memory-search.md#§4.5` p99 ≤ 5s）全程不可观测。状态注记：
+    面（2026-10-16 前版本的 06-memory-search §4.5 p99 ≤ 5s，见 git 历史）全程不可观测。状态注记：
     未修——已登记为 phase-1 输入（`docs/pilot/v1-phase-0-report.md`
     §5.2「M6 样本集边界」：需新事件 kind 或样本面补齐，未获授权前不动）。
 

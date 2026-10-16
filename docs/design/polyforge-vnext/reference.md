@@ -7,7 +7,8 @@
 > [01-workflow-skills.md](01-workflow-skills.md); memory in [06-memory-search.md](06-memory-search.md);
 > capsule base migration in [08-capsule-base-migration.md](08-capsule-base-migration.md). The v0/v1
 > design set is in [archive/](archive/) — history only, do not build from it.
-> Anchors use `<!-- §N -->`; `tools/check-xrefs.py` checks every `` `file.md#§N` `` reference.
+> Anchors use `<!-- §N -->`; `tools/check-xrefs.py` (run by `make check`) resolves every backticked
+> name.md#§N reference.
 
 ## 1. System overview <!-- §1 -->
 

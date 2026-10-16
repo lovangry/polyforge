@@ -35,7 +35,7 @@ CLI 与 Daemon 读同一份配置；**不存在任何启动期 workspace 旗标�
 
 ## 2. 迁移序列（人工，按序执行）<!-- §2 -->
 
-### 2a. 换机/换盘：进行中的 capsule 要搬家
+### 2a. 换机/换盘：进行中的 capsule 要搬家 <!-- §2a -->
 
 ```
 # 0. 目标 workspace 先建好（Daemon 不代建它）
@@ -58,7 +58,7 @@ mv ~/.local/share/polyforge/workspace/capsules/polyforge-140  /srv/polyforge/wor
 pf daemon ensure
 ```
 
-### 2b. 换基但不搬家：旧基底保留为映射节
+### 2b. 换基但不搬家：旧基底保留为映射节 <!-- §2b -->
 
 把旧基底的旧路径直接写成映射里的一节（连同它的 projects），进行中的 capsule 原地续跑，
 什么都不用搬：
@@ -71,7 +71,7 @@ pf daemon ensure
 #  projects = ["p1", "p2"]
 ```
 
-### 2c. 核对
+### 2c. 核对 <!-- §2c -->
 
 重启后用 `pf ops status` 核对 `workspaces:` 一行列出映射里的**全部** workspace（不再只报一个）；
 被搬迁/保留的进行中 WI 会在 Daemon 重启对账时按既有恢复语义续跑；`pf doctor` 逐项校验映射
