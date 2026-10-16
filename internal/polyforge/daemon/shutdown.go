@@ -171,7 +171,7 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 	// way are waited for, and at most claimAbortWait — the WIP snapshots
 	// below need the rest of the budget.
 	actx, acancel := context.WithTimeout(ctx, claimAbortWait(ctx))
-	d.rt.BeginShutdown(actx)
+	settled := d.rt.BeginShutdown(actx)
 	acancel()
 
 	// Steps 2-3 run against the snapshot of live jobs taken here; the
@@ -251,12 +251,24 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 	}
 	// Stop the runtime's durable-close retry goroutines.
 	d.rt.Close()
-	// Final check: the latch above makes the live-job snapshot final, so
-	// no agent may still be alive here. One that is was started behind
-	// the latch or survived its teardown — a defect, named loudly.
+	// Final check. In a settled shutdown the latch above made the
+	// live-job snapshot final, so no agent may still be alive here: one
+	// that is was started behind the latch or survived its teardown — a
+	// defect, named loudly. When the latch stopped waiting for an agent
+	// start still under way (its budget ran out), that start may have
+	// bound after the snapshot: whatever is alive is torn down here (a
+	// later binder tears its own down).
 	for _, ji := range d.rt.List() {
-		if ji.Agent != nil && ji.Agent.Alive() {
+		if ji.Agent == nil || !ji.Agent.Alive() {
+			continue
+		}
+		if settled {
 			fmt.Fprintf(os.Stderr, "daemon: shutdown: %s: an agent is still alive at the end of the sequence (started behind the shutdown latch, or its teardown failed) — this is a bug\n", ji.WorkItem)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "daemon: shutdown: %s: an agent bound after the shutdown stopped waiting for its start — tearing it down\n", ji.WorkItem)
+		if err := ji.Agent.Terminate(10 * time.Second); err != nil {
+			fmt.Fprintf(os.Stderr, "daemon: %s: late agent teardown incomplete: %v\n", ji.WorkItem, err)
 		}
 	}
 	return nil

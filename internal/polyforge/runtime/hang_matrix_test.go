@@ -22,8 +22,12 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
-// statusBound is how long a status read may take while A hangs.
-const statusBound = time.Second
+// statusBound is how long a status read may take while A hangs, and
+// doorBound how long another work item's start, pause, resume or wrap.
+const (
+	statusBound = time.Second
+	doorBound   = 2 * time.Second
+)
 
 type matrixRig struct {
 	r    *Runtime
@@ -71,13 +75,13 @@ func (m *matrixRig) othersResponsive(t *testing.T, hung, other string, live bool
 	m.statusResponsive(t, hung)
 	ctx := context.Background()
 	if live {
-		within(t, promptly, "a Start during the reconciliation", func() {
+		within(t, doorBound, "a Start during the reconciliation", func() {
 			if err := m.r.Start(ctx, "wi_hm_newcomer"); !isTransient(err) {
 				t.Errorf("Start during the reconciliation = %v, want the typed transient", err)
 			}
 		})
 	} else {
-		within(t, promptly, "Start of "+other, func() {
+		within(t, doorBound, "Start of "+other, func() {
 			if err := m.r.Start(ctx, other); err != nil {
 				t.Errorf("Start(%s): %v", other, err)
 				return
@@ -88,7 +92,7 @@ func (m *matrixRig) othersResponsive(t *testing.T, hung, other string, live bool
 		})
 		t.Cleanup(func() { terminateJobAgent(m.r, other) })
 	}
-	within(t, promptly, "pause of "+other, func() {
+	within(t, doorBound, "pause of "+other, func() {
 		if err := m.r.Stop(ctx, other, protocol.FinishPaused); err != nil {
 			t.Errorf("pause %s: %v", other, err)
 		}
@@ -96,12 +100,12 @@ func (m *matrixRig) othersResponsive(t *testing.T, hung, other string, live bool
 	m.hub.mu.Lock()
 	m.hub.cleanPause[other] = false // the operator's pf resume PATCH
 	m.hub.mu.Unlock()
-	within(t, promptly, "resume of "+other, func() {
+	within(t, doorBound, "resume of "+other, func() {
 		if out, err := m.r.ResumePaused(ctx, other); err != nil || out != ResumeAttached {
 			t.Errorf("ResumePaused(%s) = %q, %v", other, out, err)
 		}
 	})
-	within(t, promptly, "wrap of "+other, func() {
+	within(t, doorBound, "wrap of "+other, func() {
 		if err := m.r.Stop(ctx, other, protocol.FinishWrapped); err != nil {
 			t.Errorf("wrap %s: %v", other, err)
 		}

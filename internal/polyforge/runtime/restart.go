@@ -144,8 +144,8 @@ func (r *Runtime) requireMidflightCapsule(wi, project, dir string) error {
 // reconciliation (a running WI whose capsule lives on another machine is
 // that machine's business).
 //
-// Locking: Restart seeds each record under its work item's lock (local
-// work only), then reconciles them on a lane: the journal replays hold no
+// Locking: the lane seeds each record under its work item's lock (local
+// work only), then reconciles them: the journal replays hold no
 // lock but a placeholder's or a compensation's work-item lock; each
 // record is reconciled under its work item's lock, its network steps
 // included — the session verify and attach, a close's or a recovery's
@@ -182,31 +182,6 @@ func (r *Runtime) Restart(ctx context.Context) error {
 	if err != nil {
 		r.endRestarting()
 		return err
-	}
-	// Seed every recorded job into the live map first: persist() rewrites
-	// state.json from the map, so records that must SURVIVE the
-	// reconciliation (blocked, aihub-unreachable) are preserved by simply
-	// staying in it. A record whose WI is already live (Start ran before
-	// Restart) is left alone. The B1 journal replay still runs FIRST on
-	// the lane, and a replay that adopts a work item drops its seeded
-	// record (resumeClaiming). A seeded record is marked restartPending
-	// until the lane reaches it: every door of it refuses meanwhile.
-	for _, rec := range st.Jobs {
-		if rec.SessionID == "" {
-			// a torn write: no session to verify,
-			// nothing to reconcile — drop it rather than guess.
-			fmt.Fprintf(os.Stderr, "runtime: %s: record without a session dropped\n", rec.WorkItemID)
-			continue
-		}
-		s := r.lockWI(rec.WorkItemID)
-		if r.jobOf(rec.WorkItemID) == nil {
-			j := r.restoredJob(rec)
-			j.restartPending = true
-			r.mu.Lock()
-			r.jobs[rec.WorkItemID] = j
-			r.mu.Unlock()
-		}
-		r.unlockWI(rec.WorkItemID, s)
 	}
 	lane := &restartLane{}
 	done := make(chan error, 1)
@@ -291,6 +266,21 @@ func withRestartLane(ctx context.Context, l *restartLane) context.Context {
 	return context.WithValue(ctx, restartLaneKey{}, l)
 }
 
+// laneLock takes id's lock for the restart lane. While the reconciliation
+// runs no door can hold a work item's lock for long — a Start answers the
+// typed transient, a seeded record's doors refuse — so a holder is one of
+// the work item's background retries, parked on aihub (a claim-end or
+// end_pending close, a seal retry): the lane's wait for it is timed like
+// one of its own hub calls (hubCall), so Restart's bound still fires.
+func (r *Runtime) laneLock(ctx context.Context, id string) *wiSlot {
+	if s, ok := r.tryLockWI(id); ok {
+		return s
+	}
+	var s *wiSlot
+	r.hubCall(ctx, func() { s = r.lockWI(id) })
+	return s
+}
+
 // hubCall runs fn — one hub call — timed for Restart's wait when ctx is
 // the running reconciliation lane's (laneHub), plainly otherwise.
 func (r *Runtime) hubCall(ctx context.Context, fn func()) {
@@ -343,6 +333,32 @@ func (r *Runtime) RestartAttach(wi string) bool {
 func (r *Runtime) reconcile(ctx context.Context, lane *restartLane, st *stateFile) error {
 	defer r.endRestarting()
 	defer lane.ended.Store(true)
+	// Seed every recorded job into the live map first (the lane's first
+	// step, so a lock it waits for counts against Restart's bound):
+	// persist() rewrites state.json from the map, so records that must SURVIVE the
+	// reconciliation (blocked, aihub-unreachable) are preserved by simply
+	// staying in it. A record whose WI is already live (Start ran before
+	// Restart) is left alone. The B1 journal replay still runs FIRST on
+	// the lane, and a replay that adopts a work item drops its seeded
+	// record (resumeClaiming). A seeded record is marked restartPending
+	// until the lane reaches it: every door of it refuses meanwhile.
+	for _, rec := range st.Jobs {
+		if rec.SessionID == "" {
+			// a torn write: no session to verify,
+			// nothing to reconcile — drop it rather than guess.
+			fmt.Fprintf(os.Stderr, "runtime: %s: record without a session dropped\n", rec.WorkItemID)
+			continue
+		}
+		s := r.laneLock(ctx, rec.WorkItemID)
+		if r.jobOf(rec.WorkItemID) == nil {
+			j := r.restoredJob(rec)
+			j.restartPending = true
+			r.mu.Lock()
+			r.jobs[rec.WorkItemID] = j
+			r.mu.Unlock()
+		}
+		r.unlockWI(rec.WorkItemID, s)
+	}
 	// B1 journal replay FIRST, before the state.json records: a journaled
 	// start (crash between the claim call and the spawn) must win over any
 	// stale record of the same WI — the replay carries the secret the
@@ -362,7 +378,7 @@ func (r *Runtime) reconcile(ctx context.Context, lane *restartLane, st *stateFil
 		// capsule / unmapped project parks that WI alone; everything else
 		// keeps its record-kept posture. The record is reconciled under
 		// its work item's lock.
-		s := r.lockWI(rec.WorkItemID)
+		s := r.laneLock(ctx, rec.WorkItemID)
 		r.restartOne(ctx, rec)
 		r.announceReconciled(rec.WorkItemID)
 		r.unlockWI(rec.WorkItemID, s)

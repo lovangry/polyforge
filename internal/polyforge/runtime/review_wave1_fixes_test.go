@@ -287,7 +287,7 @@ func TestRestartRefusedReplayOfOpenSessionEndsIt(t *testing.T) {
 	hub.hold(wi, session, api.StatusRunning)
 	hub.claimFaults = []claimFault{{err: &api.Error{Code: api.ErrCoreConflict, Detail: "NOT_CLAIMABLE"}}}
 
-	replayClaims(r)
+	replayClaims(t, r)
 	if hub.endCount() != 1 || hub.lastEnd().SessionID != session || hub.lastEnd().Status != api.StatusBlocked {
 		t.Fatalf("the open session must be ended blocked with our secret, got %d ends (%+v)", hub.endCount(), hub.lastEnd())
 	}

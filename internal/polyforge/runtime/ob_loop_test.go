@@ -48,7 +48,7 @@ func TestOBLoopHungRecoveryDoesNotDelayOthers(t *testing.T) {
 		ji, ok := r.Info(a)
 		return ok && ji.State == StateRunning && ji.SpawnN == spawnA+1
 	})
-	settleOps(r, 5*time.Second)
+	settleOps(t, r, 5*time.Second)
 	if n := spawnOf(r, a); n != spawnA+1 {
 		t.Fatalf("%s relaunched to spawn %d, want exactly one recovery (%d)", a, n, spawnA+1)
 	}

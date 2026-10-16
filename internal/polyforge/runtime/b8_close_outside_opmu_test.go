@@ -336,7 +336,7 @@ func TestB8RestartReplayCloneOutsideOpMu(t *testing.T) {
 	actx, cancel := context.WithTimeout(bg(), 20*time.Second)
 	defer cancel()
 	within(t, 25*time.Second, "BeginShutdown", func() { r.BeginShutdown(actx) })
-	settleReplays(r)
+	settleReplays(t, r)
 	if got := journaled(r, slow); got == nil || got.SessionID != sess {
 		t.Fatalf("journal after the deferred replay = %+v, want the original entry", got)
 	}

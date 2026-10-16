@@ -219,7 +219,7 @@ func TestOffLockRestartHungJournalReplay(t *testing.T) {
 		ji, ok := r.Info(x)
 		return ok && ji.State == StateRunning && ji.Agent != nil && !r.isRestarting()
 	})
-	settleReplays(r)
+	settleReplays(t, r)
 	if n := hub.claimCount(); n != 1 {
 		t.Fatalf("%s claimed %d times, want the one replay", x, n)
 	}

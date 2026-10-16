@@ -212,6 +212,10 @@ type Runtime struct {
 	down         bool
 	installs     int
 	installsIdle chan struct{}
+	// shutdownLate (under mu): BeginShutdown stopped waiting while agent
+	// starts were still under way — the live-job snapshot may miss them,
+	// so a handle bound from now on is torn down by its binder at once.
+	shutdownLate bool
 	// claimMu serializes the claiming journal's read-modify-writes: its
 	// writers hold different work items' locks.
 	claimMu sync.Mutex
@@ -1196,8 +1200,9 @@ func (r *Runtime) claimScene(j *job) (note string, err error) {
 	// journal rides capsule git), so the derivation counter continues
 	// where the capsule's history left off; a brand-new capsule answers
 	// 0 and the first derivation is #1.
+	seed := spawnJournalMaxN(j.capsuleDir) // disk read: outside the job's mutex
 	j.mu.Lock()
-	j.spawnN = spawnJournalMaxN(j.capsuleDir)
+	j.spawnN = seed
 	j.mu.Unlock()
 	if err := r.materialize(ctx, j); err != nil {
 		// A typed task-repo clone failure (DAEMON-507) keeps its detail as
@@ -1316,7 +1321,10 @@ func (r *Runtime) installClaim(ctx context.Context, wi string, j *job) error {
 		j.agentPID = pid
 		j.agentStartedAt = h.StartedAt()
 		j.mu.Unlock()
-		r.release()
+		if r.release() {
+			fmt.Fprintf(os.Stderr, "runtime: %s: agent bound after the shutdown stopped waiting for it — torn down\n", id)
+			r.killAgentTree(j)
+		}
 	}
 	if err := j.transition(StateRunning); err != nil {
 		return err // unreachable: only finishClaim (the lock held) leaves CLAIMING
@@ -1930,14 +1938,18 @@ func (r *Runtime) admit() bool {
 	return true
 }
 
-// release gives an agent-start token back.
-func (r *Runtime) release() {
+// release gives an agent-start token back. It reports whether the
+// shutdown already stopped waiting for agent starts: a handle the caller
+// bound is then not in the shutdown's live set, and the caller tears it
+// down itself.
+func (r *Runtime) release() (late bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.installs--; r.installs == 0 && r.installsIdle != nil {
 		close(r.installsIdle)
 		r.installsIdle = nil
 	}
+	return r.shutdownLate
 }
 
 // claimDeferredError is the typed answer of a start the shutdown stopped
@@ -1973,8 +1985,11 @@ func IsClaimDeferred(err error) bool {
 // for: a Start still on its pre-claim steps defers itself at the latch, a
 // close or recovery on a hung push or hub call starts no agent once it
 // returns, and the restart reconciliation decides nothing after the
-// latch. Once it returned the live job set only shrinks.
-func (r *Runtime) BeginShutdown(ctx context.Context) {
+// latch. Once it returned settled, the live job set only shrinks. When
+// ctx ends first it answers false: an agent start still under way may
+// bind after the caller's live-job snapshot — its binder tears it down
+// (shutdownLate), and the caller sweeps whatever it still finds alive.
+func (r *Runtime) BeginShutdown(ctx context.Context) (settled bool) {
 	r.mu.Lock()
 	r.down = true
 	var lanes []*claimLane
@@ -2001,7 +2016,8 @@ func (r *Runtime) BeginShutdown(ctx context.Context) {
 		case <-cl.done:
 		case <-ctx.Done():
 			fmt.Fprintf(os.Stderr, "runtime: shutdown: %d claim(s) still settling at the wait's end\n", len(lanes)-i)
-			return
+			r.stopWaitingLate()
+			return false
 		}
 	}
 	if idle != nil {
@@ -2009,9 +2025,19 @@ func (r *Runtime) BeginShutdown(ctx context.Context) {
 		case <-idle:
 		case <-ctx.Done():
 			fmt.Fprintf(os.Stderr, "runtime: shutdown: agent start(s) still binding at the wait's end\n")
-			return
+			r.stopWaitingLate()
+			return false
 		}
 	}
+	return true
+}
+
+// stopWaitingLate records that the shutdown stopped waiting for agent
+// starts (release then reports late to every later binder).
+func (r *Runtime) stopWaitingLate() {
+	r.mu.Lock()
+	r.shutdownLate = true
+	r.mu.Unlock()
 }
 
 // supersedeOp is the OBSuperseded response (v1.5 M4 + m3): the periodic

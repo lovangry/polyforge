@@ -521,7 +521,7 @@ func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, *supervise.Q
 	// Before the temp dirs go, let a background operation still under way
 	// (a retry attempt finishing its persist) release its work item's
 	// lock — bounded, a hung one is the test's own business.
-	t.Cleanup(func() { settleOps(r, 10*time.Second) })
+	t.Cleanup(func() { settleOps(t, r, 10*time.Second) })
 	// The claim-time capsule remote: aihub creates the bare repo at claim
 	// (the fake hub implements the contract; the runtime's no-remote
 	// local init is a typed refusal).
@@ -533,8 +533,10 @@ func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, *supervise.Q
 }
 
 // settleOps waits, at most bound, until no restart reconciliation runs,
-// no operation holds a work item's lock and no claim sits CLAIMING.
-func settleOps(r *Runtime, bound time.Duration) {
+// no operation holds a work item's lock and no claim sits CLAIMING; an
+// operation still under way at the bound fails the test.
+func settleOps(t testing.TB, r *Runtime, bound time.Duration) {
+	t.Helper()
 	deadline := time.Now().Add(bound)
 	for time.Now().Before(deadline) {
 		r.mu.Lock()
@@ -550,6 +552,7 @@ func settleOps(r *Runtime, bound time.Duration) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+	t.Errorf("an operation was still under way %s later (a lock held, a claim CLAIMING or the restart lane running)", bound)
 }
 
 // fakeSession mints a deterministic per-WI session SECRET for tests
@@ -958,16 +961,16 @@ func underLock(r *Runtime, wi string, fn func()) {
 
 // settleReplays waits for the restart's journal replays (and every other
 // operation under way) to settle.
-func settleReplays(r *Runtime) { settleOps(r, 20*time.Second) }
+func settleReplays(t testing.TB, r *Runtime) { settleOps(t, r, 20*time.Second) }
 
 // replayClaims runs the claiming-journal replay as Restart does —
 // resumeClaiming, then the replays' clones — and waits for every replay
 // to settle.
-func replayClaims(r *Runtime) {
-	var rs []claimReplay
-	rs = r.resumeClaiming(context.Background())
+func replayClaims(t testing.TB, r *Runtime) {
+	t.Helper()
+	rs := r.resumeClaiming(context.Background())
 	r.runReplays(context.Background(), rs)
-	settleReplays(r)
+	settleReplays(t, r)
 }
 
 // capsuleSessionHandle answers the session handle the capsule's

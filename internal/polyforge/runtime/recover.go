@@ -140,8 +140,8 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// from the ledger entirely — neither counted nor resetting — so a deploy
 	// retry or a systemd restart loop cannot bounded-fail every running WI.
 	if !restartExemptCause(cause) {
+		accepted := acceptedResultCount(j.capsuleDir) // disk read: outside the job's mutex
 		j.mu.Lock()
-		accepted := acceptedResultCount(j.capsuleDir)
 		switch {
 		case accepted > j.acceptedAtRelaunch:
 			// real progress since the last relaunch (a step's result was
@@ -241,8 +241,9 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 			fmt.Fprintf(os.Stderr, "runtime: %s: recovery stopped by the shutdown before its relaunch (the next start recovers it)\n", j.wi)
 			return
 		}
+		m := spawnJournalMaxN(j.capsuleDir) // disk read: outside the job's mutex
 		j.mu.Lock()
-		if m := spawnJournalMaxN(j.capsuleDir); m > j.spawnN {
+		if m > j.spawnN {
 			j.spawnN = m
 		}
 		j.spawnN++
@@ -276,7 +277,17 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 			j.agentPID = pid
 			j.agentStartedAt = h.StartedAt()
 			j.mu.Unlock()
-			r.release()
+			if r.release() {
+				// bound after the shutdown stopped waiting for it: not in
+				// its live set — torn down here; the record stays for the
+				// next start
+				fmt.Fprintf(os.Stderr, "runtime: %s: relaunched agent bound after the shutdown stopped waiting for it — torn down\n", j.wi)
+				r.killAgentTree(j)
+				if perr := r.persist(); perr != nil {
+					fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
+				}
+				return
+			}
 			// persisted with the advanced counter (crash-safe)
 			if perr := r.persist(); perr != nil {
 				fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
@@ -322,6 +333,7 @@ func (r *Runtime) effectiveCandidatesForRecovery(j *job) map[string][]string {
 // is no resume-failure bookkeeping — polyforge#106: every relaunch is a
 // fresh driver derivation.)
 func (r *Runtime) recovered(j *job, h AgentHandle, cause string) {
+	accepted := acceptedResultCount(j.capsuleDir) // disk read: outside the job's mutex
 	j.mu.Lock()
 	// C7: the ledger's reset is the accepted-result check at the next
 	// entry, never the relaunch itself (a relaunch that dies before its
@@ -329,7 +341,7 @@ func (r *Runtime) recovered(j *job, h AgentHandle, cause string) {
 	// the job recovery-stabilized-so-far and notes the accepted-result
 	// count it starts from.
 	j.lastRelaunchRecovery = true
-	j.acceptedAtRelaunch = acceptedResultCount(j.capsuleDir)
+	j.acceptedAtRelaunch = accepted
 	spawnN := j.spawnN
 	pid := j.agentPID
 	j.mu.Unlock()

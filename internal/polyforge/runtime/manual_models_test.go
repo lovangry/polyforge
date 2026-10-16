@@ -122,7 +122,7 @@ func TestManualModelsSurviveClaimingReplay(t *testing.T) {
 	}
 	hub.hold("wi_manrep", session, api.StatusRunning)
 
-	replayClaims(r)
+	replayClaims(t, r)
 
 	j := r.jobOf("wi_manrep")
 	if j == nil {

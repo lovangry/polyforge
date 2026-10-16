@@ -150,3 +150,37 @@ func TestRestartAttachAndDeferredVerifyAnnounceOnce(t *testing.T) {
 		t.Fatalf("RTStarted announcements = %v, want none for %s (the startup pass's) and one for %s", started, live, deferred)
 	}
 }
+
+// A background retry of a work item parked on aihub with the work item's
+// lock held (a claim-end close here) does not hold Restart past its
+// bound: the lane's wait for that lock — seeding the record, then
+// reconciling it — counts as one of its hub calls.
+func TestRestartBoundCoversLaneLockWaitBehindHungRetry(t *testing.T) {
+	setGitIdentity(t)
+	hub := newFakeHub()
+	sp := &scriptedSpawner{}
+	r, _, _ := newTestRuntime(t, hub, sp)
+	r.cfg.RestartHubWait = 200 * time.Millisecond
+	r.cfg.EndRetryBase = 10 * time.Millisecond
+	r.cfg.EndRetryMax = 20 * time.Millisecond
+	const x = "wi_rl_retry"
+	t.Cleanup(func() { r.Close(); terminateJobAgent(r, x) })
+	rec, _ := restartRecord(t, r, hub, x)
+	writeStateFile(t, r, []*jobRecord{rec})
+	g := hub.hangCall(t, "end", x)
+	r.retryClaimEnd(x, x, fakeSession(x+"-earlier"), "an earlier claim's compensation")
+	g.waitEntered(t, "the claim-end retry")
+	if !r.Busy(x) {
+		t.Fatal("the parked retry does not hold the work item's lock")
+	}
+	within(t, promptly, "Restart behind the parked retry", func() {
+		if err := r.Restart(context.Background()); err != nil {
+			t.Errorf("Restart: %v", err)
+		}
+	})
+	if !r.isRestarting() {
+		t.Fatal("Restart returned with its lane finished; it never waited behind the retry")
+	}
+	g.open()
+	waitFor(t, "the lane to end", func() bool { return !r.isRestarting() })
+}

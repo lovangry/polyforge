@@ -274,7 +274,7 @@ func (r *Runtime) resumeClaiming(ctx context.Context) (replays []claimReplay) {
 			// secret (abandonClaim; the entry stays until the close
 			// lands) rather than dropping the only copy.
 			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay refused, ending the open session blocked: %v\n", wi, err)
-			s := r.lockWI(rec.WorkItemID)
+			s := r.laneLock(ctx, rec.WorkItemID)
 			r.abandonClaim(ctx, &job{wi: rec.WorkItemID, sessionID: rec.SessionID}, wi, err,
 				"the replayed claim of an open session was refused at restart: "+err.Error())
 			r.unlockWI(rec.WorkItemID, s)
@@ -294,7 +294,7 @@ func (r *Runtime) resumeClaiming(ctx context.Context) (replays []claimReplay) {
 // refusal) and the CLAIMING placeholder. It answers the placeholder, nil
 // when the replay ended otherwise.
 func (r *Runtime) placeReplay(ctx context.Context, key, id string, rec *claimingRec, resp *api.SessionClaimResponse) *job {
-	s := r.lockWI(id)
+	s := r.laneLock(ctx, id)
 	defer r.unlockWI(id, s)
 	wcfg, werr := r.LoadWorkspace(resp.WorkItem.ProjectName)
 	if werr != nil {
@@ -344,7 +344,7 @@ func (r *Runtime) placeReplay(ctx context.Context, key, id string, rec *claiming
 // background retry otherwise. The claim is never replayed.
 func (r *Runtime) endClaimAtRestart(ctx context.Context, key string, rec *claimingRec) {
 	fmt.Fprintf(os.Stderr, "runtime: %s: claiming entry of an unfinished compensation — ending the session blocked (no claim replay)\n", key)
-	s := r.lockWI(rec.WorkItemID)
+	s := r.laneLock(ctx, rec.WorkItemID)
 	settled := r.endBlockedAtHub(ctx, rec.WorkItemID, rec.SessionID, rec.EndNote, "")
 	r.unlockWI(rec.WorkItemID, s)
 	if settled {
