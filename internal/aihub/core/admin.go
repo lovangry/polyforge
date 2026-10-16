@@ -533,12 +533,17 @@ func (m *AdminManager) AddMember(projectID, userID, role string) error {
 	default:
 		return Fail(api.ErrCoreBadInput, "", "role must be viewer|writer|maintainer")
 	}
-	if _, err := m.db.Exec(`INSERT INTO project_members(project_id, user_id, role, created_at)
+	return upsertMember(m.db, projectID, userID, role)
+}
+
+// upsertMember writes one membership row through ex (the DB or a tx).
+func upsertMember(ex interface {
+	Exec(string, ...any) (sql.Result, error)
+}, projectID, userID, role string) error {
+	_, err := ex.Exec(`INSERT INTO project_members(project_id, user_id, role, created_at)
 		VALUES (?1,?2,?3,?4) ON CONFLICT(project_id, user_id) DO UPDATE SET role=excluded.role`,
-		projectID, userID, role, Now()); err != nil {
-		return err
-	}
-	return nil
+		projectID, userID, role, Now())
+	return err
 }
 
 // ---------------------------------------------------------------------------
@@ -567,10 +572,17 @@ type ProjectPatchRequest struct {
 // dropped: upserts and removes are per-row idempotent operations and
 // concurrent patches converge row-wise under the single SQLite writer.
 // Removal runs AFTER the upsert loop, so an explicit removal wins when
-// the same user appears in both lists of one request.
+// the same user appears in both lists of one request. The whole patch is
+// one transaction: a refused entry (bad role, unknown user) leaves the
+// project exactly as it was.
 func (m *AdminManager) PatchProject(idOrName string, req ProjectPatchRequest) (*api.Project, error) {
+	tx, err := m.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 	var projectID string
-	err := m.db.QueryRow(`SELECT id FROM projects WHERE id=?1 OR name=?1`, idOrName).Scan(&projectID)
+	err = tx.QueryRow(`SELECT id FROM projects WHERE id=?1 OR name=?1`, idOrName).Scan(&projectID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, Fail(api.ErrCoreNotFound, "", "project %q", idOrName)
 	}
@@ -586,20 +598,20 @@ func (m *AdminManager) PatchProject(idOrName string, req ProjectPatchRequest) (*
 			}
 			// Pre-check the user so a bad id answers 404, not an FK 500.
 			var one int
-			if err := m.db.QueryRow(`SELECT 1 FROM users WHERE id=?1`, mem.UserID).Scan(&one); err != nil {
+			if err := tx.QueryRow(`SELECT 1 FROM users WHERE id=?1`, mem.UserID).Scan(&one); err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					return nil, Fail(api.ErrCoreNotFound, "", "user %s", mem.UserID)
 				}
 				return nil, err
 			}
-			if err := m.AddMember(projectID, mem.UserID, mem.Role); err != nil {
+			if err := upsertMember(tx, projectID, mem.UserID, mem.Role); err != nil {
 				return nil, err
 			}
 		}
 	}
 	if req.RemoveMembers != nil {
 		for _, uid := range *req.RemoveMembers {
-			if _, err := m.db.Exec(`DELETE FROM project_members WHERE project_id=?1 AND user_id=?2`,
+			if _, err := tx.Exec(`DELETE FROM project_members WHERE project_id=?1 AND user_id=?2`,
 				projectID, uid); err != nil {
 				return nil, err
 			}
@@ -624,7 +636,10 @@ func (m *AdminManager) PatchProject(idOrName string, req ProjectPatchRequest) (*
 		args = append(args, string(blob))
 	}
 	args = append(args, projectID)
-	if _, err := m.db.Exec(`UPDATE projects SET `+strings.Join(sets, ",")+` WHERE id=?`, args...); err != nil {
+	if _, err := tx.Exec(`UPDATE projects SET `+strings.Join(sets, ",")+` WHERE id=?`, args...); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return m.GetProject(projectID)

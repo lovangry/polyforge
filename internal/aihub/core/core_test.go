@@ -433,3 +433,33 @@ func TestSessionClaimCarriesProjectRepos(t *testing.T) {
 		t.Fatalf("claim repos wrong: %+v", res.Repos)
 	}
 }
+
+// TestPatchProjectAtomic: a project patch is one transaction — when a
+// later member entry is refused (unknown user), the earlier upsert and
+// the description change do not land.
+func TestPatchProjectAtomic(t *testing.T) {
+	env := newEnv(t)
+	desc := "changed"
+	_, err := env.Admin.PatchProject("alpha", ProjectPatchRequest{
+		Description: &desc,
+		Members: &[]api.ProjectMember{
+			{UserID: env.UserIDB, Role: "writer"},
+			{UserID: "usr_missing", Role: "writer"},
+		},
+	})
+	if !IsCode(err, api.ErrCoreNotFound) {
+		t.Fatalf("patch with unknown user: want CORE-404, got %v", err)
+	}
+	p, err := env.Admin.GetProject("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range p.Members {
+		if m.UserID == env.UserIDB {
+			t.Errorf("refused patch still added member %s", env.UserIDB)
+		}
+	}
+	if p.Description == desc {
+		t.Errorf("refused patch still wrote description")
+	}
+}
