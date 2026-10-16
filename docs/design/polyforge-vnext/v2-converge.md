@@ -14,7 +14,7 @@
 - 核心三根支柱：**任务**（aihub WI）、**记忆**（项目演进与知识沉淀）、**workflow**（团队统一的任务处理规范）——目标是团队的 agent 在同一套体系下像一个 agent 一样运转。
 - 新功能冻结，先做减法；大改现有逻辑先问 owner；**心智模型越简单越好**（以"概念数减少"衡量方案）。
 - **按步骤选模型**是核心能力，保留；**按步骤选 harness**（pi / Claude Code / Codex）要做，排在减法之后。
-- **agent 不可信**：执行 WI 的 agent 不得驱动 daemon、不得读取机器凭证、不得写入任何会被人或交互 agent 信任的文件（#135）。
+- **信任模型（owner 裁定 2026-10-14，取代 2026-10-12 的"agent 不可信"）**：polyforge 只在团队内部使用；harness（pi / Claude Code）由人事先登录，daemon 只调用 CLI，**从不管理登录凭证**；不做重型隔离（独立 uid / bwrap 等）——**#135 冻结**，设计稿保留备查。仍然要防的是**事故**而非恶意：agent 推到 GitHub main（2026-10-13 #149 事故）、发布未经评审的提交、step agent 代答自己的人工 gate 问题（#122）。本文中以"agent 不可信"为理由的机制，现在一律按**事故护栏**理解：已建成并付出成本的护栏保留（#122/V-1 的 UDS step 进程拒绝、#156 的 ls-tree 检查与无 hook 推送、#158 的临时仓库 carrier 推送、V4 取证门禁、固定模板唤醒），但不再扩展为对抗性防御。step agent 按设计写 capsule 的 `runtime-state/pending-results/`，这不是缺陷。
 
 ## 1. 业务领域划分
 
@@ -162,7 +162,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 ### 2.6 结果信封、`context_policy` 与 `handoff`（polyforge#147 定稿）
 
-**结果信封 = 最小契约**：step agent 把**一个** JSON 对象写到约定位置 `runtime-state/pending-results/<spawn_n>.json`（位置与命名不变），内容只有 `outcome` + `output`，`needs_input` 时另带 `question_id` + `question`，再加上派发身份围栏（`wi_id` / `step_id` / `spawn_n`）。`protocol_version`、`result_id`、`artifacts` 哈希清单、`handoff_ref` 摘要引用**全部删除**，driver 不再校验它们，缺这些旧字段 MUST NOT 判不合格；result_id 宽容等补全层一并删除，不留兼容分支。**V4 命令取证门禁保留**（owner 裁定：agent 不可信，取证门禁留在 driver）：欠取证的 step（`requires_command_evidence: true`，或 step id 为 `verification`）的 completed 结果另带 `command_evidence: [{argv, exit_code, duration_ms}]`——至少一条、argv 非空、`duration_ms > 0`，否则信封被拒（进程内重试车道）；字符串形态条目由 `command_evidence` 的宽容重解析剔除并在拒绝原因里点名；被接受的取证由 driver 写入 `output.commands`（B10，step 自写的同名键被覆盖）。其余 step 的信封不带该字段。**已提交测试文件门禁**（polyforge#156，任意 step）：completed 结果的 `output.test_files` 非空时，每条路径必须是 repo 相对路径、至少存在于一个 task repo，且在其存在的每个 task repo 中都已提交在 HEAD，否则信封被拒（同一进程内重试车道，拒绝原因点名路径）——resume 只按 `refs/pf-task/<name>`（HEAD）恢复 task repo，未提交文件会丢。**声明输出 schema 校验**（polyforge#164 H3）：step 定义文件 frontmatter 的 `output:`（draft-07 JSON Schema，YAML 书写）既注入提示词（放在 step 正文之前，"per the schema above" 成立），也由 driver 机械校验 completed 结果的 `output`（值为 `null` 的可选属性按缺省处理）。v2.5.0 为**只记录模式**（`driver/outputschema.go` 的 `enforceOutputSchemas=false`，唯一开关）：不合格时不拒信封，只记持久事件 `output_schema_violation`（step、schema 路径、截断的校验错误）——用近期真实 result.json 回放约 64% 不合格（agent 此前从未见过 schema），后续版本翻转开关后改为信封被拒（同一进程内重试车道）。声明了却加载失败的 schema 记 `output_schema_unloadable` 事件并写 stderr。**既有失败的边界**（#164 S6）：repro 检查、作者 step 的 `test_files`、bug-fix fix 的 `regression_test` 永远不能标为 `pre_existing`（它们在 base 上失败是设计使然，未修好的 bug 会被当成既有失败放过），pre_existing 检查的 detail 必须带 base sha，且至少有一条 `<repo 相对路径>: <测试名>` 形式的 `pre_existing_failures` 条目（路径按完整路径或目录前缀的路径分段精确比对，不做子串匹配）；bug-fix 的 repro 已复现时，verification 的 pass 必须带一条名为 repro、状态 pass 的检查；违者信封被拒（同一车道）。**已写测试不可改**（polyforge#164 H4）：声明 `test_files` 的 step（e2e-author / repro）被接受时，driver 在其 `output.test_files_commit` 记下各 task repo 的 HEAD（只由 driver 写，step 自写的同名键被丢弃）；之后每个 completed 的 step 都机械比对这些文件在该提交与 HEAD 之间是否一致（等价于 `git diff <author-commit>..HEAD -- <test_files>`，以两次 `git ls-tree -r` 实现，沿用 #156 的加固 git 调用），有差异即信封被拒——除非该 step 当前尝试链里有人工回答（step 认为测试本身错了，必须用 needs_input 提出），此时改动成为新基线（driver 把新的 HEAD 写回前面作者 step 的 `test_files_commit`，故该 step 之后被 rewind 也不丢），并记持久事件 `authored_tests_rebaselined`（列出被改的文件）。**`requires_human_answer` 取值**：`true` = 完成前必须有人工回答（feature-full grill-review）；`if_asked`（polyforge#164 H11，quick-fix grill）= 提出的问题只能由人回答，零问题可直接完成，但 driver 记一条持久事件 `human_gate_unasked`，watcher 据此通知 owner。
+**结果信封 = 最小契约**：step agent 把**一个** JSON 对象写到约定位置 `runtime-state/pending-results/<spawn_n>.json`（位置与命名不变），内容只有 `outcome` + `output`，`needs_input` 时另带 `question_id` + `question`，再加上派发身份围栏（`wi_id` / `step_id` / `spawn_n`）。`protocol_version`、`result_id`、`artifacts` 哈希清单、`handoff_ref` 摘要引用**全部删除**，driver 不再校验它们，缺这些旧字段 MUST NOT 判不合格；result_id 宽容等补全层一并删除，不留兼容分支。**V4 命令取证门禁保留**（owner 裁定；按 2026-10-14 信任模型它是**事故护栏**——防 agent 漏跑或误报验证命令，取证检查留在 driver）：欠取证的 step（`requires_command_evidence: true`，或 step id 为 `verification`）的 completed 结果另带 `command_evidence: [{argv, exit_code, duration_ms}]`——至少一条、argv 非空、`duration_ms > 0`，否则信封被拒（进程内重试车道）；字符串形态条目由 `command_evidence` 的宽容重解析剔除并在拒绝原因里点名；被接受的取证由 driver 写入 `output.commands`（B10，step 自写的同名键被覆盖）。其余 step 的信封不带该字段。**已提交测试文件门禁**（polyforge#156，任意 step）：completed 结果的 `output.test_files` 非空时，每条路径必须是 repo 相对路径、至少存在于一个 task repo，且在其存在的每个 task repo 中都已提交在 HEAD，否则信封被拒（同一进程内重试车道，拒绝原因点名路径）——resume 只按 `refs/pf-task/<name>`（HEAD）恢复 task repo，未提交文件会丢。**声明输出 schema 校验**（polyforge#164 H3）：step 定义文件 frontmatter 的 `output:`（draft-07 JSON Schema，YAML 书写）既注入提示词（放在 step 正文之前，"per the schema above" 成立），也由 driver 机械校验 completed 结果的 `output`（值为 `null` 的可选属性按缺省处理）。v2.5.0 为**只记录模式**（`driver/outputschema.go` 的 `enforceOutputSchemas=false`，唯一开关）：不合格时不拒信封，只记持久事件 `output_schema_violation`（step、schema 路径、截断的校验错误）——用近期真实 result.json 回放约 64% 不合格（agent 此前从未见过 schema），后续版本翻转开关后改为信封被拒（同一进程内重试车道）。声明了却加载失败的 schema 记 `output_schema_unloadable` 事件并写 stderr。**既有失败的边界**（#164 S6）：repro 检查、作者 step 的 `test_files`、bug-fix fix 的 `regression_test` 永远不能标为 `pre_existing`（它们在 base 上失败是设计使然，未修好的 bug 会被当成既有失败放过），pre_existing 检查的 detail 必须带 base sha，且至少有一条 `<repo 相对路径>: <测试名>` 形式的 `pre_existing_failures` 条目（路径按完整路径或目录前缀的路径分段精确比对，不做子串匹配）；bug-fix 的 repro 已复现时，verification 的 pass 必须带一条名为 repro、状态 pass 的检查；违者信封被拒（同一车道）。**已写测试不可改**（polyforge#164 H4）：声明 `test_files` 的 step（e2e-author / repro）被接受时，driver 在其 `output.test_files_commit` 记下各 task repo 的 HEAD（只由 driver 写，step 自写的同名键被丢弃）；之后每个 completed 的 step 都机械比对这些文件在该提交与 HEAD 之间是否一致（等价于 `git diff <author-commit>..HEAD -- <test_files>`，以两次 `git ls-tree -r` 实现，沿用 #156 的加固 git 调用），有差异即信封被拒——除非该 step 当前尝试链里有人工回答（step 认为测试本身错了，必须用 needs_input 提出），此时改动成为新基线（driver 把新的 HEAD 写回前面作者 step 的 `test_files_commit`，故该 step 之后被 rewind 也不丢），并记持久事件 `authored_tests_rebaselined`（列出被改的文件）。**`requires_human_answer` 取值**：`true` = 完成前必须有人工回答（feature-full grill-review）；`if_asked`（polyforge#164 H11，quick-fix grill）= 提出的问题只能由人回答，零问题可直接完成，但 driver 记一条持久事件 `human_gate_unasked`，watcher 据此通知 owner。
 
 **`context_policy`（step 键，`inherit`\|`fresh`，缺省 `inherit`）**：声明一个 step 与上游的上下文关系。`inherit` = 本 step 续上游的活：派发时 driver 找**最近一个已 done 且声明 `handoff: true` 的更早 step**，按路径约定 `artifacts/handoff-<step-id>.md` 读出交接正文，原样拼进派发 prompt 的「Handoff from step …」小节；`fresh` = 从零开始，不注入交接正文，要读的上游产物按产物路径约定自取。`gate: true` 的 step 强制 `fresh`——闸只凭自己的输入判，不继承有倾向性的上下文。
 
@@ -172,7 +172,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 
 **禁止 step agent 使用 harness 后台任务，是 harness 适配层的责任，不是写进提示词的纪律。** 后台任务会让一个步骤在它的派生进程之外留下活动，监督面（判死、step 结束、派生计数）全部失真；靠"规则里写了不许用"约束的只是诚实的 agent。
 
-pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的数据目录下维护 `<data-dir>/step-agent/`，派生每个 step 进程时注入 `PI_CODING_AGENT_DIR=<data-dir>/step-agent`（会话另置于 `PI_CODING_AGENT_SESSION_DIR=<data-dir>/step-agent-sessions/`，实时 transcript 定位器跟着同一个根走）。该目录是 operator agent 目录的**最小快照**——只有 `auth.json`（模型服务凭证）、`models.json`（模型服务配置，保留源文件权限）、`agents/`（子 agent 定义）、`extensions/subagent/`（子 agent **工具**本身），**没有 `settings.json`**，而用户级 package（例如提供后台任务工具的 `npm:pi-background-tasks`）正是在 `settings.json` 里声明的：没有声明就没有加载，后台任务工具对 step agent **机械不可见**，与提示词无关。
+pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<harness-root>/step-agent/`（`--harness-root` / `POLYFORGE_HARNESS_ROOT`，缺省 `<data-dir>`；polyforge#171），派生每个 step 进程时注入 `PI_CODING_AGENT_DIR=<harness-root>/step-agent`（会话另置于 `PI_CODING_AGENT_SESSION_DIR=<harness-root>/step-agent-sessions/`，实时 transcript 定位器跟着同一个根走）。该目录是 operator agent 目录（`--operator-agent-dir` / `POLYFORGE_OPERATOR_AGENT_DIR`，缺省 `~/.pi/agent`；配置了却没有可读的 `auth.json` 即拒绝启动）的**最小快照**——只有 `auth.json`（模型服务凭证）、`models.json`（模型服务配置，保留源文件权限）、`agents/`（子 agent 定义）、`extensions/subagent/`（子 agent **工具**本身），**没有 `settings.json`**，而用户级 package（例如提供后台任务工具的 `npm:pi-background-tasks`）正是在 `settings.json` 里声明的：没有声明就没有加载，后台任务工具对 step agent **机械不可见**，与提示词无关。
 
 - **子 agent 工具如何送达**：它不是 pi 内建工具，而是 operator agent 目录下的扩展 `extensions/subagent/`；pi 只从 `<agent 目录>/extensions/` 自动发现全局扩展（`resource-loader` / `package-manager` 的全局 extensions 根）。所以快照**恰好**拷贝 `extensions/subagent/` 这一个子目录，其余扩展一律不带（例如 `extensions/polyforge` 是交互会话用的），`settings.json` 与 packages 永远不带。
 - 拷贝而非链接：快照不跟随 operator 后续改动（包括全局重装），也没有任何符号链接把专用目录变成整个 operator 目录的窗口（树内符号链接跳过不拷）。**每次派生前**只刷新白名单成员（源文件大小+mtime 变化即重拷，源里没了就删）；清除白名单以外的条目**只在 daemon 启动时**做——那时本 daemon 没有存活的 step 进程，不会把文件从运行中的 step 进程脚下抽走。凭证不可读 = 大声拒绝派生，绝不降级运行。
@@ -180,7 +180,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 - 位置在数据目录下，**绝不在 capsule 内**：capsule 会提交并推送到 aihub，且对 agent 可写。
 - `--no-extensions` 仍然**不传**：子 agent 工具就是上面那个扩展，关掉它等于关掉整条 step-agent 派发路径；隔离由目录（只带这一个扩展）而非开关完成。
 - **任何未来的 harness 在接入前，必须提供等价的保证**（一个 harness 若无法从启动配置上关掉后台任务族，就不具备接入资格）——这是适配层的准入条件，写在这里而不是写在执行者规则里。
-- 与 #135（独立 agent 用户）方向一致：该目录届时对 step agent 用户只读，daemon 仍是唯一写入者。
+- 凭证边界（2026-10-14 裁定）：daemon 不管理凭证——`auth.json` / `models.json` 是人登录 harness 后留在 operator agent 目录里的文件，daemon 只按白名单**拷贝**进 step-agent 目录，不签发、不刷新、不轮换；claude step 的凭证同理只在 `<harness-root>/claude-config/settings.json` 的 env 块里，由人维护。（原"与 #135 独立 agent 用户方向一致"的注随 #135 冻结作废。）
 
 ## 3. 人工协同：`pf watch`（已定）
 
@@ -205,7 +205,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 | 决策事件 | 唤醒 agent，**只给一句由 daemon 按固定模板生成的短话** | 是（少而短） |
 | 用户主动问进展 | agent 执行一次 `pf watch <wi> --once` | 仅此时 |
 
-**安全（r2 补，#135 落地前即生效）**
+**事故护栏（r2 补；#135 已冻结，这些约束就是现行机制）**
 - 唤醒语句**只用 daemon 生成的固定模板**（WI 编号、事件类型、问题 id），**不夹带任何 agent 可写的自由文本**——防止 step agent 借此对交互 agent 做提示注入。问题正文由人通过 `pf watch <wi> --once` 主动查看。
 - 唤醒语句固定附带一句："这是需要人做的决定，agent 不得代答"（#122 教训）。
 - 进展状态文件由 daemon 写在其数据目录，statusLine / 扩展通过 socket 读取，**不放在 agent 可写的路径**。
@@ -313,7 +313,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 5. **身份模型**：daemon id 存放迁移、`PF_CHAT_ID`、负责人、origin、通知路由。
 6. **恢复与重启其余 bug**（第 6 节 4、5、6、8）+ 坏任务置 blocked 后 `pf resume` 重新领取（原"待修复"原地续跑，此后已并入 blocked，见第6节） + 持久化排队队列（含重放规则）+ "继续"范围校验。
 7. **减法一、二档**（可与 2–6 并行）。
-8. 之后：权限隔离（#135）、按步骤选 harness、drain + 跨 daemon 通信（#84）。
+8. 之后：按步骤选 harness、drain + 跨 daemon 通信（#84）。（权限隔离 #135 已于 2026-10-14 冻结，不在计划内。）
 
 ## 10. 现有 WI 映射
 
@@ -322,10 +322,10 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 | #119 | 已取消（本文即其产出） |
 | #102 | 已取消（残留） |
 | #87、#88 | 被已失联的 `cli-opencode` 持有自 10-06；接管路径（`pf ops end-session <wi> --reason ...` + 任意 daemon 普通 `pf submit`）已落地，**现在可清理** |
-| #122 | 由 #137/#138/#135 与 3.2 的唤醒约束修复后复现验证关闭 |
+| #122 | 由 #137/#138 与 3.2 的唤醒约束修复后复现验证关闭 |
 | #139 | 由门禁删除分支解决（已落在集成分支） |
 | #136、#137、#138 | 归入第 9 节 1、7；集成分支已落：#137（步骤文本，`5f4fc3c`）、#138（driver 人工确认保证，`f00b398`）、#136 的 flush/stdio/`PF_AGENT_ROLE` 部分（`34fdf86`）；`agents/` 布局兼容未单独核对 |
-| #135 | 第 9 节 8；在其之前由 3.2 的安全约束兜底（见文末「已知缺口」(b)） |
+| #135 | **冻结**（owner 2026-10-14：团队内部使用，不做重型隔离）；3.2 的事故护栏与「已知缺口」(b) 的 UDS 拒绝即现行机制 |
 | #84 | 重要性上升：drain 与跨机器回答的前提；仍冻结，范围待改写 |
 | #120 | 已解冻 |
 | #130（执行 #126）、#134（执行 #133） | owner 已于 2026-10-12 暂停（paused，进度已推到 aihub）；重新领取 bug 已在集成分支修复（git-dir 隔离、克隆失败 DAEMON-516），**部署后**再 resume；#134 的 **epic/task 概念保留**（已定） |
@@ -441,8 +441,8 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 在自己的
 
 ## 附录 C：已知缺口（集成分支，2026-10-12）
 
-- **(a) bundle digest 描述与代码不一致**：01 §4.5 描述的是 RFC 8785 canonical-JSON bundle digest，但在线的 `Digest` 实现是"路径 + sha + 长度"拼接。**以代码为准**（`internal/common/workflow`，golden 向量在活测试中），01 §4.5 待更正。
-- **(b) 人工确认保证只约束诚实的 agent，直到 #135 落地**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证，但不可信的 step agent 仍可写 capsule，从而绕过。daemon 的 UDS 面（polyforge#122 起于 answer 路由，#164 并入；repo review 2026-10-16 V-1 扩到全部变更路由）按 UDS 对端 SO_PEERCRED pid 拒绝来自本 daemon step 进程树的一切非读请求（DAEMON-403）：对端、其祖先或其进程组 leader 带有 `PF_WI_ID` + `PF_DAEMON_ID=<本 daemon>` 标记即拒；取不到对端凭据也拒（fail closed）。拒绝面是一个包住整张路由表的中间件：`/jobs/{wi}/answer|claim|resume-blocked|resume-paused|pause|wrap`、`/ops/config`、`/shutdown`、`/chat/init`、`/chats/{id}/subscribe|unsubscribe|ack|heartbeat`；开放的只有读：`GET /status`、`/jobs/{wi}/watch`、`/chats/{id}/subscriptions`、`/chats/{id}/attention`。answer 路由保留其 #122 拒绝文案。残余：`setsid` 脱离进程组且清空环境的进程不在此检查内。真正的隔离仍是 #135（第 9 节 8）。（曾有的 abandon-repair 路由随 repair_pending 一并删除，此实例已不存在。）
+- **(a) bundle digest**：已不存在——digest 链随 polyforge#149 B9 删除，`internal/` 中没有 `Digest` / `FileEntry`；`internal/common/workflow` 只读 frontmatter 的模型候选字段。01 §4.5 的 digest 描述已归档。
+- **(b) 人工确认保证是事故护栏，不是对抗性防御**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证；step agent 可写 capsule，蓄意绕过不在 2026-10-14 信任模型的防御范围内（#135 冻结）。daemon 的 UDS 面（polyforge#122 起于 answer 路由，#164 并入；repo review 2026-10-16 V-1 扩到全部变更路由）按 UDS 对端 SO_PEERCRED pid 拒绝来自本 daemon step 进程树的一切非读请求（DAEMON-403）：对端、其祖先或其进程组 leader 带有 `PF_WI_ID` + `PF_DAEMON_ID=<本 daemon>` 标记即拒；取不到对端凭据也拒（fail closed）。拒绝面是一个包住整张路由表的中间件：`/jobs/{wi}/answer|claim|resume-blocked|resume-paused|pause|wrap`、`/ops/config`、`/shutdown`、`/chat/init`、`/chats/{id}/subscribe|unsubscribe|ack|heartbeat`；开放的只有读：`GET /status`、`/jobs/{wi}/watch`、`/chats/{id}/subscriptions`、`/chats/{id}/attention`。answer 路由保留其 #122 拒绝文案。残余：`setsid` 脱离进程组且清空环境的进程不在此检查内——这只能是蓄意行为，按信任模型不再追加防御（#135 冻结）。（曾有的 abandon-repair 路由随 repair_pending 一并删除，此实例已不存在。）
 - **(c) `pf watch` 进展字段**：已随监督重写合入——daemon watch 路由从 `Observe.Progress(wi)` 填充命令、命令时长、最近文件、工具调用数（见附录 D）。
 
 ## 附录 D：监督替换落地对照（第 9 节步骤 2–3，分支 `v2/a-supervision`）
