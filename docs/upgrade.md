@@ -311,9 +311,10 @@ steps:
 ```
 
 A step-id key governs the step with that id in every bundle that has one
-(`fix` covers bug-fix's and quick-fix's `fix`). A step entry's keys are
-`models` and — since polyforge#159, see the next section — `harness`;
-any other key is refused, naming it. YAML anchors and aliases work as usual
+(`fix` covers bug-fix's and quick-fix's `fix`). A step entry's only key is
+`models` (polyforge#159 briefly added `harness`; polyforge#175 removed it
+again — a residual `harness` key is refused with the retired-harness hint,
+see "Per-step harness" below); any other key is refused, naming it. YAML anchors and aliases work as usual
 (`models: &x [...]`, `{ models: *x }`).
 
 **No backward compatibility — edit all three workspace files together
