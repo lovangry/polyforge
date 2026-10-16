@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -295,5 +296,72 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 	}
 	if _, err := os.Stat(r.statePath); err != nil {
 		t.Fatalf("state.json: %v", err)
+	}
+}
+
+// review nit of B-8: AbortClaims waits only for claims already CLAIMING.
+// A Start still queued on opMu (behind a long close) is never waited on —
+// it defers itself at the latch — so the shutdown keeps its budget for
+// the WIP snapshots.
+func TestB8AbortClaimsDoesNotWaitOnStartQueuedOnOpMu(t *testing.T) {
+	hub := newFakeHub()
+	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	t.Cleanup(r.Close)
+	r.opMu.Lock() // a long close holds the lock
+	startErr := make(chan error, 1)
+	go func() { startErr <- r.Start(context.Background(), "wi_b8_queued") }()
+	time.Sleep(100 * time.Millisecond) // let it queue on opMu
+	actx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	t0 := time.Now()
+	r.AbortClaims(actx)
+	if d := time.Since(t0); d > 2*time.Second {
+		t.Fatalf("AbortClaims waited %s on a Start queued on opMu", d)
+	}
+	r.opMu.Unlock()
+	if err := recvErr(t, startErr, "the queued Start"); !IsClaimDeferred(err) {
+		t.Fatalf("the queued Start answered %v, want the deferral", err)
+	}
+	if n := hub.claimCount(); n != 0 {
+		t.Fatalf("the deferred Start claimed %d time(s)", n)
+	}
+}
+
+// review nit of B-8: a closed claim's partial capsule is quarantined, not
+// left in place; a stale OB message never touches a CLAIMING placeholder.
+func TestB8ClosedClaimQuarantinesCapsuleAndOBIgnoresPlaceholder(t *testing.T) {
+	setGitIdentity(t)
+	hub := newFakeHub()
+	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	t.Cleanup(r.Close)
+	const wi = "wi_b8_quar"
+	hub.reposFor = map[string][]api.ProjectRepo{wi: {{Name: "app", URL: hangingRemote(t)}}}
+	startErr := make(chan error, 1)
+	go func() { startErr <- r.Start(context.Background(), wi) }()
+	waitClaiming(t, r, wi)
+	j := r.jobOf(wi)
+	r.handleOB(context.Background(), protocol.OBMsg{Kind: protocol.OBSuperseded, WorkItem: wi})
+	if r.jobOf(wi) != j {
+		t.Fatal("a stale OBSuperseded dropped the CLAIMING placeholder")
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for !dirExists(filepath.Join(j.capsuleDir, "repos")) { // materialize under way
+		if time.Now().After(deadline) {
+			t.Fatal("the claim never reached its task-repo clone")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := r.Stop(context.Background(), wi, protocol.FinishFailed); err != nil {
+		t.Fatalf("fail during CLAIMING: %v", err)
+	}
+	if err := recvErr(t, startErr, "Start"); !errors.Is(err, ErrClaimClosed) {
+		t.Fatalf("Start answered %v", err)
+	}
+	if _, err := os.Stat(j.capsuleDir); !os.IsNotExist(err) {
+		t.Fatalf("the closed claim's capsule was left in place (%v)", err)
+	}
+	matches, _ := filepath.Glob(j.capsuleDir + ".quarantined.*")
+	if len(matches) == 0 {
+		t.Fatal("the closed claim's capsule was not quarantined")
 	}
 }

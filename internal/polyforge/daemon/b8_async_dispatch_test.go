@@ -171,3 +171,48 @@ func TestB8DispatchSlotLimitAndShutdownDuringClone(t *testing.T) {
 		t.Fatalf("submit queue after the shutdown = %s, want both entries kept", raw)
 	}
 }
+
+// review nit of B-8: a claim queued on the runtime's lock behind a long
+// close (here a wrap whose SessionEnd hangs) must not eat the shutdown
+// budget — the shutdown waits only for claims already CLAIMING, so the
+// sequence (and its WIP step) proceeds at once.
+func TestB8ShutdownNotDelayedByClaimQueuedOnLock(t *testing.T) {
+	td := newTestDaemon(t, func(c *Config) { c.ShutdownBudget = 60 * time.Second })
+	td.submitClaim(t, "wi_b8_live")
+	release := make(chan struct{})
+	td.hub.mu.Lock()
+	td.hub.blockEnd = release
+	td.hub.mu.Unlock()
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	wrapDone := make(chan struct{})
+	go func() {
+		defer close(wrapDone)
+		_ = td.rt.Stop(td.runCtx, "wi_b8_live", "wrapped") // holds opMu inside the parked SessionEnd
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if ji, ok := td.rt.Info("wi_b8_live"); ok && ji.State == runtime.StateSealing {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the wrap never reached SEALING")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mkBare(t, td.cfg.GitRemoteBase, "wi_b8_queued")
+	if _, err := td.client.ClaimWithModels("wi_b8_queued", "normal", nil); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond) // the dispatcher's Start queues on opMu
+	t0 := time.Now()
+	if err := td.Shutdown(context.Background(), DirectShutdownCause()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	if d := time.Since(t0); d > 10*time.Second {
+		t.Fatalf("shutdown took %s behind a claim queued on the lock (budget 60s)", d)
+	}
+	unblock()
+	<-wrapDone
+}

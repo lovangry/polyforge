@@ -38,6 +38,13 @@ func init() {
 		}
 		return wrapped(env, dir, args...)
 	}
+	wrappedTimedCtx := gitTimedCtx
+	gitTimedCtx = func(ctx context.Context, timeout time.Duration, env []string, dir string, args ...string) (string, error) {
+		if gitArgsProbe != nil {
+			gitArgsProbe(args)
+		}
+		return wrappedTimedCtx(ctx, timeout, env, dir, args...)
+	}
 	wrappedTimed := gitTimed
 	gitTimed = func(timeout time.Duration, env []string, dir string, args ...string) (string, error) {
 		if gitArgsProbe != nil {

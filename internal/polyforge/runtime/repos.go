@@ -164,7 +164,7 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 // is a just-created clone with no local state.
 func (r *Runtime) restoreTaskRepoState(ctx context.Context, j *job, name, dir string) (string, error) {
 	ref := gitops.TaskRefName(name)
-	sha, err := gitops.FetchTaskRef(j.git, dir, name)
+	sha, err := gitops.FetchTaskRef(ctx, j.git, dir, name)
 	if err != nil {
 		return "", fmt.Errorf("carrier %s fetch failed: %w", ref, err)
 	}
@@ -221,7 +221,7 @@ func (r *Runtime) restoreTaskWIP(ctx context.Context, j *job, name, dir, head st
 		}
 		j.git.EventSink(gitops.EventTaskWIPNotApplied, body)
 	}
-	wip, err := gitops.FetchTaskWIP(j.git, dir, name)
+	wip, err := gitops.FetchTaskWIP(ctx, j.git, dir, name)
 	if err != nil {
 		notApplied("fetch failed: "+err.Error(), nil)
 		return

@@ -195,13 +195,11 @@ type Runtime struct {
 	opMu      sync.Mutex
 	statePath string
 
-	// claimsInFlight counts the Start calls under way and claimsAborted
-	// latches the shutdown's AbortClaims (both under mu): once latched, a
-	// new Start answers DAEMON-410 without claiming and an in-flight one
-	// stops at its next step, leaving its claiming-journal entry for the
-	// next daemon start.
-	claimsInFlight int
-	claimsAborted  bool
+	// claimsAborted latches the shutdown's AbortClaims (under mu): once
+	// latched, a new Start answers DAEMON-410 without claiming and a
+	// CLAIMING one is cancelled and deferred, leaving its claiming-journal
+	// entry for the next daemon start.
+	claimsAborted bool
 
 	// The durable-close retry lane (endpending.go): WIs whose
 	// SessionEnd(blocked) retry goroutine is running (one per WI), and
@@ -405,6 +403,12 @@ func (r *Runtime) handleOB(ctx context.Context, msg protocol.OBMsg) {
 		return // unknown WI: nothing to fence on, drop
 	}
 	state, spawn := j.snapshot()
+	if state == StateClaiming {
+		// no monitor watches a CLAIMING job (it has no agent yet): any
+		// message for it is stale — never let it quarantine or drop the
+		// placeholder (B-8)
+		return
+	}
 	// Finding 1(a) (v1.5 review, MAJOR): OBSuperseded is a SESSION-level
 	// verdict, not a derivation-level one — it is EXEMPT from the
 	// spawn-equality fence. The exact loss the fence used to cause: a
@@ -673,10 +677,9 @@ func mintSessionID() (string, error) {
 // settle the claim: an operator close, a shutdown deferral, the blocked
 // compensation). Start still returns only once the claim settled.
 func (r *Runtime) Start(ctx context.Context, wi string) error {
-	if !r.enterClaim() {
+	if r.abortedClaims() {
 		return claimDeferredError(wi)
 	}
-	defer r.leaveClaim()
 	r.opMu.Lock()
 	j, err := r.claimLocked(ctx, wi)
 	r.opMu.Unlock()
@@ -1087,6 +1090,13 @@ func (r *Runtime) finishClaim(ctx context.Context, wi string, j *job, sceneErr e
 		r.dropJob(j)
 		return r.abandonClaim(j, wi, sceneErr, note)
 	}
+	if r.jobOf(j.wi) != j {
+		// defensive: nothing but finishClaim drops a placeholder, but an
+		// agent must never be installed for a job the table no longer
+		// holds — end the session blocked instead.
+		err := fmt.Errorf("runtime: %s: the claim's placeholder left the job table before its agent started", j.wi)
+		return r.abandonClaim(j, wi, err, err.Error())
+	}
 	return r.installClaim(ctx, wi, j)
 }
 
@@ -1206,6 +1216,12 @@ func (r *Runtime) LoadWorkspace(project string) (*workspace.Config, error) {
 	}
 	return wcfg, nil
 }
+
+// EvClaimPausedEndedBlocked is the runtime event of a pf pause that
+// landed while the claim was still materializing (B-8): there is no
+// scene to retain a paused record for, so the session ended blocked and
+// `pf resume` re-claims the work item.
+const EvClaimPausedEndedBlocked = "claim_paused_ended_blocked"
 
 // EvManualModelsDropped is the runtime event of a recorded manual
 // `--models` list dropped at re-claim because it predates the
@@ -1689,6 +1705,18 @@ func (r *Runtime) closeClaim(wi string, j *job, reason string) error {
 	if reason == protocol.FinishPaused {
 		status = api.StatusBlocked
 		note = "paused by the operator while the claim was materializing (the agent never started); pf resume re-claims it"
+		if r.cfg.EventTap != nil {
+			r.cfg.EventTap(j.wi, EvClaimPausedEndedBlocked, map[string]any{
+				"session_fingerprint": j.sessionFingerprint,
+				"note":                note,
+			})
+		}
+	}
+	// The (partly) materialized scene never ran an agent and belongs to a
+	// session that ends here: move it aside now rather than leave it for
+	// the next claim's prepareCapsule to find.
+	if err := quarantineCapsule(j.capsuleDir, j.git.GitDir); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: quarantine of the closed claim's capsule failed (scene left in place): %v\n", j.wi, err)
 	}
 	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
 		SessionID: j.sessionID,
@@ -1704,23 +1732,6 @@ func (r *Runtime) closeClaim(wi string, j *job, reason string) error {
 		r.clearManualModels(j.wi)
 	}
 	return nil
-}
-
-// enterClaim counts one Start under way; false once AbortClaims latched.
-func (r *Runtime) enterClaim() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.claimsAborted {
-		return false
-	}
-	r.claimsInFlight++
-	return true
-}
-
-func (r *Runtime) leaveClaim() {
-	r.mu.Lock()
-	r.claimsInFlight--
-	r.mu.Unlock()
 }
 
 func (r *Runtime) abortedClaims() bool {
@@ -1755,9 +1766,12 @@ func IsClaimDeferred(err error) bool {
 
 // AbortClaims is the shutdown's first runtime step (B-8): latch so no new
 // Start claims, cancel every CLAIMING job's clone/materialize, and wait —
-// bounded by ctx — until the Starts under way have settled. A cancelled
-// claim is deferred, never blocked: its journal entry stays for the next
-// daemon start. opMu is not taken (a Start may hold it on a hub call).
+// bounded by ctx — for those claims to settle. A cancelled claim is
+// deferred, never blocked: its journal entry stays for the next daemon
+// start. Only claims that already sit CLAIMING are waited for: a Start
+// still queued on opMu (or on a hub call before its claim) defers itself
+// at the latch check and is never waited on, so a long close holding
+// opMu cannot eat the shutdown budget. opMu is not taken here.
 func (r *Runtime) AbortClaims(ctx context.Context) {
 	r.mu.Lock()
 	r.claimsAborted = true
@@ -1773,20 +1787,12 @@ func (r *Runtime) AbortClaims(ctx context.Context) {
 	for _, cl := range lanes {
 		cl.cancel()
 	}
-	tick := time.NewTicker(10 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		r.mu.Lock()
-		n := r.claimsInFlight
-		r.mu.Unlock()
-		if n == 0 {
-			return
-		}
+	for i, cl := range lanes {
 		select {
+		case <-cl.done:
 		case <-ctx.Done():
-			fmt.Fprintf(os.Stderr, "runtime: shutdown: %d claim(s) still settling at the budget's end\n", n)
+			fmt.Fprintf(os.Stderr, "runtime: shutdown: %d claim(s) still settling at the wait's end\n", len(lanes)-i)
 			return
-		case <-tick.C:
 		}
 	}
 }

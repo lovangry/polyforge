@@ -224,6 +224,13 @@ var gitTimed = func(timeout time.Duration, env []string, dir string, args ...str
 	return runGit(timeout, env, dir, args...)
 }
 
+// gitTimedCtx is gitTimed under a caller context too (the claim lane's
+// carrier fetches, B-8): cancelling ctx kills the process group. A var
+// for the same test seam.
+var gitTimedCtx = func(ctx context.Context, timeout time.Duration, env []string, dir string, args ...string) (string, error) {
+	return runGitCtx(ctx, timeout, env, dir, args...)
+}
+
 // runGit runs git once; timeout 0 = unbounded.
 func runGit(timeout time.Duration, env []string, dir string, args ...string) (string, error) {
 	return runGitCtx(context.Background(), timeout, env, dir, args...)
@@ -1072,13 +1079,14 @@ func EventDetail(s string) string {
 // the per-WI lock, mirroring Clone — the claim lane is single-threaded
 // per WI, but the invariant (one git face per WI at a time) stays
 // mechanical, not remembered.
-func FetchTaskRef(o Opts, dir, name string) (string, error) {
-	return fetchCarrierRef(o, dir, TaskRefName(name))
+func FetchTaskRef(ctx context.Context, o Opts, dir, name string) (string, error) {
+	return fetchCarrierRef(ctx, o, dir, TaskRefName(name))
 }
 
 // fetchCarrierRef is FetchTaskRef for any carrier-lane ref (the task
 // carrier or the WIP ref): ("", nil) when the hub holds no such ref.
-func fetchCarrierRef(o Opts, dir, ref string) (string, error) {
+// Cancelling ctx kills the remote calls (the claim lane, B-8).
+func fetchCarrierRef(ctx context.Context, o Opts, dir, ref string) (string, error) {
 	if o.RemoteURL == "" {
 		return "", nil // no capsule remote: nowhere a carrier could exist
 	}
@@ -1092,13 +1100,13 @@ func fetchCarrierRef(o Opts, dir, ref string) (string, error) {
 	env := hubEnv(o, false, additions)
 	// ls-remote --exit-code answers 2 when no ref matches: the
 	// language-independent "no carrier yet" signal (never git's message).
-	if _, err := gitTimed(o.bound(chainRemoteTimeout), env, dir, "ls-remote", "--exit-code", o.RemoteURL, ref); err != nil {
+	if _, err := gitTimedCtx(ctx, o.bound(chainRemoteTimeout), env, dir, "ls-remote", "--exit-code", o.RemoteURL, ref); err != nil {
 		if exitCode(err) == 2 {
 			return "", nil // no carrier recorded yet: first claim, nothing to restore
 		}
 		return "", err
 	}
-	if _, err := gitTimed(o.bound(chainRemoteTimeout), env, dir, "fetch", "--quiet", "--no-tags", o.RemoteURL, ref); err != nil {
+	if _, err := gitTimedCtx(ctx, o.bound(chainRemoteTimeout), env, dir, "fetch", "--quiet", "--no-tags", o.RemoteURL, ref); err != nil {
 		return "", err
 	}
 	out, err := git(env, dir, "rev-parse", "FETCH_HEAD")

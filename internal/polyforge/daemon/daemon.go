@@ -222,13 +222,6 @@ type Daemon struct {
 	cancelRun context.CancelFunc
 	rtDone    chan struct{} // closed when the runtime message loop exited
 
-	// claims tracks the dispatcher's per-claim goroutines (repo review
-	// 2026-10-16 B-8); claimsClosed (under claimMu) refuses new ones once
-	// the shutdown sequence waits for them.
-	claimMu      sync.Mutex
-	claims       sync.WaitGroup
-	claimsClosed bool
-
 	shutOnce    sync.Once
 	shutDone    chan struct{} // closed when the FIRST shutdown sequence finished
 	shutMu      sync.Mutex
@@ -919,41 +912,14 @@ func (d *Daemon) occupiedSlots() map[string]bool {
 // queue counts a Take()n entry against the slots until it settles, so
 // the concurrency cap holds across the goroutines.
 func (d *Daemon) dispatch() {
-	if d.modes.ShuttingDown() {
-		return
-	}
-	for {
-		d.claimMu.Lock()
-		if d.claimsClosed {
-			d.claimMu.Unlock()
-			return
-		}
+	for !d.modes.ShuttingDown() {
 		e := d.q.Take()
 		if e == nil {
-			d.claimMu.Unlock()
 			return
 		}
-		d.claims.Add(1)
-		d.claimMu.Unlock()
-		go func(e qEntry) {
-			defer d.claims.Done()
-			d.startEntry(e)
-		}(*e)
-	}
-}
-
-// waitClaims stops the dispatcher from starting claims and waits, bounded
-// by ctx, for the ones under way (the runtime's AbortClaims has already
-// cancelled their clones, so they settle promptly).
-func (d *Daemon) waitClaims(ctx context.Context) {
-	d.claimMu.Lock()
-	d.claimsClosed = true
-	d.claimMu.Unlock()
-	done := make(chan struct{})
-	go func() { d.claims.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-ctx.Done():
+		// A claim that races the shutdown latch defers itself in the
+		// runtime (AbortClaims); nothing here waits for it.
+		go d.startEntry(*e)
 	}
 }
 
