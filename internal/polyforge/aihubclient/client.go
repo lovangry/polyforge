@@ -222,12 +222,17 @@ func (c *Client) DependenciesRaw(idOrSlug string) (json.RawMessage, error) {
 const SearchExcerptRunes = 120
 
 // SearchMemories runs the memory retrieval (06 §5.1). q is required;
-// memType, tags and limit are optional filters. Each hit carries a
-// SearchExcerptRunes content_excerpt.
-func (c *Client) SearchMemories(project, q, memType string, tags []string, limit int) (json.RawMessage, error) {
+// memType, tags and limit are optional filters; match is the search
+// mode ("" — the server default, every token must match — or "any",
+// the ranked any-term mode). Each hit carries a SearchExcerptRunes
+// content_excerpt.
+func (c *Client) SearchMemories(project, q, memType string, tags []string, limit int, match string) (json.RawMessage, error) {
 	v := url.Values{}
 	v.Set("project", project)
 	v.Set("q", q)
+	if match != "" {
+		v.Set("match", match)
+	}
 	v.Set("excerpt", strconv.Itoa(SearchExcerptRunes))
 	if memType != "" {
 		v.Set("type", memType)

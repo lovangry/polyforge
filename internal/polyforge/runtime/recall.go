@@ -6,11 +6,12 @@ package runtime
 // path existed at all); the F6 ruling answers it in two halves, and this
 // file is the STATIC half:
 //
-//   - at claim time the daemon recalls the project's memories
-//     semantically — goal+content as the query, the aihub memory search
-//     face as the index — and writes the top-K hits as a static snapshot
-//     into the capsule: runtime-state/recalled-memories.json, which the
-//     driver renders into every step prompt as non-binding history
+//   - at claim time the daemon recalls the project's memories — goal +
+//     the content's head as the query, the aihub memory search face's
+//     ranked any-term mode (match=any) as the index — and writes the
+//     top-K hits as a static snapshot into the capsule:
+//     runtime-state/recalled-memories.json, which the driver renders
+//     into every step prompt as non-binding history
 //     (driver/spawn.go recalledMemoriesSection, decision 2026-10-16 G3);
 //   - the runtime half (recall/remember over the UDS face) was deleted
 //     (v2-converge); the snapshot is the step agent's only memory path.
@@ -65,6 +66,31 @@ type recalledSnapshot struct {
 	CreatedAt string `json:"created_at"`
 }
 
+// recallContentRunes bounds how much of the work item's content joins
+// the goal in the claim query. The search runs in aihub's ranked
+// any-term mode (match=any), which keeps at most 32 of the query's
+// longest distinct terms; the task's head (goal + opening content) is
+// where its subject lives, and a bounded prefix keeps a long content
+// body's tail from crowding the goal's terms out of that cap.
+const recallContentRunes = 1500
+
+// recallQuery builds the claim query: the goal, plus the first
+// recallContentRunes runes of the content when there is any.
+func recallQuery(goal string, content *string) string {
+	q := strings.TrimSpace(goal)
+	if content == nil {
+		return q
+	}
+	c := strings.TrimSpace(*content)
+	if c == "" {
+		return q
+	}
+	if r := []rune(c); len(r) > recallContentRunes {
+		c = string(r[:recallContentRunes])
+	}
+	return strings.TrimSpace(q + "\n" + c)
+}
+
 // recallTopK answers the effective K for the snapshot (configured,
 // defaulted, bounded).
 func (r *Runtime) recallTopK() int {
@@ -104,10 +130,7 @@ func (r *Runtime) writeRecalledMemories(j *job) {
 		}
 	}
 	if item != nil {
-		snap.Query = strings.TrimSpace(item.Goal)
-		if item.Content != nil && strings.TrimSpace(*item.Content) != "" {
-			snap.Query = strings.TrimSpace(item.Goal + "\n" + *item.Content)
-		}
+		snap.Query = recallQuery(item.Goal, item.Content)
 	}
 	switch {
 	case strings.TrimSpace(snap.Query) == "":

@@ -13,7 +13,7 @@ memories) are not part of this verb — retrieval only.
 ## Command
 
 ```
-pf recall --project P <query> [--type T] [--tags a,b] [--limit N]
+pf recall --project P <query> [--any] [--type T] [--tags a,b] [--limit N]
 ```
 
 The query is the positional argument (or `--q`); `--project` is REQUIRED
@@ -31,7 +31,11 @@ the value from the WI under discussion. `--type` is exact
 `experience.`) or `*` (all, same as omitting it); any other `*` placement
 is refused locally. `--tags` is comma-separated and an entry must contain
 all of them. `--limit` caps results: default 20, `1..200` (anything else
-is refused locally, nothing sent).
+is refused locally, nothing sent). By default a memory must contain EVERY
+query word, so keep queries short (2–4 distinctive words); `--any` switches
+to the ranked any-term match (a memory sharing any of the query's words,
+best overlap first — stopwords and words under 3 characters ignored), for a
+long or descriptive query.
 
 ## Success
 
