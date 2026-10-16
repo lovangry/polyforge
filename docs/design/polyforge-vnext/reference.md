@@ -385,8 +385,9 @@ Detail: `06-memory-search.md#§1`. Summary (`internal/aihub/memory`): the Markdo
 index (`memory_fts`). Write = temp file + fsync → one transaction (row + FTS) → rename. A startup
 background reconcile (`RebuildIndex`) makes rows/index match files (file wins). Search needs `q`;
 `match=all` (default) ANDs every token (≥3 runes as FTS phrases, shorter ones as substrings);
-`match=any` ORs up to 32 filtered terms ranked by bm25 (rules in `06-memory-search.md#§5.1`); filters
-and limit are the same in both modes. CLI (`cli/verbs_aihub.go`): `pf recall --project P <query> [--any]` (project must
+`match=any` ORs up to 32 filtered terms (words, plus 3-rune shingles of CJK runs) ranked by bm25 and
+examines at most max(100, 10×limit) candidates (rules in `06-memory-search.md#§5.1`); filters, limit
+and the in-SQL `project=` narrowing are the same in both modes (single entry `Store.SearchMode`). CLI (`cli/verbs_aihub.go`): `pf recall --project P <query> [--any]` (project must
 be mapped; `--any` = `match=any`), `pf remember --project P --type T <content|-|@file>`, `pf memory show <id>`. At claim the
 daemon writes `runtime-state/recalled-memories.json` (query = goal + the first 1500 runes of content, `match=any`, project-scoped, top 10,
 1200-rune excerpts; empty list + notice on error or no hits; never fails the claim — `runtime/recall.go`,
