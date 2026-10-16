@@ -716,9 +716,9 @@ func (d *Driver) applyInterruptedLocked(req TransitionRequest) error {
 	// per-step failure counter is untouched — a daemon restart or driver
 	// relaunch must not push a step towards blocked) and its cause is not
 	// model-class, so it never advances the candidate pointer.
-	cause := "driver_relaunch"
-	if req.Reason == "daemon_restart" {
-		cause = "daemon_restart"
+	cause := FailDriverRelaunch
+	if req.Reason == FailDaemonRestart {
+		cause = FailDaemonRestart
 	}
 	st.Attempts = append(st.Attempts, capsule.Attempt{
 		Cause:         CauseInfraFailure,

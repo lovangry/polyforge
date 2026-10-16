@@ -125,6 +125,14 @@ func rateLimitBackoff(streak int) time.Duration {
 	return d
 }
 
+// The audit-only interruption causes a driver relaunch or a daemon
+// restart archives on the in-flight step (applyInterruptedLocked): not
+// dispatch outcomes, never counted failures.
+const (
+	FailDriverRelaunch = "driver_relaunch"
+	FailDaemonRestart  = "daemon_restart"
+)
+
 // trailingCause counts the step's trailing consecutive attempts of one
 // failure cause (the archived attempts are the authority, like the
 // candidate pointer): a dispatch that died of anything else — or a
@@ -137,7 +145,7 @@ func trailingCause(attempts []capsule.Attempt, cause string) int {
 	n := 0
 	for i := len(attempts) - 1; i >= 0; i-- {
 		a := attempts[i]
-		if a.Cause == CauseInfraFailure && (a.FailureCause == "driver_relaunch" || a.FailureCause == "daemon_restart") {
+		if a.Cause == CauseInfraFailure && (a.FailureCause == FailDriverRelaunch || a.FailureCause == FailDaemonRestart) {
 			continue
 		}
 		if a.FailureCause != cause {
