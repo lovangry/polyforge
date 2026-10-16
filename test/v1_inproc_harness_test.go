@@ -132,7 +132,6 @@ func newInprocRig(t *testing.T, inst *v1Install, obsTune ...inprocObsTune) *inpr
 		DataDir:       dataDir,
 		GitRemoteBase: inst.url + "/git",
 		WorkflowsDir:  inst.workflowsPath(),
-		Harness:       "pi",
 		PiBin:         inst.fakepiPath,
 		ClaudeBin:     "/nonexistent/claude-test-guard", // never the host claude
 	}

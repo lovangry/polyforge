@@ -69,12 +69,7 @@ type Config struct {
 	DataDir       string // state.json + external git-dirs live here
 	GitRemoteBase string // e.g. https://aihub.example/git → <base>/<wi>.git
 	WorkflowsDir  string // daemon checkout's workflows/ (materialization source)
-	// Harness is the adapter whose agent definitions the capsule
-	// materializes (pi: the subagent extension's agents/). It is NOT the
-	// step harness — that is per model candidate (polyforge#175: the
-	// `<harness>:` prefix of each candidate).
-	Harness string
-	PiBin   string // harness binary (default "pi")
+	PiBin         string // harness binary (default "pi")
 	// ClaudeBin is the Claude Code binary (default "claude"; cli.toml
 	// claude_bin / --claude-bin), used by steps whose harness is claude.
 	ClaudeBin string
@@ -130,11 +125,6 @@ type Config struct {
 }
 
 func (c *Config) fill() {
-	// The harness adapter defaults to the only one that exists today
-	// (the pi spawner).
-	if c.Harness == "" {
-		c.Harness = "pi"
-	}
 	if c.OperatorAgentDir == "" {
 		c.OperatorAgentDir = OperatorAgentDirDefault()
 		c.OperatorAgentDirExplicit = false
@@ -1277,7 +1267,7 @@ func quarantineCapsule(capsuleDir, gitDir string) error {
 // injected-failure test).
 var renameFn = os.Rename
 
-// materialize lays out the capsule: workflows/, agents/,
+// materialize lays out the capsule: workflows/,
 // capsule.json, session.json, .gitignore and the runtime-state/ tree.
 // The bundle is materialized as ONE atomic set with a completion marker
 // (F7, materialize.go; no digest verification — the digest chain is
@@ -1286,7 +1276,7 @@ var renameFn = os.Rename
 // written, so the recorded baselines are the true claim-time SHAs.
 func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	for _, d := range []string{
-		capsule.DirAgents, capsule.DirArtifacts, capsule.DirLogs, capsule.DirRepos,
+		capsule.DirArtifacts, capsule.DirLogs, capsule.DirRepos,
 		capsule.DirRuntimeState, capsule.DirSession, capsule.DirWorkflows,
 		filepath.Join(capsule.DirLogs, "session"),
 	} {
