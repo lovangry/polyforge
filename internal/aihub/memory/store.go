@@ -339,11 +339,32 @@ func (s *Store) load(memID string) (*Entry, error) {
 // allowed filters candidates (membership/visibility, applied by the
 // server layer).
 func (s *Store) Search(q string, memType string, tags []string, limit int, allowed func(*Entry) bool) ([]Entry, error) {
+	return s.SearchMode(MatchAll, "", q, memType, tags, limit, allowed)
+}
+
+// SearchMode is the search face's single entry: match picks the mode
+// (MatchAll / "" — Search's every-token AND; MatchAny — SearchAny's
+// ranked any-term OR; anything else is MEM-400). project, when
+// non-empty, is a project id narrowing the candidates INSIDE the FTS /
+// scan SQL — a pure narrowing (the caller's allowed predicate still
+// enforces membership, visibility and the same project), so the answer
+// is identical to filtering afterwards, minus the per-candidate load
+// of every other project's matches.
+func (s *Store) SearchMode(match, project, q, memType string, tags []string, limit int, allowed func(*Entry) bool) ([]Entry, error) {
+	switch match {
+	case "", MatchAll, MatchAny:
+	default:
+		return nil, errf("MEM-400", "", "match must be %q or %q", MatchAll, MatchAny)
+	}
 	if strings.TrimSpace(q) == "" {
 		return nil, errf("MEM-400", "", "q required")
 	}
 	if limit <= 0 || limit > 200 {
 		limit = 50
+	}
+	f := searchFilter{project: project, memType: memType, tags: tags, limit: limit, allowed: allowed}
+	if match == MatchAny {
+		return s.searchAny(q, f)
 	}
 	var long, short []string
 	for _, tok := range strings.Fields(q) {
@@ -353,17 +374,30 @@ func (s *Store) Search(q string, memType string, tags []string, limit int, allow
 			short = append(short, tok)
 		}
 	}
-	match := ""
+	fts := ""
 	if len(long) > 0 {
-		match = ftsQuery(long)
+		fts = ftsQuery(long)
 	}
-	return s.collect(match, short, memType, tags, limit, allowed)
+	return s.collect(fts, short, 0, f)
+}
+
+// searchFilter is one search's post-MATCH filter set plus its limit.
+type searchFilter struct {
+	project string // project id narrowing the SQL candidates; "" = all
+	memType string
+	tags    []string
+	limit   int
+	allowed func(*Entry) bool
 }
 
 // collect answers the filtered hits for one search. match is the FTS5
 // MATCH expression ("" = no FTS step: every active body is scanned);
 // short tokens must each appear as a substring of the indexed body.
-func (s *Store) collect(match string, short []string, memType string, tags []string, limit int, allowed func(*Entry) bool) ([]Entry, error) {
+// maxCands > 0 bounds the FTS candidates examined in total (one
+// rank-ordered window, no further paging); 0 pages until the limit is
+// filled or the matches run out.
+func (s *Store) collect(match string, short []string, maxCands int, f searchFilter) ([]Entry, error) {
+	memType, tags, limit, allowed := f.memType, f.tags, f.limit, f.allowed
 	out := []Entry{}
 	// seen: a write between two FTS pages can shift ranks, so the same
 	// entry may appear on consecutive pages — it is answered once.
@@ -410,11 +444,20 @@ func (s *Store) collect(match string, short []string, memType string, tags []str
 		return false
 	}
 	if match == "" {
-		scanned, serr := s.scanBodies()
+		scanned, serr := s.scanBodies(f.project)
 		if serr != nil {
 			return nil, serr
 		}
 		take(scanned)
+		return out, nil
+	}
+	// A bounded search examines one best-ranked window and stops there.
+	if maxCands > 0 {
+		cands, err := s.ftsPage(match, f.project, maxCands, 0)
+		if err != nil {
+			return nil, err
+		}
+		take(cands)
 		return out, nil
 	}
 	// FTS candidates are paged in rank order until limit entries survive
@@ -423,7 +466,7 @@ func (s *Store) collect(match string, short []string, memType string, tags []str
 	// could silently answer fewer than limit hits while more exist.
 	batch := limit * 4
 	for offset := 0; ; offset += batch {
-		cands, err := s.ftsPage(match, batch, offset)
+		cands, err := s.ftsPage(match, f.project, batch, offset)
 		if err != nil {
 			return nil, err
 		}
@@ -434,11 +477,13 @@ func (s *Store) collect(match string, short []string, memType string, tags []str
 }
 
 // ftsPage reads one rank-ordered page of FTS candidates.
-func (s *Store) ftsPage(match string, limit, offset int) ([]candRow, error) {
+// project, when non-empty, keeps only that project's rows.
+func (s *Store) ftsPage(match, project string, limit, offset int) ([]candRow, error) {
 	rows, err := s.db.Query(`SELECT f.mem_id, f.body FROM memories m
 		JOIN memory_fts f ON f.mem_id = m.id
 		WHERE memory_fts MATCH ?1 AND m.status='active'
-		ORDER BY rank LIMIT ?2 OFFSET ?3`, match, limit, offset)
+		AND (?4 = '' OR m.project_id = ?4)
+		ORDER BY rank LIMIT ?2 OFFSET ?3`, match, limit, offset, project)
 	if err != nil {
 		// A typed refusal, never a degrade to a full scan: answering
 		// every memory for a query FTS could not parse is a leak.
@@ -476,10 +521,12 @@ func typeMatches(entryType, memType string) bool {
 type candRow struct{ id, body string }
 
 // scanBodies returns every active entry's indexed body for substring
-// filtering (the short-token path).
-func (s *Store) scanBodies() ([]candRow, error) {
+// filtering (the short-token path); project, when non-empty, keeps only
+// that project's rows.
+func (s *Store) scanBodies(project string) ([]candRow, error) {
 	rows, err := s.db.Query(`SELECT f.mem_id, f.body FROM memories m
-		JOIN memory_fts f ON f.mem_id = m.id WHERE m.status='active'`)
+		JOIN memory_fts f ON f.mem_id = m.id WHERE m.status='active'
+		AND (?1 = '' OR m.project_id = ?1)`, project)
 	if err != nil {
 		return nil, errf(api.ErrMemUnavailable, "", "scan: %v", err)
 	}
