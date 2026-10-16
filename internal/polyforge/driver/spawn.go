@@ -526,7 +526,8 @@ func deliveryContract(p promptParts) string {
 func readStepDefinition(bundleDir, stepID string) (string, error) {
 	raw, err := os.ReadFile(workflow.StepDefinitionPath(bundleDir, stepID))
 	if err != nil {
-		return "", fmt.Errorf("driver: step definition for %q unreadable (expected %s under the bundle): %w", stepID, dirStepDefs+"/"+stepID+".md", err)
+		return "", fmt.Errorf("driver: step definition for %q unreadable (expected %s under the bundle, or %s beside it): %w",
+			stepID, dirStepDefs+"/"+stepID+".md", "../"+workflow.SharedDir+"/"+dirStepDefs+"/"+stepID+".md", err)
 	}
 	body := stepDefBody(raw)
 	if body == "" {

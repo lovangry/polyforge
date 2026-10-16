@@ -1059,6 +1059,12 @@ func (r *Runtime) CheckBundle(wi, bundle string) error {
 	if bundle == "" {
 		return nil
 	}
+	if bundle == workflow.SharedDir {
+		return &api.Error{
+			Code:   api.ErrDaemonWorkspaceYaml,
+			Detail: fmt.Sprintf("the workflow bundle of %s refused the claim before it was made (the work item stays queued): %q holds the shared step definitions and is not a workflow bundle", wi, workflow.SharedDir),
+		}
+	}
 	if _, ferr := r.readBundleFrontmatter(bundle); ferr != nil {
 		return &api.Error{
 			Code:   api.ErrDaemonWorkspaceYaml,

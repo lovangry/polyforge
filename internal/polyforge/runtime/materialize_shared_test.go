@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -42,5 +43,22 @@ func TestMaterializeSetCarriesSharedSteps(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("marker does not record %s", rel)
+	}
+}
+
+// "_shared" is the shared-steps directory, never a bundle: the pre-claim
+// check and the materialization both refuse it by name.
+func TestSharedDirIsNotABundle(t *testing.T) {
+	wfDir := pristineBundle(t)
+	if err := os.MkdirAll(filepath.Join(wfDir, "_shared", "steps"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r, _, _ := newTestRuntime(t, newFakeHub(), &scriptedSpawner{})
+	r.cfg.WorkflowsDir = wfDir
+	if err := r.CheckBundle("wi_s", "_shared"); err == nil || !strings.Contains(err.Error(), "not a workflow bundle") {
+		t.Fatalf("CheckBundle(_shared) = %v, want a refusal", err)
+	}
+	if err := r.materializeBundle(&job{wi: "wi_s", bundleName: "_shared", capsuleDir: t.TempDir()}); err == nil || !strings.Contains(err.Error(), "not a workflow bundle") {
+		t.Fatalf("materializeBundle(_shared) = %v, want a refusal", err)
 	}
 }

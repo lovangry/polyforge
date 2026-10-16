@@ -146,6 +146,9 @@ func (r *Runtime) materializeBundle(j *job) error {
 	if r.cfg.WorkflowsDir == "" || j.bundleName == "" {
 		return nil
 	}
+	if j.bundleName == workflow.SharedDir {
+		return fmt.Errorf("runtime: %s: %q holds the shared step definitions and is not a workflow bundle", j.wi, workflow.SharedDir)
+	}
 	src := filepath.Join(r.cfg.WorkflowsDir, j.bundleName)
 	if !dirExists(src) {
 		fmt.Fprintf(os.Stderr, "runtime: %s: bundle %s not in checkout; capsule materialized without it\n", j.wi, j.bundleName)
