@@ -301,7 +301,7 @@ func v3PendingQID(exec map[string]any, step string) string {
 // TestV3DriverLifecycleProductionArgv pins the kept face end-to-end: a
 // daemon booted exactly the way production boots it (no engine-selection
 // flag, no executor prompt flag) claims a WI, clones the task repo,
-// drives the whole quick-fix workflow through the Go driver and the
+// drives the whole autopilot workflow through the Go driver and the
 // fakepi envelope mode, survives a kill -9 mid-step and completes after
 // restart. Pre-change this passes via the engine flag's default; the
 // deletion makes the driver unconditional and must keep it green — the
@@ -561,7 +561,7 @@ func v3StepFilesCitingTheSkill(root string) []string {
 		filepath.Join(root, "workflows", "feature-full", "steps", "verification.md"),
 		filepath.Join(root, "workflows", "feature-full", "steps", "grill-review.md"),
 		filepath.Join(root, "workflows", "feature-full", "steps", "grill.md"),
-		filepath.Join(root, "workflows", "quick-fix", "steps", "grill.md"),
+		filepath.Join(root, "workflows", "autopilot", "steps", "grill.md"),
 	}
 }
 
@@ -638,7 +638,7 @@ func TestV3LiveDocSurfacesRewritten(t *testing.T) {
 		surfaces = append(surfaces, filepath.Join(root, "skills", "polyforge", n))
 	}
 	// Every workflow step file across the bundles.
-	for _, bundle := range []string{"bug-fix", "chore", "feature-full", "quick-fix", "release"} {
+	for _, bundle := range []string{"bug-fix", "chore", "feature-full", "autopilot", "release"} {
 		matches, _ := filepath.Glob(filepath.Join(root, "workflows", bundle, "steps", "*.md"))
 		surfaces = append(surfaces, matches...)
 	}

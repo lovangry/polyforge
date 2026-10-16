@@ -293,6 +293,26 @@ func TestPatchBundleWithChildrenRefused(t *testing.T) {
 	if rc.ParentID == nil || *rc.ParentID != r.ID {
 		t.Fatalf("child parent_id = %v, want %s", rc.ParentID, r.ID)
 	}
+
+	// Depth is one level (02 §4.2a): a child is never a parent, and the
+	// refused create persists nothing.
+	before, err = env2.WIs.List(ListFilters{Project: "alpha"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if _, err := env2.WIs.Create(CreateRequest{
+		Project: "alpha", Goal: "w140 grandchild", Reporter: env2.UserID,
+		ParentID: strPtrTest(rc.ID),
+	}); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "PARENT_DEPTH" {
+		t.Fatalf("create grandchild: want CORE-400/PARENT_DEPTH, got %v", err)
+	}
+	after, err = env2.WIs.List(ListFilters{Project: "alpha"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("refused grandchild create persisted a row: %d before, %d after", len(before), len(after))
+	}
 }
 
 // TestRaceBindBundleVsNewChild: PATCH bundle (NULL→X) vs create of a

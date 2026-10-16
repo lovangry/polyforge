@@ -96,7 +96,7 @@ func TestV1S05AgentKill9(t *testing.T) {
 		t.Fatalf("second derivation counter wrong: %+v", spawns[1])
 	}
 
-	// The driver faces: the whole quick-fix chain done, grill's accepted
+	// The driver faces: the whole autopilot chain done, grill's accepted
 	// envelope is the CONTINUATION's (ordinal 2), and the sealed chain
 	// carries the spawn journal.
 	x := readExecution(t, d.capsuleDir(wi))

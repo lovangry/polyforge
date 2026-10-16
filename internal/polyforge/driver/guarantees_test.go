@@ -191,19 +191,19 @@ func TestRequiresHumanAnswerIfAskedParse(t *testing.T) {
 
 func TestShippedBundlesDeclareHumanGates(t *testing.T) {
 	// Only steps whose text REQUIRES a human confirmation carry the flag:
-	// the grills allow zero questions, so they must not. quick-fix grill
+	// the grills allow zero questions, so they must not. autopilot grill
 	// (the lane's only checkpoint) declares if_asked (polyforge#164 H11).
 	want := map[string][]string{
 		"feature-full": {"grill-review"},
 	}
-	qf, err := LoadWorkflow(filepath.Join("..", "..", "..", "workflows", "quick-fix"))
+	qf, err := LoadWorkflow(filepath.Join("..", "..", "..", "workflows", "autopilot"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if s := qf.step("grill"); s == nil || !s.HumanAnswerIfAsked || s.RequiresHumanAnswer {
-		t.Fatalf("quick-fix/grill must declare requires_human_answer: if_asked: %+v", s)
+		t.Fatalf("autopilot/grill must declare requires_human_answer: if_asked: %+v", s)
 	}
-	for bundle, ids := range map[string][]string{"feature-full": {"grill"}, "quick-fix": {"grill"}} {
+	for bundle, ids := range map[string][]string{"feature-full": {"grill"}, "autopilot": {"grill"}} {
 		wf, err := LoadWorkflow(filepath.Join("..", "..", "..", "workflows", bundle))
 		if err != nil {
 			t.Fatal(err)

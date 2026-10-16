@@ -1,6 +1,6 @@
 ---
-name: quick-fix
-description: Light remediation flow - one interactive checkpoint, a single fix pass and a machine gate, sized for small well-understood changes.
+name: autopilot
+description: Light remediation flow - one interactive checkpoint, a single fix pass and a machine gate, sized for small well-understood changes. It can merge unattended - with no question asked and its gates passing, deliver auto-merges.
 rewind:
   max_total: 2
   max_per_step: 2
@@ -13,7 +13,7 @@ steps:
   - { id: deliver, context_policy: fresh, handoff: false, gate: true, requires_command_evidence: true, on_fail: { target: fix } }
 ---
 
-# quick-fix — light remediation flow
+# autopilot — light remediation flow
 
 This is the flow-level narrative for the workflow. It explains how the four
 steps compose and what flows between them; it is not itself a structural schema — the
@@ -105,7 +105,7 @@ resolution), pushes ONLY the feature branch `polyforge/<project>-<seq>`, opens o
 the PR, and merges it with `gh pr merge --merge` iff the independent review passed with no
 blocking finding, the tests passed, no conflict was LLM-resolved and its mechanical
 pre-flight (nothing uncommitted, no release residue) found nothing. Otherwise it asks a
-human-only question (merge / don't merge / back to code). This workflow has no independent `review` step, so verification's pass stands in for it: a quick-fix delivery auto-merges when its tests are covered on the pushed head, no conflict was hand-resolved and the pre-flight is clean, and asks otherwise. "Back to code" is a
+human-only question (merge / don't merge / back to code). This workflow has no independent `review` step, so verification's pass stands in for it: an autopilot delivery auto-merges when its tests are covered on the pushed head, no conflict was hand-resolved and the pre-flight is clean, and asks otherwise. "Back to code" is a
 `gate_failed` verdict that rewinds to `fix`; a re-run reuses the same branch and PR. The
 result records branch, PR URL and merge commit (or why not merged) per repo, plus the
 delivery note (`artifacts/delivery.md`). The driver refuses a completed `deliver` whose

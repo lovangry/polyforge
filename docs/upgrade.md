@@ -13,6 +13,17 @@ so creating a project fails until the upgrade SQL has run.
 - **Online backup before the window**: rsync of `memory/` and `git/`, a
   SQLite backup-API snapshot of `aihub.db` (consistent even under WAL
   writes), and an off-host copy. The service keeps running throughout.
+  Once that backup has verified (step 5), deploy.sh writes a `.verified`
+  marker into it on both sides, keeps the newest 3 verified
+  `aihub-backup-<version>-<timestamp>` dirs (this run's included) on the
+  server and in `BACKUP_ROOT`, prunes older verified ones and prints what
+  it pruned; `--dry-run` prints what it would prune. A backup dir without
+  the marker — a failed run's, and **every backup made before this
+  change** — is never counted and never pruned: each run lists them as
+  "unverified, kept; remove by hand". Delete the pre-marker ones yourself
+  once a marked backup exists. Nothing else is ever touched. The backup
+  never copies `bootstrap-admin.key` (a one-time handoff file; the key is
+  stored in the DB as a hash) or a stray `.verified`.
 - **The switch window is the only service interruption**, in this order:
   1. the old aihub container exits gracefully (drain ≤ `DRAIN_SECS`, default
      15s — the compose file's `stop_grace_period` is also 15s, longer than
@@ -258,11 +269,11 @@ manually; otherwise delete it once it is no longer needed.
 The daemon no longer pushes deliveries: the `pf ship` verb, the daemon's
 `POST /jobs/{wi}/ship` route and the `DAEMON-512` push-preflight code are
 gone (`pf ship` now answers "unknown command"). The delivery lanes
-(`feature-full`, `bug-fix`, `quick-fix`, `chore`) instead end with a
+(`feature-full`, `bug-fix`, `autopilot`, `chore`) instead end with a
 `deliver` workflow step that merges the latest origin default branch,
 pushes only the feature branch `polyforge/<project>-<seq>`, opens or reuses
 its PR, and auto-merges it (`gh pr merge --merge`) when review and tests
-passed with no LLM-resolved conflict (quick-fix, which has no review step,
+passed with no LLM-resolved conflict (autopilot, which has no review step,
 on verification's pass) — otherwise it asks a human-only
 question answered via `pf answer`. The section above describes the
 pre-#166 `pf ship`; a closed work item that was never shipped before the
@@ -326,7 +337,7 @@ steps:
 ```
 
 A step-id key governs the step with that id in every bundle that has one
-(`fix` covers bug-fix's and quick-fix's `fix`). A step entry's only key is
+(`fix` covers bug-fix's and autopilot's `fix`). A step entry's only key is
 `models` (polyforge#159 briefly added `harness`; polyforge#175 removed it
 again — a residual `harness` key is refused with the retired-harness hint,
 see "Per-step harness" below); any other key is refused, naming it. YAML anchors and aliases work as usual
@@ -379,14 +390,14 @@ yaml).
 | old kind | step ids it covered |
 |---|---|
 | `qa` | `grill` (feature-full), `grill-review` (feature-full), `root-cause` (bug-fix) |
-| `spec` | `spec` (feature-full), `grill` (quick-fix) |
+| `spec` | `spec` (feature-full), `grill` (autopilot) |
 | `author` | `plan` (feature-full, chore), `e2e-author` (feature-full) |
-| `code` | `code` (feature-full, chore), `repro` (bug-fix), `fix` (bug-fix, quick-fix), `deliver` (feature-full, bug-fix, chore, quick-fix), `release`, `deploy` (release) |
-| `gate` | `verification` (feature-full, bug-fix, chore, quick-fix), `verify` (release) |
+| `code` | `code` (feature-full, chore), `repro` (bug-fix), `fix` (bug-fix, autopilot), `deliver` (feature-full, bug-fix, chore, autopilot), `release`, `deploy` (release) |
+| `gate` | `verification` (feature-full, bug-fix, chore, autopilot), `verify` (release) |
 | `review` | `review` (feature-full, bug-fix, chore) |
 
 `grill` is one key for both lanes (it was `qa` in feature-full and `spec`
-in quick-fix).
+in autopilot).
 
 ### The three workspaces
 
@@ -995,4 +1006,26 @@ storing `credential.helper`. Check before upgrading a work machine whose
 aihub access depends on a git-config proxy or CA setting: move it to
 `https_proxy` / the system trust store first, or the chain push and
 re-claim clone will fail.
+
+## Bundle `quick-fix` renamed to `autopilot` (repo review 2026-10-16 V-7)
+
+The light remediation bundle is now `workflows/autopilot/` (frontmatter
+`name: autopilot`). Behaviour is unchanged — the new name says what the
+old one hid: with no grill question asked and its gates passing, its
+`deliver` step merges without any human. Step ids are unchanged (`grill`,
+`fix`, `verification`, `deliver`), so `.polyforge.yaml` entries keyed
+`steps.<project>.fix` (and the other step ids) resolve exactly as before;
+nothing in the workspace yaml names a bundle.
+
+The daemon resolves a work item's bundle by name in its workflows
+checkout, and the old name no longer exists there. Before deploying:
+
+- **Queued, never-claimed work items bound to `quick-fix`**: re-bind them,
+  `pf file edit <wi> --bundle autopilot`. aihub accepts a `bundle_name`
+  PATCH exactly while the work item is queued and has never been claimed
+  (the R2 window); list them with `pf queue`.
+- **Work items that were already claimed** (running, paused, blocked, or
+  queued again after a claim) cannot be re-bound — `bundle_name` froze at
+  the first claim. Let them finish before the upgrade, or cancel them and
+  file again with `--bundle autopilot`.
 

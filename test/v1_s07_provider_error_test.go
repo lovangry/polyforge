@@ -11,7 +11,7 @@ import (
 // errors; the driver-era equivalent storm window is the workflow's OWN
 // gate-fail ladder: the verification gate FAILs with a populated error
 // verdict three times, the on_fail rewind-to-fix policy fires twice (the
-// quick-fix bundle's rewind bounds: max_total 2, max_per_step 2), and the
+// autopilot bundle's rewind bounds: max_total 2, max_per_step 2), and the
 // third FAIL hits the bound — failed_rewind_exhausted. The daemon's v2
 // terminal wiring translates the driver's exit into the failed close:
 // the recovery cause is the failure signal, not a death. Every archived

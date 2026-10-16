@@ -4,7 +4,7 @@
 // capsule with REAL child processes (bash scripts playing the step
 // agent), through the production StepSpawnAdapter → runtime.Spawner
 // seam. Verifies: step sequencing, result envelope collection, handoff
-// injection, gate pass, and terminal state — the full quick-fix flow
+// injection, gate pass, and terminal state — the full autopilot flow
 // without the daemon.
 //
 // Run: go test -tags smoke ./internal/polyforge/driver/ -run TestSmokeEndToEnd -v -timeout 120s
@@ -104,7 +104,7 @@ func TestSmokeEndToEnd(t *testing.T) {
 		}
 	}
 
-	// --- Write a minimal v2 workflow (quick-fix shape: grill→fix→verification→finalize) ---
+	// --- Write a minimal v2 workflow (autopilot shape: grill→fix→verification→finalize) ---
 	wfYAML := `---
 name: smoke-bundle
 description: Phase-1 smoke test bundle

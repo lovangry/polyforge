@@ -136,16 +136,7 @@ func (m *Manager) HandleGit(w http.ResponseWriter, r *http.Request) {
 	if gp := r.Header.Get("Git-Protocol"); gp != "" {
 		env = append(env, "GIT_PROTOCOL="+gp)
 	}
-	for k, v := range r.Header {
-		// Pass HTTP_* through (http-backend reads HTTP_ACCEPT etc.).
-		if strings.HasPrefix(k, "Git-") || k == "Content-Type" || k == "Content-Length" {
-			continue
-		}
-		name := "HTTP_" + strings.ToUpper(strings.ReplaceAll(k, "-", "_"))
-		for _, hv := range v {
-			env = append(env, name+"="+hv)
-		}
-	}
+	env = append(env, cgiHeaderEnv(r.Header)...)
 
 	cmd := exec.Command("git", "http-backend")
 	cmd.Env = env
@@ -228,4 +219,27 @@ func writeGitErr(w http.ResponseWriter, code, format string, args ...any) {
 	w.WriteHeader(e.HTTPStatus())
 	// Deliberately small writes; git clients print this on failure.
 	_, _ = fmt.Fprintf(w, `{"code":%q,"detail":%q}`, e.Code, e.Detail)
+}
+
+// cgiHeaderEnv maps request headers to CGI HTTP_* variables (http-backend
+// reads HTTP_ACCEPT etc.). Credential headers are dropped: the caller is
+// already authenticated (REMOTE_USER carries the WI), and http-backend,
+// receive-pack and the pre-receive hook all inherit this environment —
+// the session secret stays out of it (v1.5-api-contract §0).
+func cgiHeaderEnv(h http.Header) []string {
+	var env []string
+	for k, v := range h {
+		switch k {
+		case "Content-Type", "Content-Length", "Authorization", "Proxy-Authorization", "Cookie":
+			continue
+		}
+		if strings.HasPrefix(k, "Git-") {
+			continue
+		}
+		name := "HTTP_" + strings.ToUpper(strings.ReplaceAll(k, "-", "_"))
+		for _, hv := range v {
+			env = append(env, name+"="+hv)
+		}
+	}
+	return env
 }

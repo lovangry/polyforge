@@ -52,7 +52,7 @@ func TestShippedStepOutputSchemasCompile(t *testing.T) {
 // stripped.
 func TestSpawnStepPromptShowsDeclaredOutputSchema(t *testing.T) {
 	ad, sp, capDir := spawnEnv(t)
-	writeCapsuleFile(t, capDir, "workflows/quick-fix-x/steps/verification.md",
+	writeCapsuleFile(t, capDir, "workflows/autopilot-x/steps/verification.md",
 		"---\ntools: [go]\noutput:\n  type: object\n  required: [verdict]\n  properties:\n    verdict: { type: string, enum: [pass, fail] }\n---\n\nverification: build, lint, test")
 	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 1}); err != nil {
 		t.Fatalf("SpawnStep: %v", err)
@@ -72,11 +72,11 @@ func TestSpawnStepPromptShowsDeclaredOutputSchema(t *testing.T) {
 }
 
 // verificationEnv runs fix -> verification (a gate rewinding to fix)
-// with the SHIPPED quick-fix verification definition in the bundle.
+// with the SHIPPED autopilot verification definition in the bundle.
 func verificationEnv(t *testing.T) (*Driver, *fakeSpawner, string) {
 	t.Helper()
 	d, sp, execPath := runEnv(t, spec("fix"), gateSpec("verification", "fix"))
-	writeCapsuleFile(t, d.wi.CapsuleDir, "workflows/b/steps/verification.md", shippedStepDef(t, "quick-fix", "verification"))
+	writeCapsuleFile(t, d.wi.CapsuleDir, "workflows/b/steps/verification.md", shippedStepDef(t, "autopilot", "verification"))
 	return d, sp, execPath
 }
 
@@ -147,7 +147,7 @@ func TestRunEnforcedSchemaRejectsViolation(t *testing.T) {
 // null on an optional property means absent: a pass with
 // "fail_reason": null conforms.
 func TestOutputSchemaTreatsNullAsAbsent(t *testing.T) {
-	s, err := loadStepOutputSchema(filepath.Join("..", "..", "..", "workflows", "quick-fix"), "verification")
+	s, err := loadStepOutputSchema(filepath.Join("..", "..", "..", "workflows", "autopilot"), "verification")
 	if err != nil || s == nil {
 		t.Fatal(err)
 	}
@@ -228,13 +228,13 @@ var shippedSamples = map[string]string{
 	"feature-full/code":         `{"commits":[{"step_id":"s1","sha":"abc1234","message":"feat: s1"}],"build_status":"green","summary":"done"}`,
 	"feature-full/review":       `{"verdict":"pass","findings":[{"severity":"non-blocking","detail":"nit"}]}`,
 	"feature-full/verification": `{"verdict":"pass","checks":[{"name":"build","status":"pass"},{"name":"tests","status":"skipped","detail":"no tests"},{"name":"authored-scenarios","status":"pass"}],"authored_titles":["A","B"],"scenarios":[{"title":"A","status":"pass"},{"title":"B","status":"skipped","detail":"needs GPU"}],"test_bar":[{"repo":"app","command":"go build ./..."},{"repo":"app","command":"go test ./..."},{"repo":"app","command":"npm run test:e2e -- test/e2e/a.spec.ts"}]}`,
-	"quick-fix/grill":           `{"qa_log":"artifacts/grill-qa.md","memo_path":"artifacts/fix-memo.md","scope_points":["fix the typo"],"non_goals":[]}`,
-	"quick-fix/fix":             `{"commits":[{"sha":"abc1234","message":"fix: typo"}],"build_status":"green"}`,
-	"quick-fix/verification":    `{"verdict":"pass","checks":[{"name":"build","status":"pass"}],"test_bar":[{"repo":"app","command":"go build ./..."},{"repo":"app","command":"go test ./..."}]}`,
+	"autopilot/grill":           `{"qa_log":"artifacts/grill-qa.md","memo_path":"artifacts/fix-memo.md","scope_points":["fix the typo"],"non_goals":[]}`,
+	"autopilot/fix":             `{"commits":[{"sha":"abc1234","message":"fix: typo"}],"build_status":"green"}`,
+	"autopilot/verification":    `{"verdict":"pass","checks":[{"name":"build","status":"pass"}],"test_bar":[{"repo":"app","command":"go build ./..."},{"repo":"app","command":"go test ./..."}]}`,
 	"bug-fix/deliver":           deliverSample,
 	"chore/deliver":             deliverSample,
 	"feature-full/deliver":      deliverSample,
-	"quick-fix/deliver":         deliverSample,
+	"autopilot/deliver":         deliverSample,
 	"release/release":           `{"verdict":"pass","version":"v2.5.0","commit":"abc1234","notes":"docs/release-notes/v2.5.0.md","artifacts_published":["pf-linux-amd64"],"fail_reason":null}`,
 	"release/verify":            `{"verdict":"pass","version":"v2.5.0","commit":"abc1234","checks":[{"name":"release.sh --verify","status":"pass"}]}`,
 	"release/deploy":            `{"verdict":"defer","state":"none"}`,

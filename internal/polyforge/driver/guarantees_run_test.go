@@ -126,7 +126,7 @@ func TestRunHumanGateGateFailRewindNeedsFreshAnswer(t *testing.T) {
 	}
 }
 
-// polyforge#164 H11: an if_asked human checkpoint (quick-fix grill) may
+// polyforge#164 H11: an if_asked human checkpoint (autopilot grill) may
 // complete with zero questions — an unattended lane runs on — but the
 // skipped checkpoint is recorded as the durable human_gate_unasked event
 // (which the watcher turns into an owner notification).

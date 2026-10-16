@@ -17,8 +17,8 @@ import (
 // while both run (T8 — session isolation is per-WI, m4).
 func TestV1S14ConcurrentTwoWI(t *testing.T) {
 	inst := newV1Install(t)
-	wiA := inst.newWI(t, "s14: concurrent member A", envelopeQuickFix(), nil)
-	wiB := inst.newWI(t, "s14: concurrent member B", envelopeQuickFix(), nil)
+	wiA := inst.newWI(t, "s14: concurrent member A", envelopeAutopilot(), nil)
+	wiB := inst.newWI(t, "s14: concurrent member B", envelopeAutopilot(), nil)
 
 	d := newV1Daemon(t, inst)
 	d.start()

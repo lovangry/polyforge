@@ -51,7 +51,7 @@ func TestS12ManualModelsBeatYamlAndAdvanceOnModelFailure(t *testing.T) {
 	}
 
 	// an ordinary submit of another WI is unaffected: the yaml chain governs.
-	wi2 := w113NewWI(t, inst, "e2e", "s12 plain submit keeps yaml", envelopeQuickFix())
+	wi2 := w113NewWI(t, inst, "e2e", "s12 plain submit keeps yaml", envelopeAutopilot())
 	cap2 := w079Run(t, d, inst, ws, wi2)
 	if got := w079Model(t, cap2, "grill"); got != "s12-yaml-def" {
 		t.Fatalf("plain submit grill model %q, want the yaml default", got)
@@ -64,7 +64,7 @@ func TestS12ManualModelsBadInputRefused(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
 	d := w079Setup(t, inst, w113WS{key: ws, projects: []string{"e2e"}})
-	wi := w113NewWI(t, inst, "e2e", "s12 bad models", envelopeQuickFix())
+	wi := w113NewWI(t, inst, "e2e", "s12 bad models", envelopeAutopilot())
 	for _, bad := range []string{"pi:a,,pi:b", "pi:a,pi:a", ",", "codex:a", "claude:"} {
 		out := d.pfWant(inst, 1, "submit", wi, "--models", bad)
 		if !strings.Contains(out, "--models") {

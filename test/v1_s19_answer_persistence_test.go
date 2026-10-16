@@ -185,7 +185,7 @@ func TestV1S19AwaitingAnswerRedeliveredAfterDaemonCrash(t *testing.T) {
 func TestV1S19FinalOutcomeReplayedAfterDaemonCrash(t *testing.T) {
 	inst := newV1Install(t)
 	wi := inst.newWI(t, "s19 C: the terminal outcome replayed after a crash",
-		envelopeQuickFix(), nil)
+		envelopeAutopilot(), nil)
 
 	d := newV1Daemon(t, inst)
 	d.start()

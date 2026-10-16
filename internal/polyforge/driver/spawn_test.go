@@ -110,15 +110,15 @@ func writeArchivedResult(t *testing.T, capDir, stepID string, n int64, res *Step
 func spawnEnv(t *testing.T) (*StepSpawnAdapter, *captureSpawner, string) {
 	t.Helper()
 	capDir := t.TempDir()
-	writeCapsuleFile(t, capDir, "workflows/quick-fix-x/workflow.md", "---\n"+strings.TrimPrefix(extExample, "\n")+"---\n")
-	writeCapsuleFile(t, capDir, "workflows/quick-fix-x/steps/grill.md", "grill: ask the sharp questions")
-	writeCapsuleFile(t, capDir, "workflows/quick-fix-x/steps/fix.md", "fix: implement the micro-spec")
-	writeCapsuleFile(t, capDir, "workflows/quick-fix-x/steps/verification.md",
+	writeCapsuleFile(t, capDir, "workflows/autopilot-x/workflow.md", "---\n"+strings.TrimPrefix(extExample, "\n")+"---\n")
+	writeCapsuleFile(t, capDir, "workflows/autopilot-x/steps/grill.md", "grill: ask the sharp questions")
+	writeCapsuleFile(t, capDir, "workflows/autopilot-x/steps/fix.md", "fix: implement the micro-spec")
+	writeCapsuleFile(t, capDir, "workflows/autopilot-x/steps/verification.md",
 		"---\ntools: [go]\n---\n\nverification: build, lint, test")
 	writeCapsuleFile(t, capDir, capsule.SessionJSON, `{"harness":"pi","session_id":"ab12cd34"}`)
 	sp := &captureSpawner{}
 	ad, err := NewStepSpawnAdapter(StepSpawnAdapter{
-		WI:           WIInfo{ID: "wi_sp", CapsuleDir: capDir, BundleName: "quick-fix-x"},
+		WI:           WIInfo{ID: "wi_sp", CapsuleDir: capDir, BundleName: "autopilot-x"},
 		Spawner:      sp,
 		PollInterval: 2 * time.Millisecond,
 	})
@@ -347,7 +347,7 @@ func TestSpawnStepInputFormErrors(t *testing.T) {
 	}
 
 	// missing step definition
-	if err := os.Remove(filepath.Join(capDir, "workflows", "quick-fix-x", "steps", "fix.md")); err != nil {
+	if err := os.Remove(filepath.Join(capDir, "workflows", "autopilot-x", "steps", "fix.md")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 2}); err == nil ||
@@ -791,13 +791,13 @@ func TestSpawnStepResumeWithoutJournalLineDegradesToFresh(t *testing.T) {
 // translator, and the process exit (code + stderr tail) is announced.
 func TestSpawnStepWiresHarnessTranslatorOntoTheLink(t *testing.T) {
 	capDir := t.TempDir()
-	writeCapsuleFile(t, capDir, "workflows/quick-fix-x/workflow.md", "---\n"+strings.TrimPrefix(extExample, "\n")+"---\n")
-	writeCapsuleFile(t, capDir, "workflows/quick-fix-x/steps/grill.md", "grill")
+	writeCapsuleFile(t, capDir, "workflows/autopilot-x/workflow.md", "---\n"+strings.TrimPrefix(extExample, "\n")+"---\n")
+	writeCapsuleFile(t, capDir, "workflows/autopilot-x/steps/grill.md", "grill")
 	writeCapsuleFile(t, capDir, capsule.SessionJSON, `{"harness":"pi","session_id":"ab12cd34"}`)
 	sp := &captureSpawner{}
 	link := supervise.NewLink("wi_sp")
 	ad, err := NewStepSpawnAdapter(StepSpawnAdapter{
-		WI:      WIInfo{ID: "wi_sp", CapsuleDir: capDir, BundleName: "quick-fix-x"},
+		WI:      WIInfo{ID: "wi_sp", CapsuleDir: capDir, BundleName: "autopilot-x"},
 		Spawner: sp, Link: link, PollInterval: 2 * time.Millisecond,
 	})
 	if err != nil {

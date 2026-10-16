@@ -72,14 +72,16 @@ go build -o bin/pf ./cmd/pf
 ```
 
 **2. Start aihub on a scratch data dir and port.** On first start over an
-empty data dir, aihub seeds a bootstrap admin (`usr_root`) and prints a
-one-time API key to its log — copy it now, it is never shown again:
+empty data dir, aihub seeds a bootstrap admin (`usr_root`) and writes its
+API key to `<data-dir>/bootstrap-admin.key` (mode 0600; the log names the
+file, never the key). Copy the key, then delete the file — the key is not
+stored anywhere else:
 
 ```
 mkdir -p /tmp/pf-quickstart/aihub-data
 bin/aihub --data-dir /tmp/pf-quickstart/aihub-data --listen 127.0.0.1:18420 \
   > /tmp/pf-quickstart/aihub.log 2>&1 &
-grep "one-time api key" /tmp/pf-quickstart/aihub.log
+cat /tmp/pf-quickstart/aihub-data/bootstrap-admin.key
 ```
 
 **3. Point `pf` at the server with a config file** (the flat `cli.toml`
@@ -111,12 +113,12 @@ bin/pf --config /tmp/pf-quickstart/cli.toml api-keys create --user <MACHINE_USER
 ```
 
 **5. File a minimal smoke work item.** `--bundle` makes it an execution
-ticket — only execution tickets can be claimed; `quick-fix` is one of
+ticket — only execution tickets can be claimed; `autopilot` is one of
 the workflow bundles shipped in `workflows/`:
 
 ```
 bin/pf --config /tmp/pf-quickstart/cli.toml file create --project demo \
-  --bundle quick-fix \
+  --bundle autopilot \
   --goal "Quickstart smoke: exercise the file -> submit -> watch -> wrap chain." \
   --content "Minimal smoke work item; no product change is expected." \
   --label smoke
@@ -300,7 +302,7 @@ after the last push is lost. A blocked WI has exactly two exits: `pf resume <id>
 The platform ships with zero release-specific code in its engine: a release is a
 work item filed against the project-agnostic `release` workflow bundle
 (`workflows/release/`), and the delivery lanes (`feature-full`, `bug-fix`,
-`quick-fix`, `chore`) never release or deploy. Trigger it by filing a release WI
+`autopilot`, `chore`) never release or deploy. Trigger it by filing a release WI
 (`pf file --bundle release ...`, or ask the routing skill: "release" / "deploy" /
 "发版" files that WI). If the goal names a bump (`major`, `minor`, `patch`) it is
 passed verbatim to the repo's procedure; otherwise the repo default applies.
@@ -313,7 +315,10 @@ images are immutable, so there is no rewind into a re-release):
    head, records the pre-release remote tag list, checks the procedure supports
    `--verify`, then runs `.polyforge/release.sh [bump]` (which runs the repo's
    test gate itself). No procedure in the capsule is a FAIL; two repos carrying
-   one is `PF-RELEASE-AMBIGUOUS_OWNER`.
+   one is `PF-RELEASE-AMBIGUOUS_OWNER`. If origin's head already carries a
+   release tag (`v*`), or a re-dispatch finds a remote tag its earlier
+   attempt's pre-release list lacks, the step is a FAIL
+   `PF-RELEASE-ALREADY_RELEASED`, never a second release.
 2. `verify` - a fresh judge that trusts nothing from step 1: release commit vs
    origin head, the new tag exists and points at it, every older tag is
    unchanged, release notes are non-empty, then `.polyforge/release.sh --verify

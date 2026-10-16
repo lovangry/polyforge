@@ -2,7 +2,7 @@
 
 There is no `pf ship` verb (removed by polyforge#166) and the daemon never
 pushes a delivery. Delivery is the last step of the delivery lanes:
-`feature-full`, `bug-fix`, `quick-fix` and `chore` each end with a
+`feature-full`, `bug-fix`, `autopilot` and `chore` each end with a
 `deliver` step that:
 
 1. merges the latest origin default branch into the work,
@@ -12,7 +12,7 @@ pushes a delivery. Delivery is the last step of the delivery lanes:
 4. auto-merges with `gh pr merge --merge` when the review passed with no
    blocking finding, the tests passed, no merge conflict had to be
    resolved by the LLM, and its pre-flight (nothing uncommitted, no release
-   residue) found nothing. quick-fix has no review step: there
+   residue) found nothing. autopilot has no review step: there
    verification's pass stands in for the review.
 
 Otherwise the step asks a **human-only** question. `pf watch <id> --once`

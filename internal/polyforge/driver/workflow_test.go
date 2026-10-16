@@ -20,7 +20,7 @@ import (
 // into a full bundle (a handoff producer, an inherit consumer with
 // declared inputs, a fresh gate with a scalar-form input).
 const extExample = `
-name: quick-fix-x
+name: autopilot-x
 description: extended-frontmatter probe bundle
 rewind:
   max_total: 3

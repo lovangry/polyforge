@@ -106,7 +106,7 @@ func TestDoctorCandidatePrefixAndClaudeTrigger(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("quick-fix", "---\ndefaults:\n  model_candidates: [pi:g/glm]\nsteps:\n  - { id: fix }\n---\n")
+	write("autopilot", "---\ndefaults:\n  model_candidates: [pi:g/glm]\nsteps:\n  - { id: fix }\n---\n")
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -137,7 +137,7 @@ func TestDoctorCandidatePrefixAndClaudeTrigger(t *testing.T) {
 	// shows the chain with each candidate's harness
 	put("steps:\n  polyforge:\n    fix: { models: [claude:claude-opus-5-5, pi:g/glm] }\n")
 	_, _, doc = doctorStatus(t, env, "--json", "doctor")
-	if st, detail := doctorFind(t, doc, "harness claude"); st != "warn" || !strings.Contains(detail, "polyforge/quick-fix/fix: [claude:claude-opus-5-5, pi:g/glm] (steps.polyforge.fix.models)") {
+	if st, detail := doctorFind(t, doc, "harness claude"); st != "warn" || !strings.Contains(detail, "polyforge/autopilot/fix: [claude:claude-opus-5-5, pi:g/glm] (steps.polyforge.fix.models)") {
 		t.Fatalf("mixed chain claude check: %s %q", st, detail)
 	}
 

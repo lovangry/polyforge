@@ -12,7 +12,7 @@ import (
 // v1_s01: default-install smoke, driver/envelope edition. A real aihub,
 // a real `pf daemon` (the driver is the engine; polyforge#106 removed
 // the selection flag), a real `pf submit`, a scripted
-// envelope-action plan that walks the quick-fix workflow (grill → fix →
+// envelope-action plan that walks the autopilot workflow (grill → fix →
 // verification), and the completed workflow's faces: every
 // step done in execution.json, every result envelope archived under
 // artifacts/steps/<step>/s<n>/, the task-repo clone, the capsule git
@@ -70,7 +70,7 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 			t.Fatalf("capsule.json still carries the deleted v1 lineage key %q: %v", gone, idnMap)
 		}
 	}
-	if idnMap["work_item_id"] != wi || idnMap["bundle_name"] != "quick-fix" {
+	if idnMap["work_item_id"] != wi || idnMap["bundle_name"] != "autopilot" {
 		t.Fatalf("capsule identity wrong: %v", idnMap)
 	}
 	// T1 session trail, first half: the claim set the hub's session row
@@ -100,7 +100,7 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 		t.Fatal("capsule chain must not carry repos/ (gitignored, own .git)")
 	}
 	// The materialized bundle rides the capsule.
-	if _, err := os.Stat(filepath.Join(capDir, "workflows", "quick-fix", "workflow.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(capDir, "workflows", "autopilot", "workflow.md")); err != nil {
 		t.Fatalf("materialized bundle missing: %v", err)
 	}
 

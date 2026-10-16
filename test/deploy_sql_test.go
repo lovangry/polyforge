@@ -185,7 +185,7 @@ func TestDeployWindowAppliesUpgradeSQLInOrder(t *testing.T) {
 	// container stop -> upgrade SQL -> new container up
 	sshLog := d.logOf("log-ssh")
 	iProbe := sqlRunIndex(sshLog, "v2.3.0-probe.sql")
-	iStop := strings.Index(sshLog, " aihub-app aihub 5\n") // stop snippet: compose project service drain
+	iStop := strings.Index(sshLog, " aihub-app aihub 15\n") // stop snippet: compose project service drain
 	iSQL := sqlRunIndex(sshLog, "v2.3.0-upgrade.sql")
 	iUp := strings.Index(sshLog, " aihub-app aihub 8080 5") // up snippet: compose project service port wait
 	if !(iProbe >= 0 && iProbe < iStop && iStop < iSQL && iSQL < iUp) {

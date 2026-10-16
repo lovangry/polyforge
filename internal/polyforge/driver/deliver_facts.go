@@ -31,7 +31,7 @@ package driver
 // pre-push hook.
 //
 // autoMergeEligible is the merge rule itself, isolated so the owner's
-// quick-fix rule (no review step) stays one visible condition.
+// autopilot rule (no review step) stays one visible condition.
 
 import (
 	"encoding/json"
@@ -64,7 +64,7 @@ type mergeFacts struct {
 // workflow that has one), the tests are covered on the pushed head, the
 // delivered head is the local HEAD on the latest default branch, and no
 // conflict was hand-resolved. The pre-flight (nothing uncommitted, no
-// release residue) is the step contract's part. quick-fix has no review
+// release residue) is the step contract's part. autopilot has no review
 // step: there verification's pass (a gate the lane cannot pass by
 // without) stands in for it — owner decision, polyforge#166.
 func autoMergeEligible(f mergeFacts) (bool, string) {

@@ -43,7 +43,7 @@ here (`--once`) only when asked. A `carrier_push_failed <repo>` line means the
 work item's commits in that task repo could not be saved to aihub, so a
 `pf resume` after a block may lose them; the git error (or the refusal reason)
 is in the `--once` events, never in the line. A `human_gate_unasked` line means a
-quick-fix grill finished without asking the human anything; the work item kept
+autopilot grill finished without asking the human anything; the work item kept
 running — tell the human, who may check the grill's memo. Progress lines, wake-up lines and
 `pf watch list` name the work item by its slug (`polyforge#140`); the id stands
 in only when no slug is known. Quote a slug when you pass it back

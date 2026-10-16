@@ -84,10 +84,26 @@ The release must build exactly the freshly fetched origin default-branch head.
    no work worth keeping; the release builds origin's head, nothing else). Then require
    `git status --porcelain` to be empty and `git rev-parse HEAD` to equal
    `git rev-parse origin/<default>`. Anything else: `verdict: fail`.
-4. Record the pre-release remote tag list, which the next step needs for its
-   immutability check: `git ls-remote --tags origin > <capsule>/artifacts/pre-release-tags.txt`
+4. Record `origin_head` = `git rev-parse origin/<default>`.
+5. **Already released?** This step can be dispatched again after an earlier attempt
+   already published (the harness died before its result landed), and someone may have
+   released this head by hand. Run `git ls-remote --tags origin` once now (the current
+   list) and refuse in either case below - do NOT run the procedure; finish with
+   `verdict: fail` and a `fail_reason` that begins with `PF-RELEASE-ALREADY_RELEASED`
+   and names the tag(s), so a human decides the next move:
+   - **The head is already tagged** (checked whether or not any file from an earlier
+     attempt exists): a release tag - a tag whose name starts with `v`, for example
+     `v1.2.3` - whose sha, or peeled `^{}` sha, equals `origin_head`.
+   - **An earlier attempt recorded a list**: `<capsule>/artifacts/pre-release-tags.txt`
+     already exists (never overwrite it) and the current list has any line that file
+     lacks - any tag, on any commit, added or moved since that attempt (for example
+     `comm -13` over the two sorted lists prints something).
+   A normal first run passes both: origin's head carries no release tag yet and there is
+   no earlier list.
+6. Only when the file does not exist yet: record the pre-release remote tag list, which
+   the next step needs for its immutability check:
+   `git ls-remote --tags origin > <capsule>/artifacts/pre-release-tags.txt`
    (run it BEFORE the procedure; keep the file exactly as git printed it).
-5. Record `origin_head` = `git rev-parse origin/<default>`.
 
 ## 4. Run the procedure
 
