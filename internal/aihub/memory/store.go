@@ -563,7 +563,7 @@ func (s *Store) ftsPage(match, project string, now time.Time, limit, offset int)
 			if !ok {
 				continue // inactive or another project's
 			}
-			c.score = r.rank * (1 + freshnessBoost*freshness(c.typ, c.updatedAt, now))
+			c.score = r.rank * (1 + freshnessBoost*freshness(c.typ, c.updated, now))
 			all = append(all, c)
 			if best.Len() < want {
 				heap.Push(best, c.score)
@@ -610,9 +610,11 @@ func (s *Store) ftsMeta(keys []int64, project string) (map[int64]scoredCand, err
 	out := make(map[int64]scoredCand, len(keys))
 	for rows.Next() {
 		var c scoredCand
-		if err := rows.Scan(&c.rowid, &c.id, &c.typ, &c.updatedAt); err != nil {
+		var updatedAt string
+		if err := rows.Scan(&c.rowid, &c.id, &c.typ, &updatedAt); err != nil {
 			return nil, err
 		}
+		c.updated = parseUpdatedAt(updatedAt)
 		out[c.rowid] = c
 	}
 	return out, rows.Err()
@@ -649,21 +651,22 @@ func rowidList(keys []int64) string {
 // scoredCand is one candidate with its score (lower is better).
 type scoredCand struct {
 	candRow
-	rowid     int64 // FTS rowid (ftsPage)
-	typ       string
-	updatedAt string
-	score     float64
+	rowid   int64 // FTS rowid (ftsPage)
+	typ     string
+	updated time.Time // parseUpdatedAt
+	score   float64
 }
 
-// sortScored orders candidates by score, then updated_at DESC, then id.
+// sortScored orders candidates by score, then updated_at DESC (as
+// instants), then id.
 func sortScored(all []scoredCand) {
 	sort.Slice(all, func(i, j int) bool {
 		a, b := all[i], all[j]
 		if a.score != b.score {
 			return a.score < b.score
 		}
-		if a.updatedAt != b.updatedAt {
-			return a.updatedAt > b.updatedAt
+		if !a.updated.Equal(b.updated) {
+			return a.updated.After(b.updated)
 		}
 		return a.id < b.id
 	})
@@ -715,12 +718,13 @@ func (s *Store) scanBodies(project string, now time.Time) ([]candRow, error) {
 	var all []scoredCand
 	for rows.Next() {
 		var c scoredCand
-		var typ string
-		if err := rows.Scan(&c.id, &c.body, &c.updatedAt, &typ); err != nil {
+		var typ, updatedAt string
+		if err := rows.Scan(&c.id, &c.body, &updatedAt, &typ); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		c.score = -freshness(typ, c.updatedAt, now)
+		c.updated = parseUpdatedAt(updatedAt)
+		c.score = -freshness(typ, c.updated, now)
 		all = append(all, c)
 	}
 	rows.Close()

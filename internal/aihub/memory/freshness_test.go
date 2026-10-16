@@ -8,10 +8,14 @@ package memory
 // ftsPage's early stop matching a full sort.
 
 import (
+	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/aihub/core"
 )
 
 var freshNow = time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
@@ -202,7 +206,7 @@ func TestFreshnessWeight(t *testing.T) {
 		{"rule.ops", "not a time", 1},
 	}
 	for _, c := range cases {
-		got := freshness(c.typ, c.updated, freshNow)
+		got := freshness(c.typ, parseUpdatedAt(c.updated), freshNow)
 		if math.Abs(got-c.want) > 1e-9 || got > 1 || got < 0 {
 			t.Errorf("freshness(%q, %q) = %v, want %v", c.typ, c.updated, got, c.want)
 		}
@@ -238,43 +242,224 @@ func TestSearchUnparseableAndFutureUpdatedAt(t *testing.T) {
 	}
 }
 
+// refCand is one brute-force reference candidate.
+type refCand struct {
+	id      string
+	score   float64
+	updated time.Time
+}
+
+// refSort is the documented order, written independently of
+// sortScored: score ascending, then updated_at DESC as instants, then id.
+func refSort(c []refCand) {
+	sort.Slice(c, func(i, j int) bool {
+		a, b := c[i], c[j]
+		if a.score != b.score {
+			return a.score < b.score
+		}
+		if ua, ub := a.updated.UnixNano(), b.updated.UnixNano(); ua != ub {
+			return ua > ub
+		}
+		return a.id < b.id
+	})
+}
+
+// refOrder ranks every active match of the given project ("" = all) by
+// brute force: every rank read, every score computed, one full sort.
+func refOrder(t *testing.T, db *core.DB, match, project string, now time.Time, keep func(id string) bool) []refCand {
+	t.Helper()
+	rows, err := db.Query(`SELECT m.id, f.rank, m.type, m.updated_at
+		FROM memory_fts f JOIN memories m ON m.id = f.mem_id
+		WHERE memory_fts MATCH ?1 AND m.status='active' AND (?2 = '' OR m.project_id = ?2)`, match, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var ref []refCand
+	for rows.Next() {
+		var c refCand
+		var rank float64
+		var typ, ua string
+		if err := rows.Scan(&c.id, &rank, &typ, &ua); err != nil {
+			t.Fatal(err)
+		}
+		if keep != nil && !keep(c.id) {
+			continue
+		}
+		c.updated = parseUpdatedAt(ua)
+		c.score = rank * (1 + freshnessBoost*freshness(typ, c.updated, now))
+		ref = append(ref, c)
+	}
+	refSort(ref)
+	return ref
+}
+
 // TestFTSPageExactOrder: ftsPage's early-stopping page equals a full
-// sort of every match by the documented score, on every page.
+// sort of every match by the documented score, on every page — with a
+// project filter, inactive rows still carrying an FTS row, exact score
+// ties and mixed whole-second / fractional timestamps.
 func TestFTSPageExactOrder(t *testing.T) {
 	s, anyMatch := benchCorpus(t, 400)
-	now := time.Now()
-	for _, match := range []string{ftsQuery([]string{"gowork"}), anyMatch} {
-		rows, err := s.db.Query(`SELECT f.mem_id, f.rank, m.type, m.updated_at
-			FROM memory_fts f JOIN memories m ON m.id = f.mem_id WHERE memory_fts MATCH ?1`, match)
+	now := time.Now().UTC()
+	admin := core.NewAdminManager(s.db)
+	beta, err := admin.CreateProject(core.CreateProjectRequest{Name: "beta"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alpha, owner string
+	if err := s.db.QueryRow(`SELECT project_id, owner_user_id FROM memories LIMIT 1`).Scan(&alpha, &owner); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`UPDATE memories SET project_id=?1 WHERE CAST(substr(id, 10) AS INTEGER) % 3 = 0`,
+		`UPDATE memories SET status='redacted' WHERE CAST(substr(id, 10) AS INTEGER) % 11 = 0`,
+		// whole-second stamps for a share of the rows
+		`UPDATE memories SET updated_at = substr(updated_at, 1, 19) || 'Z' WHERE CAST(substr(id, 10) AS INTEGER) % 2 = 0`,
+	} {
+		if _, err := s.db.Exec(q, beta.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Exact score ties: identical bodies of a non-decaying type, so
+	// score is equal and only updated_at / id order them — including two
+	// stamps in the same second, whole vs fractional (string order would
+	// put the whole-second one first; as instants it is older).
+	tieStamps := []string{"2026-01-01T00:00:05Z", "2026-01-01T00:00:05.123Z", "2026-01-01T00:00:05.123Z", "2025-06-01T00:00:00Z"}
+	for i, ts := range tieStamps {
+		id := fmt.Sprintf("mem_tie%02d", i)
+		if _, err := s.db.Exec(`INSERT INTO memories(id, project_id, owner_user_id, type, visibility,
+			authority_path, content_sha, content_len, created_at, updated_at)
+			VALUES (?1, ?2, ?3, 'rule.ops', 'project', 'memory/x', 'sha', 1, ?4, ?4)`, id, alpha, owner, ts); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.Exec(`INSERT INTO memory_fts(mem_id, body) VALUES (?1, 'gowork tie body')`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rare := ftsQuery([]string{"gowork"})
+	for _, match := range []string{rare, anyMatch} {
+		for _, project := range []string{"", alpha, beta.ID} {
+			ref := refOrder(t, s.db, match, project, now, nil)
+			for _, pg := range []struct{ limit, offset int }{{10, 0}, {10, 10}, {25, 30}, {50, 0}, {7, max(0, len(ref)-3)}, {5, len(ref) + 5}} {
+				got, err := s.ftsPage(match, project, now, pg.limit, pg.offset)
+				if err != nil {
+					t.Fatal(err)
+				}
+				lo, hi := min(pg.offset, len(ref)), min(pg.offset+pg.limit, len(ref))
+				if len(got) != hi-lo {
+					t.Fatalf("project %q page %+v: %d rows, want %d", project, pg, len(got), hi-lo)
+				}
+				for i, c := range got {
+					if c.id != ref[lo+i].id || c.body == "" {
+						t.Fatalf("project %q page %+v row %d = %s, want %s", project, pg, i, c.id, ref[lo+i].id)
+					}
+				}
+			}
+		}
+		// The tie group, as instants: the two fractional stamps (id
+		// order between them) ahead of the whole second, then the older.
+		got, err := s.ftsPage(match, alpha, now, 1000, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var ref []scoredCand
-		for rows.Next() {
-			var c scoredCand
-			var rank float64
-			if err := rows.Scan(&c.id, &rank, &c.typ, &c.updatedAt); err != nil {
-				t.Fatal(err)
+		var ties []string
+		for _, c := range got {
+			if strings.HasPrefix(c.id, "mem_tie") {
+				ties = append(ties, c.id)
 			}
-			c.score = rank * (1 + freshnessBoost*freshness(c.typ, c.updatedAt, now))
-			ref = append(ref, c)
 		}
-		rows.Close()
-		sortScored(ref)
-		for _, pg := range []struct{ limit, offset int }{{10, 0}, {10, 10}, {25, 30}, {50, 0}, {7, len(ref) - 3}, {5, len(ref) + 5}} {
-			got, err := s.ftsPage(match, "", now, pg.limit, pg.offset)
-			if err != nil {
+		if match == rare {
+			if want := "mem_tie01,mem_tie02,mem_tie00,mem_tie03"; strings.Join(ties, ",") != want {
+				t.Fatalf("tie order %v, want %s", ties, want)
+			}
+		}
+	}
+}
+
+// TestSearchModeExactOrder: the full search path (collect, entry loads,
+// type / tag / project filters, limit) answers the brute-force order in
+// both match modes, over real entries with redacted ones among them.
+func TestSearchModeExactOrder(t *testing.T) {
+	e := newEnv(t)
+	pinClock(e)
+	beta, err := e.admin.CreateProject(core.CreateProjectRequest{Name: "beta"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alpha string
+	if err := e.db.QueryRow(`SELECT id FROM projects WHERE name='alpha'`).Scan(&alpha); err != nil {
+		t.Fatal(err)
+	}
+	types := []string{"experience.debug", "fact.note", "rule.ops", "doc.review", "doc.design", "other"}
+	words := []string{"wallaby", "lantern", "harbour", "cobalt"}
+	tagged := map[string]bool{}
+	typeOf := map[string]string{}
+	for i := 0; i < 48; i++ {
+		proj := "alpha"
+		if i%4 == 0 {
+			proj = "beta"
+		}
+		var tags []string
+		if i%3 == 0 {
+			tags = []string{"ops"}
+		}
+		body := strings.Repeat(words[i%len(words)]+" ", 1+i%5) + "wallaby " + strings.Repeat("filler ", i%7)
+		got, err := e.store.Create(CreateRequest{Project: proj, Type: types[i%len(types)], Visibility: "project",
+			Content: body, Tags: tags}, e.user)
+		if err != nil {
+			t.Fatal(err)
+		}
+		typeOf[got.ID] = got.Type
+		tagged[got.ID] = len(tags) > 0
+		ts := freshNow.Add(-time.Duration(i*17) * 24 * time.Hour)
+		stamp := ts.Format(time.RFC3339Nano)
+		if i%2 == 0 {
+			stamp = ts.Add(123 * time.Millisecond).Format(time.RFC3339Nano)
+		}
+		if _, err := e.db.Exec(`UPDATE memories SET updated_at=?1 WHERE id=?2`, stamp, got.ID); err != nil {
+			t.Fatal(err)
+		}
+		if i%9 == 0 {
+			if err := e.store.Redact(got.ID); err != nil {
 				t.Fatal(err)
 			}
-			lo, hi := min(pg.offset, len(ref)), min(pg.offset+pg.limit, len(ref))
-			if len(got) != hi-lo {
-				t.Fatalf("page %+v: %d rows, want %d", pg, len(got), hi-lo)
-			}
-			for i, c := range got {
-				if c.id != ref[lo+i].id || c.body == "" {
-					t.Fatalf("page %+v row %d = %s, want %s", pg, i, c.id, ref[lo+i].id)
-				}
-			}
+		}
+	}
+	cases := []struct {
+		mode, q, project, typ string
+		tags                  []string
+		limit                 int
+	}{
+		{MatchAll, "wallaby", "", "", nil, 50},
+		{MatchAll, "wallaby", alpha, "", nil, 7},
+		{MatchAll, "wallaby", beta.ID, "", nil, 50},
+		{MatchAll, "wallaby", "", "doc.*", nil, 50},
+		{MatchAll, "wallaby", "", "", []string{"ops"}, 5},
+		{MatchAny, "wallaby lantern harbour", "", "", nil, 10},
+		{MatchAny, "wallaby lantern harbour", alpha, "experience.*", nil, 50},
+		{MatchAny, "cobalt lantern", "", "", []string{"ops"}, 50},
+	}
+	for _, c := range cases {
+		match := ftsQuery([]string{c.q})
+		if c.mode == MatchAny {
+			match = ftsJoin(anyTerms(c.q), " OR ")
+		}
+		ref := refOrder(t, e.db, match, c.project, freshNow, func(id string) bool {
+			return typeMatches(typeOf[id], c.typ) && (len(c.tags) == 0 || tagged[id])
+		})
+		want := make([]string, 0, c.limit)
+		for _, r := range ref[:min(c.limit, len(ref))] {
+			want = append(want, r.id)
+		}
+		hits, err := e.store.SearchMode(c.mode, c.project, c.q, c.typ, c.tags, c.limit, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := ids(hits); strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("%+v:\n got  %v\n want %v", c, got, want)
+		}
+		if len(want) == 0 {
+			t.Fatalf("%+v: empty reference — the case tests nothing", c)
 		}
 	}
 }

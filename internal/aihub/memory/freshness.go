@@ -19,7 +19,9 @@ package memory
 // 1.5× as relevant as a fresh one always stays ahead of it. The
 // multiplicative form is independent of bm25's absolute scale, which
 // varies with corpus size and query length. Exact ties fall back to
-// updated_at DESC, then id. The substring-scan path (short tokens only,
+// updated_at DESC compared as instants (whole-second and fractional
+// RFC3339 stamps both occur; an unparseable one counts as oldest), then
+// id. The substring-scan path (short tokens only,
 // no rank) orders by w alone. ftsPage evaluates the order without
 // reading every match's stored row; see there.
 
@@ -64,19 +66,29 @@ func stabilityDays(typ string) float64 {
 	return defaultStabilityDays
 }
 
-// freshness answers w for one entry at query time now. updated_at is
-// written RFC3339 (core.Now, or a frontmatter timestamp); one that does
-// not parse counts as fully stale (w = 0). A future timestamp counts as
-// age 0, so w never exceeds 1.
-func freshness(typ, updatedAt string, now time.Time) float64 {
+// parseUpdatedAt reads an updated_at value. It is written RFC3339
+// (core.Now, or a frontmatter timestamp), with or without fractional
+// seconds; one that does not parse answers the zero time — the oldest
+// instant, and fully stale for freshness.
+func parseUpdatedAt(s string) time.Time {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// freshness answers w for one entry at query time now (updated from
+// parseUpdatedAt). An unparseable updated_at counts as fully stale
+// (w = 0). A future one counts as age 0, so w never exceeds 1.
+func freshness(typ string, updated, now time.Time) float64 {
 	days := stabilityDays(typ)
 	if days == 0 {
 		return 1
 	}
-	t, err := time.Parse(time.RFC3339Nano, updatedAt)
-	if err != nil {
+	if updated.IsZero() {
 		return 0
 	}
-	age := max(0, now.Sub(t).Hours()/24)
+	age := max(0, now.Sub(updated).Hours()/24)
 	return math.Exp(-age / days)
 }

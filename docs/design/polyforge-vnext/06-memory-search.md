@@ -69,7 +69,7 @@ aihub 启动后在后台运行 `Store.RebuildIndex`（`cmd/aihub/main.go`；先�
 
 两种模式的排序相同（`memory/freshness.go`）：`w = exp(-age_days / stability_days)`，`age_days` 按
 `memories.updated_at`（权威文档最后修订时间；没有更新端点，API 写入的条目等于 `created_at`）到查询时刻计算；
-`score = rank × (1 + 0.5 × w)`（rank 为 FTS5 bm25，越负越好），升序，平分时按 `updated_at` 降序、再按 id。
+`score = rank × (1 + 0.5 × w)`（rank 为 FTS5 bm25，越负越好），升序，平分时按 `updated_at` 降序（按解析后的时刻比较——整秒与带小数秒的 RFC3339 并存；解析不了的视为最旧）、再按 id。
 stability：`rule.*`、`doc.design`、`doc.decision` 不衰减（w = 1）；`doc.review`、`doc.audit` 及其他 `doc.*`
 （时点快照）180 天；`experience.*` 90 天；`fact.*` 与 `methodology.*` 180 天；其他类型 90 天。`updated_at`
 解析不了按完全陈旧（w = 0），未来时间按 age 0（w ≤ 1）。新鲜度最多把相关度放大 1.5 倍：相近的命中里新的在前，相关度高出 1.5 倍以上的旧条目始终排在
