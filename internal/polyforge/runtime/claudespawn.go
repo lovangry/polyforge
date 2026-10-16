@@ -124,32 +124,27 @@ func (s *claudeSpawner) buildCmd(p SpawnParams) (*exec.Cmd, error) {
 	// them may shape the step (clean context) — only the switches the
 	// adapter sets above. CLAUDE_CONFIG_DIR is stripped the same way: it
 	// is hard-set by the adapter (an operator env value would hijack the
-	// step's config dir and would duplicate the env entry); ANTHROPIC_*
-	// pass through.
+	// step's config dir and would duplicate the env entry).
 	//
-	// ANTHROPIC_* precedence (repo review 2026-10-16 V-11, owner ruling:
-	// document, do not strip). Two sources can reach a claude step:
-	//   1. the process environment — whatever the daemon inherited from
-	//      the tmux server of `pf daemon ensure` (captured when that
-	//      server first started, possibly from a human's shell), passed
-	//      through unchanged and visible in /proc/<pid>/environ;
-	//   2. the `env` block of <claude-config>/settings.json, the one
-	//      credential authority (#171), applied by claude itself.
-	// Verified in this code: the adapter injects no credential and
-	// strips none of ANTHROPIC_*; source 1 reaches every step process.
-	// NOT verified here (needs a real claude run): that claude lets the
-	// settings.json env block override a same-named process variable —
-	// Claude Code documents settings `env` as applied to every session,
-	// which suggests it wins, but a variable set only in the process env
-	// (e.g. an ANTHROPIC_BASE_URL absent from settings.json) certainly
-	// still applies. Keep credentials out of the tmux server's
-	// environment, or set every ANTHROPIC_* the step needs in
-	// settings.json.
+	// ANTHROPIC_* (repo review 2026-10-16 V-11, superseded by env
+	// hygiene): EVERY inherited ANTHROPIC_* is stripped too, so the
+	// `env` block of <claude-config>/settings.json is the ONLY source of
+	// a claude step's credential, endpoint and model defaults. Before,
+	// whatever the daemon inherited (e.g. the tmux server's
+	// ANTHROPIC_BASE_URL / AUTH_TOKEN / MODEL of a human's session)
+	// reached every step, and whether settings.json beat a same-named
+	// process variable was unverified; a variable only in the process env
+	// certainly applied. Now nothing of it reaches the step — set every
+	// ANTHROPIC_* a step needs in settings.json. (`pf daemon ensure`
+	// also no longer hands the daemon any ANTHROPIC_*: see
+	// supervisor/env.go.) pi steps are untouched: pi authenticates from
+	// its own auth.json.
 	inherited := newEnvSanitizer(s.cfg.EnvSecrets...).childEnv()
 	env := make([]string, 0, len(inherited)+len(additions))
 	for _, kv := range inherited {
 		name, _, _ := strings.Cut(kv, "=")
-		if name == "CLAUDECODE" || strings.HasPrefix(name, "CLAUDE_CODE_") || name == "CLAUDE_CONFIG_DIR" {
+		if name == "CLAUDECODE" || strings.HasPrefix(name, "CLAUDE_CODE_") || name == "CLAUDE_CONFIG_DIR" ||
+			strings.HasPrefix(name, "ANTHROPIC_") {
 			continue
 		}
 		env = append(env, kv)
