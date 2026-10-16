@@ -377,10 +377,10 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 
 ---
 
-## 14. capsule 链与任务仓库保全（现行机制；2026-10-16 自 05 §7.5/§7.6 迁入） <!-- §14 -->
+## 14. capsule 链与任务仓库保全（现行机制；2026-10-16 自 05 文档 7.5/7.6 节迁入） <!-- §14 -->
 
 `05-sync-revision-recovery.md` 的其余部分描述已删除的 Revision/CAS/SYNC 模型（已加归档横幅）；本节是 capsule 链规则、任务仓库
-carrier ref 与 WIP ref 这三项**现行**机制的唯一设计记录。§14.2、§14.3 逐字迁自原 05 §7.5、§7.6（仅按 2026-10-14 信任模型改写了
+carrier ref 与 WIP ref 这三项**现行**机制的唯一设计记录。§14.2、§14.3 逐字迁自原 `05-sync-revision-recovery.md#§7.5`、`05-sync-revision-recovery.md#§7.6`（仅按 2026-10-14 信任模型改写了
 理由句，交叉引用改为本节编号）；原处保留为历史副本，以本节为准。
 
 ### 14.1 capsule 链规则 <!-- §14.1 -->
@@ -552,7 +552,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 
 ## 附录 C：已知缺口（集成分支，2026-10-12）
 
-- **(a) bundle digest**：已不存在——digest 链随 polyforge#149 B9 删除，`internal/` 中没有 `Digest` / `FileEntry`；`internal/common/workflow` 只读 frontmatter 的模型候选字段。01 §4.5 的 digest 描述已归档。
+- **(a) bundle digest**：已不存在——digest 链随 polyforge#149 B9 删除，`internal/` 中没有 `Digest` / `FileEntry`；`internal/common/workflow` 只读 frontmatter 的模型候选字段。`01-workflow-skills.md#§4.5` 的 digest 描述已归档。
 - **(b) 人工确认保证是事故护栏，不是对抗性防御**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证；step agent 可写 capsule，蓄意绕过不在 2026-10-14 信任模型的防御范围内（#135 冻结）。daemon 的 UDS 面（polyforge#122 起于 answer 路由，#164 并入；repo review 2026-10-16 V-1 扩到全部变更路由）按 UDS 对端 SO_PEERCRED pid 拒绝来自本 daemon step 进程树的一切非读请求（DAEMON-403）：对端、其祖先或其进程组 leader 带有 `PF_WI_ID` + `PF_DAEMON_ID=<本 daemon>` 标记即拒；取不到对端凭据也拒（fail closed）。拒绝面是一个包住整张路由表的中间件：`/jobs/{wi}/answer|claim|resume-blocked|resume-paused|pause|wrap`、`/ops/config`、`/shutdown`、`/chat/init`、`/chats/{id}/subscribe|unsubscribe|ack|heartbeat`；开放的只有读：`GET /status`、`/jobs/{wi}/watch`、`/chats/{id}/subscriptions`、`/chats/{id}/attention`。answer 路由保留其 #122 拒绝文案。残余：`setsid` 脱离进程组且清空环境的进程不在此检查内——这只能是蓄意行为，按信任模型不再追加防御（#135 冻结）。（曾有的 abandon-repair 路由随 repair_pending 一并删除，此实例已不存在。）
 - **(c) `pf watch` 进展字段**：已随监督重写合入——daemon watch 路由从 `Observe.Progress(wi)` 填充命令、命令时长、最近文件、工具调用数（见附录 D）。
 
