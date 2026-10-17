@@ -24,6 +24,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // cleanupBound bounds one teardown's waits inside the six-layer cleanup.
@@ -313,17 +314,44 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	}
 }
 
-// effectiveCandidatesForRecovery answers the per-step effective
-// candidate lists a recovery re-derivation dispatches under
-// (polyforge#79): the job's claim-time snapshot — live, or rehydrated
-// from the daemon-private state.json record (never from capsule.json,
-// which the agent can write). nil means bundle-only behavior. The yaml
-// is never re-read here: an edit governs the NEXT claim, never an
-// in-flight job.
+// effectiveCandidatesForRecovery answers the per-step candidate lists a
+// recovery re-derivation dispatches under (polyforge#79): the job's
+// claim-time snapshot — live, or rehydrated from the daemon-private
+// state.json record (never from capsule.json, which the agent can
+// write). The yaml is not re-read for a snapshot: an edit governs the
+// NEXT claim, never an in-flight job.
+//
+// A record without a snapshot (one written before claims stored it)
+// is recomposed exactly as a claim composes it — the driver reads no
+// other candidate source — over the current yaml and bundle; a
+// composition that cannot be read is logged and leaves no list.
 func (r *Runtime) effectiveCandidatesForRecovery(j *job) map[string][]string {
 	j.mu.Lock()
-	defer j.mu.Unlock()
-	return j.stepCandidates
+	snap, project, bundle, manual := j.stepCandidates, j.project, j.bundleName, j.manualModels
+	j.mu.Unlock()
+	if snap != nil || bundle == "" {
+		return snap
+	}
+	fm, err := r.readBundleFrontmatter(bundle)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: no claim-time candidate snapshot and the bundle cannot be read (%v); dispatching on the harness default\n", j.wi, err)
+		return nil
+	}
+	wcfg, err := r.LoadWorkspace(project)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: no claim-time candidate snapshot and the workspace yaml cannot be read (%v); dispatching on the harness default\n", j.wi, err)
+		return nil
+	}
+	composed := workspace.ComposeCandidates(fm, wcfg, project, manual)
+	if composed != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: no claim-time candidate snapshot in the record; recomposed from the current yaml and bundle\n", j.wi)
+		j.mu.Lock()
+		if j.stepCandidates == nil {
+			j.stepCandidates = composed
+		}
+		j.mu.Unlock()
+	}
+	return composed
 }
 
 // recovered finishes a successful re-derivation. A successful recovery

@@ -6,10 +6,8 @@ package runtime
 // an in-flight job's recomputation); a restart-RECONSTRUCTED job (nil
 // snapshot) re-derives the lists from the workspace yaml FRESH through
 // the same claim-time compose, so the archived-attempt recomputation
-// indexes the re-derived list; a yaml that fails to re-read falls back
-// to the capsule.json audit; an audit-less capsule rehydrates to nil
-// (bundle-only, today's behavior). The interrupted-dispatch archive
-// signal rides the relaunch as the raw recovery cause.
+// indexes the re-derived list. The interrupted-dispatch archive signal
+// rides the relaunch as the raw recovery cause.
 
 import (
 	"context"
@@ -174,9 +172,10 @@ func TestRecoveryReconstructedJobRehydratesRecordNotYamlOrCapsule(t *testing.T) 
 	}
 }
 
-// A record without a snapshot (no yaml, no audit — the no-yaml claim shape)
-// rehydrates to nil: bundle-only behavior, exactly today's.
-func TestRecoveryAuditlessCapsuleRehydratesNil(t *testing.T) {
+// A record without a snapshot and no workspace yaml recomposes the
+// bundle's own lists, exactly what the claim would compose (the driver
+// reads no list of its own).
+func TestRecoverySnapshotlessRecordRecomposesBundleLists(t *testing.T) {
 	setGitIdentity(t)
 	wfDir := frontmatterBundle(t, w079Frontmatter)
 	sp := &scriptedSpawner{}
@@ -198,7 +197,59 @@ func TestRecoveryAuditlessCapsuleRehydratesNil(t *testing.T) {
 	r.cfg.GitRemoteBase = hub2.capsuleRepoBase
 	r.cfg.WorkflowsDir = wfDir
 	j := seedJob(r, "wi_w079rec4")
-	if got := r.effectiveCandidatesForRecovery(j); got != nil {
-		t.Fatalf("audit-less rehydration %v, want nil (bundle-only)", got)
+	got := r.effectiveCandidatesForRecovery(j)
+	if f := got["fix"]; len(f) != 2 || f[0] != "pi:prov/flash" || f[1] != "pi:prov/glm" {
+		t.Fatalf("snapshot-less rehydration %v, want the bundle's lists (fix [pi:prov/flash pi:prov/glm])", got)
+	}
+}
+
+// A record written before claims stored the candidate snapshot carries
+// none: the recovery recomposes the lists exactly as a claim does (the
+// driver reads no other candidate source), instead of relaunching on the
+// harness default.
+func TestRecoveryRecomposesARecordWithoutSnapshot(t *testing.T) {
+	setGitIdentity(t)
+	wfDir := frontmatterBundle(t, w079Frontmatter)
+	hub := newFakeHub()
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sp := &scriptedSpawner{}
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	r := New(Config{
+		MachineID:     "m-test",
+		Mapping:       mappingFor(ws, "proj"),
+		DataDir:       filepath.Join(t.TempDir(), "data"),
+		MaxRecoveries: 2,
+	}, hub, sp, toOB, supervise.NewQueue[protocol.OBMsg]())
+	hub.capsuleRepoBase = filepath.Join(r.cfg.DataDir, "capsule-remotes")
+	r.cfg.GitRemoteBase = hub.capsuleRepoBase
+	r.cfg.WorkflowsDir = wfDir
+	rec := &recordingStarter{base: scriptedEngineStarter(sp)}
+	r.cfg.AgentStarter = rec.start
+
+	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [pi:w79/code-a, pi:w79/code-b] }\n")
+	if err := r.Start(context.Background(), "wi_w079old"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	j := r.jobOf("wi_w079old")
+	if j == nil {
+		t.Fatal("the claim must run to a live agent")
+	}
+	if got := recvRT(t, toOB); got.Kind != protocol.RTStarted {
+		t.Fatalf("expected the claim's RTStarted, got %+v", got)
+	}
+	j.mu.Lock()
+	j.stepCandidates = nil // the shape of a record without step_candidates
+	j.mu.Unlock()
+
+	r.handleOB(context.Background(), recoveryMsg(j, protocol.RecoverDeath))
+	if msg := recvRT(t, toOB); msg.Kind != protocol.RTRecovered {
+		t.Fatalf("expected RTRecovered, got %+v", msg)
+	}
+	got := rec.last().StepCandidates["fix"]
+	if len(got) != 2 || got[0] != "pi:w79/code-a" || got[1] != "pi:w79/code-b" {
+		t.Fatalf("relaunch StepCandidates for fix %v, want the recomposed [pi:w79/code-a pi:w79/code-b]", got)
 	}
 }
