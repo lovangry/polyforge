@@ -287,3 +287,47 @@ func TestAdapterCrossHarnessSwitchCarriesReference(t *testing.T) {
 		})
 	}
 }
+
+// A claude→pi switch right after the claude dispatch ended: the capsule
+// copy of the claude session is written asynchronously at the commit
+// boundary and may not exist yet — the reference is copied from the
+// native session at the switch, so the next harness always gets it.
+func TestCrossHarnessReferenceDoesNotWaitForTheCommitBoundaryCopy(t *testing.T) {
+	ad, sp, capDir := spawnEnv(t)
+	cfgDir := t.TempDir()
+	ad.ClaudeConfigDir = cfgDir
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "grill", WIID: "wi_sp", SpawnN: 1, Harness: "claude", Model: "m-claude"}); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := sp.last()
+	if err := ad.appendSpawnJournal(p, "grill", "ab12cd34", 1, "2026-10-15T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	native := filepath.Join(cfgDir, "projects", harness.ClaudeProjectDirName(capDir), p.HarnessSession+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(native), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const conv = "{\"type\":\"user\",\"message\":\"the claude conversation\"}\n"
+	if err := os.WriteFile(native, []byte(conv), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p.TranscriptPath); err == nil {
+		t.Fatal("precondition: the capsule copy must not exist yet")
+	}
+	for _, next := range []StepSpawn{
+		{StepID: "grill", WIID: "wi_sp", SpawnN: 2, Harness: "pi", Model: "m-pi", Resume: true},
+		{StepID: "grill", WIID: "wi_sp", SpawnN: 3, Harness: "pi", Model: "m-pi", Fresh: true},
+	} {
+		_ = os.Remove(p.TranscriptPath)
+		if _, err := ad.SpawnStep(context.Background(), next); err != nil {
+			t.Fatal(err)
+		}
+		p2, _ := sp.last()
+		if !strings.Contains(p2.InitialPrompt, "Previous attempt (read-only reference)") || !strings.Contains(p2.InitialPrompt, p.TranscriptPath) {
+			t.Fatalf("spawn %d (resume=%v fresh=%v) carries no reference to %s", next.SpawnN, next.Resume, next.Fresh, p.TranscriptPath)
+		}
+		if raw, err := os.ReadFile(p.TranscriptPath); err != nil || string(raw) != conv {
+			t.Fatalf("the referenced capsule transcript = %q (%v), want the native session", raw, err)
+		}
+	}
+}
