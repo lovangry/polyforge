@@ -329,13 +329,14 @@ earlier; `context_policy` ∈ {inherit, fresh}, gates fresh. `requires_human_ans
 if_asked} is enforced by its YAML decoder; candidates are validated in `driver.New` and, before the
 claim, against the daemon checkout (`common/workflow.CheckCandidates`: unprefixed candidates or a
 `harness` key → `DAEMON-414`, WI stays queued). Rewind bounds ≤0 fall back to 4 / 2. Step file frontmatter: only `output:` (draft-07 JSON Schema in YAML) is
-read — injected into the prompt and checked record-only (`driver/outputschema.go`,
-`enforceOutputSchemas=false` → event `output_schema_violation`).
+read — injected into the prompt and checked (`driver/outputschema.go`): enforced on the release
+bundle's `release` and `deploy` steps (a violation is an envelope rejection; their schemas carry the
+verdict contract), record-only on every other step (event `output_schema_violation`).
 
 ### 7.3 Step dispatch and the result envelope <!-- §7.3 -->
 
 - One harness process per dispatch, cwd = capsule. The step writes **one** JSON envelope to `runtime-state/pending-results/<spawn_n>.json`: `{wi_id, step_id, spawn_n, outcome, output, question_id, question, command_evidence, submitted_at}`; outcomes `completed | gate_failed | needs_input | incomplete` (`driver/result.go`). The driver archives it to `artifacts/steps/<step>/s<spawn_n>/result.json`.
-- Validation order (`ValidateStepResult`): shape; identity + spawn_n fence; needs_input question shape; gate verdict binding (completed with `verdict: fail` → `gate_failed`); `requires_human_answer`; release/deploy verdict binding; command evidence (argv non-empty, `duration_ms>0`); committed test files; output schema (record-only); authored tests unchanged. A rejection is retried in-process with the reason; the 4th consecutive rejection (`maxEnvelopeRejects`=3 retries) blocks the step `result_invalid`. Details: `v2-converge.md#§2.6`.
+- Validation order (`ValidateStepResult`): shape; identity + spawn_n fence; needs_input question shape; gate verdict binding (completed with `verdict: fail` → `gate_failed`); `requires_human_answer`; `defer` verdict only on `deploy`; output schema (enforced on `release`/`deploy`, record-only elsewhere); command evidence (a list of objects on any step, else rejected; on evidence-owing steps argv non-empty, `duration_ms>0`); committed test files; pre-existing-failure boundary; authored tests unchanged; deliver binding. A rejection is retried in-process with the reason; the 4th consecutive rejection (`maxEnvelopeRejects`=3 retries) blocks the step `result_invalid`. Details: `v2-converge.md#§2.6`.
 - `gate_failed` → bounded rewind (`driver/transition.go` `applyGateFailLocked`): no `on_fail` → `failed_gate`; a bound hit → `failed_rewind_exhausted`; else `[target, gate)` archived as `gate_fail_rewind` and reset, the verdict text delivered to the target as `pending_rewind_input`, candidate pointers reset.
 - `needs_input` → question stored in `execution.json`; a human answers with `pf answer` → daemon `/jobs/{wi}/answer` → driver bridge (`applyAnswerLocked`). Never answered by an agent (UDS step-origin refusal).
 - `incomplete` → workflow `blocked`. Workflow statuses: `running completed failed_gate failed_rewind_exhausted blocked`; step statuses `pending in_progress done` (`common/capsule/capsule.go`). A terminal workflow closes the WI (completed → `wrapped`, failed → `failed`, blocked → hub `blocked`) after a final seal push; if that push fails the close degrades to blocked (`v2-converge.md#§D`).
