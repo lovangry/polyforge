@@ -376,17 +376,17 @@ type PushTimings struct {
 }
 
 // CommitPush stages everything, commits and pushes to the aihub bare
-// repo. It
-// takes the per-WI git lock itself; callers must not hold it. A clean
+// repo. It takes the per-WI git lock itself; callers must not hold it. A clean
 // tree (nothing staged after the porcelain check) PUSHES the standing
 // HEAD — an idempotent no-op ("Everything up-to-date") when the server
 // already holds it — so the pushed flag is honest on every return shape,
 // including the retry-after-failed-push one a wrap/seal re-drive needs:
 // a commit that landed locally on a failed push finally reaches the
 // server HERE, and a still-dead server answers with its error, not a
-// fake success. ctx bounds the commit and the chain push: when it ends
-// the running git call's process group is killed, the task-repo lane is
-// skipped and the per-WI lock is released before CommitPush returns.
+// fake success. ctx bounds the chain push: when it ends the push's git
+// process group is killed, the task-repo lane is skipped and the per-WI
+// lock is released before CommitPush returns. The local status, add and
+// commit are not cut short (a killed one would leave index.lock behind).
 // Returns the local commit SHA, whether the push reached the server, and
 // the commit/push wall-clock timings.
 func CommitPush(ctx context.Context, o Opts, message string) (string, bool, PushTimings, error) {
@@ -399,17 +399,16 @@ func CommitPush(ctx context.Context, o Opts, message string) (string, bool, Push
 		return "", false, timings, err
 	}
 	env := o.Env()
-	gitc := func(args ...string) (string, error) { return gitTimedCtx(ctx, 0, env, o.CapsuleDir, args...) }
 	// Clean-tree check BEFORE committing: git reports "nothing to commit"
 	// on stdout, so the failure cannot be told apart from a real commit
 	// error by the error string. The porcelain listing is the honest
 	// signal: empty output means the standing HEAD is already the answer.
-	status, err := gitc("status", "--porcelain")
+	status, err := git(env, o.CapsuleDir, "status", "--porcelain")
 	if err != nil {
 		return "", false, timings, err
 	}
 	if strings.TrimSpace(status) != "" {
-		if _, err := gitc("add", "-A"); err != nil {
+		if _, err := git(env, o.CapsuleDir, "add", "-A"); err != nil {
 			// An embedded repository with no commit checked out fails the
 			// add itself — the same poison shape one step earlier.
 			if strings.Contains(err.Error(), "does not have a commit checked out") {
@@ -424,7 +423,7 @@ func CommitPush(ctx context.Context, o Opts, message string) (string, bool, Push
 			return "", false, timings, err
 		}
 		commitStart := time.Now()
-		_, cerr := gitc("commit", "-m", message)
+		_, cerr := git(env, o.CapsuleDir, "commit", "-m", message)
 		timings.CommitMS = time.Since(commitStart).Milliseconds()
 		if cerr != nil {
 			return "", false, timings, cerr

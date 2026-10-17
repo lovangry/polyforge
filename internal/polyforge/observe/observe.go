@@ -106,8 +106,8 @@ func (c *Config) fill() {
 		c.SessionRevalidateEvery = defaultRevalidateEvery
 	}
 	if c.PushFunc == nil {
-		// ctx (PushBound) bounds the commit and the chain push; on its end
-		// the git process group is killed and the per-WI lock released
+		// ctx (PushBound) bounds the chain push; on its end the push's
+		// git process group is killed and the per-WI lock released
 		c.PushFunc = gitops.CommitPush
 	}
 }
