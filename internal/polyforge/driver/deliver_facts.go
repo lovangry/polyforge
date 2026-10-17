@@ -30,8 +30,8 @@ package driver
 // the human; prevention rests on the step contract and the machine's
 // pre-push hook.
 //
-// autoMergeEligible is the merge rule itself, isolated so the owner's
-// autopilot rule (no review step) stays one visible condition.
+// mergeBlocker is the merge rule itself; its first condition keeps the
+// owner's autopilot rule (no review step) one visible line.
 
 import (
 	"encoding/json"
@@ -48,66 +48,49 @@ import (
 // task repo name -> HEAD sha at the moment verification completed.
 const verifiedHeadsKey = "verified_heads"
 
-// mergeFacts is what the merge rule judges one merged repo on.
-type mergeFacts struct {
-	hasReview               bool   // the workflow has an independent review step
-	reviewPassed            bool   // ...and it is done with pass, no blocking finding
-	testsCovered            bool   // see the file comment
-	handResolved            string // non-empty: why the history is not a clean merge
-	deliveryMismatch        string // non-empty: why the pushed/merged head is not the local HEAD
-	selfReportedConflict    bool   // the step says it resolved a conflict
-	selfReportedTestsFailed bool   // the step says tests failed
-}
-
-// autoMergeEligible is the merge rule: a PR merges without a human only
-// when the independent review passed with no blocking finding (in a
-// workflow that has one), the tests are covered on the pushed head, the
-// delivered head is the local HEAD on the latest default branch, and no
-// conflict was hand-resolved. The pre-flight (nothing uncommitted, no
-// release residue) is the step contract's part. autopilot has no review
-// step: there verification's pass (a gate the lane cannot pass by
-// without) stands in for it — owner decision, polyforge#166.
-func autoMergeEligible(f mergeFacts) (bool, string) {
-	switch {
-	case f.hasReview && !f.reviewPassed:
-		return false, "no independent review passed with no blocking finding"
-	case f.handResolved != "":
-		return false, "the delivered history has a hand-resolved or hand-made change (" + f.handResolved + ")"
-	case f.deliveryMismatch != "":
-		return false, "the delivered head cannot be tied to the local HEAD (" + f.deliveryMismatch + ")"
-	case f.selfReportedConflict:
-		return false, "the step reports an LLM-resolved conflict"
-	case f.selfReportedTestsFailed:
-		return false, "the step reports failing tests"
-	case !f.testsCovered:
-		return false, "the tests are not shown to pass on the pushed head (it differs from the commit verification passed on and this dispatch did not re-run verification's test_bar in that repo after its last merge)"
+// mergeBlocker answers why one merged repo is not eligible to merge
+// without a human ("" = eligible): the independent review passed with no
+// blocking finding (in a workflow that has one), no conflict was
+// hand-resolved, the delivered head is the local HEAD on the latest
+// default branch, and the tests are covered on the pushed head. The
+// pre-flight (nothing uncommitted, no release residue) is the step
+// contract's part. autopilot has no review step: there verification's
+// pass (a gate the lane cannot pass by without) stands in for it — owner
+// decision, polyforge#166.
+func mergeBlocker(spec ResultSpec, r deliverRepo, branch string, ev []CommandEvidence) string {
+	if spec.HasReview && !spec.ReviewPassed {
+		return "no independent review passed with no blocking finding"
 	}
-	return true, ""
-}
-
-// deliverFacts derives one merged repo's facts from the capsule.
-func deliverFacts(spec ResultSpec, r deliverRepo, branch string, ev []CommandEvidence) mergeFacts {
-	f := mergeFacts{hasReview: spec.HasReview, reviewPassed: spec.ReviewPassed}
+	handMade := func(why string) string {
+		return "the delivered history has a hand-resolved or hand-made change (" + why + ")"
+	}
 	verified := spec.VerifiedHeads[r.Name]
 	if spec.ReposDir == "" || verified == "" {
-		f.handResolved = "no verification record of this repo's head"
-		return f
+		return handMade("no verification record of this repo's head")
 	}
 	dir := filepath.Join(spec.ReposDir, r.Name)
 	headOut, err := repoGit(dir, "rev-parse", "HEAD")
 	if err != nil {
-		f.handResolved = "HEAD unreadable"
-		return f
+		return handMade("HEAD unreadable")
 	}
 	head := strings.TrimSpace(headOut)
-	f.deliveryMismatch = deliveredHeadMismatch(dir, head, branch, strings.TrimSpace(r.MergeCommit))
-	if head == verified {
-		f.testsCovered = true
-		return f
+	if head != verified {
+		if why := handMadeHistory(dir, verified, head); why != "" {
+			return handMade(why)
+		}
 	}
-	f.handResolved = handMadeHistory(dir, verified, head)
-	f.testsCovered = testBarRerun(r.Name, spec.VerifiedTestBar, evidenceEvents(ev, filepath.Dir(spec.ReposDir)))
-	return f
+	if why := deliveredHeadMismatch(dir, head, branch, strings.TrimSpace(r.MergeCommit)); why != "" {
+		return "the delivered head cannot be tied to the local HEAD (" + why + ")"
+	}
+	switch {
+	case r.LLMResolvedConflict:
+		return "the step reports an LLM-resolved conflict"
+	case r.TestsPassed != nil && !*r.TestsPassed:
+		return "the step reports failing tests"
+	case head != verified && !testBarRerun(r.Name, spec.VerifiedTestBar, evidenceEvents(ev, filepath.Dir(spec.ReposDir))):
+		return "the tests are not shown to pass on the pushed head (it differs from the commit verification passed on and this dispatch did not re-run verification's test_bar in that repo after its last merge)"
+	}
+	return ""
 }
 
 // deliveredHeadMismatch ties what was pushed and merged to the local
@@ -149,7 +132,7 @@ func deliveredHeadMismatch(dir, head, branch, mergeCommit string) string {
 		if _, err := repoGit(dir, "cat-file", "-e", mergeCommit+"^{commit}"); err == nil {
 			p2, err := repoGit(dir, "rev-parse", "--verify", "-q", mergeCommit+"^2")
 			if err != nil || strings.TrimSpace(p2) != head {
-				return "the recorded merge commit " + short(mergeCommit) + " did not merge the local HEAD"
+				return "the recorded merge commit " + shortSHA(mergeCommit) + " did not merge the local HEAD"
 			}
 		}
 	}
@@ -160,7 +143,7 @@ func deliveredHeadMismatch(dir, head, branch, mergeCommit string) string {
 // verified..head is a merge git reproduces without conflict, else why not.
 func handMadeHistory(dir, verified, head string) string {
 	if _, err := repoGit(dir, "merge-base", "--is-ancestor", verified, head); err != nil {
-		return "the verified commit " + short(verified) + " is not an ancestor of HEAD"
+		return "the verified commit " + shortSHA(verified) + " is not an ancestor of HEAD"
 	}
 	out, err := repoGit(dir, "rev-list", "--first-parent", "--parents", verified+".."+head)
 	if err != nil {
@@ -172,15 +155,16 @@ func handMadeHistory(dir, verified, head string) string {
 			continue
 		}
 		if len(f) != 3 {
-			return "commit " + short(f[0]) + " is not a two-parent merge"
+			return "commit " + shortSHA(f[0]) + " is not a two-parent merge"
 		}
 		want, err := repoGit(dir, "merge-tree", "--write-tree", f[1], f[2])
 		if err != nil {
-			return "merge " + short(f[0]) + " had conflicts"
+			return "merge " + shortSHA(f[0]) + " had conflicts"
 		}
 		got, err := repoGit(dir, "rev-parse", f[0]+"^{tree}")
-		if err != nil || firstLineOf(want) != strings.TrimSpace(got) {
-			return "merge " + short(f[0]) + " differs from git's own merge result"
+		tree, _, _ := strings.Cut(strings.TrimSpace(want), "\n")
+		if err != nil || strings.TrimSpace(tree) != strings.TrimSpace(got) {
+			return "merge " + shortSHA(f[0]) + " differs from git's own merge result"
 		}
 	}
 	return ""
@@ -235,18 +219,13 @@ func evidenceEvents(ev []CommandEvidence, capsuleRoot string) []evEvent {
 			}
 			ev := evEvent{repo: repoOfRel(dir), words: words, exit: e.ExitCode}
 			if filepath.Base(words[0]) == "git" {
-				j := 1
-				for j < len(words) && strings.HasPrefix(words[j], "-") {
-					if words[j] == "-C" && j+1 < len(words) {
-						ev.repo = repoOfRel(joinRel(dir, words[j+1], capsuleRoot))
+				j, opts := gitSubcommand(words[1:])
+				for _, o := range opts {
+					if o[0] == "-C" {
+						ev.repo = repoOfRel(joinRel(dir, o[1], capsuleRoot))
 					}
-					switch words[j] {
-					case "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env":
-						j++
-					}
-					j++
 				}
-				ev.merge = j < len(words) && (words[j] == "merge" || words[j] == "pull")
+				ev.merge = j+1 < len(words) && (words[j+1] == "merge" || words[j+1] == "pull")
 			}
 			out = append(out, ev)
 		}
@@ -354,14 +333,7 @@ func checkNothingToDeliver(reposDir, repo string) error {
 // verification's accepted output (overwriting anything the step supplied).
 func recordVerifiedHeads(out map[string]any, capsuleDir string) {
 	delete(out, verifiedHeadsKey)
-	reposDir := filepath.Join(capsuleDir, capsule.DirRepos)
-	heads := map[string]any{}
-	for _, name := range taskRepoNames(reposDir) {
-		if h, err := repoGit(filepath.Join(reposDir, name), "rev-parse", "HEAD"); err == nil {
-			heads[name] = strings.TrimSpace(h)
-		}
-	}
-	if len(heads) > 0 {
+	if heads := repoHeads(filepath.Join(capsuleDir, capsule.DirRepos)); len(heads) > 0 {
 		out[verifiedHeadsKey] = heads
 	}
 }
@@ -386,19 +358,4 @@ func verificationRecord(st *capsule.Step) (map[string]string, []testBarCmd) {
 		_ = json.Unmarshal(raw, &bar)
 	}
 	return heads, bar
-}
-
-func short(sha string) string {
-	if len(sha) > 12 {
-		return sha[:12]
-	}
-	return sha
-}
-
-func firstLineOf(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	return strings.TrimSpace(s)
 }
