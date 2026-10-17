@@ -340,10 +340,10 @@ func TestTransitionStepResultCompleted(t *testing.T) {
 	mustInit(t, d)
 	mustStart(t, d, "a", 1)
 	res := completedResult("a", 1, `{"summary":"A"}`)
-	res.CommandEvidence = []CommandEvidence{{
+	res.CommandEvidence = rawEvidence([]CommandEvidence{{
 		Argv: []string{"go", "test", "./..."}, Cwd: "/w", ExitCode: 0,
 		StartedAt: time.Now(), DurationMs: 1200, LogPath: "logs/a.log",
-	}}
+	}})
 	if err := d.transition(TransitionRequest{Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: res}); err != nil {
 		t.Fatalf("result: %v", err)
 	}

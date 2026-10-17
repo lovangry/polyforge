@@ -3,9 +3,10 @@ package driver
 // guarantees_test.go: the three mechanical driver guarantees (v2 §2.3) —
 // needs_input envelope validation, the human-gate guarantee (#138) and
 // the V4 verification-evidence gate — plus the retry-feedback and
-// tolerant-re-parse plumbing they ride on.
+// evidence-decoding plumbing they ride on.
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -17,6 +18,19 @@ import (
 
 func goodEvidence() []CommandEvidence {
 	return []CommandEvidence{{Argv: []string{"go", "test", "./..."}, ExitCode: 0, DurationMs: 1200}}
+}
+
+// rawEvidence encodes evidence entries as the envelope carries them.
+func rawEvidence(ev []CommandEvidence) []json.RawMessage {
+	var out []json.RawMessage
+	for _, e := range ev {
+		b, err := json.Marshal(e)
+		if err != nil {
+			panic(err)
+		}
+		out = append(out, b)
+	}
+	return out
 }
 
 func TestNeedsInputEnvelopeValidation(t *testing.T) {
@@ -140,13 +154,13 @@ func TestVerificationEvidenceGate(t *testing.T) {
 		"one bad of 2": append(goodEvidence(), CommandEvidence{Argv: []string{"x"}}),
 	}
 	for name, ev := range bad {
-		f.res.CommandEvidence = ev
+		f.res.CommandEvidence = rawEvidence(ev)
 		err := ValidateStepResult(f.res, f.spec)
 		if err == nil || !strings.Contains(err.Error(), "verification evidence") {
 			t.Fatalf("%s: want evidence rejection, got %v", name, err)
 		}
 	}
-	f.res.CommandEvidence = goodEvidence()
+	f.res.CommandEvidence = rawEvidence(goodEvidence())
 	if err := ValidateStepResult(f.res, f.spec); err != nil {
 		t.Fatalf("complete evidence must validate: %v", err)
 	}
@@ -229,7 +243,11 @@ func TestShippedBundlesDeclareHumanGates(t *testing.T) {
 	}
 }
 
-func TestTolerantReparseKeepsObjectEvidence(t *testing.T) {
+// A command_evidence list holding a non-object item still collects (it
+// is valid JSON, so never a dispatch defect) and is then rejected by the
+// envelope gate, on any step, naming the item — the rejection feeds the
+// in-process retry lane.
+func TestNonObjectEvidenceCollectsThenIsRejected(t *testing.T) {
 	dir := t.TempDir()
 	drop := filepath.Join(dir, "1.json")
 	raw := `{"outcome":"completed","output":{},
@@ -242,22 +260,49 @@ func TestTolerantReparseKeepsObjectEvidence(t *testing.T) {
 	if err != nil || res == nil {
 		t.Fatalf("collect: %v %v", res, err)
 	}
-	if len(res.CommandEvidence) != 1 || res.CommandEvidence[0].DurationMs != 42 {
-		t.Fatalf("object evidence entry must survive the tolerant re-parse: %+v", res.CommandEvidence)
+	if len(res.CommandEvidence) != 2 {
+		t.Fatalf("every item is kept verbatim: %s", res.CommandEvidence)
 	}
-	if err := checkCommandEvidence(res.CommandEvidence); err != nil {
-		t.Fatal(err)
+	for _, owes := range []bool{true, false} {
+		spec := ResultSpec{WIID: "wi", StepID: "verification", SpawnN: 1, RequireCommandEvidence: owes}
+		if err := ValidateStepResult(res, spec); err == nil || !strings.Contains(err.Error(), "command_evidence[0] is not an OBJECT") {
+			t.Fatalf("owes=%v: a string item must be rejected by name, got %v", owes, err)
+		}
 	}
-	// all-strings: dropped, and the gate then rejects with the object hint.
-	if err := os.WriteFile(drop, []byte(`{"outcome":"completed","output":{},"command_evidence":["x"]}`), 0o644); err != nil {
-		t.Fatal(err)
+}
+
+// The destination of string evidence: the step is re-dispatched with the
+// rejection as feedback and a well-formed rewrite is accepted; an author
+// that keeps writing strings blocks the step result_invalid.
+func TestRunStringEvidenceRejectedThenRewritten(t *testing.T) {
+	stringEv := func() fakeEntry {
+		e := done(`{}`)
+		e.res.CommandEvidence = []json.RawMessage{json.RawMessage(`"ran go test"`)}
+		return e
 	}
-	res, err = r.collect()
-	if err != nil || len(res.CommandEvidence) != 0 {
-		t.Fatalf("string-only evidence must be dropped: %+v %v", res, err)
+	good := done(`{}`)
+	good.res.CommandEvidence = rawEvidence(goodEvidence())
+	d, sp, _ := runEnv(t, StepSpec{ID: "verification", ContextPolicy: "fresh", RequiresCommandEvidence: true})
+	sp.script = []fakeEntry{stringEv(), good}
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
-	if err := checkCommandEvidence(res.CommandEvidence); err == nil || !strings.Contains(err.Error(), "OBJECT") {
-		t.Fatalf("got %v", err)
+	if fb := sp.spawnAt(1).PriorRejection; !strings.Contains(fb, "is not an OBJECT") {
+		t.Fatalf("the retry must carry the rejection: %q", fb)
+	}
+	if x := d.Snapshot(); x.WorkflowStatus != StatusCompleted {
+		t.Fatalf("the well-formed rewrite must be accepted: %s", x.WorkflowStatus)
+	}
+
+	d, sp, _ = runEnv(t, StepSpec{ID: "verification", ContextPolicy: "fresh", RequiresCommandEvidence: true})
+	for i := 0; i <= maxEnvelopeRejects; i++ {
+		sp.script = append(sp.script, stringEv())
+	}
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if x := d.Snapshot(); x.WorkflowStatus != StatusBlocked || !strings.Contains(x.BlockedReason, "result_invalid") {
+		t.Fatalf("status %q reason %q, want blocked with result_invalid", x.WorkflowStatus, x.BlockedReason)
 	}
 }
 
@@ -283,7 +328,7 @@ func TestDeliveryContractStatesGuaranteesOnlyWhenTheyApply(t *testing.T) {
 	}
 }
 
-func TestTolerantReparseNamesBadStartedAt(t *testing.T) {
+func TestEvidenceRejectionNamesBadStartedAt(t *testing.T) {
 	dir := t.TempDir()
 	drop := filepath.Join(dir, "1.json")
 	raw := `{"outcome":"completed","output":{},

@@ -75,16 +75,17 @@ func deliverBranch(spec ResultSpec) string {
 }
 
 // deliverBinding judges one deliver envelope (any outcome): the command
-// rule on its evidence, then — for a completed pass — the merge rule.
-func deliverBinding(res *StepResult, delivered Outcome, spec ResultSpec) error {
+// rule on its decoded evidence, then — for a completed pass — the merge
+// rule.
+func deliverBinding(res *StepResult, evidence []CommandEvidence, delivered Outcome, spec ResultSpec) error {
 	branch := deliverBranch(spec)
-	if err := deliverCommandRule(res.CommandEvidence, branch); err != nil {
+	if err := deliverCommandRule(evidence, branch); err != nil {
 		return fmt.Errorf("driver: step %q recorded a forbidden delivery command: %w", spec.StepID, err)
 	}
 	if delivered != OutcomeCompleted || res.Outcome != OutcomeCompleted {
 		return nil
 	}
-	return deliverMergeRule(res, branch, spec)
+	return deliverMergeRule(res, evidence, branch, spec)
 }
 
 // deliverRepo is the per-repo record of the deliver output.
@@ -100,7 +101,7 @@ type deliverRepo struct {
 	TestsPassed         *bool  `json:"tests_passed"`
 }
 
-func deliverMergeRule(res *StepResult, branch string, spec ResultSpec) error {
+func deliverMergeRule(res *StepResult, evidence []CommandEvidence, branch string, spec ResultSpec) error {
 	var out struct {
 		Verdict any           `json:"verdict"`
 		Repos   []deliverRepo `json:"repos"`
@@ -148,7 +149,7 @@ func deliverMergeRule(res *StepResult, branch string, spec ResultSpec) error {
 		if strings.TrimSpace(r.PRURL) == "" || strings.TrimSpace(r.MergeCommit) == "" {
 			return fmt.Errorf("driver: deliver output %s is merged and owes its pr_url and merge_commit", label)
 		}
-		if why := mergeBlocker(spec, r, branch, res.CommandEvidence); why != "" {
+		if why := mergeBlocker(spec, r, branch, evidence); why != "" {
 			human = append(human, r.Name+": merged although "+why)
 		}
 	}

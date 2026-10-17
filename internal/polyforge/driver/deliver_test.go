@@ -95,7 +95,7 @@ const goodPush = "cd repos/demo && git push origin HEAD:refs/heads/polyforge/pol
 
 func deliverRes(outcome Outcome, output string, evidence []CommandEvidence) *StepResult {
 	return &StepResult{WIID: "wi_d", StepID: deliverStepID, SpawnN: 1, Outcome: outcome,
-		Output: json.RawMessage(output), CommandEvidence: evidence}
+		Output: json.RawMessage(output), CommandEvidence: rawEvidence(evidence)}
 }
 
 const mergedOut = `{"verdict":"pass","repos":[{"name":"demo","branch":"polyforge/polyforge-166","pr_url":"https://github.com/o/r/pull/1","merged":true,"merge_commit":"abc","tests_passed":true}]}`

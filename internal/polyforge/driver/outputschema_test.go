@@ -91,7 +91,7 @@ func verificationEnv(t *testing.T) (*Driver, *fakeSpawner, string) {
 
 func verificationDone(output string) fakeEntry {
 	e := done(output)
-	e.res.CommandEvidence = goodEvidence()
+	e.res.CommandEvidence = rawEvidence(goodEvidence())
 	return e
 }
 

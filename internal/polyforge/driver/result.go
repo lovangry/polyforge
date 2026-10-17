@@ -34,6 +34,7 @@
 package driver
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -126,15 +127,13 @@ type StepResult struct {
 	Output     json.RawMessage `json:"output"`                // step-specific output JSON, schema-checked
 	QuestionID string          `json:"question_id,omitempty"` // set when Outcome == needs_input
 	Question   string          `json:"question,omitempty"`    // the question text for needs_input
-	// CommandEvidence is the V4 command-evidence list: required (and
-	// checked) only on a step that owes it (ResultSpec.RequireCommandEvidence).
-	CommandEvidence []CommandEvidence `json:"command_evidence,omitempty"`
+	// CommandEvidence is the V4 command-evidence list, kept verbatim item
+	// by item: every item must decode as a CommandEvidence object
+	// (decodeCommandEvidence, any step), and a step that owes evidence
+	// (ResultSpec.RequireCommandEvidence) must carry well-formed entries.
+	CommandEvidence []json.RawMessage `json:"command_evidence,omitempty"`
 	SubmittedAt     time.Time         `json:"submitted_at,omitempty"`
 
-	// evidenceDropped records why the tolerant re-parse discarded
-	// command_evidence entries (set by the collector, never serialized);
-	// the evidence gate quotes it so a rejection names the real reason.
-	evidenceDropped []string
 	// rebaseline is set by ValidateStepResult when the step changed
 	// authored test files with a human's approval (the authored-tests
 	// gate): the accepted output is stamped with the new baseline.
@@ -263,9 +262,11 @@ type ResultSpec struct {
 //     completed result is recorded (res.schemaViolation), not rejected.
 //     A rejection is the in-process retry lane, never a silent
 //     reclassification;
-//  4. the V4 command-evidence gate (RequireCommandEvidence steps): a
-//     completed result must carry at least one command_evidence entry,
-//     each with a non-empty argv and duration_ms > 0;
+//  4. the command-evidence gate: every command_evidence item, on any
+//     step and outcome, must be an object that decodes as a
+//     CommandEvidence (decodeCommandEvidence); on a RequireCommandEvidence
+//     step (the V4 gate) a completed result must carry at least one
+//     entry, each with a non-empty argv and duration_ms > 0;
 //  5. the committed-test-files gate (ReposDir set, any step): a
 //     completed result whose output declares test_files must have every
 //     listed path committed at HEAD in its task repo(s)
@@ -362,14 +363,16 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 			}
 		}
 	}
-	// 4. the V4 command-evidence gate: a completed result (after the
-	// verdict re-bind) of an evidence-owing step must carry well-formed
-	// command_evidence.
+	// 4. the command-evidence gate: an item the driver cannot read is
+	// rejected, never dropped; then the V4 gate — a completed result
+	// (after the verdict re-bind) of an evidence-owing step must carry
+	// well-formed command_evidence.
+	evidence, err := decodeCommandEvidence(res.CommandEvidence)
+	if err != nil {
+		return fmt.Errorf("driver: step %q envelope carries unreadable command evidence: %w", spec.StepID, err)
+	}
 	if res.Outcome == OutcomeCompleted && spec.RequireCommandEvidence {
-		if err := checkCommandEvidence(res.CommandEvidence); err != nil {
-			if len(res.evidenceDropped) > 0 {
-				err = fmt.Errorf("%w (entries dropped while parsing the envelope: %s)", err, strings.Join(res.evidenceDropped, "; "))
-			}
+		if err := checkCommandEvidence(evidence); err != nil {
 			return fmt.Errorf("driver: step %q completed without verification evidence: %w", spec.StepID, err)
 		}
 	}
@@ -402,7 +405,7 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 	// with --merge; a merge outside the merge rule, or a PR left unmerged,
 	// needs a human answer.
 	if spec.StepID == deliverStepID {
-		if err := deliverBinding(res, delivered, spec); err != nil {
+		if err := deliverBinding(res, evidence, delivered, spec); err != nil {
 			return err
 		}
 	}
@@ -412,8 +415,7 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 // checkCommandEvidence enforces the V4 evidence shape: at least one entry,
 // every entry with a non-empty argv and duration_ms > 0. exit_code's
 // zero value is legitimate and its presence cannot be checked on the
-// decoded struct, so it is not enforced. An entry the tolerant re-parse
-// could not decode never reaches here as a struct (see evidenceDropped).
+// decoded struct, so it is not enforced.
 func checkCommandEvidence(ev []CommandEvidence) error {
 	if len(ev) == 0 {
 		return errors.New("command_evidence is empty — a verification step must carry at least one entry, each an OBJECT {\"argv\": [...], \"exit_code\": N, \"duration_ms\": N} (duration_ms > 0)")
@@ -427,6 +429,25 @@ func checkCommandEvidence(ev []CommandEvidence) error {
 		}
 	}
 	return nil
+}
+
+// decodeCommandEvidence decodes the envelope's command_evidence items. An
+// item that is not a JSON object, or does not decode as a
+// CommandEvidence, is an error naming it: the rejection feeds back into
+// the retry prompt, so the rewrite knows what to fix.
+func decodeCommandEvidence(items []json.RawMessage) ([]CommandEvidence, error) {
+	ev := make([]CommandEvidence, 0, len(items))
+	for i, el := range items {
+		if !bytes.HasPrefix(bytes.TrimSpace(el), []byte("{")) {
+			return nil, fmt.Errorf("command_evidence[%d] is not an OBJECT — each entry is {\"argv\": [...], \"exit_code\": N, \"duration_ms\": N}, never a string", i)
+		}
+		var ce CommandEvidence
+		if err := json.Unmarshal(el, &ce); err != nil {
+			return nil, fmt.Errorf("command_evidence[%d] could not be decoded: %v (started_at must be RFC3339, argv a string list, numbers numeric)", i, err)
+		}
+		ev = append(ev, ce)
+	}
+	return ev, nil
 }
 
 // needsInputQuestion extracts the question of a needs_input envelope: it
