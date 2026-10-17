@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -163,24 +164,7 @@ func TestSameMachineBlockedResumeWithoutSealedCommitIsRefused(t *testing.T) {
 // back, from the same quarantined generation the capsule chain is
 // adopted from.
 func TestSameMachineBlockedResumeRestoresTaskReposFromSealedScene(t *testing.T) {
-	g := newWIPRig(t, "wi_seal_task_repos")
-	g.dirty(t)
-	hook := filepath.Join(g.hubBare, "hooks", "pre-receive")
-	if err := os.WriteFile(hook, []byte("#!/bin/sh\necho refused >&2\nexit 1\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	g.block(t)
-	if last := g.hub.lastEnd(); last.HeadSHA == "" {
-		t.Fatalf("setup: the blocked close must carry the sealed head, got %+v", last)
-	}
-	for _, ref := range []string{gitops.TaskRefName("app"), gitops.TaskWIPRefName("app")} {
-		if _, ok := g.hubRef(t, ref); ok {
-			t.Fatalf("setup: %s must not have reached aihub", ref)
-		}
-	}
-	if err := os.Remove(hook); err != nil {
-		t.Fatal(err)
-	}
+	g := sealTaskScene(t, "wi_seal_task_repos")
 
 	if err := g.r.Start(context.Background(), g.wi, StartOpts{}); err != nil {
 		t.Fatalf("resume on the sealing machine: %v", err)
@@ -198,5 +182,122 @@ func TestSameMachineBlockedResumeRestoresTaskReposFromSealedScene(t *testing.T) 
 	}
 	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(g.r.gitDirFor(g.wi)), "pf-carrier-*")); len(left) != 0 {
 		t.Fatalf("the sealed-scene store must be removed after the restore: %v", left)
+	}
+}
+
+// sealTaskScene runs a WI with an unpushed task-repo commit and
+// uncommitted task-repo work, and closes it blocked while aihub refuses
+// every push: neither the chain head nor the carrier/WIP refs reach
+// aihub, so the work exists only in this machine's scene.
+func sealTaskScene(t *testing.T, wi string) *wipRig {
+	t.Helper()
+	g := newWIPRig(t, wi)
+	g.dirty(t)
+	hook := filepath.Join(g.hubBare, "hooks", "pre-receive")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\necho refused >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	g.block(t)
+	if last := g.hub.lastEnd(); last.HeadSHA == "" {
+		t.Fatalf("setup: the blocked close must carry the sealed head, got %+v", last)
+	}
+	for _, ref := range []string{gitops.TaskRefName("app"), gitops.TaskWIPRefName("app")} {
+		if _, ok := g.hubRef(t, ref); ok {
+			t.Fatalf("setup: %s must not have reached aihub", ref)
+		}
+	}
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
+	}
+	return g
+}
+
+// The sealed scene's task-repo state that does not land in the local
+// store refuses the claim (DAEMON-507) instead of reading the missing
+// carrier as "first claim" and continuing from the origin's branch; the
+// seal stays.
+func TestSealedSceneStoreFailureRefusesTheResume(t *testing.T) {
+	g := sealTaskScene(t, "wi_seal_store_fail")
+	sealed := g.hub.lastEnd().HeadSHA
+	inner := snapshotTaskReposFn
+	snapshotTaskReposFn = func(o gitops.Opts) ([]string, []string) {
+		return []string{"app"}, nil // claims success, wrote nothing
+	}
+	t.Cleanup(func() { snapshotTaskReposFn = inner })
+
+	t.Cleanup(func() { terminateJobAgent(g.r, g.wi) })
+	err := g.r.Start(context.Background(), g.wi, StartOpts{})
+	if err == nil || !strings.Contains(err.Error(), api.ErrDaemonSpawnFail) || !strings.Contains(err.Error(), "repos/app") {
+		t.Fatalf("a resume whose sealed task state was not recorded = %v, want %s naming repos/app", err, api.ErrDaemonSpawnFail)
+	}
+	if end := g.hub.lastEnd(); end.Status != api.StatusBlocked {
+		t.Fatalf("the refused claim must end blocked, got %+v", end)
+	}
+	g.hub.mu.Lock()
+	still := g.hub.seals[g.wi].SealedHead
+	g.hub.mu.Unlock()
+	if still != sealed {
+		t.Fatalf("the seal must stay at %s, got %q", sealed, still)
+	}
+}
+
+// Several quarantined generations: an earlier resume that adopted the
+// sealed head and crashed before laying out its task repos (newest, not
+// materialized) is passed over, and of the materialized generations
+// holding the sealed head the newest wins — the chain and the task repos
+// come from that one generation.
+func TestSealedSceneGenerationChoice(t *testing.T) {
+	g := sealTaskScene(t, "wi_seal_generations")
+	sealed := g.hub.lastEnd().HeadSHA
+	capDir := testCapsuleDir(g.r, g.wi)
+	gitDir := g.r.gitDirFor(g.wi)
+	if err := quarantineCapsule(capDir, gitDir); err != nil {
+		t.Fatal(err)
+	}
+	qs := quarantinedGitDirs(gitDir)
+	if len(qs) != 1 {
+		t.Fatalf("quarantines = %v", qs)
+	}
+	ts, err := strconv.ParseInt(strings.TrimPrefix(qs[0], gitDir+".quarantined."), 36, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen := func(n int64) string { return ".quarantined." + strconv.FormatInt(ts+n, 36) }
+	cp := func(from, to string) {
+		t.Helper()
+		if out, err := exec.Command("cp", "-a", from, to).CombinedOutput(); err != nil {
+			t.Fatalf("cp: %v: %s", err, out)
+		}
+	}
+	// a newer materialized generation of the same sealed state, with one
+	// more uncommitted file: it is the one restored
+	cp(qs[0], gitDir+gen(1))
+	cp(capDir+gen(0), capDir+gen(1))
+	writeFile(t, filepath.Join(capDir+gen(1), capsule.DirRepos, "app", "newest.txt"), "newest generation\n")
+	// the newest: a crashed earlier resume — the adopted chain, no task
+	// repos, never materialized
+	cp(qs[0], gitDir+gen(2))
+	if err := os.MkdirAll(capDir+gen(2), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := g.r.Start(context.Background(), g.wi, StartOpts{}); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	t.Cleanup(func() { terminateJobAgent(g.r, g.wi) })
+	repoB := filepath.Join(capDir, capsule.DirRepos, "app")
+	if got := carrierGit(t, repoB, "rev-parse", "HEAD"); got != g.workHead {
+		t.Fatalf("resumed task repo HEAD = %q, want %q", got, g.workHead)
+	}
+	if _, err := os.Stat(filepath.Join(repoB, "newest.txt")); err != nil {
+		t.Fatalf("the task repos must come from the newest materialized generation: %v", err)
+	}
+	if got, err := gitops.Head(g.r.jobOf(g.wi).git); err != nil || got != sealed {
+		t.Fatalf("capsule head = %q (%v)", got, err)
+	}
+	for _, d := range []string{capDir + gen(0), capDir + gen(1), capDir + gen(2), gitDir + gen(0), gitDir + gen(1), gitDir + gen(2)} {
+		if _, err := os.Stat(d); err != nil {
+			t.Fatalf("quarantine %s must stay: %v", d, err)
+		}
 	}
 }

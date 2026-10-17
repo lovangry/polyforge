@@ -134,8 +134,9 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 // lane (gitops.PushTaskWIP, the close points' own snapshot) runs over the
 // scene with that repo as its remote, so each repos/<name> HEAD lands on
 // refs/pf-task/<name> and its uncommitted work on refs/pf-wip/<name>, and
-// the claim-time restore reads it exactly as it reads aihub. The scene is
-// only read. The store sits beside the external git-dirs as a pf-carrier-*
+// the claim-time restore reads it exactly as it reads aihub. Every task
+// repo of the scene with a born HEAD must land there, or the claim is
+// refused (the seal stays). The scene is only read. The store sits beside the external git-dirs as a pf-carrier-*
 // temp (the daemon start sweeps one a crash left); the caller removes it.
 func sealedTaskStore(j *job) (string, error) {
 	store, err := os.MkdirTemp(filepath.Dir(j.git.GitDir), "pf-carrier-sealed-")
@@ -145,16 +146,30 @@ func sealedTaskStore(j *job) (string, error) {
 	if out, err := gitTask(context.Background(), store, "init", "--quiet", "--bare", "--template=", store); err != nil {
 		return store, fmt.Errorf("%v: %s", err, strings.TrimSpace(out))
 	}
-	gitops.PushTaskWIP(gitops.Opts{
+	want, failed := snapshotTaskReposFn(gitops.Opts{
 		WorkItemID:    j.wi,
 		CapsuleDir:    j.sealedScene,
 		GitDir:        j.git.GitDir,
 		RemoteURL:     store,
 		EventSink:     j.git.EventSink,
 		CarrierAlerts: &gitops.CarrierAlerts{},
-	}, true, true)
+	})
+	if len(failed) > 0 {
+		return store, fmt.Errorf("the task-repo state of %s could not be recorded", strings.Join(failed, ", "))
+	}
+	// Fail closed: a carrier missing from the store would read as "first
+	// claim" and continue from the origin's branch without the sealed work.
+	for _, name := range want {
+		if _, err := gitTask(context.Background(), store, "--git-dir="+store, "rev-parse", "--verify", "-q", gitops.TaskRefName(name)); err != nil {
+			return store, fmt.Errorf("repos/%s has a born HEAD but its carrier %s was not recorded", name, gitops.TaskRefName(name))
+		}
+	}
 	return store, nil
 }
+
+// snapshotTaskReposFn is sealedTaskStore's carrier-lane run (a seam for
+// the store-failure test).
+var snapshotTaskReposFn = gitops.SnapshotTaskRepos
 
 // fetchTaskRefFn is the carrier read (a seam for the hub-blip test);
 // carrierFetchBackoff is the first wait of its retries of a transient
