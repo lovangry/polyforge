@@ -505,3 +505,16 @@ func TestMarkClosingOutlivesARecovery(t *testing.T) {
 		t.Fatalf("needs_recovery events after MarkClosing: %d", n)
 	}
 }
+
+// A monitor told to stop leaves the link's facts to its successor, even
+// when its loop picks the facts case before the stop case.
+func TestStoppingMonitorLeavesFactsToItsSuccessor(t *testing.T) {
+	m, _ := newTestMonitor(t, newFakeHandle("att_1"), nil)
+	m.requestStop()
+	soon(t, time.Second, "the monitor stopped", func() bool { return len(eventsOf(m, EvJobStopped)) == 1 })
+	m.link.Fact(supervise.StepStarted{Step: "next", SpawnN: 7, StartedAt: time.Now()})
+	m.drainFacts() // the select's facts case, taken after the stop
+	if facts := m.link.Facts.Drain(); len(facts) != 1 {
+		t.Fatalf("the stopping monitor consumed the successor's facts: %d left", len(facts))
+	}
+}

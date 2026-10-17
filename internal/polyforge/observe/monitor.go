@@ -301,7 +301,16 @@ func (m *Monitor) isQuiet() bool {
 func (m *Monitor) now() time.Time { return m.link.Clock() }
 
 // drainFacts consumes every queued driver fact, in order.
+//
+// A monitor told to stop consumes nothing more: the link is the work
+// item's, and its facts may already be the next derivation's, whose
+// monitor is built right after this one is told to stop.
 func (m *Monitor) drainFacts() {
+	select {
+	case <-m.stopCh:
+		return
+	default:
+	}
 	facts := m.link.Facts.Drain()
 	if len(facts) == 0 {
 		return
