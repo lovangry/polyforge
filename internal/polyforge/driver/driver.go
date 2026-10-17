@@ -118,6 +118,14 @@ type Config struct {
 	Sleep func(ctx context.Context, d time.Duration)
 }
 
+// hasUnsettledDispatch reports whether the current step awaits a
+// dispatch that never settled.
+func (d *Driver) hasUnsettledDispatch() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.unsettledStepLocked() != nil
+}
+
 // InterruptedDispatch records one derivation that ended without a
 // result: the recovery cause. The driver archives it as an audit-only
 // infra_failure attempt (never model-class, so never a candidate
@@ -304,6 +312,14 @@ func (d *Driver) Run(ctx context.Context) error {
 	// pointer; an operator shutdown never reaches this hook (the bridge
 	// filters it).
 	collected, collectedN := d.unconsumedResult()
+	if collected == nil && d.cfg.Interrupted == nil && d.hasUnsettledDispatch() {
+		// A claim over a dispatch that never settled — an operator pause
+		// cancelled it, or a shutdown or crash ended it before this claim:
+		// that time is never booked, even by a later system relaunch.
+		if err := d.transition(TransitionRequest{Kind: TransClaimReentry, SpawnN: d.currentSpawnN()}); err != nil {
+			return fmt.Errorf("driver: claim re-entry write failed: %w", err)
+		}
+	}
 	if collected == nil && d.cfg.Interrupted != nil {
 		if err := d.transition(TransitionRequest{
 			Kind:     TransInterrupted,

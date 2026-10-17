@@ -408,3 +408,53 @@ func TestD6RelaunchBeforeTheNextDispatchBooksOnce(t *testing.T) {
 		t.Fatalf("booked %dms, want 3s + 2s (no re-booking of the dispatch)", got)
 	}
 }
+
+// TestD6PausedDispatchNeverBookedByALaterRelaunch: pause → resume by a
+// fresh claim → the resumed driver stalls before any new dispatch → the
+// system relaunches. The paused dispatch is never booked: the claim
+// re-stamped the step's start, so the relaunch books only from the claim.
+func TestD6PausedDispatchNeverBookedByALaterRelaunch(t *testing.T) {
+	execPath, _ := interruptionCycles(t, time.Hour, 20*time.Minute, time.Hour, []*InterruptedDispatch{nil})
+	dir := filepath.Dir(execPath)
+	at := time.Unix(1_700_000_000, 0).Add(5 * time.Hour)
+	newDriver := func(in *InterruptedDispatch, link *supervise.Link, sp *fakeSpawner) *Driver {
+		d, err := New(Config{
+			WI:             WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
+			ExecPath:       execPath,
+			Workflow:       &Workflow{Steps: []StepSpec{spec("s")}, MaxTotal: 4, MaxPerStep: 2},
+			Spawner:        sp,
+			Log:            &safeLog{},
+			Link:           link,
+			Limits:         supervise.Defaults{StepTimeout: time.Hour},
+			StepCandidates: map[string][]string{"s": {"pi:a"}},
+			Interrupted:    in,
+			Now:            func() time.Time { return at },
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return d
+	}
+
+	// the resume: a fresh claim whose driver stalls before dispatching
+	link := supervise.NewLink("wi_run")
+	link.Verdict(supervise.DriverStalled{Duration: time.Minute, Phase: "between_steps"})
+	sp := &fakeSpawner{}
+	if err := newDriver(nil, link, sp).Run(context.Background()); !errors.Is(err, ErrDriverStalled) {
+		t.Fatalf("claim driver: %v, want the stall", err)
+	}
+	if len(sp.dispatched()) != 0 {
+		t.Fatal("the claim driver must stall before any dispatch")
+	}
+
+	// the system relaunch: its archive books nothing of the paused dispatch
+	link = supervise.NewLink("wi_run")
+	link.Verdict(supervise.DriverStalled{Duration: time.Minute, Phase: "between_steps"})
+	stalled := &InterruptedDispatch{Detail: "driver_stalled", BookWall: true}
+	if err := newDriver(stalled, link, &fakeSpawner{}).Run(context.Background()); !errors.Is(err, ErrDriverStalled) {
+		t.Fatalf("relaunched driver: %v, want the stall", err)
+	}
+	if got := readExec(t, execPath).Steps["s"].BudgetConsumed.WallMs; got != 0 {
+		t.Fatalf("a relaunch after a pause booked %dms of the paused dispatch", got)
+	}
+}

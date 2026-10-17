@@ -90,6 +90,12 @@ const (
 	// failed dispatch and its death-cause disposal in one atomic write
 	// (applyStepFailedLocked).
 	TransStepFailed TransitionKind = "step_failed"
+	// TransClaimReentry is a claim's re-entry of an in_progress step whose
+	// dispatch never settled (cancelled by an operator pause, a shutdown
+	// or a crash before this claim): it re-stamps step_started_at, so a
+	// later system relaunch books only from the claim and the time before
+	// it never counts toward T (applyClaimReentryLocked).
+	TransClaimReentry TransitionKind = "claim_reentry"
 )
 
 // TransitionRequest is one submitted execution.json mutation. SpawnN is
@@ -231,6 +237,8 @@ func (d *Driver) applyLocked(req TransitionRequest, info *appliedInfo) error {
 		return d.applyAnswerLocked(req)
 	case TransInterrupted:
 		return d.applyInterruptedLocked(req)
+	case TransClaimReentry:
+		return d.applyClaimReentryLocked()
 	case TransStepFailed:
 		return d.applyStepFailedLocked(req, info)
 	default:
@@ -706,6 +714,29 @@ func (d *Driver) applyInterruptedLocked(req TransitionRequest) error {
 		Detail:        req.Reason,
 	})
 	return nil
+}
+
+// applyClaimReentryLocked re-stamps the current step's start when a
+// claim finds its dispatch unsettled; any other state is left as is.
+func (d *Driver) applyClaimReentryLocked() error {
+	if st := d.unsettledStepLocked(); st != nil {
+		st.StepStartedAt = d.stamp()
+	}
+	return nil
+}
+
+// unsettledStepLocked answers the current step when the workflow runs,
+// the step is in_progress with no open question and its dispatch never
+// settled (Step.Dispatch set); nil otherwise.
+func (d *Driver) unsettledStepLocked() *capsule.Step {
+	if d.exec.WorkflowStatus != StatusRunning {
+		return nil
+	}
+	st := d.exec.Steps[d.exec.CurrentStep]
+	if st == nil || st.Status != capsule.StepInProgress || st.PendingQuestion != nil || st.Dispatch == 0 {
+		return nil
+	}
+	return st
 }
 
 // interruptedWallMs answers the wall time from the current dispatch's
