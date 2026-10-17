@@ -73,6 +73,12 @@ re-runs that same bar only after merging a moved default branch changed the tree
 report (`artifacts/verification-report.md`) is this step's test evidence. Reading a test
 file's source is part of the review; running it is not.
 
+## Principles
+
+Every principle is a check (a violation is blocking); the checklist spells them out.
+
+{{principles}}
+
 ## Owner-rules checklist (any hit is a blocking finding)
 
 On top of the lane judgment above, check the diff against the owner's
@@ -89,17 +95,18 @@ these present:
 - **No manual-gate bypass.** No code path that bypasses a manual checkpoint
   (`needs_input` / gate) - the flow's interactive checkpoints must stay
   load-bearing.
-- **No backward-compatibility code.** No compat shims, dual paths, or
-  legacy-behavior fallbacks; when behavior changes or is removed, the old shape is
-  deleted, not carried alongside.
 - **Spec-forced inventions.** If any of the change's own requirements
   ({{scope_source}}) forces an invented mechanism - e.g. it demands "the loser
   must be refused" where both serializations are valid, which is what drove a sleep+latch hack - do not pass
   the diff for faithfully implementing it: flag it as a blocking finding and
   propose the spec change in that finding instead.
-- **Agent reachability for new entry points.** If the diff adds a new daemon or
-  aihub entry point, the diff must state whether the step agent can reach it; an
-  unstated new entry point is itself a finding.
+- **Unruled behavior change.** Existing behavior changed without an owner ruling.
+- **I/O under a lock.** Network or disk I/O while holding a lock.
+- **Weak tests.** A new test that passes on the old code, or an assertion relaxed
+  without a stated reason.
+- **Stale docs.** Docs not updated with the code they describe.
+- **Leaked credentials** in an agent's env, a command line, a log or an artifact.
+- **Guess as fact.** An unverified claim stated as fact.
 
 ## Position in the flow
 

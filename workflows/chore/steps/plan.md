@@ -79,6 +79,12 @@ whether it exists:
   bump that becomes a refactor; if adjacent work is genuinely needed, say so in the plan
   as a called-out exclusion and let a human decide, rather than silently including it.
 
+## Principles
+
+Pick the simplest mechanism; before adding timing, shutdown or retry logic, check whether the recovery path already covers it; no I/O under a lock.
+
+{{principles}}
+
 ## Output
 
 Emit the final JSON object per the schema above: the artifact path, the ordered step

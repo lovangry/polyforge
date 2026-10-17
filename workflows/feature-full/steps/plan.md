@@ -85,6 +85,12 @@ Example:
   ordinary unit tests belong inside the relevant `code` step of this plan if the project
   expects them alongside the implementation.
 
+## Principles
+
+Pick the simplest mechanism; before adding timing, shutdown or retry logic, check whether the recovery path already covers it; no I/O under a lock.
+
+{{principles}}
+
 ## Output
 
 Emit the final JSON object per the schema above: the artifact path, the ordered step ids

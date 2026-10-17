@@ -71,6 +71,12 @@ every ambiguity you can find as a question, not an assumption.
 - Do not skip straight to writing `spec` content into `grill-qa.md` — keep the two
   documents' roles distinct even though they share a file.
 
+## Principles
+
+Ask first whether the change alters behavior or only the implementation; for a new entry point, ask who may reach it; list each behavior-changing point as a question for the owner.
+
+{{principles}}
+
 ## Output
 
 Emit the final JSON output per the schema above once the questioning is complete:

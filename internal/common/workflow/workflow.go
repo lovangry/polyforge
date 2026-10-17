@@ -6,6 +6,7 @@
 package workflow
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,14 +44,40 @@ func StepDefinitionPath(bundleDir, stepID string) string {
 // placeholder is one step-definition variable reference: {{name}}.
 var placeholder = regexp.MustCompile(`\{\{([a-z][a-z0-9_]*)\}\}`)
 
+// PrinciplesVar is the one placeholder a step definition may use without
+// declaring it: {{principles}} renders workflows/_shared/principles.md
+// (PrinciplesFile), the engineering principles shared by every bundle, so
+// the text lives once and each step states around it how it applies them.
+const (
+	PrinciplesVar  = "principles"
+	PrinciplesFile = "principles.md"
+)
+
 // ReadStepDefinition reads the step definition StepDefinitionPath
-// resolves and renders it with the step entry's vars (RenderStepVars).
-// A read error is returned unwrapped (os.IsNotExist holds).
+// resolves and renders it with the step entry's vars (RenderStepVars),
+// plus {{principles}} when the definition uses it (a step entry may not
+// declare that var itself). A read error is returned unwrapped
+// (os.IsNotExist holds).
 func ReadStepDefinition(bundleDir, stepID string, vars map[string]string) ([]byte, error) {
 	path := StepDefinitionPath(bundleDir, stepID)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
+	}
+	if _, ok := vars[PrinciplesVar]; ok {
+		return nil, fmt.Errorf("%s: step entry declares the reserved var %q (it renders %s/%s)", path, PrinciplesVar, SharedDir, PrinciplesFile)
+	}
+	if bytes.Contains(raw, []byte("{{"+PrinciplesVar+"}}")) {
+		text, err := os.ReadFile(filepath.Join(filepath.Dir(bundleDir), SharedDir, PrinciplesFile))
+		if err != nil {
+			return nil, fmt.Errorf("%s: {{%s}}: %w", path, PrinciplesVar, err)
+		}
+		withP := make(map[string]string, len(vars)+1)
+		for k, v := range vars {
+			withP[k] = v
+		}
+		withP[PrinciplesVar] = strings.TrimSpace(string(text))
+		vars = withP
 	}
 	out, err := RenderStepVars(raw, vars)
 	if err != nil {
