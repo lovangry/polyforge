@@ -140,7 +140,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// attach is NOT a failure (v2-converge §2.3): those causes are exempt
 	// from the ledger entirely — neither counted nor resetting — so a deploy
 	// retry or a systemd restart loop cannot bounded-fail every running WI.
-	if !restartExemptCause(cause) {
+	if !LifecycleCause(cause) {
 		accepted := acceptedResultCount(j.capsuleDir) // disk read: outside the job's mutex
 		j.mu.Lock()
 		switch {
@@ -567,18 +567,22 @@ func (r *Runtime) killAgentTree(j *job) {
 	}
 }
 
-// restartExemptCause reports whether a recovery cause is a daemon
-// restart, an operator attach or an operator resume.
+// LifecycleCause reports whether a recovery cause is a daemon restart,
+// an operator attach or an operator resume — a lifecycle event, not a
+// relaunch the system ordered after a hang, stall or death.
 //
-// Destination: the consecutive-recovery-failures budget is spent only by
+// Destinations: the consecutive-recovery-failures budget is spent only by
 // failures — a process-lifecycle event neither counts nor resets it, so a
-// deploy or a restart loop cannot bounded-fail a healthy work item.
+// deploy or a restart loop cannot bounded-fail a healthy work item; and
+// the step's runtime T books the interrupted dispatch of a system
+// relaunch only (the bridge's interruptedFromCause), so a pause or a
+// restart's downtime never counts while a hang→relaunch loop still
+// reaches T.
 //
-// The bridge's interruptedFromCause is a different list with a different
+// The bridge's audit archive is a different list with a different
 // destination (every derivation that ended without a result is recorded
-// in attempts[] as audit); a daemon restart is exempt here and recorded
-// there, so the two do not merge.
-func restartExemptCause(cause string) bool {
+// in attempts[]); a daemon restart is exempt here and recorded there.
+func LifecycleCause(cause string) bool {
 	return cause == causeDaemonRestart || cause == causeOperatorAttach || cause == causeOperatorResume
 }
 

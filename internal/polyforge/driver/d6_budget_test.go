@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"path/filepath"
+
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
@@ -246,10 +248,10 @@ func TestAcceptedAttemptSeqAndClock(t *testing.T) {
 	}
 }
 
-// TestD6CancelledDispatchBooksNothing: a cancelled dispatch (pause,
-// recovery relaunch) is an interruption like a kill -9 — it books no wall
-// time and writes nothing; T counts the dispatches that ended in a result
-// or a failure, each booked in that same write.
+// TestD6CancelledDispatchBooksNothing: the cancelled driver (pause,
+// recovery relaunch) books no wall time and writes nothing; a system
+// relaunch's dispatch is booked by the successor's interrupted archive
+// (TestD6HangRelaunchLoopReachesT).
 func TestD6CancelledDispatchBooksNothing(t *testing.T) {
 	d, sp, execPath := runEnv(t, spec("a"))
 	var mu sync.Mutex
@@ -281,5 +283,128 @@ func TestD6CancelledDispatchBooksNothing(t *testing.T) {
 		if k == "budget_update" {
 			t.Fatal("a cancelled dispatch emitted budget_update")
 		}
+	}
+}
+
+// interruptionCycles runs one driver per entry of interrupted over ONE
+// capsule: each dispatches step "s", holds it for hold on a shared fake
+// clock and is cancelled (the runtime's Terminate); gap passes before
+// the next driver starts (the pause, the recovery). The entry is the
+// Config.Interrupted the driver starts with (nil: a claim, e.g. the
+// resume after a pause). It answers the last driver's link.
+func interruptionCycles(t *testing.T, stepTimeout, hold, gap time.Duration, interrupted []*InterruptedDispatch) (string, *supervise.Link) {
+	t.Helper()
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, capsule.ExecutionJSON)
+	var mu sync.Mutex
+	clock := time.Unix(1_700_000_000, 0)
+	now := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return clock
+	}
+	var link *supervise.Link
+	for i, in := range interrupted {
+		sp := &fakeSpawner{script: []fakeEntry{{hold: true}}}
+		link = supervise.NewLink("wi_run")
+		d, err := New(Config{
+			WI:             WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
+			ExecPath:       execPath,
+			Workflow:       &Workflow{Steps: []StepSpec{spec("s")}, MaxTotal: 4, MaxPerStep: 2},
+			Spawner:        sp,
+			Log:            &safeLog{},
+			Link:           link,
+			Limits:         supervise.Defaults{StepTimeout: stepTimeout},
+			StepCandidates: map[string][]string{"s": {"pi:a"}},
+			Interrupted:    in,
+			Now:            now,
+		})
+		if err != nil {
+			t.Fatalf("cycle %d: New: %v", i, err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		go func() { errCh <- d.Run(ctx) }()
+		waitUntil(t, "the dispatch to start", func() bool { return len(sp.dispatched()) == 1 })
+		mu.Lock()
+		clock = clock.Add(hold)
+		mu.Unlock()
+		cancel()
+		if err := <-errCh; !errors.Is(err, context.Canceled) {
+			t.Fatalf("cycle %d: Run: %v, want the cancellation", i, err)
+		}
+		mu.Lock()
+		clock = clock.Add(gap)
+		mu.Unlock()
+	}
+	return execPath, link
+}
+
+// TestD6PauseCyclesBookNothing: a dispatch cancelled by an operator
+// pause books no wall time — whether the work item resumes by a fresh
+// claim (no interrupted archive) or by a live-holder operator resume (an
+// archive the bridge marks non-booking) — so neither the dispatch nor
+// the pause itself ever counts toward T.
+func TestD6PauseCyclesBookNothing(t *testing.T) {
+	resume := &InterruptedDispatch{Detail: "operator resume"}
+	execPath, _ := interruptionCycles(t, time.Hour, 20*time.Minute, time.Hour,
+		[]*InterruptedDispatch{nil, nil, resume, nil, resume, resume})
+	exec := readExec(t, execPath)
+	if got := exec.Steps["s"].BudgetConsumed.WallMs; got != 0 {
+		t.Fatalf("pause cycles booked %dms toward T", got)
+	}
+	if got := exec.BudgetConsumed.WallMs; got != 0 {
+		t.Fatalf("pause cycles booked %dms on the workflow aggregate", got)
+	}
+}
+
+// TestD6HangRelaunchLoopReachesT: a dispatch the system relaunches after
+// a hang books its runtime in the successor's interrupted archive, so a
+// hang→relaunch loop accumulates and the next dispatch starts with T
+// already spent (the supervisor's T rule then ends it at once). The
+// booking runs from the dispatch's start to the successor's archive
+// write, so the recovery between the kill and the relaunch counts too.
+func TestD6HangRelaunchLoopReachesT(t *testing.T) {
+	stalled := &InterruptedDispatch{Detail: "driver_stalled", BookWall: true}
+	execPath, link := interruptionCycles(t, 10*time.Minute, 3*time.Minute, time.Minute,
+		[]*InterruptedDispatch{nil, stalled, stalled, stalled})
+	exec := readExec(t, execPath)
+	if got := exec.Steps["s"].BudgetConsumed.WallMs; got != (12 * time.Minute).Milliseconds() {
+		t.Fatalf("three relaunched dispatches of 3m (+1m recovery each) booked %dms, want 12m", got)
+	}
+	var last *supervise.StepStarted
+	for _, f := range link.Facts.Drain() {
+		if s, ok := f.(supervise.StepStarted); ok {
+			last = &s
+		}
+	}
+	if last == nil {
+		t.Fatal("the last relaunch dispatched no step")
+	}
+	if th := last.Thresholds; th.PriorRuntime < th.StepTimeout {
+		t.Fatalf("after the loop the dispatch must start with T spent: %v of %v", th.PriorRuntime, th.StepTimeout)
+	}
+}
+
+// TestD6RelaunchBeforeTheNextDispatchBooksOnce: two relaunches with no
+// dispatch between them book the interrupted dispatch once, plus only
+// the time since the first archive.
+func TestD6RelaunchBeforeTheNextDispatchBooksOnce(t *testing.T) {
+	d, _, _, execPath := testEnv(t, spec("a"))
+	at := time.Unix(1_700_000_000, 0)
+	d.cfg.Now = func() time.Time { return at }
+	mustInit(t, d)
+	mustStart(t, d, "a", 1)
+	at = at.Add(3 * time.Second)
+	relaunch := TransitionRequest{Kind: TransInterrupted, Reason: "driver_stalled", BookWall: true, SpawnN: 1}
+	if err := d.transition(relaunch); err != nil {
+		t.Fatalf("first archive: %v", err)
+	}
+	at = at.Add(2 * time.Second)
+	if err := d.transition(relaunch); err != nil {
+		t.Fatalf("second archive: %v", err)
+	}
+	if got := readExec(t, execPath).Steps["a"].BudgetConsumed.WallMs; got != 5000 {
+		t.Fatalf("booked %dms, want 3s + 2s (no re-booking of the dispatch)", got)
 	}
 }

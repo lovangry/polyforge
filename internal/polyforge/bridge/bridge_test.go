@@ -97,6 +97,13 @@ func TestInterruptedFromCausePolicy(t *testing.T) {
 			t.Fatalf("archive detail %q, want the cause verbatim %q", got.Detail, cause)
 		}
 	}
+	// T booking: a system relaunch (hang, stall, death) books the
+	// interrupted dispatch; a daemon restart or an operator resume does not.
+	for cause, want := range map[string]bool{"agent_death": true, "driver_stalled": true, "daemon_restart": false, "operator resume": false} {
+		if got := interruptedFromCause(cause); got == nil || got.BookWall != want {
+			t.Fatalf("cause %q: archive %+v, want BookWall %v", cause, got, want)
+		}
+	}
 }
 
 // fakeRTSpawner is a scripted rt.Spawner: it records every Spawn's

@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
@@ -113,6 +114,9 @@ type TransitionRequest struct {
 	// WallMs is the finished dispatch's wall time folded into the step's
 	// cumulative runtime by a step_result write.
 	WallMs int64
+	// BookWall (interrupted): the system relaunched the dispatch after a
+	// hang, stall or death — book its wall time toward the step's T.
+	BookWall bool
 	// TestFilesCommit is the authored-tests baseline (task repo -> HEAD)
 	// a completed step_result stamps under test_files_commit
 	// (polyforge#164 H4); nil = no stamp. It lands in the result's own
@@ -682,15 +686,50 @@ func (d *Driver) applyInterruptedLocked(req TransitionRequest) error {
 	if req.Reason == FailDaemonRestart {
 		cause = FailDaemonRestart
 	}
+	now := d.stamp()
+	if req.BookWall {
+		// A system relaunch books the interrupted dispatch's runtime so a
+		// hang→relaunch loop reaches T. Only an unsettled dispatch (its
+		// result or failure write books it otherwise), and only the time
+		// since its start or since the last interruption archived for it
+		// — a second relaunch before the next dispatch never re-books.
+		if ms := interruptedWallMs(st, now); ms > 0 && st.Dispatch != 0 {
+			d.addWallLocked(st, ms)
+		}
+	}
 	st.Attempts = append(st.Attempts, capsule.Attempt{
 		Cause:         CauseInfraFailure,
 		FailureCause:  cause,
 		AttemptSeq:    nextAttemptSeq(st),
 		StartedAt:     st.StepStartedAt,
-		InterruptedAt: d.stamp(),
+		InterruptedAt: now,
 		Detail:        req.Reason,
 	})
 	return nil
+}
+
+// interruptedWallMs answers the wall time from the current dispatch's
+// start, or from a later interruption already archived for that same
+// dispatch, to now; 0 when the start stamp does not parse.
+func interruptedWallMs(st *capsule.Step, now string) int64 {
+	from, err := time.Parse(time.RFC3339Nano, st.StepStartedAt)
+	if err != nil {
+		return 0
+	}
+	for _, a := range st.Attempts {
+		if a.Cause != CauseInfraFailure || a.StartedAt != st.StepStartedAt ||
+			(a.FailureCause != FailDriverRelaunch && a.FailureCause != FailDaemonRestart) {
+			continue
+		}
+		if at, err := time.Parse(time.RFC3339Nano, a.InterruptedAt); err == nil && at.After(from) {
+			from = at
+		}
+	}
+	to, err := time.Parse(time.RFC3339Nano, now)
+	if err != nil {
+		return 0
+	}
+	return to.Sub(from).Milliseconds()
 }
 
 // requireRunningStep is the step_failed precondition: a known,

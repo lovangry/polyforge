@@ -129,16 +129,17 @@ const causeOperatorShutdown = rt.CauseOperatorAttach
 // an interruption of the step, and records nothing; every other cause is
 // archived verbatim.
 //
-// runtime's restartExemptCause (recover.go) is a different list with a
-// different destination — the consecutive-recovery-failures budget is
-// spent by failures only — so the two do not merge: a daemon restart is
-// exempt from that budget yet is recorded here, because the derivation
-// it killed still ended without a result.
+// The interrupted dispatch's wall time is booked toward the step's T
+// only when the system relaunched it after a hang, stall or death
+// (runtime.LifecycleCause false): a daemon restart or an operator resume
+// is still recorded here — the derivation it killed ended without a
+// result — but books nothing, so a pause or a restart's downtime never
+// counts while a hang→relaunch loop still reaches T.
 func interruptedFromCause(cause string) *driver.InterruptedDispatch {
 	if cause == "" || cause == causeOperatorShutdown {
 		return nil
 	}
-	return &driver.InterruptedDispatch{Detail: cause}
+	return &driver.InterruptedDispatch{Detail: cause, BookWall: !rt.LifecycleCause(cause)}
 }
 
 // Start instantiates the driver over the capsule and runs it.

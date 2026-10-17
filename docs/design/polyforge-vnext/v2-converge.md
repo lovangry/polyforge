@@ -145,7 +145,7 @@ supervisor 对每次派发维护：派发时刻、最后一次"真实输出"时�
 - X 默认按 harness 翻译器声明的**输出粒度**取：逐字粒度（思考时也有输出）可短（例 10 分钟）；整条粒度或模型不返回思考内容时放长（例 30 分钟）。"模型不返回思考内容"在模型配置中声明。
 - Y 默认 30 分钟（#83 教训）；T 默认 60–90 分钟（#117 教训）；N 默认 10 分钟。
 - **放宽**：每次放宽翻倍（放宽后的界 = 放宽前界 × 2），写入 `execution.json`（`steps.<id>.supervision.relaxed_wall_ms` / `relaxed_tool_ms`），重启后沿用。**只有超时类死因放宽 T**（`step_timeout_slow_model` 与 `step_timeout_long_task` 每次处置都放宽一次，第二次 `step_timeout_long_task` 也先翻倍再 blocked）；换模型、人工继续、限流退避一律不放宽（polyforge#147 D6）。
-- T 按**整个步骤累计**（跨该步的多次派发、跨换模型、跨人工继续连续累计，polyforge#147 D6 起不再有任何"重开窗口"的 rebase——`runtime_base_ms` 已删）；计入 agent 实际运行时间与**限流退避的等待时间**（D7：同模型重试只受 T 约束，owner 裁定），等人回答（needs_input）的挂钟时间不计入。
+- T 按**整个步骤累计**（跨该步的多次派发、跨换模型、跨人工继续连续累计，polyforge#147 D6 起不再有任何"重开窗口"的 rebase——`runtime_base_ms` 已删）；计入 agent 实际运行时间与**限流退避的等待时间**（D7：同模型重试只受 T 约束，owner 裁定），等人回答（needs_input）的挂钟时间不计入。**被打断的派发（D6，owner 裁定）**：以结果或失败结束的派发在同一次写入里记账；**操作员暂停**取消的派发不计入任何挂钟时间（无论之后以重新领取还是 live-holder 的 `operator resume` 继续，暂停期间也不计）；**系统**在挂起 / 停滞 / 死亡后重拉的派发**计入**其运行时间——由继任 driver 的 interrupted 归档写入记账，从该派发开始（或该派发上一次归档）到归档写入为止（其间恢复车道的处理时间一并计入），因此挂起→重拉循环仍会达到 T。daemon 重启（`daemon_restart`）与操作员 attach 属生命周期事件，同暂停一样不计（停机时间不是运行时间）；判定用 runtime 的 `LifecycleCause`（与连续恢复失败预算的豁免表同一张），在 bridge 的 `interruptedFromCause` 处决定，被取消的 driver 自身不写任何东西。
 - **rewind 重跑清零**：gate FAIL rewind 回到某步时，该步的累计 T 归零（旧窗口的记账随归档 attempt 留存）；发起 rewind 的 gate 步自身（不归档、保持 in_progress）的累计 T 同样归零，重入在新窗口下评审。
 
 ### 2.5 harness 翻译器 <!-- §2.5 -->

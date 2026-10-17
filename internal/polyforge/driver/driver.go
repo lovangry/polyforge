@@ -124,6 +124,11 @@ type Config struct {
 // advance) when the recovery lane re-derives.
 type InterruptedDispatch struct {
 	Detail string
+	// BookWall books the interrupted dispatch's wall time toward the
+	// step's T in the same archive write: set for a relaunch the system
+	// ordered after a hang, stall or death, never for a daemon restart
+	// or an operator resume (the bridge decides from the recovery cause).
+	BookWall bool
 }
 
 // Driver is the per-WI execution driver. One Driver per work item; Run
@@ -301,9 +306,10 @@ func (d *Driver) Run(ctx context.Context) error {
 	collected, collectedN := d.unconsumedResult()
 	if collected == nil && d.cfg.Interrupted != nil {
 		if err := d.transition(TransitionRequest{
-			Kind:   TransInterrupted,
-			Reason: d.cfg.Interrupted.Detail,
-			SpawnN: d.currentSpawnN(),
+			Kind:     TransInterrupted,
+			Reason:   d.cfg.Interrupted.Detail,
+			BookWall: d.cfg.Interrupted.BookWall,
+			SpawnN:   d.currentSpawnN(),
 		}); err != nil {
 			return fmt.Errorf("driver: interrupted-dispatch archive failed: %w", err)
 		}
@@ -396,10 +402,10 @@ func (d *Driver) Run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				// Cancellation (pause, recovery relaunch): not a failure of
 				// the step — nothing is counted, the candidate pointer stays
-				// and no wall time is booked. A cancelled dispatch is an
-				// interruption exactly like a kill -9: the step's runtime T
-				// counts the dispatches that ended in a result or a failure,
-				// each booked in that same write.
+				// and this driver writes nothing. A dispatch the system
+				// relaunches after a hang, stall or death is booked by the
+				// successor's interrupted archive (Config.Interrupted); a
+				// paused one books nothing.
 				d.announceEnd(stepID, n, supervise.OutcomeExitedWithoutResult, -1, "cancelled")
 				return fmt.Errorf("driver: step %s dispatch %d ended without a result: %w", stepID, n, werr)
 			}
