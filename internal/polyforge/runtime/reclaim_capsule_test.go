@@ -23,12 +23,11 @@ func reclaimJob(t *testing.T, wi, fp string) *job {
 	j := &job{wi: wi, sessionFingerprint: fp}
 	j.capsuleDir = filepath.Join(base, "capsules", wi)
 	j.git = gitops.Opts{
-		WorkItemID:  wi,
-		Fingerprint: fp,
-		CapsuleDir:  j.capsuleDir,
-		GitDir:      filepath.Join(base, "git", wi+".git"),
-		Username:    wi,
-		Secret:      "push-secret",
+		WorkItemID: wi,
+		CapsuleDir: j.capsuleDir,
+		GitDir:     filepath.Join(base, "git", wi+".git"),
+		Username:   wi,
+		Secret:     "push-secret",
 	}
 	return j
 }
@@ -58,7 +57,7 @@ func TestPrepareCapsuleReclaimQuarantinesGitDirAndPushes(t *testing.T) {
 	if err := writeSessionMarker(j.capsuleDir, "fp-old"); err != nil {
 		t.Fatal(err)
 	}
-	if _, pushed, _, err := gitops.CommitPush(j.git, "publish"); err != nil || !pushed {
+	if _, pushed, _, err := gitops.CommitPush(context.Background(), j.git, "publish"); err != nil || !pushed {
 		t.Fatalf("first publish: pushed=%v err=%v", pushed, err)
 	}
 	tip, err := exec.Command("git", "--git-dir", bare, "rev-parse", "refs/heads/main").Output()
@@ -75,7 +74,6 @@ func TestPrepareCapsuleReclaimQuarantinesGitDirAndPushes(t *testing.T) {
 	}
 
 	j2 := &job{wi: j.wi, capsuleDir: j.capsuleDir, git: j.git, sessionFingerprint: "fp-new"}
-	j2.git.Fingerprint = "fp-new"
 	if err := r.prepareCapsule(context.Background(), j2); err != nil {
 		t.Fatalf("prepareCapsule: %v", err)
 	}
@@ -91,7 +89,7 @@ func TestPrepareCapsuleReclaimQuarantinesGitDirAndPushes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(j2.capsuleDir, "next.txt"), []byte("n\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, pushed, _, err := gitops.CommitPush(j2.git, "after re-claim"); err != nil || !pushed {
+	if _, pushed, _, err := gitops.CommitPush(context.Background(), j2.git, "after re-claim"); err != nil || !pushed {
 		t.Fatalf("push after re-claim: pushed=%v err=%v", pushed, err)
 	}
 }
@@ -104,7 +102,7 @@ func TestPrepareCapsuleCloneFailurePublishedRefusesInit(t *testing.T) {
 	if out, err := exec.Command("git", "--git-dir", bare, "symbolic-ref", "HEAD", "refs/heads/main").CombinedOutput(); err != nil {
 		t.Fatalf("bare HEAD: %v: %s", err, out)
 	}
-	if _, pushed, _, err := gitops.CommitPush(j.git, "publish"); err != nil || !pushed {
+	if _, pushed, _, err := gitops.CommitPush(context.Background(), j.git, "publish"); err != nil || !pushed {
 		t.Fatalf("publish: pushed=%v err=%v", pushed, err)
 	}
 	// ls-remote still sees refs/heads/main, but the clone cannot fetch objects.

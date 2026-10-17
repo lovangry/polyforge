@@ -109,10 +109,8 @@ superseded, ended) → `CORE-403 STALE_SESSION` before any gate, so it never cla
 
 `/git/<wi>.git` (`internal/aihub/git/proxy.go`, `core/owner.go` `CheckSessionCredential`): Basic user
 must be the WI id, password the live session secret. No session → `GIT-401 NO_SESSION`; mismatch →
-`GIT-401 BAD_CREDENTIAL` (message names the current holder fingerprint); stored fingerprint not the
-secret's → `GIT-401 BAD_FINGERPRINT`; status ≠ running → `GIT-403 PAUSED` (checked on every smart-HTTP
-request, so fetch/clone are refused too). Backup layer: the push must carry `--push-option=session-fingerprint=<fp>` and the
-pre-receive hook compares it with the proxy-derived fingerprint (`git/hook.go`). Fencing covers the
+`GIT-401 BAD_CREDENTIAL` (message names the current holder fingerprint); status ≠ running →
+`GIT-403 PAUSED` (checked on every smart-HTTP request, so fetch/clone are refused too). Fencing covers the
 aihub proxy only — pushes a step makes to an external origin are not fenced.
 
 ### 3.5 Daemon-side session state <!-- §3.5 -->
@@ -210,7 +208,7 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 | `AUTH-401` | Missing/invalid API key |
 | `AUTH-403` | Not admin; key scoped to another project; not a writer |
 | `GIT-400` | Wrong smart-HTTP method/target |
-| `GIT-401` | `NO_SESSION`, `BAD_CREDENTIAL`, `BAD_FINGERPRINT`; client side "no push remote" |
+| `GIT-401` | `NO_SESSION`, `BAD_CREDENTIAL`; client side "no push remote" |
 | `GIT-403` | `PAUSED`: any git request while the WI is not running |
 | `GIT-404` | Bad path / traversal / repo missing |
 | `GIT-412` | Local staged gitlink refused by `pf` before commit (the hook rejects gitlinks with text only) |
@@ -392,8 +390,8 @@ grace 1m; per-step failure bound 3 (`DefaultMaxStepFailures`). Timeouts relax (d
 ## 8. Capsule and git chain <!-- §8 -->
 
 - Layout: `v2-converge.md#§E` (E.5), constants `internal/common/capsule/capsule.go`; `pending-results/` and `sync/` are defined in `driver/spawn.go` and `runtime/materialize.go`. `.gitignore`: `/repos/`, `/artifacts/release-*/`, `/sync/`. The capsule's git-dir is external (`<data-dir>/git/<wi>.git`, a `gitdir:` pointer file in the capsule): it is outside the capsule tree, but a step's own `git commit` in the capsule root still reaches it — hence the trailer fold below.
-- Chain rules (FF-only, `Polyforge-Seq` trailer from 1, blob ≤16 MiB, no gitlinks), push fencing, push retry schedule, re-claim = clone + task-repo restore, `DAEMON-516/518`: `v2-converge.md#§14.1`. Carrier refs `refs/pf-task/<name>`: `v2-converge.md#§14.2`. Uncommitted-work snapshots `refs/pf-wip/<name>`: `v2-converge.md#§14.3`.
-- Local invariants (`internal/polyforge/gitops/gitops.go`): one per-WI git mutex shared by runtime and observe; seq derived inside it; `index.lock` older than 10m removed at acquisition; local gitlink precheck (`GIT-412`); commits a step made on the chain branch without a trailer are folded back into the next chain commit (`untrailered_commits_folded`); an amended already-pushed commit is non-fast-forward and needs a human.
+- Chain rules (FF-only, no ref deletion, blob ≤16 MiB, no gitlinks), push fencing, push retry schedule, re-claim = clone + task-repo restore, `DAEMON-516/518`: `v2-converge.md#§14.1`. Carrier refs `refs/pf-task/<name>`: `v2-converge.md#§14.2`. Uncommitted-work snapshots `refs/pf-wip/<name>`: `v2-converge.md#§14.3`.
+- Local invariants (`internal/polyforge/gitops/gitops.go`): one per-WI git mutex shared by runtime and observe; the chain push is bounded by its caller's context (on its end the push's git process group is killed and the lock released); `index.lock` older than 10m removed at acquisition; local gitlink precheck (`GIT-412`); a commit a step made on the chain branch is pushed as an ordinary fast-forward commit; an amended already-pushed commit is non-fast-forward and needs a human.
 - Push loop (`observe/observe.go`, `observe/monitor.go`): event-triggered on each `execution.json` commit; retry every 10s; `push_backpressure` after 5 consecutive failed pushes or 30 min without success; 5 identical errors stop the round until the next boundary; 60s per push.
 
 ## 9. Memory and recall <!-- §9 -->

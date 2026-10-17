@@ -178,16 +178,10 @@ func TestV1S03PauseResume(t *testing.T) {
 		t.Fatalf("wrapped work item still names session %q", sess.Fingerprint)
 	}
 
-	// The chain continued ABOVE the paused tip: seq trailers strictly
-	// increasing across the pause/attach boundary.
-	seqs := inst.bareSeqTrailers(t, wi)
-	if len(seqs) <= pausedCommits {
-		t.Fatalf("chain did not grow past the pause (%d <= %d)", len(seqs), pausedCommits)
-	}
-	for i, s := range seqs {
-		if s != int64(i+1) {
-			t.Fatalf("seq trailer %d is %d, want %d (chain: %v)", i, s, i+1, seqs)
-		}
+	// The chain continued ABOVE the paused tip (the hook admits only
+	// fast-forward pushes to main).
+	if n := inst.bareCommitCount(t, wi); n <= pausedCommits {
+		t.Fatalf("chain did not grow past the pause (%d <= %d)", n, pausedCommits)
 	}
 
 	// The continuation's faces: grill done with its archived answer, the

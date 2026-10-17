@@ -73,21 +73,14 @@ func (m *Manager) HandleGit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Basic auth against the session (reference.md §3.4): the password is the
-	// session secret. The returned handle is the push-option fence's
-	// expected value (REQUIRED on every proxied push): the session's PUBLIC
-	// fingerprint. It rides the
-	// CGI environment as PF_EXPECTED_FINGERPRINT so the pre-receive hook
-	// can compare it with the push's --push-option=session-fingerprint=<fp>
-	// (http-backend passes its env through to receive-pack and thus to the
-	// hook).
+	// session secret, and only the work item's live session passes.
 	user, secret, ok := r.BasicAuth()
 	if !ok {
 		w.Header().Set("WWW-Authenticate", `Basic realm="polyforge"`)
 		writeGitErr(w, api.ErrGitUnauthorized, "git access requires a session-scoped credential")
 		return
 	}
-	expectedHandle, err := m.checker.CheckSessionCredential(wiID, user, secret)
-	if err != nil {
+	if err := m.checker.CheckSessionCredential(wiID, user, secret); err != nil {
 		w.Header().Set("WWW-Authenticate", `Basic realm="polyforge"`)
 		// The git client only understands the 401; the typed code rides in
 		// the response headers for diagnostics.
@@ -109,6 +102,13 @@ func (m *Manager) HandleGit(w http.ResponseWriter, r *http.Request) {
 		writeGitErr(w, api.ErrGitNotFound, "no repository for %s", wiID)
 		return
 	}
+	// A repo this process has not ensured yet (one created by an earlier
+	// build) gets this build's configuration and hook before its first
+	// push: the chain rules are always the running hub's.
+	if err := m.EnsureBare(wiID); err != nil {
+		writeGitErr(w, api.ErrGitInternal, "prepare repository for %s: %v", wiID, err)
+		return
+	}
 
 	// CGI environment (git http-backend contract). Base is the inherited
 	// process environment: http-backend execs git-receive-pack/upload-pack
@@ -127,7 +127,6 @@ func (m *Manager) HandleGit(w http.ResponseWriter, r *http.Request) {
 		"CONTENT_TYPE="+r.Header.Get("Content-Type"),
 		"GIT_PF_MAX_BLOB="+strconv.FormatInt(m.MaxBlobBytes, 10),
 		"GIT_PF_MAX_TASK_BLOB="+strconv.FormatInt(m.MaxTaskBlobBytes, 10),
-		"PF_EXPECTED_FINGERPRINT="+expectedHandle,
 	)
 	if n := r.Header.Get("Content-Length"); n != "" {
 		env = append(env, "CONTENT_LENGTH="+n)

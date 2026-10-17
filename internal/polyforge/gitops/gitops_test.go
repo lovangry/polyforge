@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/common/api"
 )
 
 // gitArgsProbe, when set, observes every git argv the package builds
@@ -44,13 +44,6 @@ func init() {
 			gitArgsProbe(args)
 		}
 		return wrappedTimedCtx(ctx, timeout, env, dir, args...)
-	}
-	wrappedTimed := gitTimed
-	gitTimed = func(timeout time.Duration, env []string, dir string, args ...string) (string, error) {
-		if gitArgsProbe != nil {
-			gitArgsProbe(args)
-		}
-		return wrappedTimed(timeout, env, dir, args...)
 	}
 }
 
@@ -96,32 +89,11 @@ func mkBare(t *testing.T, dir string, hook bool) *testBare {
 	return b
 }
 
-// writeTestHook installs a pre-receive hook shaped like aihub's: seq
-// trailer present + strictly increasing, and every push option recorded.
+// writeTestHook installs a pre-receive hook that records every push's
+// options.
 func writeTestHook(t *testing.T, b *testBare) {
 	t.Helper()
-	script := fmt.Sprintf(`#!/bin/sh
-TRAILER=Polyforge-Seq
-prev=""
-while read old new ref; do
-  range="$new"
-  if [ "$old" != "0000000000000000000000000000000000000000" ]; then
-    prev=$(git log -1 --format="%%(trailers:key=$TRAILER,valueonly)" "$old" | tr -d '[:space:]')
-    case "$prev" in ''|*[!0-9]*) prev="" ;; esac
-    range="$old..$new"
-  fi
-  for c in $(git rev-list --reverse "$range"); do
-    seq=$(git log -1 --format="%%(trailers:key=$TRAILER,valueonly)" "$c" | tr -d '[:space:]')
-    case "$seq" in ''|*[!0-9]*) echo "commit $c missing $TRAILER" >&2; exit 1 ;; esac
-    if [ -n "$prev" ]; then
-      [ "$seq" -gt "$prev" ] || { echo "$TRAILER must increase: $c has $seq, prev $prev" >&2; exit 1; }
-    fi
-    prev="$seq"
-  done
-done
-echo "$GIT_PUSH_OPTION_COUNT|$GIT_PUSH_OPTION_0" >> %q
-exit 0
-`, b.optsFile)
+	script := fmt.Sprintf("#!/bin/sh\necho \"$GIT_PUSH_OPTION_COUNT|$GIT_PUSH_OPTION_0\" >> %q\nexit 0\n", b.optsFile)
 	path := filepath.Join(b.dir, "hooks", "pre-receive")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -146,18 +118,14 @@ func (b *testBare) pushesSeen(t *testing.T) []string {
 	return out
 }
 
-// tipSeq reads the newest main commit's Polyforge-Seq on the bare repo.
-func (b *testBare) tipSeq(t *testing.T) int64 {
+// commits counts the bare repo's main commits.
+func (b *testBare) commits(t *testing.T) int64 {
 	t.Helper()
-	out, err := run("git", "--git-dir", b.dir, "log", "-1",
-		"--format=%(trailers:key="+capsule.SeqTrailer+",valueonly)", "main")
+	out, err := run("git", "--git-dir", b.dir, "rev-list", "--count", "main")
 	if err != nil {
-		t.Fatalf("bare log: %v: %s", err, out)
+		t.Fatalf("bare rev-list: %v: %s", err, out)
 	}
-	n, perr := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
-	if perr != nil {
-		t.Fatalf("tip trailer unparsable: %q", out)
-	}
+	n, _ := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
 	return n
 }
 
@@ -214,9 +182,9 @@ func testOpts(t *testing.T, wi string) (Opts, string) {
 }
 
 // ---------------------------------------------------------------------------
-// seq trailer: derived in-lock, strictly increasing, accepted by the hook
+// commit + push
 
-func TestCommitPushSeqMonotonicAndPushLands(t *testing.T) {
+func TestCommitPushEveryRoundLands(t *testing.T) {
 	setIdentity(t)
 	o, barePath := testOpts(t, "wi_seq")
 	bare := mkBare(t, barePath, true)
@@ -224,15 +192,15 @@ func TestCommitPushSeqMonotonicAndPushLands(t *testing.T) {
 
 	for i := 1; i <= 3; i++ {
 		writeDirty(t, o, fmt.Sprintf("f%d.txt", i), fmt.Sprintf("round %d\n", i))
-		sha, pushed, _, err := CommitPush(o, fmt.Sprintf("observe: execution v%d", i))
+		sha, pushed, _, err := CommitPush(context.Background(), o, fmt.Sprintf("observe: execution v%d", i))
 		if err != nil || !pushed {
 			t.Fatalf("round %d: CommitPush = (%q, %v, %v)", i, sha, pushed, err)
 		}
 		if sha == "" {
 			t.Fatalf("round %d: local SHA missing", i)
 		}
-		if got := bare.tipSeq(t); got != int64(i) {
-			t.Fatalf("round %d: bare tip seq = %d, want %d", i, got, i)
+		if got := bare.commits(t); got != int64(i) {
+			t.Fatalf("round %d: bare main has %d commits, want %d", i, got, i)
 		}
 	}
 	if n := len(bare.pushesSeen(t)); n != 3 {
@@ -240,7 +208,97 @@ func TestCommitPushSeqMonotonicAndPushLands(t *testing.T) {
 	}
 }
 
-func TestCommitPushRetryKeepsSeqConsistent(t *testing.T) {
+// A step's own `git commit` in the capsule root lands on the chain as an
+// ordinary commit: the next publish pushes it as it is, on top of the
+// daemon's history, and the daemon's next commit builds on it.
+func TestCommitPushPublishesAForeignCommitAsIs(t *testing.T) {
+	setIdentity(t)
+	o, barePath := testOpts(t, "wi_foreign")
+	bare := mkBare(t, barePath, true)
+	mkCapsule(t, o)
+	writeDirty(t, o, "a.txt", "a\n")
+	if _, pushed, _, err := CommitPush(context.Background(), o, "observe: v1"); err != nil || !pushed {
+		t.Fatalf("CommitPush: pushed=%v err=%v", pushed, err)
+	}
+	writeDirty(t, o, "agent.txt", "agent\n")
+	if out, err := run("git", "-C", o.CapsuleDir, "add", "agent.txt"); err != nil {
+		t.Fatalf("agent add: %v: %s", err, out)
+	}
+	if out, err := run("git", "-C", o.CapsuleDir, "commit", "-q", "-m", "agent's own commit"); err != nil {
+		t.Fatalf("agent commit: %v: %s", err, out)
+	}
+	foreign, err := run("git", "-C", o.CapsuleDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeDirty(t, o, "b.txt", "b\n")
+	sha, pushed, _, err := CommitPush(context.Background(), o, "observe: v2")
+	if err != nil || !pushed {
+		t.Fatalf("CommitPush over a foreign commit: pushed=%v err=%v", pushed, err)
+	}
+	if out, err := run("git", "--git-dir", barePath, "merge-base", "--is-ancestor", strings.TrimSpace(foreign), "main"); err != nil {
+		t.Fatalf("the foreign commit is not on the hub's chain as it was: %v: %s", err, out)
+	}
+	if got, ok := bareRefSHA(t, barePath, "refs/heads/main"); !ok || got != sha {
+		t.Fatalf("hub main = %q, want the daemon's commit %q", got, sha)
+	}
+	if got := bare.commits(t); got != 3 {
+		t.Fatalf("hub main has %d commits, want 3", got)
+	}
+}
+
+// A publish whose context ended while it waited for the per-WI lock
+// commits nothing (a local commit it would never push).
+func TestCommitPushEndedContextCommitsNothing(t *testing.T) {
+	setIdentity(t)
+	o, barePath := testOpts(t, "wi_ended")
+	bare := mkBare(t, barePath, true)
+	mkCapsule(t, o)
+	writeDirty(t, o, "a.txt", "a\n")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, pushed, _, err := CommitPush(ctx, o, "observe: v1"); err == nil || pushed {
+		t.Fatalf("an ended context must refuse the publish: pushed=%v err=%v", pushed, err)
+	}
+	if _, err := run("git", "--git-dir", o.GitDir, "rev-parse", "--verify", "-q", "HEAD"); err == nil {
+		t.Fatal("a commit was created under an ended context")
+	}
+	if bare.hasMain(t) {
+		t.Fatal("something was pushed under an ended context")
+	}
+}
+
+// A step's own commit in the capsule root that records a gitlink is
+// refused locally with the typed GIT-412 before the push (the hook would
+// refuse it on every push), and nothing reaches the hub.
+func TestCommitPushRefusesAnUnpushedGitlinkCommit(t *testing.T) {
+	setIdentity(t)
+	o, barePath := testOpts(t, "wi_agentlink")
+	bare := mkBare(t, barePath, true)
+	mkCapsule(t, o)
+	writeDirty(t, o, "a.txt", "a\n")
+	if _, pushed, _, err := CommitPush(context.Background(), o, "observe: v1"); err != nil || !pushed {
+		t.Fatalf("CommitPush: pushed=%v err=%v", pushed, err)
+	}
+	if out, err := run("git", "-C", o.CapsuleDir, "update-index", "--add", "--cacheinfo", "160000,0123456789012345678901234567890123456789,vendored"); err != nil {
+		t.Fatalf("agent update-index: %v: %s", err, out)
+	}
+	if out, err := run("git", "-C", o.CapsuleDir, "commit", "-q", "-m", "agent commit with a gitlink"); err != nil {
+		t.Fatalf("agent commit: %v: %s", err, out)
+	}
+	_, pushed, _, err := CommitPush(context.Background(), o, "observe: v2")
+	if pushed || !IsLocalGitlink(err) {
+		t.Fatalf("want the typed local gitlink refusal, got pushed=%v err=%v", pushed, err)
+	}
+	if !strings.Contains(err.Error(), "vendored") || !strings.Contains(err.Error(), "git reset --soft") {
+		t.Fatalf("the refusal must name the path and the undo: %v", err)
+	}
+	if got := bare.commits(t); got != 1 {
+		t.Fatalf("hub main has %d commits, want only the first", got)
+	}
+}
+
+func TestCommitPushRetryCarriesTheStandingCommit(t *testing.T) {
 	setIdentity(t)
 	o, barePath := testOpts(t, "wi_retry")
 	bare := mkBare(t, barePath, true)
@@ -250,26 +308,25 @@ func TestCommitPushRetryKeepsSeqConsistent(t *testing.T) {
 	dead := o
 	dead.RemoteURL = filepath.Join(t.TempDir(), "nowhere.git")
 	writeDirty(t, o, "a.txt", "a\n")
-	sha1, pushed, _, err := CommitPush(dead, "first")
+	sha1, pushed, _, err := CommitPush(context.Background(), dead, "first")
 	if err == nil || pushed {
 		t.Fatalf("push to a dead remote must fail: (%q, %v, %v)", sha1, pushed, err)
 	}
 	if sha1 == "" {
 		t.Fatal("the local commit must still be reported on push failure")
 	}
-	// Round 2: a new change against the live remote — the seq continues
-	// above the standing commit, and the push carries BOTH commits
-	// through the hook's strict-increase check.
+	// Round 2: a new change against the live remote — the push carries
+	// BOTH commits.
 	writeDirty(t, o, "b.txt", "b\n")
-	sha2, pushed, _, err := CommitPush(o, "second")
+	sha2, pushed, _, err := CommitPush(context.Background(), o, "second")
 	if err != nil || !pushed {
 		t.Fatalf("CommitPush = (%q, %v, %v)", sha2, pushed, err)
 	}
 	if sha2 == sha1 {
 		t.Fatal("the second commit must be a new SHA")
 	}
-	if !bare.hasMain(t) {
-		t.Fatal("the push never landed")
+	if got := bare.commits(t); got != 2 {
+		t.Fatalf("bare main has %d commits, want both", got)
 	}
 }
 
@@ -280,7 +337,7 @@ func TestCommitPushCleanTreePushesStandingHead(t *testing.T) {
 	mkCapsule(t, o)
 
 	writeDirty(t, o, "a.txt", "a\n")
-	sha, pushed, _, err := CommitPush(o, "one")
+	sha, pushed, _, err := CommitPush(context.Background(), o, "one")
 	if err != nil || !pushed {
 		t.Fatalf("CommitPush = (%q, %v, %v)", sha, pushed, err)
 	}
@@ -291,7 +348,7 @@ func TestCommitPushCleanTreePushesStandingHead(t *testing.T) {
 	// no-op ("Everything up-to-date": the hook saw nothing more), but
 	// pushed reports the truthful server-reached state, not a
 	// presumed one.
-	sha2, pushed, pt, err := CommitPush(o, "wrap: wrapped")
+	sha2, pushed, pt, err := CommitPush(context.Background(), o, "wrap: wrapped")
 	if err != nil {
 		t.Fatalf("clean tree must not error: %v", err)
 	}
@@ -330,7 +387,7 @@ func TestCommitPushCleanTreeRetryIsHonestAfterFailedPush(t *testing.T) {
 	dead := o
 	dead.RemoteURL = filepath.Join(t.TempDir(), "nowhere.git")
 	writeDirty(t, o, "a.txt", "a\n")
-	sha1, pushed, _, err := CommitPush(dead, "first")
+	sha1, pushed, _, err := CommitPush(context.Background(), dead, "first")
 	if err == nil || pushed {
 		t.Fatalf("push to a dead remote must fail: (%q, %v, %v)", sha1, pushed, err)
 	}
@@ -341,7 +398,7 @@ func TestCommitPushCleanTreeRetryIsHonestAfterFailedPush(t *testing.T) {
 	// Round 2: the tree is clean, the remote STILL dead — the retry
 	// must NOT fake success. It pushes the standing HEAD, fails, and
 	// reports the error.
-	sha2, pushed, _, err := CommitPush(dead, "retry on clean tree")
+	sha2, pushed, _, err := CommitPush(context.Background(), dead, "retry on clean tree")
 	if err == nil {
 		t.Fatal("a clean-tree retry against a dead remote must surface the push error")
 	}
@@ -357,15 +414,15 @@ func TestCommitPushCleanTreeRetryIsHonestAfterFailedPush(t *testing.T) {
 
 	// Round 3: the tree is still clean, the server is back — the retry
 	// pushes the standing HEAD through and reports pushed=true.
-	sha3, pushed, _, err := CommitPush(o, "retry once the server is back")
+	sha3, pushed, _, err := CommitPush(context.Background(), o, "retry once the server is back")
 	if err != nil || !pushed {
 		t.Fatalf("clean-tree retry against the live remote = (%q, %v, %v)", sha3, pushed, err)
 	}
 	if sha3 != sha1 {
 		t.Fatalf("the standing HEAD must be the one pushed: %q vs %q", sha3, sha1)
 	}
-	if got := bare.tipSeq(t); got != 1 {
-		t.Fatalf("bare tip seq = %d, want 1", got)
+	if got := bare.commits(t); got != 1 {
+		t.Fatalf("bare main has %d commits, want 1", got)
 	}
 }
 
@@ -379,7 +436,7 @@ func TestCommitPushCleanTreeWithNoHistoryIsTyped(t *testing.T) {
 	mkBare(t, barePath, false)
 	mkCapsule(t, o) // initialized, unborn branch, empty tree: clean porcelain
 
-	sha, pushed, _, err := CommitPush(o, "nothing anywhere")
+	sha, pushed, _, err := CommitPush(context.Background(), o, "nothing anywhere")
 	if err == nil {
 		t.Fatalf("clean tree with no history must error: (%q, %v)", sha, pushed)
 	}
@@ -388,55 +445,31 @@ func TestCommitPushCleanTreeWithNoHistoryIsTyped(t *testing.T) {
 	}
 }
 
-func TestCommitPushFirstCommitIsSeqOneOnUnbornBranch(t *testing.T) {
+func TestCommitPushFirstCommitOnUnbornBranch(t *testing.T) {
 	setIdentity(t)
 	o, barePath := testOpts(t, "wi_unborn")
 	bare := mkBare(t, barePath, true)
 	mkCapsule(t, o)
 
 	writeDirty(t, o, "first.txt", "first\n")
-	if _, pushed, _, err := CommitPush(o, "first"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(context.Background(), o, "first"); err != nil || !pushed {
 		t.Fatalf("first CommitPush = (%v, %v)", pushed, err)
 	}
-	if got := bare.tipSeq(t); got != 1 {
-		t.Fatalf("first commit seq = %d, want 1", got)
+	if got := bare.commits(t); got != 1 {
+		t.Fatalf("bare main has %d commits, want 1", got)
 	}
 }
 
-// TestPushOptionSessionFingerprintReachedServer (reference.md §3.4): when the
-// opts carry the PUBLIC session fingerprint, the push option becomes
-// session-fingerprint=<fp> — the fencing-on-use backup layer.
-func TestPushOptionSessionFingerprintReachedServer(t *testing.T) {
-	setIdentity(t)
-	o, barePath := testOpts(t, "wi_fp")
-	bare := mkBare(t, barePath, true)
-	mkCapsule(t, o)
-	o.Fingerprint = "ab12cd34ef56aa00"
-
-	writeDirty(t, o, "a.txt", "a\n")
-	if _, pushed, _, err := CommitPush(o, "one"); err != nil || !pushed {
-		t.Fatalf("CommitPush = (%v, %v)", pushed, err)
-	}
-	seen := bare.pushesSeen(t)
-	if len(seen) != 1 {
-		t.Fatalf("hook invocations: %d, want 1", len(seen))
-	}
-	if seen[0] != "1|session-fingerprint=ab12cd34ef56aa00" {
-		t.Fatalf("push options seen: %q, want count=1 option session-fingerprint=ab12cd34ef56aa00", seen[0])
-	}
-}
-
-// TestPushOptionAbsentFingerprintSendsNoOption: with no fingerprint
-// set (a pre-session push of a non-WI repo, or a local push the hook
-// must not fence), the push carries NO push option at all.
-func TestPushOptionAbsentFingerprintSendsNoOption(t *testing.T) {
+// A push carries no push option: session fencing is the hub proxy's
+// credential check.
+func TestPushCarriesNoPushOption(t *testing.T) {
 	setIdentity(t)
 	o, barePath := testOpts(t, "wi_popt")
 	bare := mkBare(t, barePath, true)
 	mkCapsule(t, o)
 
 	writeDirty(t, o, "a.txt", "a\n")
-	if _, pushed, _, err := CommitPush(o, "one"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(context.Background(), o, "one"); err != nil || !pushed {
 		t.Fatalf("CommitPush = (%v, %v)", pushed, err)
 	}
 	seen := bare.pushesSeen(t)
@@ -594,7 +627,7 @@ func TestPushArgsNeverCarrySecret(t *testing.T) {
 	t.Cleanup(func() { gitArgsProbe = nil })
 
 	writeDirty(t, o, "a.txt", "a\n")
-	if _, pushed, _, err := CommitPush(o, "one"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(context.Background(), o, "one"); err != nil || !pushed {
 		t.Fatalf("CommitPush = (%v, %v)", pushed, err)
 	}
 	var sawPush bool
@@ -649,7 +682,7 @@ func TestPushAndCloneOverHTTPWithCredential(t *testing.T) {
 		t.Fatalf("clone over http:// must receive the credential: %v", err)
 	}
 	writeDirty(t, o, "http.txt", "over http\n")
-	sha, pushed, _, err := CommitPush(o, "http push")
+	sha, pushed, _, err := CommitPush(context.Background(), o, "http push")
 	if err != nil || !pushed {
 		t.Fatalf("CommitPush over http:// = (%q, %v, %v)", sha, pushed, err)
 	}
@@ -755,7 +788,7 @@ func TestCleanStaleLocksAges(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeDirty(t, o, "a.txt", "a\n")
-	_, _, _, err := CommitPush(o, "one")
+	_, _, _, err := CommitPush(context.Background(), o, "one")
 	if err == nil {
 		t.Fatal("a live young lock must surface as a push failure, not be deleted")
 	}
@@ -769,7 +802,7 @@ func TestCleanStaleLocksAges(t *testing.T) {
 	if err := os.Chtimes(lock, past, past); err != nil {
 		t.Fatal(err)
 	}
-	sha, pushed, _, err := CommitPush(o, "one")
+	sha, pushed, _, err := CommitPush(context.Background(), o, "one")
 	if err != nil || !pushed {
 		t.Fatalf("CommitPush after stale-lock removal = (%q, %v, %v)", sha, pushed, err)
 	}
@@ -798,7 +831,7 @@ func TestCloneSeparatesGitDirOnMain(t *testing.T) {
 			seed.RemoteURL = barePath
 			mkCapsule(t, seed)
 			writeDirty(t, seed, "seed.txt", "seed\n")
-			if _, pushed, _, err := CommitPush(seed, "seed"); err != nil || !pushed {
+			if _, pushed, _, err := CommitPush(context.Background(), seed, "seed"); err != nil || !pushed {
 				t.Fatalf("seed push: %v", err)
 			}
 		}
@@ -845,7 +878,7 @@ func TestChainPushIsBounded(t *testing.T) {
 	chainRemoteTimeout = time.Second
 	defer func() { chainRemoteTimeout = old }()
 	start := time.Now()
-	_, pushed, _, err := CommitPush(o, "observe: hang")
+	_, pushed, _, err := CommitPush(context.Background(), o, "observe: hang")
 	if err == nil || pushed {
 		t.Fatalf("a hung remote must fail the push: pushed=%v err=%v", pushed, err)
 	}
@@ -875,30 +908,64 @@ func TestChainPushIsBounded(t *testing.T) {
 	}
 }
 
-// repo review 2026-10-16 B-17: a carrier/WIP push that loses the same
-// ref-transaction CAS race the chain push retries is retried too, not
-// raised as carrier_push_failed.
-func TestCarrierPushRetriesRefCasRejection(t *testing.T) {
-	old := gitTimed
-	defer func() { gitTimed = old }()
-	calls := 0
-	gitTimed = func(_ time.Duration, _ []string, _ string, args ...string) (string, error) {
-		calls++
-		if calls == 1 {
-			return "", errors.New("error: cannot lock ref 'refs/pf-task/r': is at 1 but expected 2\n ! [remote rejected] HEAD -> refs/pf-task/r (failed to update ref)")
+// The publish context bounds the chain push: when it ends, the hung git
+// process group is killed and the per-WI lock is free before CommitPush
+// returns — no push outlives its caller (chainRemoteTimeout stays at its
+// 10-minute default here).
+func TestCommitPushContextKillsTheHungPush(t *testing.T) {
+	setIdentity(t)
+	o, barePath := testOpts(t, "wi_ctxhang")
+	mkBare(t, barePath, false)
+	marker := filepath.Join(t.TempDir(), "hook-alive")
+	hook := "#!/bin/sh\necho $$ > " + marker + "\nexec sleep 300\n"
+	if err := os.WriteFile(filepath.Join(barePath, "hooks", "pre-receive"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mkCapsule(t, o)
+	writeDirty(t, o, "f.txt", "x\n")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	_, pushed, _, err := CommitPush(ctx, o, "observe: hang")
+	if err == nil || pushed {
+		t.Fatalf("an ended context must fail the push: pushed=%v err=%v", pushed, err)
+	}
+	if took := time.Since(start); took > 20*time.Second {
+		t.Fatalf("push took %s after its context ended", took)
+	}
+	done := make(chan struct{})
+	go func() { Lock(o.WorkItemID)(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the per-WI lock is still held after CommitPush returned")
+	}
+	raw, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("the hook never ran: %v", err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	deadline := time.Now().Add(5 * time.Second)
+	for pid > 0 && syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("the hook's sleeper %d survived the ended context", pid)
 		}
-		return "", nil
+		time.Sleep(50 * time.Millisecond)
 	}
-	if _, err := carrierPush(Opts{RemoteURL: "/x.git"}, nil, t.TempDir(), "a:refs/pf-task/r", nil); err != nil || calls != 2 {
-		t.Fatalf("carrierPush = %v after %d calls, want success on the retry", err, calls)
+}
+
+// A lost ref-transaction race (an overlapping push of the same ref won)
+// is not permanent: the next push re-advertises and lands, so a close
+// must retry it rather than give the push up.
+func TestRefCasRejectionIsNotPermanent(t *testing.T) {
+	cas := &api.Error{Code: api.ErrGitInternal, Detail: "error: cannot lock ref 'refs/heads/main': is at 1 but expected 2\n ! [remote rejected] HEAD -> main (failed to update ref)"}
+	if IsPermanentPushRejection(cas) {
+		t.Fatal("a lost ref-transaction race must not classify as permanent")
 	}
-	calls = 0
-	gitTimed = func(_ time.Duration, _ []string, _ string, args ...string) (string, error) {
-		calls++
-		return "", errors.New("fatal: unreachable")
-	}
-	if _, err := carrierPush(Opts{RemoteURL: "/x.git"}, nil, t.TempDir(), "a:refs/pf-task/r", nil); err == nil || calls != 1 {
-		t.Fatalf("a non-CAS failure must not be retried: err=%v calls=%d", err, calls)
+	hook := &api.Error{Code: api.ErrGitInternal, Detail: " ! [remote rejected] HEAD -> main (pre-receive hook declined)"}
+	if !IsPermanentPushRejection(hook) {
+		t.Fatal("a hook refusal stays permanent")
 	}
 }
 
@@ -919,11 +986,11 @@ func TestChainPushIgnoresGlobalGitConfig(t *testing.T) {
 	t.Setenv("GIT_CONFIG_GLOBAL", gc) // the operator's global config
 	mkCapsule(t, o)
 	writeDirty(t, o, "f.txt", "x\n")
-	if _, pushed, _, err := CommitPush(o, "observe: v1"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(context.Background(), o, "observe: v1"); err != nil || !pushed {
 		t.Fatalf("CommitPush: pushed=%v err=%v", pushed, err)
 	}
-	if got := bare.tipSeq(t); got < 1 {
-		t.Fatalf("the real hub repo did not receive the push (tip seq %d)", got)
+	if got := bare.commits(t); got < 1 {
+		t.Fatalf("the real hub repo did not receive the push (%d commits)", got)
 	}
 	if out, err := run("git", "--git-dir", decoy, "rev-parse", "-q", "--verify", "refs/heads/main"); err == nil {
 		t.Fatalf("the push was rerouted to the decoy by ~/.gitconfig: %s", out)

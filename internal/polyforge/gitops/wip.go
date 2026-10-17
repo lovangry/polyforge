@@ -16,9 +16,8 @@ package gitops
 // pf-carrier-* repo the carrier push uses) whose object store borrows the
 // task repo's through objects/info/alternates, pointed at the task repo
 // as --work-tree, with a temporary index file (GIT_INDEX_FILE inside the
-// temp repo): read-tree HEAD, pre-scan (prescanWIP), add -A
-// --ignore-errors, prune (pruneWIPIndex), write-tree, commit-tree -p
-// HEAD. Nothing of the agent's repo is written — not its HEAD, branch,
+// temp repo): read-tree HEAD, one pass deciding what is left out
+// (planWIP), add -A --ignore-errors, write-tree, commit-tree -p HEAD. Nothing of the agent's repo is written — not its HEAD, branch,
 // index, config or object store (the new blobs, trees and the commit land
 // in the temp repo) — and its config is never loaded as configuration:
 // git reads the temp repo's config, so no repo-defined clean filter,
@@ -38,10 +37,10 @@ package gitops
 // Left out and reported (commit message + task_wip_skipped), so one bad
 // path never loses the whole snapshot: embedded repositories, untracked
 // files over the blob limit or above the total cap (excluded BEFORE add —
-// never hashed), tracked files over the blob limit (kept at HEAD via
-// skip-worktree, never hashed), files git cannot read (add
-// --ignore-errors), lfs/git-crypt files. A left-out tracked path keeps
-// its HEAD entry, never becomes a deletion.
+// never hashed), tracked files over the blob limit and lfs/git-crypt
+// files (kept at HEAD via skip-worktree, never hashed), files git cannot
+// read (add --ignore-errors). A left-out tracked path keeps its HEAD
+// entry, never becomes a deletion.
 //
 // `git stash create` was rejected: it runs inside the agent repo (its
 // config, its object store) and never records untracked files.
@@ -208,10 +207,6 @@ func pushTaskWIP(o Opts, env []string, reposDir string, s carrierSrc, credAdditi
 	if out, err := gitw(carrierCheckTimeout, "read-tree", s.sha); err != nil {
 		return "", nil, out, err
 	}
-	head, out, err := wipIndex(gitw)
-	if err != nil {
-		return "", nil, out, err
-	}
 	// The ignore and attribute sources the carrier env drops, as data.
 	if err := writeWIPInfo(tmp, "attributes", wipAttributes(o, dir, tmp)); err != nil {
 		return "", nil, "", err
@@ -220,17 +215,22 @@ func pushTaskWIP(o Opts, env []string, reposDir string, s carrierSrc, credAdditi
 	if err := writeWIPInfo(tmp, "exclude", ignore); err != nil {
 		return "", nil, "", err
 	}
-	// Pre-scan (before anything is hashed): embedded repositories and
-	// over-limit untracked files go to the exclude, over-limit tracked
+	// The one pass that decides what is left out, before anything is
+	// hashed: excluded untracked paths join the exclude, left-out tracked
 	// files keep their HEAD entry (skip-worktree) — `add -A` never reads
-	// a multi-GB file.
-	extra, skipped, out, err := prescanWIP(gitw, dir, head)
+	// a multi-GB file nor a filtered one.
+	exclude, pin, skipped, out, err := planWIP(gitw, dir, s.sha)
 	if err != nil {
 		return "", skipped, out, err
 	}
-	if len(extra) > 0 {
-		if err := writeWIPInfo(tmp, "exclude", ignore+"\n"+strings.Join(extra, "\n")+"\n"); err != nil {
+	if len(exclude) > 0 {
+		if err := writeWIPInfo(tmp, "exclude", ignore+"\n"+strings.Join(exclude, "\n")+"\n"); err != nil {
 			return "", skipped, "", err
+		}
+	}
+	for i := 0; i < len(pin); i += 200 {
+		if out, err := gitw(carrierCheckTimeout, append([]string{"update-index", "--skip-worktree", "--"}, pin[i:min(i+200, len(pin))]...)...); err != nil {
+			return "", skipped, out, err
 		}
 	}
 	// add -A hashes every changed or untracked, not-ignored file: it may
@@ -242,11 +242,6 @@ func pushTaskWIP(o Opts, env []string, reposDir string, s carrierSrc, credAdditi
 			return "", skipped, out, err
 		}
 		skipped = append(skipped, unindexedPaths(err.Error())...)
-	}
-	more, out, err := pruneWIPIndex(gitw, dir, head)
-	skipped = append(skipped, more...)
-	if err != nil {
-		return "", skipped, out, err
 	}
 	tree, err := gitw(carrierCheckTimeout, "write-tree")
 	if err != nil {
@@ -279,109 +274,113 @@ func pushTaskWIP(o Opts, env []string, reposDir string, s carrierSrc, credAdditi
 	return wip, skipped, "", nil
 }
 
-// indexEntry is one stage-0 index entry.
-type indexEntry struct{ mode, sha string }
-
-// wipIndex reads the temporary index (ls-files -s -z): path → entry.
-func wipIndex(gitw func(time.Duration, ...string) (string, error)) (map[string]indexEntry, string, error) {
-	out, err := gitw(carrierCheckTimeout, "ls-files", "-s", "-z")
+// planWIP is the snapshot's one pass over the task repo before `add -A`:
+// HEAD's entries with their blob sizes (ls-tree), the untracked,
+// not-ignored paths (`ls-files -o --exclude-standard` with the temp
+// exclude in effect — an embedded repository shows as one "dir/" entry
+// and ignored directories are never descended), their sizes (lstat) and
+// their filter attributes (check-attr). It answers the extra exclude
+// lines (untracked paths left out), the tracked paths to keep at HEAD
+// (skip-worktree) and the left-out paths with their reasons. Left out:
+// embedded repositories; files whose attributes name a filter the
+// snapshot cannot apply (wipSkippedFilters — every such tracked file is
+// kept at HEAD, reported when it visibly changed); files over the blob
+// cap; above the total cap the largest changed files first. The total
+// counts the untracked files and the tracked files whose size differs
+// from HEAD's blob (a same-size edit is only seen when add hashes it).
+func planWIP(gitw func(time.Duration, ...string) (string, error), dir, sha string) (exclude, pin, skipped []string, out string, err error) {
+	tree, err := gitw(carrierPushTimeout, "ls-tree", "-r", "-l", "-z", sha)
 	if err != nil {
-		return nil, out, err
+		return nil, nil, nil, tree, err
 	}
-	m := map[string]indexEntry{}
-	for _, rec := range strings.Split(out, "\x00") {
-		meta, path, ok := strings.Cut(rec, "\t")
-		if !ok {
-			continue
-		}
-		f := strings.Fields(meta) // mode sha stage
-		if len(f) == 3 {
-			m[path] = indexEntry{f[0], f[1]}
-		}
-	}
-	return m, "", nil
-}
-
-// prescanWIP runs before `add -A` on the temporary index (HEAD's
-// entries): `ls-files -o --exclude-standard` (the temp exclude in effect)
-// lists the untracked, not-ignored paths — git shows an embedded
-// repository as one "dir/" entry and never descends into ignored
-// directories. It answers the extra exclude lines (embedded repositories;
-// untracked files over the blob cap; above the total cap the largest
-// untracked files first) and the left-out paths, and marks every tracked
-// regular file whose working copy is over the blob cap skip-worktree so
-// `add -A` keeps its HEAD entry without hashing it (recorded when its
-// size differs from HEAD's blob).
-func prescanWIP(gitw func(time.Duration, ...string) (string, error), dir string, head map[string]indexEntry) (extra, skipped []string, out string, err error) {
 	others, err := gitw(carrierPushTimeout, "ls-files", "-o", "--exclude-standard", "-z")
 	if err != nil {
-		return nil, nil, others, err
+		return nil, nil, nil, others, err
 	}
 	type file struct {
-		path string
-		size int64
+		path      string
+		size      int64 // working copy; -1 = absent or not a regular file
+		head      int64 // HEAD blob size; -1 = untracked
+		filter    string
+		untracked bool
 	}
-	var untracked []file
-	var total int64
+	lsize := func(p string) int64 {
+		if st, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(p))); err == nil && st.Mode().IsRegular() {
+			return st.Size()
+		}
+		return -1
+	}
+	var files []*file
+	for _, rec := range strings.Split(tree, "\x00") {
+		meta, p, ok := strings.Cut(rec, "\t")
+		f := strings.Fields(meta) // mode type sha size
+		if !ok || len(f) != 4 || (f[0] != "100644" && f[0] != "100755") {
+			continue
+		}
+		head, _ := strconv.ParseInt(f[3], 10, 64)
+		files = append(files, &file{path: p, size: lsize(p), head: head})
+	}
 	for _, p := range strings.Split(others, "\x00") {
-		if p == "" {
-			continue
-		}
-		if strings.HasSuffix(p, "/") {
-			rel := strings.TrimSuffix(p, "/")
-			extra = append(extra, "/"+escapeIgnore(rel)+"/")
+		if rel, ok := strings.CutSuffix(p, "/"); ok {
+			exclude = append(exclude, "/"+escapeIgnore(rel)+"/")
 			skipped = append(skipped, rel+" (embedded git repository)")
-			continue
+		} else if size := lsize(p); size >= 0 {
+			files = append(files, &file{path: p, size: size, head: -1, untracked: true})
 		}
-		st, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(p)))
-		if err != nil || !st.Mode().IsRegular() {
-			continue
+	}
+	byPath := make(map[string]*file, len(files))
+	paths := make([]string, 0, len(files))
+	for _, f := range files {
+		byPath[f.path] = f
+		paths = append(paths, f.path)
+	}
+	for i := 0; i < len(paths); i += 500 {
+		out, err := gitw(carrierCheckTimeout, append([]string{"check-attr", "-z", "filter", "--"}, paths[i:min(i+500, len(paths))]...)...)
+		if err != nil {
+			return nil, nil, skipped, out, err
 		}
-		if st.Size() > wipBlobCap {
-			extra = append(extra, "/"+escapeIgnore(p))
-			skipped = append(skipped, fmt.Sprintf("%s (%d bytes, over the %d-byte blob limit; not read)", p, st.Size(), wipBlobCap))
-			continue
+		a := strings.Split(out, "\x00")
+		for j := 0; j+2 < len(a); j += 3 {
+			if f := byPath[a[j]]; f != nil {
+				f.filter = a[j+2]
+			}
 		}
-		untracked = append(untracked, file{p, st.Size()})
-		total += st.Size()
+	}
+	leave := func(f *file, report bool, reason string) {
+		if f.untracked {
+			exclude = append(exclude, "/"+escapeIgnore(f.path))
+		} else {
+			pin = append(pin, f.path)
+		}
+		if report {
+			skipped = append(skipped, f.path+" ("+reason+")")
+		}
+	}
+	var changed []*file
+	var total int64
+	for _, f := range files {
+		visible := f.size != f.head
+		switch {
+		case wipSkippedFilters[f.filter]:
+			leave(f, visible, "filter="+f.filter+" not applied by the snapshot")
+		case f.size > wipBlobCap:
+			leave(f, visible, fmt.Sprintf("%d bytes, over the %d-byte blob limit; not read", f.size, wipBlobCap))
+		case visible && f.size > 0:
+			changed = append(changed, f)
+			total += f.size
+		}
 	}
 	if total > wipTotalCap {
-		sort.SliceStable(untracked, func(a, b int) bool { return untracked[a].size > untracked[b].size })
-		for _, f := range untracked {
+		sort.SliceStable(changed, func(a, b int) bool { return changed[a].size > changed[b].size })
+		for _, f := range changed {
 			if total <= wipTotalCap {
 				break
 			}
-			extra = append(extra, "/"+escapeIgnore(f.path))
-			skipped = append(skipped, fmt.Sprintf("%s (%d bytes, left out to keep the snapshot under %d bytes; not read)", f.path, f.size, wipTotalCap))
+			leave(f, true, fmt.Sprintf("%d bytes, left out to keep the snapshot under %d bytes; not read", f.size, wipTotalCap))
 			total -= f.size
 		}
 	}
-	var pin []string
-	paths := make([]string, 0, len(head))
-	for p := range head {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
-	for _, p := range paths {
-		e := head[p]
-		if e.mode != "100644" && e.mode != "100755" {
-			continue
-		}
-		st, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(p)))
-		if err != nil || !st.Mode().IsRegular() || st.Size() <= wipBlobCap {
-			continue
-		}
-		pin = append(pin, p)
-		if hs, err := gitw(carrierCheckTimeout, "cat-file", "-s", e.sha); err != nil || strings.TrimSpace(hs) != strconv.FormatInt(st.Size(), 10) {
-			skipped = append(skipped, fmt.Sprintf("%s (%d bytes, over the %d-byte blob limit; kept at HEAD, not read)", p, st.Size(), wipBlobCap))
-		}
-	}
-	for i := 0; i < len(pin); i += 200 {
-		if out, err := gitw(carrierCheckTimeout, append([]string{"update-index", "--skip-worktree", "--"}, pin[i:min(i+200, len(pin))]...)...); err != nil {
-			return extra, skipped, out, err
-		}
-	}
-	return extra, skipped, "", nil
+	return exclude, pin, skipped, "", nil
 }
 
 // unindexedPaths answers the paths a `git add --ignore-errors` reported
@@ -402,102 +401,6 @@ func unindexedPaths(msg string) []string {
 		out = append(out, "(some paths: git add reported errors: "+first+")")
 	}
 	return out
-}
-
-// pruneWIPIndex leaves out of the staged snapshot the changed entries
-// that must not ride it: files whose attributes name a clean/smudge
-// filter the snapshot cannot apply (wipSkippedFilters), blobs over the
-// carrier blob limit, and — above the total cap — the largest remaining
-// changed files first. A left-out path is reset to its HEAD entry (or
-// dropped when HEAD has none), so the restore brings it back at HEAD's
-// state and never deletes it. Answers the left-out paths.
-func pruneWIPIndex(gitw func(time.Duration, ...string) (string, error), dir string, head map[string]indexEntry) ([]string, string, error) {
-	idx, out, err := wipIndex(gitw)
-	if err != nil {
-		return nil, out, err
-	}
-	type changed struct {
-		path string
-		size int64
-	}
-	var paths []string
-	for p, e := range idx {
-		if h, ok := head[p]; !ok || h != e {
-			paths = append(paths, p)
-		}
-	}
-	sort.Strings(paths)
-	if len(paths) == 0 {
-		return nil, "", nil
-	}
-	filters := map[string]string{}
-	for i := 0; i < len(paths); i += 200 {
-		chunk := paths[i:min(i+200, len(paths))]
-		out, err := gitw(carrierCheckTimeout, append([]string{"check-attr", "-z", "filter", "--"}, chunk...)...)
-		if err != nil {
-			return nil, out, err
-		}
-		f := strings.Split(out, "\x00")
-		for j := 0; j+2 < len(f); j += 3 {
-			filters[f[j]] = f[j+2]
-		}
-	}
-	reasons := map[string]string{}
-	var kept []changed
-	var total int64
-	for _, p := range paths {
-		if v := filters[p]; wipSkippedFilters[v] {
-			reasons[p] = "filter=" + v + " not applied by the snapshot"
-			continue
-		}
-		var size int64
-		if st, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(p))); err == nil && st.Mode().IsRegular() {
-			size = st.Size()
-		}
-		if size > wipBlobCap {
-			reasons[p] = fmt.Sprintf("%d bytes, over the %d-byte blob limit", size, wipBlobCap)
-			continue
-		}
-		kept = append(kept, changed{p, size})
-		total += size
-	}
-	if total > wipTotalCap {
-		sort.SliceStable(kept, func(a, b int) bool { return kept[a].size > kept[b].size })
-		for _, c := range kept {
-			if total <= wipTotalCap {
-				break
-			}
-			reasons[c.path] = fmt.Sprintf("%d bytes, left out to keep the snapshot under %d bytes", c.size, wipTotalCap)
-			total -= c.size
-		}
-	}
-	if len(reasons) == 0 {
-		return nil, "", nil
-	}
-	var skipped, revert, remove []string
-	for _, p := range paths {
-		r, ok := reasons[p]
-		if !ok {
-			continue
-		}
-		skipped = append(skipped, p+" ("+r+")")
-		if h, ok := head[p]; ok {
-			revert = append(revert, "--cacheinfo", h.mode+","+h.sha+","+p)
-		} else {
-			remove = append(remove, p)
-		}
-	}
-	for i := 0; i < len(revert); i += 400 {
-		if out, err := gitw(carrierCheckTimeout, append([]string{"update-index"}, revert[i:min(i+400, len(revert))]...)...); err != nil {
-			return skipped, out, err
-		}
-	}
-	for i := 0; i < len(remove); i += 200 {
-		if out, err := gitw(carrierCheckTimeout, append([]string{"update-index", "--force-remove", "--"}, remove[i:min(i+200, len(remove))]...)...); err != nil {
-			return skipped, out, err
-		}
-	}
-	return skipped, "", nil
 }
 
 // wipExcludeMax bounds each ignore/attribute source the snapshot copies.

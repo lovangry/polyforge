@@ -1211,29 +1211,6 @@ func capsuleCommitCount(t *testing.T, dataDir, wi string) int {
 	return n
 }
 
-// bareSeqTrailers returns the Polyforge-Seq trailer values of main, in
-// commit order (oldest first).
-func (u *v1Install) bareSeqTrailers(t *testing.T, wi string) []int64 {
-	t.Helper()
-	if u.bareCommitCount(t, wi) == 0 {
-		return nil
-	}
-	out := gitRun(t, u.bareRepo(wi), "log", "--reverse", "--format=%(trailers:key=Polyforge-Seq,valueonly)", "main")
-	var seqs []int64
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		n, err := strconv.ParseInt(line, 10, 64)
-		if err != nil {
-			t.Fatalf("seq trailer %q: %v", line, err)
-		}
-		seqs = append(seqs, n)
-	}
-	return seqs
-}
-
 // bareHasPath reports whether the server-side chain's main tip carries
 // the given path (the capsule revision chain content check).
 func (u *v1Install) bareHasPath(t *testing.T, wi, path string) bool {
