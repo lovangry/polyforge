@@ -4,7 +4,7 @@
 
 | 权威项 | 值 |
 |---|---|
-| 文档定位 | Capsule 基底（workspace）的人工迁移流程：换机/换盘/迁移到新基底时的映射改写 → shutdown → `mv`（如需）→ 重启序列、`capsules/` 的 `.gitignore` 指引 |
+| 文档定位 | Capsule 基底（workspace）的人工迁移流程：换机/换盘/迁移到新基底时的shutdown → 映射改写 → 重启序列（进行中的 capsule 不搬）、`capsules/` 的 `.gitignore` 指引 |
 | 本文是唯一权威 | Daemon **没有**、也永远不会有自动迁移：没有迁移子命令、没有迁移旗标、启动时不搬任何 capsule。本文是唯一一个命名旧基底默认路径的地方 |
 
 ## 1. 背景 <!-- §1 -->
@@ -35,33 +35,38 @@ CLI 与 Daemon 读同一份配置；**不存在任何启动期 workspace 旗标�
 
 ## 2. 迁移序列（人工，按序执行）<!-- §2 -->
 
-### 2a. 换机/换盘：进行中的 capsule 要搬家 <!-- §2a -->
+### 2a. 换机/换盘：进行中的 capsule 不搬 <!-- §2a -->
+
+重启对账只认 job 记录里的 capsule 路径（`runtime/restart.go` `requireMidflightCapsule`）：该 WI 的 project
+仍在映射里（任一 workspace）且记录的目录存在，就原地续跑。所以**不要 `mv` 进行中的 capsule**——搬走后记录的
+路径不存在，WI 按 `capsule_missing` 置 blocked，搬过去的目录不会被使用。旧目录无法保留（换机、拆盘）时：
 
 ```
 # 0. 目标 workspace 先建好（Daemon 不代建它）
 mkdir -p /srv/polyforge/workspace
 
-# 1. 优雅停掉本机 daemon（干净退出同时结束 `pf daemon ensure` 的 tmux 监督环，不会被重新拉起）
+# 1. 停掉本机 daemon（干净退出同时结束 `pf daemon ensure` 的 tmux 监督环，不会被重新拉起）
 pf ops shutdown
 # （自管 systemd 单元的机器：systemctl stop polyforge-daemon）
 
-# 2. 把「进行中」的 capsule 目录整体移动到新基底的 capsules/ 下（目录名原样搬：<project>-<seq>，#144 前认领的为 wi_id）
-mv ~/.local/share/polyforge/workspace/capsules/polyforge-140  /srv/polyforge/workspace/capsules/
-#    只搬还在进行中的 WI；终态 capsule 不搬（留在旧基底，需要时人工取用）
-
-# 3. 改写共享配置的 [workspace] 映射：新基底一节，列出这些 WI 的 projects
+# 2. 改写共享配置的 [workspace] 映射：新基底一节，列出 projects
 #    （编辑 ~/.config/polyforge/cli.toml）
 #      [workspace."/srv/polyforge/workspace"]
 #      projects = ["p1", "p2"]
 
-# 4. 用同一份配置重新拉起 daemon（映射就是唯一的 workspace 来源，无旗标可传；polyforge#174）
+# 3. 用同一份配置重新拉起 daemon（映射就是唯一的 workspace 来源，无旗标可传；polyforge#174）
 pf daemon ensure
+
+# 4. 旧目录已不在的进行中 WI 此时是 blocked（capsule_missing）：从 aihub 重新领取到新基底
+pf resume <id>
+#    capsule 链 + carrier ref（refs/pf-task/<name>）+ WIP ref（refs/pf-wip/<name>）恢复；
+#    已完成的步骤不重跑，最后一次推送之后的本地改动丢失
 ```
 
 ### 2b. 换基但不搬家：旧基底保留为映射节 <!-- §2b -->
 
-把旧基底的旧路径直接写成映射里的一节（连同它的 projects），进行中的 capsule 原地续跑，
-什么都不用搬：
+旧目录留在原处即可：进行中的 capsule 按记录路径原地续跑（只要求其 project 仍在映射里，落在哪一节都行）。
+若旧基底的 projects 还要继续在那里落新 capsule，就把它保留为映射里的一节：
 
 ```
 #  [workspace."/old/ws"]
@@ -74,7 +79,7 @@ pf daemon ensure
 ### 2c. 核对 <!-- §2c -->
 
 重启后用 `pf ops status` 核对 `workspaces:` 一行列出映射里的**全部** workspace（不再只报一个）；
-被搬迁/保留的进行中 WI 会在 Daemon 重启对账时按既有恢复语义续跑；`pf doctor` 逐项校验映射
+保留在原处的进行中 WI 在重启对账时原地续跑，旧目录已不在的 WI 是 blocked、等 `pf resume`；`pf doctor` 逐项校验映射
 （缺目录、project 未知、逆映射歧义都会被点名）。
 
 ## 3. `capsules/` 的 `.gitignore` 指引 <!-- §3 -->

@@ -35,12 +35,12 @@ disk as the read-only scene a later resume continues from.
 | Code | When | What to tell the user |
 |---|---|---|
 | `DAEMON-404` | No local job for this work item on this machine | It is not running here — pause it on the machine that runs it. |
-| `DAEMON-409` | A close is already in progress for this job (a wrap or another pause), or the job is mid-recovery | Wait for the in-flight close to settle, then re-check with `pf watch <id> --once`. |
+| `DAEMON-409` | The job's close is already in progress (sealing, or retrying the session end until aihub takes it) | Wait for the in-flight close to settle, then re-check with `pf watch <id> --once`. |
 | `CORE-*` passthrough | The server-side pause was refused | Read the typed Core verdict — typically the session is no longer this daemon's; act per its detail. |
 | `DAEMON-500` | The close failed on the daemon side | The job is left mid-seal, recorded as such; the next daemon start finishes the close. Check the daemon log before retrying. |
 | `dial unix …` | Daemon not running | Nothing is executing here — run `pf daemon ensure`, then retry once (or check `--socket`). |
 
-**Pause while the work item is still being claimed** (`pf status` shows
+**Pause while the work item is still being claimed** (`pf ops status` shows
 `claiming`: the capsule and task repos are still cloning, no agent ran
 yet): there is no scene to keep a paused record for, so the daemon
 cancels the clone, quarantines the partial capsule and ends the session

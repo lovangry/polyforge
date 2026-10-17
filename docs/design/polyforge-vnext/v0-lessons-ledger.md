@@ -63,7 +63,7 @@ D1  Dead agent + detached bash descendants escape the process group —
 D2  Agent death mid-answer-relay: answers must not be lost — idempotent
     3-state ledger, failure never consumes the answer id; new attempt
     must see the pending question (re-injection).
-    〔SUPERSEDED (2026-10-16): the answer ledger is deleted; answers are archived in execution.json by the driver bridge and a re-dispatch re-asks the pending question — reference.md §7.3. The lesson stands.〕
+    〔SUPERSEDED (2026-10-16): the answer ledger is deleted; answers are archived in execution.json by the driver and a re-dispatch re-asks the pending question — reference.md §7.3. The lesson stands.〕
 D3  Restart must reconcile with aihub before reviving (wrapped -> don't
     revive; running -> kill+recover; blocked -> leave).
 D4  Claim idempotency: re-sending the same key returns the same attempt
@@ -359,9 +359,9 @@ v1.5 session-model 实施期间的设计裁定、评审轨迹与残余未修项�
      StatePaused 加入 runtime 状态机、clean_pause 标记、operator
      pause 保留 job record（secret 本地存活，pf resume 兑现续跑
      承诺）。状态注记：已落地。
-   - M4 周期性会话重验：monitor tick 上重验（~5 分钟；常量见
+   - M4 周期性会话重验：monitor tick 上重验（~30 秒；常量见
      `internal/polyforge/observe/session.go`：defaultRevalidateEvery
-     5m / verifyErrorBackoff 30s / verifyCallBound 70s），由
+     30s / verifyErrorBackoff 30s / verifyCallBound 70s），由
      3158d25 补上 Lane D 缺口接线；`--revalidate-every` 旗标由姊妹
      胶囊 wi_brFjFISWrAFC 落地（fa2e091、4045576、0b6ac8a）。
      状态注记：已落地。
