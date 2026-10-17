@@ -233,7 +233,7 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 ### 6.1 UDS routes <!-- §6.1 -->
 
 `internal/polyforge/daemon/routes.go` `routes()` — 18 routes, all wrapped by `refuseStepOrigin`: every
-non-read request (including a `GET /chats/{id}/attention` with `mark=1` or `ack=1`) whose peer (or its ancestors / process-group leader) carries this daemon's
+non-read request whose peer (or its ancestors / process-group leader) carries this daemon's
 `PF_WI_ID`+`PF_DAEMON_ID` markers — or whose peer credential cannot be read — is refused `DAEMON-403`
 (SO_PEERCRED capture `daemon/peercred.go`, check `runtime/stepproc.go` `StepProcessOrigin`).
 
@@ -251,9 +251,8 @@ non-read request (including a `GET /chats/{id}/attention` with `mark=1` or `ack=
 | GET | `/jobs/{wi}/watch?after=N` | per-WI snapshot + events | `pf watch <wi> --once` |
 | GET | `/chats/{id}/subscriptions` | list | `pf watch` |
 | POST | `/chats/{id}/subscribe`, `/unsubscribe` | manage subscriptions | `pf watch subscribe|unsubscribe` |
-| POST | `/chats/{id}/ack`, `/heartbeat` | cursor advance; watcher liveness (TTL 20s) | resident `pf watch --chat` |
-| GET | `/chats/{id}/attention?ack=1` | pending human decisions, each with a key; listed until acked (no `ack=1`: `mark=1` marks shown at fetch, legacy). With `mark=1`/`ack=1` it records state and is step-origin guarded (DAEMON-403); a plain list stays an open read | resident `pf watch --chat` |
-| POST | `/chats/{id}/attention/ack` | `{"keys"}` the watcher printed; idempotent, unknown keys ignored | resident `pf watch --chat` |
+| POST | `/chats/{id}/ack` | cursor advance | resident `pf watch --chat` |
+| POST | `/chats/{id}/subscribe-owned` | `{"owner"}`: subscribe the chat to every held WI it submitted or `owner` owns (origin owner, else reporter) that it has no subscription for; answers the added ones (cursor just before the WI's newest decision event) | resident `pf watch --chat` start |
 
 Socket: `--socket` > `PF_DAEMON_SOCKET` > cli.toml `daemon_socket` > `daemon.sock` in `$POLYFORGE_DATA_DIR`, else `~/.local/share/polyforge` (`cli.DataDir`; the same default for `pf` and the daemon, so `-data-dir` does not move it)
 (`cli/config.go`, `daemon/main.go`).
@@ -283,8 +282,8 @@ Socket: `--socket` > `PF_DAEMON_SOCKET` > cli.toml `daemon_socket` > `daemon.soc
 
 Default `~/.local/share/polyforge`. File inventory: `v2-converge.md#§E` (E.4), plus `git/askpass/`
 (one-shot credential helpers, swept at start; `gitops/gitops.go`). Events: one JSONL line per event in
-`events.log` (16 MiB rotation, 3 generations; per-WI seq monotonic across restarts via `events.seq`;
-`observe/events.go`); kinds and emitters in E.1. Execution state authority is always the capsule's
+`events/wi-<id>.jsonl` (one file per work item, `events/daemon.jsonl` for daemon scope; per-WI seq
+monotonic across restarts; a file silent for 30 days is removed at start; `observe/events.go`); kinds and emitters in E.1. Execution state authority is always the capsule's
 `runtime-state/execution.json`; events are news.
 
 ## 7. Execution <!-- §7 -->
@@ -391,7 +390,7 @@ grace 1m; per-step failure bound 3 (`DefaultMaxStepFailures`). Timeouts relax (d
 - Layout: `v2-converge.md#§E` (E.5), constants `internal/common/capsule/capsule.go`; `pending-results/` and `sync/` are defined in `driver/spawn.go` and `runtime/materialize.go`. `.gitignore`: `/repos/`, `/artifacts/release-*/`, `/sync/`. The capsule's git-dir is external (`<data-dir>/git/<wi>.git`, a `gitdir:` pointer file in the capsule): it is outside the capsule tree, but a step's own `git commit` in the capsule root still reaches it — hence the trailer fold below.
 - Chain rules (FF-only, no ref deletion, blob ≤16 MiB, no gitlinks), push fencing, push retry schedule, re-claim = clone + task-repo restore, `DAEMON-516/518`: `v2-converge.md#§14.1`. Carrier refs `refs/pf-task/<name>`: `v2-converge.md#§14.2`. Uncommitted-work snapshots `refs/pf-wip/<name>`: `v2-converge.md#§14.3`.
 - Local invariants (`internal/polyforge/gitops/gitops.go`): one per-WI git mutex shared by runtime and observe; the chain push is bounded by its caller's context (on its end the push's git process group is killed and the lock released); `index.lock` older than 10m removed at acquisition; local gitlink precheck (`GIT-412`); a commit a step made on the chain branch is pushed as an ordinary fast-forward commit; an amended already-pushed commit is non-fast-forward and needs a human.
-- Push loop (`observe/observe.go`, `observe/monitor.go`): event-triggered on each `execution.json` commit; retry every 10s; `push_backpressure` after 5 consecutive failed pushes or 30 min without success; 5 identical errors stop the round until the next boundary; 60s per push.
+- Push loop (`observe/observe.go`, `observe/monitor.go`): event-triggered on each `execution.json` commit; a failed Version is retried with exponential backoff (10s doubling to 5 min; one `push_failed` per attempt, one `push_backpressure` when the delay reaches its cap); a new Version is pushed at once (only a success resets the delay); 60s per push.
 
 ## 9. Memory and recall <!-- §9 -->
 

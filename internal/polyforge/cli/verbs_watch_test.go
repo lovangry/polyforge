@@ -29,12 +29,9 @@ type watchDaemon struct {
 	acks []protocol.ChatAck
 	sock string
 	init int
-	// attention: attn is answered on every fetch (the query recorded);
-	// attnAckRoute false plays an older daemon without POST attention/ack.
-	attn         []protocol.ChatAttentionItem
-	attnQuery    string
-	attnAckRoute bool
-	attnAcks     []protocol.ChatAttentionAck
+	// owned: the WIs subscribe-owned adds (each owner body recorded)
+	owned  []string
+	owners []string
 }
 
 func newWatchDaemon(t *testing.T, snap protocol.WatchSnapshot, subs ...protocol.ChatSub) *watchDaemon {
@@ -50,7 +47,7 @@ func newWatchDaemon(t *testing.T, snap protocol.WatchSnapshot, subs ...protocol.
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		_ = json.NewEncoder(rw).Encode(protocol.ChatSubscriptions{ChatID: r.PathValue("id"),
-			StatusPath: filepath.Join(t.TempDir(), "daemon-data", "chat.status"), Subscriptions: w.subs})
+			Subscriptions: w.subs})
 	})
 	mux.HandleFunc("POST /chats/{id}/ack", func(rw http.ResponseWriter, r *http.Request) {
 		var a protocol.ChatAck
@@ -60,24 +57,19 @@ func newWatchDaemon(t *testing.T, snap protocol.WatchSnapshot, subs ...protocol.
 		w.mu.Unlock()
 		io.WriteString(rw, `{"ok":true}`)
 	})
-	mux.HandleFunc("POST /chats/{id}/heartbeat", func(rw http.ResponseWriter, r *http.Request) { io.WriteString(rw, `{"ok":true}`) })
-	mux.HandleFunc("GET /chats/{id}/attention", func(rw http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /chats/{id}/subscribe-owned", func(rw http.ResponseWriter, r *http.Request) {
+		var b struct{ Owner string }
+		_ = json.NewDecoder(r.Body).Decode(&b)
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		w.attnQuery = r.URL.RawQuery
-		_ = json.NewEncoder(rw).Encode(protocol.ChatAttention{ChatID: "c", Items: append([]protocol.ChatAttentionItem{}, w.attn...)})
-	})
-	mux.HandleFunc("POST /chats/{id}/attention/ack", func(rw http.ResponseWriter, r *http.Request) {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		if !w.attnAckRoute {
-			http.NotFound(rw, r)
-			return
+		w.owners = append(w.owners, b.Owner)
+		added := []protocol.ChatSub{}
+		for _, wi := range w.owned {
+			added = append(added, protocol.ChatSub{WI: wi})
+			w.subs = append(w.subs, protocol.ChatSub{WI: wi})
 		}
-		var a protocol.ChatAttentionAck
-		_ = json.NewDecoder(r.Body).Decode(&a)
-		w.attnAcks = append(w.attnAcks, a)
-		io.WriteString(rw, `{"ok":true}`)
+		w.owned = nil
+		_ = json.NewEncoder(rw).Encode(protocol.ChatSubscriptions{ChatID: r.PathValue("id"), Subscriptions: added})
 	})
 	mux.HandleFunc("POST /chats/{id}/subscribe", func(rw http.ResponseWriter, r *http.Request) {
 		var b struct{ WI string }
@@ -199,7 +191,7 @@ func TestWatchStatuslineReadsTheFileWithoutTheDaemon(t *testing.T) {
 	if err := os.MkdirAll(files.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(files.FallbackStatusPath(), []byte("wi_1 running step=plan 2m00s\n"), 0o600); err != nil {
+	if err := os.WriteFile(files.StatusPath(), []byte("wi_1 running step=plan 2m00s\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// no daemon socket at all: the statusline must still answer
@@ -220,7 +212,7 @@ func TestWatchStatuslineHarnessSessionFromStdinIsCached(t *testing.T) {
 	w := newWatchDaemon(t, protocol.WatchSnapshot{})
 	files := watcher.NewFiles(filepath.Join(rt, "polyforge"), "chat_from_session")
 	_ = os.MkdirAll(files.Dir, 0o700)
-	_ = os.WriteFile(files.FallbackStatusPath(), []byte("wi_7 running\n"), 0o600)
+	_ = os.WriteFile(files.StatusPath(), []byte("wi_7 running\n"), 0o600)
 	env := map[string]string{"XDG_RUNTIME_DIR": rt, "PF_DAEMON_SOCKET": w.sock}
 	for i := 0; i < 2; i++ {
 		clearEnv(t)
@@ -432,38 +424,19 @@ func TestWatchHarnessSessionNotFoundBeatsEnv(t *testing.T) {
 	}
 }
 
-// repo review 2026-10-16 B-25 (WA-4): the watcher asks for fetch-then-ack
-// (ack=1, plus mark=1 for an older daemon) and acks the printed notice by
-// key; against an older daemon (no keys, no ack route) it prints the same
-// line and sends no attention ack.
-func TestWatchAttentionFetchThenAckAndOlderDaemon(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		key  string
-		ack  bool
-	}{{"new daemon", "wi_9|blocked|", true}, {"older daemon", "", false},
-		// keys but no ack route (404): dropped quietly, not retried loudly
-		{"no ack route", "wi_9|blocked|", false}} {
-		t.Run(tc.name, func(t *testing.T) {
-			w := newWatchDaemon(t, completedSnap())
-			w.attn = []protocol.ChatAttentionItem{{WI: "wi_9", Reason: "blocked", Key: tc.key}}
-			w.attnAckRoute = tc.ack
-			code, out, stderr := runPf(t, watchEnv(w, t, map[string]string{"PF_CHAT_ID": "chat_a"}),
-				"watch", "--wait-decision", "--no-parent-check", "--poll", "10ms")
-			if code != 0 || !strings.Contains(out, "needs you: wi_9") {
-				t.Fatalf("code=%d out=%q stderr=%q", code, out, stderr)
-			}
-			w.mu.Lock()
-			defer w.mu.Unlock()
-			if !strings.Contains(w.attnQuery, "ack=1") || !strings.Contains(w.attnQuery, "mark=1") {
-				t.Fatalf("query = %q", w.attnQuery)
-			}
-			if tc.ack && (len(w.attnAcks) != 1 || len(w.attnAcks[0].Keys) != 1 || w.attnAcks[0].Keys[0] != tc.key) {
-				t.Fatalf("attention acks = %+v", w.attnAcks)
-			}
-			if !tc.ack && (len(w.attnAcks) != 0 || strings.Contains(stderr, "attention ack failed")) {
-				t.Fatalf("older daemon: no attention ack expected: %+v %q", w.attnAcks, stderr)
-			}
-		})
+// The resident watcher's start subscribes the chat to the WIs its owner
+// holds (once) and folds their decisions into the fixed reminder line.
+func TestWatchStartSubscribesOwnedWIs(t *testing.T) {
+	w := newWatchDaemon(t, completedSnap())
+	w.owned = []string{"wi_9"}
+	code, out, stderr := runPf(t, watchEnv(w, t, map[string]string{"PF_CHAT_ID": "chat_a"}),
+		"watch", "--wait-decision", "--no-parent-check", "--poll", "10ms")
+	if code != 0 || !strings.Contains(out, "[polyforge] 1 WI needs you:") || strings.Count(out, "\n") != 1 {
+		t.Fatalf("code=%d out=%q stderr=%q", code, out, stderr)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.owners) != 1 || len(w.acks) != 1 || w.acks[0].WI != "wi_9" {
+		t.Fatalf("subscribe-owned calls %v, acks %+v: want one call and the reminded decision acked", w.owners, w.acks)
 	}
 }

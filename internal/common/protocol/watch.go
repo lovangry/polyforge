@@ -123,16 +123,13 @@ type ChatSub struct {
 	Notified []string `json:"notified,omitempty"`
 	// Done is set once the WI's terminal decision was delivered: the
 	// watcher stops polling it.
-	Done         bool   `json:"done,omitempty"`
-	SubscribedAt string `json:"subscribed_at,omitempty"`
+	Done bool `json:"done,omitempty"`
 }
 
-// ChatSubscriptions is the GET /chats/{id}/subscriptions answer.
+// ChatSubscriptions is the GET /chats/{id}/subscriptions answer, and the
+// POST /chats/{id}/subscribe-owned answer (the subscriptions it added).
 type ChatSubscriptions struct {
-	ChatID string `json:"chat_id"`
-	// StatusPath is where the resident watcher writes the progress file
-	// (under the daemon data dir).
-	StatusPath    string    `json:"status_path"`
+	ChatID        string    `json:"chat_id"`
 	Subscriptions []ChatSub `json:"subscriptions"`
 }
 
@@ -152,26 +149,4 @@ type ChatAck struct {
 	Cursor   int64    `json:"cursor"`
 	Notified []string `json:"notified,omitempty"`
 	Done     bool     `json:"done,omitempty"`
-}
-
-// ChatAttentionItem is one WI that needs a human and has no live watcher.
-type ChatAttentionItem struct {
-	WI     string `json:"wi"`
-	Slug   string `json:"slug,omitempty"` // display name; empty = show WI
-	Reason string `json:"reason"`         // needs_input
-	// Key names the notice for POST attention/ack; set only when the
-	// fetch asked for fetch-then-ack (ack=1) and the daemon supports it.
-	Key string `json:"key,omitempty"`
-}
-
-// ChatAttentionAck is the POST /chats/{id}/attention/ack body: the Keys of
-// the attention notices the watcher printed.
-type ChatAttentionAck struct {
-	Keys []string `json:"keys"`
-}
-
-// ChatAttention is the GET /chats/{id}/attention answer.
-type ChatAttention struct {
-	ChatID string              `json:"chat_id"`
-	Items  []ChatAttentionItem `json:"items"`
 }

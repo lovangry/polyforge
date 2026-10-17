@@ -58,7 +58,6 @@ func newSessionTestMonitor(t *testing.T, sid string, verifier SessionVerifier, c
 	m.rtQ.Push(Attach{
 		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", SpawnN: 1, SessionID: sid},
 		Handle: h,
-		WI:     m.wi,
 	})
 	soon(t, 2*time.Second, "session attach never adopted", func() bool {
 		m.stateMu.Lock()
@@ -91,27 +90,13 @@ func TestRevalidateMismatchSupersedes(t *testing.T) {
 		t.Fatalf("OBSuperseded detail must carry the current holder fingerprint: %+v", msg)
 	}
 
-	// Finding 1(b) (v1.5 review): the emission is RETRYABLE. While the
-	// latch is set the revalidation KEEPS RUNNING and every unmatched
-	// verdict re-emits OBSuperseded — the old contract fired exactly
-	// once, so a delivery fenced out
-	// at the runtime's spawn counter was lost forever and the agent of
-	// a WI held elsewhere ran unsupervised. The re-emissions keep
-	// arriving until the runtime's release (RTFinished, Finding 4)
-	// stops this loop — nothing releases this monitor, so they must
-	// keep coming.
-	for range 3 {
-		remsg := waitOB(t, ob, "a re-emitted OBSuperseded")
-		if remsg.Kind != protocol.OBSuperseded {
-			t.Fatalf("only OBSuperseded re-emissions may arrive, got %+v", remsg)
-		}
-	}
-
-	// The event face stays ONCE: the supersession VERDICT is latched
-	// (the PUBLIC fingerprint — never the secret); only the OB emission
-	// repeats.
+	// One emission and one verdict event (the PUBLIC fingerprint —
+	// never the secret): the OB queue never drops and the runtime fences
+	// OBSuperseded on the session fingerprint, so nothing re-emits. The
+	// monitor stops: no further verify, no verdict, no push.
+	expectNoOB(t, ob, 150*time.Millisecond, "a re-emitted OBSuperseded")
 	if evs := eventsOf(m, EvSessionSuperseded); len(evs) != 1 {
-		t.Fatalf("session_superseded events: %d, want exactly 1 (the verdict latches once)", len(evs))
+		t.Fatalf("session_superseded events: %d, want exactly 1", len(evs))
 	} else {
 		if !contains(string(evs[0].Body), "ab12cd34ef56aa00") {
 			t.Fatalf("event must carry the current fingerprint: %s", evs[0].Body)
@@ -120,16 +105,18 @@ func TestRevalidateMismatchSupersedes(t *testing.T) {
 			t.Fatalf("event must NEVER carry the session secret: %s", evs[0].Body)
 		}
 	}
-
-	// The revalidation really is still running: the verify calls grew
-	// past one (the old contract asserted exactly 1 here — the fire-once
-	// shape the review's Finding 1 deleted).
-	if verifier.calls.Load() < 2 {
-		t.Fatalf("verify calls after supersession: %d, want >= 2 (the re-emission engine)", verifier.calls.Load())
+	if n := verifier.calls.Load(); n != 1 {
+		t.Fatalf("verify calls after supersession: %d, want 1 (a superseded monitor stops)", n)
 	}
-
-	// The superseded monitor's protective surface is the server-side
-	// push fencing, not a local refusal.
+	soon(t, time.Second, "the monitor stopped", func() bool { return len(eventsOf(m, EvJobStopped)) == 1 })
+	m.link.Fact(supervise.StepStarted{Step: "s", SpawnN: 1, StartedAt: time.Now(), Thresholds: supervise.Thresholds{Silence: 10 * time.Millisecond}})
+	expectNoVerdict(t, m, 100*time.Millisecond, "a superseded monitor judges nothing")
+	rawWrite(t, m, 9, "s")
+	m.link.Fact(supervise.ExecCommitted{Version: 9, Step: "s"})
+	time.Sleep(100 * time.Millisecond)
+	if n := len(eventsOf(m, EvPublished)); n != 0 {
+		t.Fatalf("a superseded monitor pushed %d times into the capsule the runtime quarantines", n)
+	}
 }
 
 // TestRevalidateMatchIsQuiet: matches=true → no OB message, no event,
@@ -147,8 +134,8 @@ func TestRevalidateMatchIsQuiet(t *testing.T) {
 	if verifier.calls.Load() == 0 {
 		t.Fatal("the revalidation never ran")
 	}
-	// The live derivation keeps being observed: a pending question
-	// persisted in execution.json is still projected.
+	// The live derivation keeps being observed: its commit boundaries
+	// are still published.
 	writePendingQuestion(t, m, "q_m", "ok?", "code")
 }
 
@@ -175,8 +162,8 @@ func TestRevalidateTransportErrorNeverActs(t *testing.T) {
 	soon(t, 2*time.Second, "the verify was never retried", func() bool {
 		return verifier.calls.Load() >= 2
 	})
-	// The monitor still behaves normally: the exec_committed-triggered read keeps
-	// projecting a pending question.
+	// The monitor still behaves normally: its commit boundaries are
+	// still published.
 	writePendingQuestion(t, m, "q_t", "ok?", "code")
 }
 
@@ -231,7 +218,6 @@ func TestRefusedPushRevalidatesAtOnce(t *testing.T) {
 	m.rtQ.Push(Attach{
 		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", SpawnN: 1, SessionID: "sess_secret_r"},
 		Handle: h,
-		WI:     m.wi,
 	})
 	soon(t, 2*time.Second, "the first revalidation", func() bool { return verifier.calls.Load() == 1 })
 	ours.Store(false) // taken over at the hub; the next check is an hour away

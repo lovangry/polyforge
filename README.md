@@ -274,11 +274,10 @@ credential is unavailable, with `DAEMON-403` (polyforge#122 accident guard).
 | POST | `/shutdown` | Trigger the bounded graceful shutdown sequence. | user |
 | POST | `/chat/init` | `pf chat init`: the chat id of a harness session (created on first use). | user |
 | GET | `/jobs/{wi}/watch` | `pf watch <wi> --once`: per-WI snapshot (status, step, pending question, events). | user |
-| GET | `/chats/{id}/subscriptions` | A chat's daemon-held subscriptions and its progress-file path. | user |
+| GET | `/chats/{id}/subscriptions` | A chat's daemon-held subscriptions. | user |
 | POST | `/chats/{id}/subscribe`, `/unsubscribe` | Subscribe / drop a work item for a chat. | user |
 | POST | `/chats/{id}/ack` | Acknowledge consumed events / delivered decisions (advances the cursor). | user |
-| POST | `/chats/{id}/heartbeat` | Resident-watcher liveness for a chat. | user |
-| GET | `/chats/{id}/attention` | Pending decisions for a chat (and for work items nobody watches). | user |
+| POST | `/chats/{id}/subscribe-owned` | A watcher's start: subscribe the chat to the held work items it submitted or its owner owns. | user |
 
 Authoritative source for this table is the code itself — the
 `mux.Handle`/`mux.HandleFunc` mount list in `internal/polyforge/daemon/routes.go`;

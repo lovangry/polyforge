@@ -60,14 +60,13 @@ func TestV1S21F15ProgressSemantics(t *testing.T) {
 		}
 		return false
 	})
-	rec := waitForEvent(t, d, wiA, "supervisor_verdict", 30*time.Second)
+	rec := waitForEvent(t, d, wiA, "step_dead", 30*time.Second)
 	var v struct {
-		Verdict  string `json:"verdict"`
 		Cause    string `json:"cause"`
 		Evidence string `json:"evidence"`
 	}
 	eventBody(t, rec, &v)
-	if v.Verdict != "step_dead" || v.Cause != "harness_silent" {
+	if v.Cause != "harness_silent" {
 		t.Fatalf("shape A: verdict %+v, want step_dead harness_silent (UI noise is silence)", v)
 	}
 	waitQuestion(t, d, wiA, "q_s21a", 30*time.Second)
@@ -116,7 +115,7 @@ func TestV1S21F15ProgressSemantics(t *testing.T) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	if n := countOf(d.eventKinds(t, wiB), "supervisor_verdict"); n != 0 {
+	if n := countOf(d.eventKinds(t, wiB), "step_dead"); n != 0 {
 		t.Fatalf("shape B: the supervisor judged a streaming model dead: %v", d.eventKinds(t, wiB))
 	}
 	waitQuestion(t, d, wiB, "q_s21b", 30*time.Second)
@@ -133,11 +132,11 @@ func TestV1S21F15ProgressSemantics(t *testing.T) {
 func assertQuietWhileParked(t *testing.T, d *v1Daemon, wi string, wantVerdicts int) {
 	t.Helper()
 	kinds := d.eventKinds(t, wi)
-	if n := countOf(kinds, "supervisor_verdict"); n != wantVerdicts {
+	if n := countOf(kinds, "step_dead"); n != wantVerdicts {
 		t.Fatalf("supervisor verdicts while parked: %d, want %d: %v", n, wantVerdicts, kinds)
 	}
 	for _, e := range d.eventsOf(t, wi) {
-		if e.Kind == "supervisor_verdict" && wantVerdicts == 0 {
+		if e.Kind == "step_dead" && wantVerdicts == 0 {
 			t.Fatalf("unexpected verdict: %s", e.Body)
 		}
 	}

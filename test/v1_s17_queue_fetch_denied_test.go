@@ -13,8 +13,6 @@ package test
 // auto stays on, and the parked member is undisturbed.
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -26,13 +24,7 @@ import (
 // daemonEvents reads the daemon's durable events log (every scope).
 func daemonEvents(t *testing.T, d *v1Daemon) []protocol.EventEntry {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(d.dataDir, "events.log"))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		t.Fatalf("events.log: %v", err)
-	}
+	raw := eventsRaw(t, d.dataDir)
 	var out []protocol.EventEntry
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)

@@ -24,7 +24,7 @@ func TestQueueFetchDeniedEdgeSemantics(t *testing.T) {
 	if err := td.modes.SetAuto(true); err != nil {
 		t.Fatalf("enable auto: %v", err)
 	}
-	eventsPath := filepath.Join(td.DataDirPath(), observe.EventsFile)
+	eventsPath := filepath.Join(td.DataDirPath(), observe.EventsDir, "daemon.jsonl") // the daemon-scope file
 
 	count := func() int {
 		raw, err := os.ReadFile(eventsPath)

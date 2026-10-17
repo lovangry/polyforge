@@ -2,11 +2,12 @@ package observe
 
 // observe.go: the Observe hub — the supervisor's root object. It owns
 // the events log (driver events land in it too, durably), spawns one
-// per-WI supervisor goroutine per RTStarted, routes RTRecovered/WIFinished
+// per-WI supervisor goroutine per RTStarted, routes RTRecovered/RTFinished
 // to the right monitor, and exposes the monitors' read faces (Activities,
-// PendingInputs, Progress, the events log) to the daemon. Runtime talks to Observe through exactly two channels
-// carrying the five protocol messages (the driver Handle rides WITH the
-// lifecycle message as the attachment — it is not a third message kind).
+// Progress, the events log) to the daemon. Runtime talks to
+// Observe through two queues (RT lifecycle messages in, OB messages out);
+// the agent handle a monitor watches is resolved when its lifecycle
+// message is consumed (Config.Agent).
 
 import (
 	"context"
@@ -18,25 +19,26 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
-// Attach is one Runtime→Observe lifecycle event plus its attachment:
-// the agent handle for RTStarted/RTRecovered, the per-WI facts for
-// RTStarted.
+// Attach is one adopted derivation: its lifecycle message and the agent
+// handle the monitor watches.
 type Attach struct {
 	Msg    protocol.RTMsg
-	Handle Handle // nil for RTFinished
-	// WI is required on RTStarted.
-	WI WIInfo
+	Handle Handle
 }
 
 // Config wires the hub. Zero fields take the defaults in fill().
 type Config struct {
-	// RT is the Runtime→Observe lifecycle channel (RTStarted/
+	// RT is the Runtime→Observe lifecycle queue (RTStarted/
 	// RTRecovered/RTFinished). Runtime writes; Observe reads.
-	RT *supervise.Queue[Attach]
+	RT *supervise.Queue[protocol.RTMsg]
+	// Agent resolves a work item's live agent handle and per-WI facts at
+	// the moment its RTStarted/RTRecovered is consumed; ok=false = no
+	// live agent to watch.
+	Agent func(wi string) (h Handle, info WIInfo, ok bool)
 	// OB is the Observe→Runtime queue (WINeedsRecovery, WICompleted).
 	// Unbounded: a send never blocks and never drops.
 	OB *supervise.Queue[protocol.OBMsg]
-	// DataDir hosts the daemon events file (events.log).
+	// DataDir hosts the per-WI events files (events/).
 	DataDir string
 	// PushFunc overrides the capsule commit+push operation (tests).
 	PushFunc PushFunc
@@ -73,11 +75,10 @@ type Config struct {
 	ModelErrorGrace time.Duration
 	// DriverStall is N: the driver between steps for longer than this,
 	// not waiting on a human, is stalled (10m; negative disables).
-	DriverStall       time.Duration
-	PushRetryBackoff  time.Duration // async push retry spacing after a failure (10s)
-	BackpressureSteps int           // N consecutive failed pushes before the degradation event (5)
-	BackpressureAfter time.Duration // T without a successful push before the degradation event (30min)
-	PushBound         time.Duration // per-push bound (protocol.PushTimeout, 60s)
+	DriverStall      time.Duration
+	PushRetryBackoff time.Duration // first retry delay after a failed push (10s); doubles per failure
+	PushBackoffMax   time.Duration // the longest retry delay (5m); reaching it writes push_backpressure
+	PushBound        time.Duration // per-push bound (protocol.PushTimeout, 60s)
 }
 
 func (c *Config) fill() {
@@ -93,11 +94,8 @@ func (c *Config) fill() {
 	if c.PushRetryBackoff == 0 {
 		c.PushRetryBackoff = 10 * time.Second
 	}
-	if c.BackpressureSteps == 0 {
-		c.BackpressureSteps = 5
-	}
-	if c.BackpressureAfter == 0 {
-		c.BackpressureAfter = 30 * time.Minute
+	if c.PushBackoffMax == 0 {
+		c.PushBackoffMax = 5 * time.Minute
 	}
 	if c.PushBound == 0 {
 		c.PushBound = protocol.PushTimeout
@@ -129,9 +127,9 @@ func New(cfg Config) (*Observe, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.RT == nil || cfg.OB == nil {
+	if cfg.RT == nil || cfg.OB == nil || cfg.Agent == nil {
 		log.Close()
-		return nil, errConfig("RT and OB queues are both required")
+		return nil, errConfig("the RT and OB queues and the Agent resolver are required")
 	}
 	return &Observe{cfg: cfg, log: log,
 		monitors: map[string]*Monitor{}}, nil
@@ -151,12 +149,8 @@ func (o *Observe) Run(ctx context.Context) {
 		_ = o.log.Close()
 	}()
 	for {
-		for {
-			at, ok := o.cfg.RT.Pop()
-			if !ok {
-				break
-			}
-			o.onAttach(at)
+		for msg, ok := o.cfg.RT.Pop(); ok; msg, ok = o.cfg.RT.Pop() {
+			o.onRT(msg)
 		}
 		select {
 		case <-ctx.Done():
@@ -166,22 +160,37 @@ func (o *Observe) Run(ctx context.Context) {
 	}
 }
 
-func (o *Observe) onAttach(at Attach) {
-	wi := at.Msg.WorkItem
-	switch at.Msg.Kind {
-	case protocol.RTStarted:
-		if old := o.takeMonitor(wi); old != nil {
-			// A stale monitor for the same WI (Runtime restarted the WI
-			// without a WIFinished): stop it, the new derivation wins.
-			old.requestStop()
-		}
-		if at.Handle == nil || at.Msg.SpawnN <= 0 || at.WI.WorkItem == "" {
-			_ = o.log.Append(wi, EvJobStopped, map[string]any{
-				"error": "RTStarted without handle/spawn_n/wi-info; not monitored",
-			})
+func (o *Observe) onRT(msg protocol.RTMsg) {
+	wi := msg.WorkItem
+	switch msg.Kind {
+	case protocol.RTStarted, protocol.RTRecovered:
+		h, info, live := o.cfg.Agent(wi)
+		live = live && h != nil && msg.SpawnN > 0 && info.WorkItem != ""
+		o.mu.Lock()
+		m := o.monitors[wi]
+		o.mu.Unlock()
+		if msg.Kind == protocol.RTRecovered && m != nil {
+			if live {
+				m.rtQ.Push(Attach{Msg: msg, Handle: h})
+			}
 			return
 		}
-		m := o.newMonitor(at)
+		// a start, or a recovery no monitor watches (a restart's, or a
+		// paused record's resume — the pause released its monitor): it
+		// builds the monitor
+		if m != nil {
+			m.requestStop() // a stale monitor (no RTFinished): the new derivation wins
+		}
+		if !live {
+			if msg.Kind == protocol.RTStarted {
+				_ = o.log.Append(wi, EvJobStopped, map[string]any{
+					"error": "RTStarted without a live agent or spawn_n; not monitored",
+				})
+			}
+			o.takeMonitor(wi)
+			return
+		}
+		m = o.newMonitor(Attach{Msg: msg, Handle: h}, info)
 		o.setMonitor(wi, m)
 		m.announceStart()
 		o.wg.Add(1)
@@ -189,22 +198,13 @@ func (o *Observe) onAttach(at Attach) {
 			defer o.wg.Done()
 			m.run()
 		}()
-	case protocol.RTRecovered:
-		m := o.lookup(wi)
-		if m == nil {
-			_ = o.log.Append(wi, EvJobStopped, map[string]any{
-				"error": "RTRecovered for an unmonitored work item; dropped",
-			})
-			return
-		}
-		m.rtQ.Push(at)
 	case protocol.RTFinished:
 		if m := o.takeMonitor(wi); m != nil {
 			m.requestStop() // monitor emits its own job_stopped event
 		}
 	default:
 		_ = o.log.Append(wi, EvJobStopped, map[string]any{
-			"error": "unknown RT message kind: " + string(at.Msg.Kind),
+			"error": "unknown RT message kind: " + string(msg.Kind),
 		})
 	}
 }
@@ -250,9 +250,9 @@ func (o *Observe) setMonitor(wi string, m *Monitor) {
 	o.monitors[wi] = m
 }
 
-// MarkClosing arms the expected-death suppression for a daemon-initiated
-// close: the agent's imminent death raises no recovery (the monitor's
-// sealing flag). No monitor (never monitored) is a no-op.
+// MarkClosing turns the work item's monitor quiet for a daemon-initiated
+// close: the agent's imminent exit raises no recovery and writes no
+// needs_recovery event. No monitor (never monitored) is a no-op.
 func (o *Observe) MarkClosing(wi string) {
 	if m := o.lookup(wi); m != nil {
 		m.markClosing()
@@ -267,28 +267,27 @@ func (o *Observe) takeMonitor(wi string) *Monitor {
 	return m
 }
 
-// newMonitor builds the per-WI supervisor for one RTStarted attachment.
-func (o *Observe) newMonitor(at Attach) *Monitor {
+// newMonitor builds the per-WI supervisor for one adopted derivation.
+func (o *Observe) newMonitor(at Attach, info WIInfo) *Monitor {
 	var link *supervise.Link
 	if o.cfg.Registry != nil {
-		link = o.cfg.Registry.Link(at.WI.WorkItem)
+		link = o.cfg.Registry.Link(info.WorkItem)
 	} else {
-		link = supervise.NewLink(at.WI.WorkItem)
+		link = supervise.NewLink(info.WorkItem)
 	}
 	m := &Monitor{
-		wi: at.WI,
+		wi: info,
 		cfg: monitorCfg{
-			PollInterval:      o.cfg.PollInterval,
-			ModelErrorGrace:   o.cfg.ModelErrorGrace,
-			DriverStall:       o.cfg.DriverStall,
-			PushRetryBackoff:  o.cfg.PushRetryBackoff,
-			BackpressureSteps: o.cfg.BackpressureSteps,
-			BackpressureAfter: o.cfg.BackpressureAfter,
-			PushBound:         o.cfg.PushBound,
-			revalidate:        o.cfg.SessionRevalidateEvery,
-			verify:            o.cfg.SessionVerify,
-			push:              o.cfg.PushFunc,
-			locateLive:        o.cfg.LocateLive,
+			PollInterval:     o.cfg.PollInterval,
+			ModelErrorGrace:  o.cfg.ModelErrorGrace,
+			DriverStall:      o.cfg.DriverStall,
+			PushRetryBackoff: o.cfg.PushRetryBackoff,
+			PushBackoffMax:   o.cfg.PushBackoffMax,
+			PushBound:        o.cfg.PushBound,
+			revalidate:       o.cfg.SessionRevalidateEvery,
+			verify:           o.cfg.SessionVerify,
+			push:             o.cfg.PushFunc,
+			locateLive:       o.cfg.LocateLive,
 		},
 		log:    o.log,
 		ob:     o.cfg.OB,

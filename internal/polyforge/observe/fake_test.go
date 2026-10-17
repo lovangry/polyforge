@@ -38,17 +38,45 @@ func (h *fakeHandle) Exit() <-chan struct{} { return h.exit }
 // dying marks the process as exited (confirmed death signal).
 func (h *fakeHandle) die() { h.once.Do(func() { close(h.exit) }) }
 
+// agentTable is a fake Config.Agent resolver: wi → live handle + capsule.
+type agentTable struct {
+	mu sync.Mutex
+	m  map[string]agentEntry
+}
+
+type agentEntry struct {
+	h   Handle
+	dir string
+}
+
+func newAgentTable() *agentTable { return &agentTable{m: map[string]agentEntry{}} }
+
+func (a *agentTable) set(wi string, h Handle, capsuleDir string) {
+	a.mu.Lock()
+	a.m[wi] = agentEntry{h, capsuleDir}
+	a.mu.Unlock()
+}
+
+func (a *agentTable) lookup(wi string) (Handle, WIInfo, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	e, ok := a.m[wi]
+	if !ok {
+		return nil, WIInfo{}, false
+	}
+	return e.h, WIInfo{WorkItem: wi, CapsuleDir: e.dir}, true
+}
+
 // --- monitor construction ---
 
 func testCfg() monitorCfg {
 	return monitorCfg{
-		PollInterval:      5 * time.Millisecond,
-		ModelErrorGrace:   40 * time.Millisecond,
-		DriverStall:       time.Hour, // inert unless a test shrinks it
-		PushRetryBackoff:  2 * time.Millisecond,
-		BackpressureSteps: 5,
-		BackpressureAfter: 30 * time.Minute,
-		PushBound:         time.Second,
+		PollInterval:     5 * time.Millisecond,
+		ModelErrorGrace:  40 * time.Millisecond,
+		DriverStall:      time.Hour, // inert unless a test shrinks it
+		PushRetryBackoff: 2 * time.Millisecond,
+		PushBackoffMax:   20 * time.Millisecond,
+		PushBound:        time.Second,
 		push: func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
 			return "sha_default", true, gitops.PushTimings{}, nil
 		},
@@ -74,12 +102,7 @@ func newTestMonitor(t *testing.T, h Handle, mod func(*monitorCfg)) (*Monitor, *s
 		mod(&cfg)
 	}
 	m := &Monitor{
-		wi: WIInfo{
-			WorkItem:   "wi_test",
-			Project:    "proj",
-			CapsuleDir: capsuleDir,
-			BundleName: "bundle-a",
-		},
+		wi:         WIInfo{WorkItem: "wi_test", CapsuleDir: capsuleDir},
 		cfg:        cfg,
 		log:        log,
 		ob:         ob,
@@ -93,7 +116,6 @@ func newTestMonitor(t *testing.T, h Handle, mod func(*monitorCfg)) (*Monitor, *s
 	m.attach(Attach{
 		Msg:    protocol.RTMsg{Kind: protocol.RTStarted, WorkItem: "wi_test", SpawnN: 1},
 		Handle: h,
-		WI:     m.wi,
 	})
 	m.phase = phaseBetween
 	m.phaseSince = m.now()
@@ -246,10 +268,16 @@ func writePendingQuestionAt(t *testing.T, m *Monitor, qid, question, step, asked
 		t.Fatal(err)
 	}
 	m.link.Fact(supervise.ExecCommitted{Version: version, Step: step})
-	soon(t, 2*time.Second, "pending question "+qid+" projected", func() bool {
-		m.stateMu.Lock()
-		defer m.stateMu.Unlock()
-		return m.pending != nil && m.pending.ID == qid && m.pending.AskedAt == askedAt
+	soon(t, 2*time.Second, "the commit boundary carrying "+qid+" published", func() bool {
+		for _, e := range eventsOf(m, EvPublished) {
+			var b struct {
+				Version int64 `json:"version"`
+			}
+			if json.Unmarshal(e.Body, &b) == nil && b.Version == version {
+				return true
+			}
+		}
+		return false
 	})
 }
 
@@ -299,7 +327,7 @@ func soon(t *testing.T, bound time.Duration, what string, cond func() bool) {
 	t.Fatalf("condition not met in time: %s", what)
 }
 
-// eventsOf reads the monitor's ring, filtered by kind.
+// eventsOf reads the monitor's work item's events, filtered by kind.
 func eventsOf(m *Monitor, kind string) []protocol.EventEntry {
 	var out []protocol.EventEntry
 	for _, e := range m.log.SinceAfter(m.wi.WorkItem, 0) {

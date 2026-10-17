@@ -255,13 +255,13 @@ func TestLatestJournalTranscriptFiltersByStep(t *testing.T) {
 {"spawn_n":5,"step_id":"review","transcript":""}
 `)
 	for step, want := range map[string]string{"review": "/t/review1.jsonl", "code": "/t/code2.jsonl", "verification": "/t/ver3.jsonl"} {
-		got, err := ad.latestJournalTranscript(step)
-		if err != nil || got != want {
-			t.Fatalf("step %s: got (%q, %v) want %q", step, got, err, want)
+		e, err := ad.latestJournalEntry(step)
+		if got := e.Transcript; err != nil || got != want {
+			t.Fatalf("step %s: got (%q, %v) want %q", step, e.Transcript, err, want)
 		}
 	}
-	if got, err := ad.latestJournalTranscript("polish"); err != nil || got != "" {
-		t.Fatalf("a step with no journal line answers (\"\", nil), got (%q, %v)", got, err)
+	if e, err := ad.latestJournalEntry("polish"); err != nil || e.Transcript != "" {
+		t.Fatalf("a step with no journal line answers no transcript, got (%q, %v)", e.Transcript, err)
 	}
 }
 

@@ -133,10 +133,11 @@ others with `pf watch subscribe <wi>` and drops them with `pf watch
 unsubscribe <wi>` (`pf watch list` shows them). The subscriptions and the
 per-chat read cursors live in the daemon, not in any file you can write. There
 is no arming, no script copying and no adoption prompt: a new session simply
-subscribes to the work items it wants. A decision for a work item nobody
-watches is kept by the daemon and surfaced the next time a watcher of the
-origin chat, or of the work item's owner (`PF_USER_ID`; the reporter when the
-job has no owner), starts — as `[polyforge] N WIs need you: ...`.
+subscribes to the work items it wants. A watcher's start also subscribes its
+chat to every work item the daemon holds that the chat submitted or its owner
+(`PF_USER_ID`; the reporter when the job has no owner) owns; decisions those
+work items already hold are kept by the daemon and surface then — as
+`[polyforge] N WIs need you: ...`.
 
 ### Rules for you (every harness)
 
@@ -317,7 +318,7 @@ pf [global flags] <verb> [verb flags] [positional args]
   ran ensure when the session started (see below).
 - A `DAEMON-403 ... belongs to the step process tree` answer on any
   daemon-face verb that changes state (submit/claim, answer, pause,
-  resume, wrap, ops, chat init, watch subscribe/ack/heartbeat) means the
+  resume, wrap, ops, chat init, watch subscribe/ack) means the
   caller is a step agent of that daemon: a step never drives the daemon.
   Reads (status, watch snapshot) stay open. Do not retry; the human
   session runs the verb.

@@ -8,21 +8,21 @@ package test
 //   - S22b (V8): an embedded git repository laid in the capsule (the
 //     #48 poison shape, the grill envelope action) is refused by the
 //     LOCAL precheck — classified push_poisoned_local, never
-//     push_failed — and the same-error retry cap bounds the round at
-//     exactly 5 attempts before the halt; the documented cleanup (the
-//     unpoison envelope action) plus a fresh commit boundary recovers
-//     the chain, which seals with NO gitlink anywhere in the published
-//     history.
+//     push_failed — and its retries back off exponentially (no #48
+//     storm); the documented cleanup (the unpoison envelope action) plus
+//     a fresh commit boundary recovers the chain, which seals with NO
+//     gitlink anywhere in the published history.
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
-func TestV1S22LocalGitlinkPrecheckAndRetryCap(t *testing.T) {
+func TestV1S22LocalGitlinkPrecheckAndRetryBackoff(t *testing.T) {
 	inst := newV1Install(t)
-	wi := inst.newWI(t, "s22: local gitlink precheck, poisoned-local classification, same-error cap",
+	wi := inst.newWI(t, "s22: local gitlink precheck, poisoned-local classification, retry backoff",
 		[]map[string]any{
 			// The #48 poison shape: an embedded repository OUTSIDE
 			// repos/ (which is gitignored), laid by the grill envelope
@@ -34,13 +34,13 @@ func TestV1S22LocalGitlinkPrecheckAndRetryCap(t *testing.T) {
 				"poison_gitlink": true},
 			// The documented cleanup, scripted as the continuation: the
 			// unpoison envelope action deletes the nested .git and bumps
-			// the Version — the halted round re-arms at that boundary.
+			// the Version — a fresh Version is pushed at once.
 			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true,
 				"unpoison_gitlink": true},
-			// The fix step burns 15s before its envelope: the re-armed
-			// push round's second attempt (the 10s backoff) lands on the
-			// CLEAN tree and recovers the chain while the workflow is
-			// still live — the wrap must never outrun the recovery push.
+			// The fix step burns 15s before its envelope: the push of the
+			// cleanup's Version lands on the CLEAN tree and recovers the
+			// chain while the workflow is still live — the wrap must
+			// never outrun the recovery push.
 			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 15000},
 			{"do": "envelope", "id": "verification", "outcome": "completed"},
 		}, nil)
@@ -53,51 +53,28 @@ func TestV1S22LocalGitlinkPrecheckAndRetryCap(t *testing.T) {
 	// The first local refusal lands within one poll+push round.
 	waitForEvent(t, d, wi, "push_poisoned_local", 30*time.Second)
 
-	// The same-error cap: after 5 consecutive identical refusals the
-	// round halts with the reason=same_error degraded event (the steps
-	// ladder's own event may follow on the same failure count — wait for
-	// the cap's specifically). The parked question keeps the WI live and
-	// version-stable while the cap burns.
-	deadline := time.Now().Add(120 * time.Second)
-	var capBody struct {
-		Reason string `json:"reason"`
-		Streak int    `json:"streak"`
-	}
-	for {
+	// The retries back off: the parked question keeps the Version stable,
+	// so the refusals come at the production delays (10s, then 20s, ...),
+	// never at a fixed cadence.
+	var refusals []protocol.EventEntry
+	waitUntil(t, 90*time.Second, "three poisoned-local refusals", func() bool {
+		refusals = refusals[:0]
 		for _, e := range d.eventsOf(t, wi) {
-			if e.Kind != "push_backpressure" {
-				continue
-			}
-			_ = json.Unmarshal(e.Body, &capBody)
-			if capBody.Reason == "same_error" {
-				break
+			if e.Kind == "push_poisoned_local" {
+				refusals = append(refusals, e)
 			}
 		}
-		if capBody.Reason == "same_error" || time.Now().After(deadline) {
-			break
+		return len(refusals) >= 3
+	})
+	at := func(e protocol.EventEntry) time.Time {
+		ts, err := time.Parse(time.RFC3339Nano, e.At)
+		if err != nil {
+			t.Fatalf("event timestamp %q: %v", e.At, err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		return ts
 	}
-	if capBody.Reason != "same_error" || capBody.Streak != 5 {
-		t.Fatalf("want the same-error cap event (reason=same_error, streak=5), got %+v", capBody)
-	}
-
-	// The classification held the whole poisoned episode: local refusals
-	// only, never push_failed; and the cap means the round HALTED at
-	// exactly 5 attempts (no 185-push storm). The re-armed round's first
-	// attempt (the answer's boundary, before the scripted cleanup lands)
-	// meets the still-poisoned index once more and is refused — the 6th
-	// and last local refusal — and its second attempt (the 10s backoff,
-	// the tree now clean) recovers the chain.
-	time.Sleep(2 * time.Second)
-	preCleanup := 0
-	for _, e := range d.eventsOf(t, wi) {
-		if e.Kind == "push_poisoned_local" {
-			preCleanup++
-		}
-	}
-	if preCleanup != 5 {
-		t.Fatalf("the capped round must attempt exactly 5 poisoned pushes, got %d", preCleanup)
+	if first, second := at(refusals[1]).Sub(at(refusals[0])), at(refusals[2]).Sub(at(refusals[1])); second < first+5*time.Second {
+		t.Fatalf("retry delays %v then %v: the second must be longer (exponential backoff)", first, second)
 	}
 	for _, e := range d.eventsOf(t, wi) {
 		if e.Kind == "push_failed" {
@@ -107,19 +84,16 @@ func TestV1S22LocalGitlinkPrecheckAndRetryCap(t *testing.T) {
 
 	// The cleanup recovers the chain: the owner's answer re-dispatches
 	// grill, whose envelope action unpoisons and bumps the Version — the
-	// halted round re-arms, the push succeeds, and the workflow runs to
-	// its terminal wrap.
+	// fresh Version's push succeeds, and the workflow runs to its
+	// terminal wrap.
 	answerQuestion(t, d, wi, "q_s22b", "Cleaned up; resume.")
 	inst.waitWIStatus(t, wi, "wrapped", 180*time.Second)
 
-	// The recovery push: the re-armed round's first attempt lands on the
-	// CLEAN tree (the scripted cleanup runs inside the 10s backoff
-	// window) — the refusal count stays at the capped 5, the push
-	// succeeds, and the recovered chain lands while fix holds its 15s
-	// window, BEFORE the wrap stops the monitor.
-	waitUntil(t, 60*time.Second, "the re-armed round never recovered the chain", func() bool {
-		kinds := d.eventKinds(t, wi)
-		return countOf(kinds, "push_poisoned_local") == 5 && countOf(kinds, "published") >= 1
+	// The recovery push: the cleanup's fresh Version is pushed at once on
+	// the CLEAN tree and the recovered chain lands while fix holds its
+	// 15s window, BEFORE the wrap stops the monitor.
+	waitUntil(t, 60*time.Second, "the cleanup never recovered the chain", func() bool {
+		return countOf(d.eventKinds(t, wi), "published") >= 1
 	})
 	inst.waitBareCommits(t, wi, 1, 60*time.Second)
 

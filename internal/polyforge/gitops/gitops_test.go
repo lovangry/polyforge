@@ -1010,3 +1010,36 @@ func TestHubEnvBoundsStalledTransfers(t *testing.T) {
 		t.Fatal("an inherited GIT_* value must not survive")
 	}
 }
+
+// An in-flight atomicfile temp file (the driver writing execution.json or
+// a transcript copy during a publish) is never content: `add -A` skips it,
+// so one vanishing between status and add cannot fail the publish. The
+// exclusion lives in the git-dir, not in the tracked .gitignore.
+func TestCommitPushSkipsInFlightTempFiles(t *testing.T) {
+	setIdentity(t)
+	o, barePath := testOpts(t, "wi_tmp")
+	mkBare(t, barePath, true)
+	mkCapsule(t, o)
+	writeDirty(t, o, "a.txt", "a\n")
+	if err := os.MkdirAll(filepath.Join(o.CapsuleDir, "runtime-state"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeDirty(t, o, "runtime-state/.execution.json.12345.tmp", "{}")
+	writeDirty(t, o, ".x.98.tmp", "x")
+	if _, pushed, _, err := CommitPush(context.Background(), o, "observe: v1"); err != nil || !pushed {
+		t.Fatalf("CommitPush: pushed=%v err=%v", pushed, err)
+	}
+	out, err := run("git", "--git-dir", barePath, "ls-tree", "-r", "--name-only", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, ".tmp") || !strings.Contains(out, "a.txt") {
+		t.Fatalf("published tree:\n%s\nwant a.txt and no temp file", out)
+	}
+	if _, pushed, _, err := CommitPush(context.Background(), o, "observe: v2"); err != nil || !pushed {
+		t.Fatalf("second CommitPush (exclude already present): pushed=%v err=%v", pushed, err)
+	}
+	if raw, _ := os.ReadFile(filepath.Join(o.CapsuleDir, ".gitignore")); strings.Contains(string(raw), ".tmp") {
+		t.Fatal("the tracked .gitignore must not change")
+	}
+}

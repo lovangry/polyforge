@@ -37,9 +37,10 @@ func startProcAgent(t *testing.T) *procAgent {
 	return a
 }
 
-func (a *procAgent) PID() int          { return 0 }
-func (a *procAgent) StartedAt() string { return "" }
-func (a *procAgent) Done() bool        { return !a.Alive() }
+func (a *procAgent) Exit() <-chan struct{} { return a.done }
+func (a *procAgent) PID() int              { return 0 }
+func (a *procAgent) StartedAt() string     { return "" }
+func (a *procAgent) Done() bool            { return !a.Alive() }
 func (a *procAgent) Alive() bool {
 	select {
 	case <-a.done:
@@ -69,7 +70,7 @@ func TestShutdownLateAgentStartLeavesNoProcess(t *testing.T) {
 			bound := make(chan *procAgent, 1)
 			var once sync.Once
 			td := newTestDaemon(t, func(c *Config) {
-				c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
+				c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (Agent, error) {
 					once.Do(func() { close(entered) })
 					if delay >= 0 {
 						time.Sleep(delay)

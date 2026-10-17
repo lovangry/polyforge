@@ -37,6 +37,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/harness"
 	"github.com/silgrid/polyforge/internal/common/spawn"
 	"github.com/silgrid/polyforge/internal/common/workflow"
+	"github.com/silgrid/polyforge/internal/polyforge/sessionjsonl"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
@@ -206,19 +207,19 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		default:
 			transcript = prev.Transcript
 		}
-		if !resume && usableTranscript(prev.Transcript) {
+		if !resume {
 			// the continuation cannot resume (another harness, or the
 			// native session is gone): the fresh conversation gets the
 			// previous capsule transcript as read-only reference (§2.4)
-			parts.Reference = prev.Transcript
+			parts.Reference = a.referenceTranscript(prev)
 		}
 	}
 	if sp.Fresh && parts.Reference == "" {
 		// a retry starts a NEW conversation; the previous transcript, when
 		// readable, rides the prompt as a read-only reference (it may be
 		// another harness's JSONL: reference material only)
-		if prev, perr := a.latestJournalTranscript(sp.StepID); perr == nil && usableTranscript(prev) {
-			parts.Reference = prev
+		if prev, perr := a.latestJournalEntry(sp.StepID); perr == nil {
+			parts.Reference = a.referenceTranscript(prev)
 		}
 	}
 	if transcript == "" {
@@ -300,6 +301,29 @@ func (a *StepSpawnAdapter) newTranslator(h string, spawnN int64) (supervise.Tran
 
 // usableTranscript reports whether a transcript path names a non-empty
 // regular file.
+// referenceTranscript answers a previous dispatch's capsule transcript
+// as a read-only reference ("" when there is none readable). A claude
+// dispatch's capsule file is a copy of its native session that the
+// commit-boundary sync writes asynchronously; it is copied here first,
+// from the native session, so the reference never depends on whether
+// that push has run.
+func (a *StepSpawnAdapter) referenceTranscript(prev capsule.SpawnJournalEntry) string {
+	if prev.Transcript == "" {
+		return ""
+	}
+	if harness.Of(prev.Harness) == harness.Claude {
+		if src := harness.LocateClaudeSession(prev.HarnessSession, a.ClaudeConfigDir, a.WI.CapsuleDir); src != "" {
+			if err := sessionjsonl.CopyReadonly(src, prev.Transcript); err != nil {
+				fmt.Fprintf(os.Stderr, "driver: %s: copy the previous claude session for reference: %v\n", a.WI.ID, err)
+			}
+		}
+	}
+	if !usableTranscript(prev.Transcript) {
+		return ""
+	}
+	return prev.Transcript
+}
+
 func usableTranscript(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && st.Mode().IsRegular() && st.Size() > 0
@@ -813,18 +837,6 @@ func (a *StepSpawnAdapter) latestJournalEntry(stepID string) (capsule.SpawnJourn
 		return capsule.SpawnJournalEntry{}, nil
 	}
 	return best, nil
-}
-
-// latestJournalTranscript answers the resume source for a re-dispatch:
-// the highest-ordinal spawn-journal line OF THE GIVEN STEP declaring a
-// transcript (the capsule-side session copy the runtime mechanism
-// resumes from). Another step's conversation is never a candidate: the
-// journal is capsule-wide and interleaves every step's spawns. A step
-// with no journal line (or no journal) answers ("", nil): the caller
-// degrades to a fresh dispatch; only an unreadable journal is an error.
-func (a *StepSpawnAdapter) latestJournalTranscript(stepID string) (string, error) {
-	e, err := a.latestJournalEntry(stepID)
-	return e.Transcript, err
 }
 
 // appendSpawnJournal appends one spawn identity line through

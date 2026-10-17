@@ -29,11 +29,9 @@ func (c clientAPI) Snapshot(wi string, after int64) (*protocol.WatchSnapshot, er
 	return c.d.WatchSnapshot(wi, after)
 }
 func (c clientAPI) Ack(a protocol.ChatAck) error { return c.d.ChatAck(c.chat, a) }
-func (c clientAPI) Heartbeat(pid int) error      { return c.d.ChatHeartbeat(c.chat, pid) }
-func (c clientAPI) Attention(owner string) ([]protocol.ChatAttentionItem, error) {
-	return c.d.ChatAttention(c.chat, owner)
+func (c clientAPI) SubscribeOwned(owner string) ([]protocol.ChatSub, error) {
+	return c.d.ChatSubscribeOwned(c.chat, owner)
 }
-func (c clientAPI) AckAttention(keys []string) error { return c.d.ChatAttentionAck(c.chat, keys) }
 
 // The real watcher against the real daemon: a chat submits, the step asks a
 // question, the watcher prints ONE fixed-template line (no question text),
@@ -80,12 +78,12 @@ func TestWatcherAgainstRealDaemonNeedsInputOnce(t *testing.T) {
 	if out2.Len() != 0 {
 		t.Fatalf("the delivered decision must not repeat: %q", out2.String())
 	}
-	// the progress file (daemon-provided path) is written by the resident watcher
-	sink := &watcher.StatusSink{Primary: subs.StatusPath, Fallback: t.TempDir() + "/fb"}
+	// the progress file is written by the resident watcher
+	files := watcher.NewFiles(t.TempDir(), "chat_e2e")
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel2()
-	_ = watcher.Run(ctx2, api, watcher.Options{Status: sink, Poll: 20 * time.Millisecond})
-	raw, err := os.ReadFile(subs.StatusPath)
+	_ = watcher.Run(ctx2, api, watcher.Options{Status: files.WriteStatus, Poll: 20 * time.Millisecond})
+	raw, err := os.ReadFile(files.StatusPath())
 	if err != nil || !strings.Contains(string(raw), "proj#7 needs input step=plan") {
 		t.Fatalf("progress file = %q err=%v", raw, err)
 	}
@@ -142,10 +140,11 @@ type deadStdout struct{}
 
 func (deadStdout) Write([]byte) (int, error) { return 0, errors.New("write: broken pipe") }
 
-// repo review 2026-10-16 B-25 (WA-4): the real watcher dies after fetching
-// the attention notice and before printing it — the next start prints it
-// (fetch-then-ack), and once printed and acked it never repeats.
-func TestWatcherCrashBeforePrintingAttentionRedelivers(t *testing.T) {
+// repo review 2026-10-16 B-25 (WA-4): the owner's other chat starts a real
+// watcher, which subscribes it to the owner's WI and dies before printing
+// the reminder — the next start prints the decision (fetch-then-ack), and
+// once printed and acked it never repeats.
+func TestWatcherCrashBeforePrintingOwnedReminderRedelivers(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	td.client.Origin = &cli.SubmitOrigin{ChatID: "chat_origin", Owner: "alice"}
 	td.submitClaim(t, "wi_crash")
@@ -153,7 +152,7 @@ func TestWatcherCrashBeforePrintingAttentionRedelivers(t *testing.T) {
 	td.seedPendingQuestion(t, "wi_crash", "q-1", "plan", "?")
 	waitNeedsInput(t, td, "wi_crash")
 
-	// alice's other chat: told through owner routing
+	// alice's other chat: subscribed through owner routing
 	api := clientAPI{d: td.client, chat: "chat_other"}
 	run := func(out io.Writer, d time.Duration) error {
 		ctx, cancel := context.WithTimeout(context.Background(), d)
@@ -167,12 +166,12 @@ func TestWatcherCrashBeforePrintingAttentionRedelivers(t *testing.T) {
 	if err := run(&out, 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "needs you: wi_crash") {
-		t.Fatalf("the notice fetched by the crashed watcher must print now: %q", out.String())
+	if !strings.Contains(out.String(), "wi_crash needs_input q-1") {
+		t.Fatalf("the decision the crashed watcher never printed must print now: %q", out.String())
 	}
 	var out2 bytes.Buffer
 	_ = run(&out2, 300*time.Millisecond)
 	if out2.Len() != 0 {
-		t.Fatalf("an acked notice must not repeat: %q", out2.String())
+		t.Fatalf("an acked decision must not repeat: %q", out2.String())
 	}
 }

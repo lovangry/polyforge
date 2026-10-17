@@ -52,8 +52,8 @@
 - 实时信号走进程内通道：**每个 WI 一条无界队列，发送方永不阻塞**（supervisor 的 select 循环与 runtime 的串行处理都不得被投递卡住）；**事实与判定不得丢弃**。
 - driver 消费判定时**不得在跨 WI 的锁下做网络 / git 等长操作**（避免一个 WI 的推送卡住所有 WI）；runtime 只按 WI 加锁跨网络，全局的任务表锁持有期间不做任何 I/O。
 - harness 的海量输出**只保留最新状态**（合并，不排队）。
-- 持久化：`execution.json` 是**唯一权威**（进度、待答问题、失败计数、放宽后的阈值、终态）；事件日志是**补充记录**——driver 事件也写入（替代只打 stderr 的 `stdLogger`），每条事件带**跨重启单调递增 id**（不再每次重启从 1 重编），文件按大小轮转；磁盘满时事件追加失败只降级为日志告警，权威仍在 `execution.json`。
-- supervisor 不再轮询 `execution.json` 作为主路径；推送进度到 aihub 改由事件触发，**保留退避与同错熔断**（F18/F22 教训：曾 185 次推送风暴）。
+- 持久化：`execution.json` 是**唯一权威**（进度、待答问题、失败计数、放宽后的阈值、终态）；事件日志是**补充记录**——driver 事件也写入（替代只打 stderr 的 `stdLogger`），每条事件带**跨重启单调递增 id**（不再每次重启从 1 重编），每个 WI 一个文件；磁盘满时事件追加失败只降级为日志告警，权威仍在 `execution.json`。
+- supervisor 不再轮询 `execution.json` 作为主路径；推送进度到 aihub 改由事件触发，**失败按指数退避重试**（F18/F22 教训：曾 185 次推送风暴；见 §14.1）。
 - 转录同步（F3）以最近一次 `step_started.transcript_path` 为源，commit 前同步。（现状：job 级收尾前的活转录同步**保留**——C11 裁定，polyforge#150；实现为 `runtime/pitranscript.go` 的 `syncLiveTranscript`（commit 24cde0d 恢复）：job 在 pause / bounded-fail / seal 等收尾路径上结束时，当前派发的 step 未走到提交边界，其活转录若不在收尾提交前同步就会丢失——收尾前同步保证终态前转录落盘。）
 
 **driver → supervisor（事实）**
@@ -208,7 +208,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 **事故护栏（r2 补；#135 已冻结，这些约束就是现行机制）**
 - 唤醒语句**只用 daemon 生成的固定模板**（WI 编号、事件类型、问题 id），**不夹带任何 agent 可写的自由文本**——防止 step agent 借此对交互 agent 做提示注入。问题正文由人通过 `pf watch <wi> --once` 主动查看。
 - 唤醒语句固定附带一句："这是需要人做的决定，agent 不得代答"（#122 教训）。
-- 进展状态文件 **不放在 agent 可写的路径**。（现状，2026-10-16 按代码更正：文件由常驻 watcher（`pf watch --chat`，`watcher/engine.go`）写在 daemon 订阅应答给出的 `<data-dir>/chat-status/<chat>.status`，daemon 未给出时回退到 `$XDG_RUNTIME_DIR/polyforge/chat-<chat>.status`；statusLine 用 `pf watch --statusline` 直接读文件、不经 daemon，见附录 E.2。）
+- 进展状态文件由常驻 watcher（`pf watch --chat`，`watcher/engine.go`）写在固定路径 `$XDG_RUNTIME_DIR/polyforge/chat-<chat>.status`；statusLine 用 `pf watch --statusline` 直接读文件、不经 daemon，见附录 E.2。（同 uid、不隔离的信任模型（#135）下，任何本地路径对 step agent 都同样可写，不再区分主/回退路径。）
 
 **不做**：tmux 分屏（owner 否决）；把进展原样经过 agent（污染上下文、耗 token）。
 
@@ -309,7 +309,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
    - git-dir 修法：隔离 capsule 时把外置 git-dir 一并移入隔离区；目标已存在时报错而非复用（含跨文件系统 EXDEV 合并情形）；加"同机隔离后重新领取 → HEAD 等于 aihub 最新提交"的测试。
    - **V4 验证证据门禁移入 driver**（已定）：driver 接受 verification 步骤的 completed 结果时，要求结构化命令证据（argv、exit_code、duration_ms），缺失则走信封拒绝的进程内重试；旧 flush 路径上的同名检查随 #136 删除。
    - 步骤 1 完成后：**验证"结束会话 + 重新领取能从断点继续"**，通过则按第 8 节四档简化 takeover / adopt-session / verify-session（**已完成**，见第 8 节四档）。
-2. **事件底座**：driver 事件写入事件日志；单调 id、轮转；`execution.json` 权威。
+2. **事件底座**：driver 事件写入事件日志；单调 id、每 WI 一个文件；`execution.json` 权威。
 3. **监督替换（同一批上线）**：driver ↔ supervisor 契约 + 判死规则 + 死因处理 + 失败计数 + 阈值 + 恢复引擎的 driver 异常退出界 + **孤儿 step 进程回收（第 6 节 bug 3，必须同批——否则"重启后同模型重派"会与孤儿进程双写同一 capsule，#99 教训）**。
 4. **`pf watch`**：Go 实现、双通道、固定模板唤醒、订阅/游标存 daemon、Claude Code statusLine 与唤醒适配、pi 扩展；删除 watch.sh / watch-probe。
 5. **身份模型**：daemon id 存放迁移、`PF_CHAT_ID`、负责人、origin、通知路由。
@@ -392,9 +392,9 @@ carrier ref 与 WIP ref 这三项**现行**机制的唯一设计记录。§14.2�
   提交不带序号 trailer：step 在 capsule 根自己 `git commit` 的提交就是链上一个普通快进提交，随下一次发布原样推送。
 - **会话围栏**：推送经 aihub git 代理，Basic 口令必须是该 WI **当前活会话**的 secret（一次性 `GIT_ASKPASS` 传递，不进 argv）；被取代或已
   结束的会话被拒（`GIT-401`）。
-- **异步推送的重试调度**（`observe/observe.go`、`observe/monitor.go`）：失败后每 10s 重试；连续 5 次失败或 30 分钟无成功推送发一次
-  `push_backpressure` 降级事件；同一错误连续 5 次即停止本轮重试（`reason=same_error`），直到下一个提交边界（`execution.json`
-  Version 前进）或一次成功推送重新武装。每次推送上界 60s（`protocol.PushTimeout`）。
+- **异步推送的重试调度**（`observe/observe.go`、`observe/monitor.go`）：每次失败一条 `push_failed`，同一 Version 按指数退避重试
+  （10s 起，每次翻倍，上限 5 分钟）；退避触顶时发一次 `push_backpressure` 降级事件。新的 Version（提交边界）立即推送但不重置退避，
+  一次成功推送结束本轮。每次推送上界 60s（`protocol.PushTimeout`）。
 - **再认领 = 重新 clone**：blocked→`pf resume` 等再认领从 aihub 链 clone capsule，再按 §14.2 的 carrier ref 与 §14.3 的 WIP ref 恢复任务仓库；
   已有发布进度的 WI clone 失败时拒绝本地初始化（`DAEMON-516`，否则会从第 1 步重跑）；由另一台 daemon 续跑 blocked WI 而 aihub 链头不等于
   封存时记录的 head 时拒绝（`DAEMON-518`）。
@@ -555,7 +555,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 ## 附录 C：已知缺口（集成分支，2026-10-12） <!-- §C -->
 
 - **(a) bundle digest**：已不存在——digest 链随 polyforge#149 B9 删除，`internal/` 中没有 `Digest` / `FileEntry`；`internal/common/workflow` 只读 frontmatter 的模型候选字段。`01-workflow-skills.md#§4.5` 的 digest 描述已归档。
-- **(b) 人工确认保证是事故护栏，不是对抗性防御**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证；step agent 可写 capsule，蓄意绕过不在 2026-10-14 信任模型的防御范围内（#135 冻结）。daemon 的 UDS 面（polyforge#122 起于 answer 路由，#164 并入；repo review 2026-10-16 V-1 扩到全部变更路由）按 UDS 对端 SO_PEERCRED pid 拒绝来自本 daemon step 进程树的一切非读请求（DAEMON-403）：对端、其祖先或其进程组 leader 带有 `PF_WI_ID` + `PF_DAEMON_ID=<本 daemon>` 标记即拒；取不到对端凭据也拒（fail closed）。拒绝面是一个包住整张路由表的中间件：`/jobs/{wi}/answer|claim|resume-paused|pause|wrap`、`/ops/config`、`/shutdown`、`/chat/init`、`/chats/{id}/subscribe|unsubscribe|ack|heartbeat|attention/ack`，以及带 `mark=1` 或 `ack=1` 的 `GET /chats/{id}/attention`（它记录投递状态——标为已显示或待 ack——step 若能调用便可藏掉人的提醒；repo review 2026-10-16 B-25 WA-4）；开放的只有纯读：`GET /status`、`/jobs/{wi}/watch`、`/chats/{id}/subscriptions`、不带 `mark`/`ack` 的 `/chats/{id}/attention`。answer 路由保留其 #122 拒绝文案。残余：`setsid` 脱离进程组且清空环境的进程不在此检查内——这只能是蓄意行为，按信任模型不再追加防御（#135 冻结）。（曾有的 abandon-repair 路由随 repair_pending 一并删除，此实例已不存在。）
+- **(b) 人工确认保证是事故护栏，不是对抗性防御**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证；step agent 可写 capsule，蓄意绕过不在 2026-10-14 信任模型的防御范围内（#135 冻结）。daemon 的 UDS 面（polyforge#122 起于 answer 路由，#164 并入；repo review 2026-10-16 V-1 扩到全部变更路由）按 UDS 对端 SO_PEERCRED pid 拒绝来自本 daemon step 进程树的一切非读请求（DAEMON-403）：对端、其祖先或其进程组 leader 带有 `PF_WI_ID` + `PF_DAEMON_ID=<本 daemon>` 标记即拒；取不到对端凭据也拒（fail closed）。拒绝面是一个包住整张路由表的中间件：`/jobs/{wi}/answer|claim|resume-paused|pause|wrap`、`/ops/config`、`/shutdown`、`/chat/init`、`/chats/{id}/subscribe|unsubscribe|subscribe-owned|ack`；开放的只有纯读：`GET /status`、`/jobs/{wi}/watch`、`/chats/{id}/subscriptions`。answer 路由保留其 #122 拒绝文案。残余：`setsid` 脱离进程组且清空环境的进程不在此检查内——这只能是蓄意行为，按信任模型不再追加防御（#135 冻结）。（曾有的 abandon-repair 路由随 repair_pending 一并删除，此实例已不存在。）
 - **(c) `pf watch` 进展字段**：已随监督重写合入——daemon watch 路由从 `Observe.Progress(wi)` 填充命令、命令时长、最近文件、工具调用数（见附录 D）。
 
 ## 附录 D：监督替换落地对照（第 9 节步骤 2–3，分支 `v2/a-supervision`） <!-- §D -->
@@ -563,7 +563,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 **代码位置**
 - 契约、翻译器、判死规则：`internal/polyforge/supervise`（`contract.go` 事实/判定/无界队列/每 WI 的 `Link`；`translator.go` + `pi.go` 翻译器接口与 pi 实现；`tracker.go` 每次派发一份的合并状态；`rules.go` 规则 ⓪–④ 的纯函数 `Judge`；`defaults.go` 全局阈值）。
 - driver 一侧：`internal/polyforge/driver/supervision.go`（判定围栏、死因表、失败计数、放宽、事实发送）；`TransStepFailed` 在 `transition.go`，一次原子写入记录 attempt（带死因子类）、计数、放宽值、下一次派发形态，必要时写 blocked。
-- supervisor 一侧：`internal/polyforge/observe/monitor.go`（消费事实、每派发一份状态、判定、`driver_stalled`、事件触发推送、M4 保留）；事件底座 `observe/events.go`（逐行带 id、按大小轮转、重启后续号、历史从文件读）。
+- supervisor 一侧：`internal/polyforge/observe/monitor.go`（消费事实、每派发一份状态、判定、`driver_stalled`、事件触发推送、M4 保留）；事件底座 `observe/events.go`（每 WI 一个 JSONL 文件，逐行带 id、重启后续号、`?after` 从文件读）。
 - 失败计数等持久字段：`capsule.Step.Supervision`、`Attempt.FailureCause`、`Execution.BlockedReason`。
 
 **规则 ① 与 T 的后续修订（集成分支）**：规则 ① 扩展到正常结束的轮次（`ended_without_result`，见 2.3 表）；T 取 `max(3 × wall_minutes, 全局默认)`（见 2.4）。
@@ -581,17 +581,16 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 
 本附录只登记现状，不新增也不改变任何机制：以下各项在代码里是活的、有读者或有外部可见面，但此前设计文档里查不到。来源即表中的常量与文件；与代码不一致时以代码为准，并回改本表。
 
-### E.1 事件 kind（`<data-dir>/events.log`，`protocol.EventEntry` 一行一条）
+### E.1 事件 kind（`<data-dir>/events/wi-<id>.jsonl`，daemon 级为 `events/daemon.jsonl`；`protocol.EventEntry` 一行一条）
 
 事件是"新闻"不是状态：执行态权威始终是 capsule 的 `runtime-state/execution.json`（INV-1），追加失败只降级不影响正确性（`observe/events.go`）。`pf watch` 读取的就是这些行。
 
 | kind | 发射者 | 含义 |
 |---|---|---|
 | `job_started` / `job_stopped` | observe（`monitor.go`、`observe.go`） | 监督开始 / 结束一个 job |
-| `supervisor_verdict` | observe `monitor.go` | 一条监督裁决（`step_dead` 及其 cause/证据，或 `driver_stalled`）在送达 driver 时落盘 |
 | `needs_recovery` | observe `monitor.go` | 同一 attempt 内的信号要求恢复（reason/detail/spawn_n） |
 | `wi_agent_rederived` | observe `monitor.go` | 恢复后的后继 step 进程已起（spawn_n） |
-| `pending_invalid` | observe `monitor.go` | `execution.json` 的 `pending_question` 缺 `id`，被投影忽略（每次看到一条） |
+| `pending_invalid` | observe `monitor.go` | `execution.json` 的 `pending_question` 缺 `id`，状态面不把它当待答问题（每次看到一条） |
 | `transcript_missing` | observe `monitor.go` | 提交边界找不到本次派生的 harness 会话文件（F3，仅告警，提交照常） |
 | `published` / `push_failed` / `push_backpressure` / `push_poisoned_local` | observe `monitor.go`；`push_failed` 另由 runtime 封存路径经 EventTap 发出（`runtime.go`、`restart.go`） | capsule 链推送成功 / 失败 / 背压 / 本地 gitlink 预检拒绝（后者不计入 M8） |
 | `session_superseded` | observe `session.go`；runtime `runtime.go` | 周期 session 校验发现另一 daemon 持有该 WI（载荷只有公开指纹） |
@@ -605,7 +604,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `missing_midflight_capsule` | runtime `recover.go` | 运行中 capsule 消失，拒绝静默重建（#103） |
 | `manual_models_dropped` | runtime `runtime.go` | 重新领取时丢弃早于 `<harness>:<model>` 格式的 `--models` 记录（#175） |
 | `exec_init` / `step_started` / `step_done` / `gate_verdict` / `needs_input` / `incomplete` / `rewind` / `terminal` / `answered` / `interrupted` / `resumed` / `step_failed` / `blocked` / `candidate_switched` / `candidates_exhausted` | driver `transition.go`（`emitLocked` 按已提交的状态转移发出） | 状态转移的进度新闻；body 带 spawn_n 与 step |
-| `driver_stalled` / `step_dead` / `verdict_stale` / `schema_fault` | driver `driver.go`、`supervision.go` | driver 收到的监督裁决 / 过期裁决被丢弃 / 结果信封持续被拒（契约坏了而非模型问题） |
+| `step_dead` / `verdict_stale` / `schema_fault` | driver `driver.go`、`supervision.go` | driver 收到的监督裁决（cause/证据）/ 过期裁决被丢弃 / 结果信封持续被拒（契约坏了而非模型问题）；`driver_stalled` 只记在 `needs_recovery.reason` |
 | `envelope_rejected` / `gate_verdict_bound` / `human_gate_unasked` | driver `result.go` 常量 | 信封校验拒绝（原文带错误）/ gate 步以 completed 交了 fail 判定，被改绑为 gate_failed / `requires_human_answer: if_asked` 步零提问完成 |
 | `output_schema_violation` / `output_schema_unloadable` | driver `outputschema.go` | 输出不符合声明的 schema / schema 读不出来 |
 | `authored_tests_rebaselined` | driver `testfiles.go` | 人工批准的测试文件改动成为新基线 |
@@ -615,9 +614,8 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | 路径 | 写者 | 内容 |
 |---|---|---|
 | `<data-dir>/chats.json` | daemon `identity.go` | (harness, harness-session) → chat id，让恢复的会话沿用同一 chat；chat id 只是通知标签，不是凭据 |
-| `<data-dir>/chat-subs.json` | daemon `chatsubs.go` | 每个 chat 订阅的 WI、事件游标、已送达的决策键与已显示的提醒；原子写 |
-| `<data-dir>/chat-status/<chat>.status` | 常驻 watcher（`watcher/engine.go`；路径由 daemon 的订阅应答 `status_path` 给出，`daemon/chatsubs.go`） | 该 chat 的进度文件（主路径） |
-| `$XDG_RUNTIME_DIR/polyforge/chat-<chat>.{lock,pid,status}`（无 `XDG_RUNTIME_DIR` 时为临时目录下按 uid 区分的 0700 目录） | 常驻 watcher `watcher/files.go` | 单实例锁、pid 文件、回退进度文件（daemon 未给出主路径时）；回退目录不是本人所有或可被他人写入时拒绝使用 |
+| `<data-dir>/chat-subs.json` | daemon `chatsubs.go` | 每个 chat 订阅的 WI、事件游标与已送达的决策键；原子写 |
+| `$XDG_RUNTIME_DIR/polyforge/chat-<chat>.{lock,pid,status}`（无 `XDG_RUNTIME_DIR` 时为临时目录下按 uid 区分的 0700 目录） | 常驻 watcher `watcher/files.go` | 单实例锁、pid 文件、该 chat 的进度文件；临时目录不是本人所有或可被他人写入时拒绝使用 |
 
 ### E.3 `attrs.blocked_seal` 与 `sealed_head` / `sealed_machine`
 
@@ -637,8 +635,8 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `runtime-state.json` | runtime `runtime.go` | runtime 的 job 记录（旧文档称作 `state.json`） |
 | `claiming.json` | runtime `claiming.go` | 领取前的持久化意图日志（B1，`reference.md#§3.5`），崩溃后重放 |
 | `manual-models.json` | runtime `manualmodels.go` | 每个 WI 的 `pf submit --models` 列表（只在本机有效） |
-| `events.log`（`.1`…`.3`）/ `events.seq` | observe `events.go` | 事件 JSONL（16 MiB 轮转，保留 3 代）/ 轮转时写入的每 WI 序号快照，保证 seq 跨重启单调 |
-| `chats.json`、`chat-subs.json`、`chat-status/` | 见 E.2 | |
+| `events/wi-<id>.jsonl`、`events/daemon.jsonl` | observe `events.go` | 每 WI 一个事件 JSONL（seq = 文件末行 seq + 1，跨重启单调）；静默超过 30 天的文件（含 daemon.jsonl）在 daemon 启动时删除 |
+| `chats.json`、`chat-subs.json` | 见 E.2 | |
 | `git/<wi>.git` | runtime | capsule 的外置 git-dir（agent 碰不到 hooks/config） |
 | `release/<tag>`、`release/current` | `tools/install.sh` | release checkout；daemon 以 `release/current/workflows` 为 `-workflows-dir` |
 | `step-agent/`、`step-agent-sessions/`、`claude-config/` | runtime（harness root，默认即 data dir） | 专用 pi agent 目录 / pi 会话 / Claude Code 配置目录（其 `settings.json` env 块是凭据权威层） |

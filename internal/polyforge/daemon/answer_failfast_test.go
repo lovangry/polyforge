@@ -54,10 +54,10 @@ func TestAnswerWithoutLiveBridgeHandleFailsFast(t *testing.T) {
 	}
 }
 
-// answerAgent is a fake engine handle that carries the bridge's Answer
+// answerAgent is a fake engine handle that carries the driver's Answer
 // method, so the answer route takes its driver branch.
 type answerAgent struct {
-	runtime.AgentHandle
+	Agent
 	answered chan string
 }
 
@@ -72,12 +72,12 @@ func TestAnswerWithNoPendingQuestionIsRefused(t *testing.T) {
 	aa := &answerAgent{answered: make(chan string, 1)}
 	td := newTestDaemon(t, func(c *Config) {
 		inner := fakeEngineStarter()
-		c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
+		c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (Agent, error) {
 			h, err := inner(ctx, in)
 			if err != nil {
 				return nil, err
 			}
-			aa.AgentHandle = h
+			aa.Agent = h
 			return aa, nil
 		}
 	})

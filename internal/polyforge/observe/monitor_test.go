@@ -112,9 +112,6 @@ func TestRuleHarnessSilentZeroSignalsAfterSpawn(t *testing.T) {
 	}
 	// the supervisor stays silent for that spawn until step_ended
 	expectNoVerdict(t, m, 150*time.Millisecond, "after the verdict")
-	if n := len(eventsOf(m, EvSupervisorVerdict)); n != 1 {
-		t.Fatalf("supervisor_verdict events: %d, want 1", n)
-	}
 }
 
 func TestRuleHarnessSilentUINoiseDoesNotCountAsWork(t *testing.T) {
@@ -442,50 +439,6 @@ func TestTranscriptSourceFollowsLatestStepStarted(t *testing.T) {
 	}
 }
 
-func TestDriverExitFlushesLastCommitBoundaryBeforeReporting(t *testing.T) {
-	// the terminal wrap trusts that the driver's last Version was published
-	// (it does not push on its own): the supervisor publishes FIRST, then
-	// reports the exit
-	h := newFakeHandle("att_1")
-	release := make(chan struct{})
-	pushes := make(chan struct{}, 4)
-	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
-			pushes <- struct{}{}
-			<-release
-			return "sha", true, gitops.PushTimings{}, nil
-		}
-	})
-	m.writeExec(t, 7, "release") // the terminal commit boundary
-	soon(t, time.Second, "the push started", func() bool { return len(pushes) == 1 })
-
-	h.die() // the driver returned while its last Version is still being published
-	expectNoOB(t, ob, 150*time.Millisecond, "the exit must wait for the in-flight publish")
-	close(release)
-	msg := waitOB(t, ob, "the exit report after the publish")
-	if msg.Reason != protocol.RecoverDeath {
-		t.Fatalf("reason %q", msg.Reason)
-	}
-	if len(eventsOf(m, EvPublished)) == 0 {
-		t.Fatal("the last Version must be published before the exit is reported")
-	}
-}
-
-func TestDriverExitFlushIsBoundedWhenThePushFails(t *testing.T) {
-	h := newFakeHandle("att_1")
-	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
-			return "", false, gitops.PushTimings{}, context.DeadlineExceeded
-		}
-	})
-	m.writeExec(t, 3, "code")
-	soon(t, time.Second, "a failed push", func() bool { return len(eventsOf(m, EvPushFailed)) >= 1 })
-	h.die()
-	if msg := waitOB(t, ob, "the exit report despite a failing push"); msg.Reason != protocol.RecoverDeath {
-		t.Fatalf("reason %q", msg.Reason)
-	}
-}
-
 func TestLiveProgressFaceReadsTheCurrentDispatch(t *testing.T) {
 	h := newFakeHandle("att_1")
 	m, _ := newTestMonitor(t, h, nil)
@@ -525,5 +478,43 @@ func TestActivityCarriesCandidateWithEffort(t *testing.T) {
 	soon(t, time.Second, "dispatch 2 adopted", func() bool { return m.activity().SpawnN == 2 })
 	if got := m.activity().Candidate; got != "pi:m" {
 		t.Fatalf("candidate %q, want pi:m", got)
+	}
+}
+
+// F10: an id-less pending question in execution.json is unanswerable;
+// the commit-boundary read names it with one pending_invalid event.
+func TestIDLessPendingQuestionWritesPendingInvalid(t *testing.T) {
+	m, _ := newTestMonitor(t, newFakeHandle("att_1"), nil)
+	writePendingQuestion(t, m, "", "which?", "grill")
+	soon(t, time.Second, "the pending_invalid event", func() bool { return len(eventsOf(m, "pending_invalid")) >= 1 })
+}
+
+// A daemon-initiated close stays quiet even when a recovery it was queued
+// behind adopts a new derivation: that derivation's expected exit raises
+// nothing either.
+func TestMarkClosingOutlivesARecovery(t *testing.T) {
+	h := newFakeHandle("att_1")
+	m, ob := newTestMonitor(t, h, nil)
+	m.markClosing()
+	h2 := newFakeHandle("att_2")
+	m.rtQ.Push(Attach{Msg: protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", SpawnN: 2}, Handle: h2})
+	soon(t, time.Second, "recovery adopted", func() bool { return m.currentSpawn() == 2 })
+	h2.die()
+	expectNoOB(t, ob, 200*time.Millisecond, "the closed derivation's exit")
+	if n := len(eventsOf(m, EvNeedsRecovery)); n != 0 {
+		t.Fatalf("needs_recovery events after MarkClosing: %d", n)
+	}
+}
+
+// A monitor told to stop leaves the link's facts to its successor, even
+// when its loop picks the facts case before the stop case.
+func TestStoppingMonitorLeavesFactsToItsSuccessor(t *testing.T) {
+	m, _ := newTestMonitor(t, newFakeHandle("att_1"), nil)
+	m.requestStop()
+	soon(t, time.Second, "the monitor stopped", func() bool { return len(eventsOf(m, EvJobStopped)) == 1 })
+	m.link.Fact(supervise.StepStarted{Step: "next", SpawnN: 7, StartedAt: time.Now()})
+	m.drainFacts() // the select's facts case, taken after the stop
+	if facts := m.link.Facts.Drain(); len(facts) != 1 {
+		t.Fatalf("the stopping monitor consumed the successor's facts: %d left", len(facts))
 	}
 }

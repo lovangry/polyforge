@@ -18,9 +18,10 @@ import (
 // request lost.
 func TestRecoveryBurstNeverDropped(t *testing.T) {
 	const n = 300
-	rt := supervise.NewQueue[Attach]()
+	rt := supervise.NewQueue[protocol.RTMsg]()
 	ob := supervise.NewQueue[protocol.OBMsg]()
-	o, err := New(Config{RT: rt, OB: ob, DataDir: t.TempDir(), PollInterval: 5 * time.Millisecond})
+	agents := newAgentTable()
+	o, err := New(Config{RT: rt, OB: ob, Agent: agents.lookup, DataDir: t.TempDir(), PollInterval: 5 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,11 +38,8 @@ func TestRecoveryBurstNeverDropped(t *testing.T) {
 			t.Fatal(err)
 		}
 		handles[i] = newFakeHandle(wi)
-		rt.Push(Attach{
-			Msg:    protocol.RTMsg{Kind: protocol.RTStarted, WorkItem: wi, SpawnN: 1},
-			Handle: handles[i],
-			WI:     WIInfo{WorkItem: wi, Project: "proj", CapsuleDir: dir, BundleName: "b"},
-		})
+		agents.set(wi, handles[i], dir)
+		rt.Push(protocol.RTMsg{Kind: protocol.RTStarted, WorkItem: wi, SpawnN: 1})
 	}
 	soon(t, 5*time.Second, "all monitors registered", func() bool {
 		for i := 0; i < n; i++ {

@@ -90,7 +90,7 @@ func TestV1S06HangRecovery(t *testing.T) {
 	if n := countOf(kinds, "needs_recovery"); n != 1 {
 		t.Fatalf("needs_recovery fired %d times, want 1 (completion only): %v", n, kinds)
 	}
-	if n := countOf(kinds, "supervisor_verdict"); n != 0 {
+	if n := countOf(kinds, "step_dead"); n != 0 {
 		t.Fatalf("the supervisor judged a live step process dead: %v", kinds)
 	}
 

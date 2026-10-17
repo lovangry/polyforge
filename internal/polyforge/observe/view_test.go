@@ -4,6 +4,7 @@ package observe
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -17,10 +18,10 @@ func TestEventsFileShapeIsJSONLEventEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The durable record: every ring entry exists as ONE JSONL line in
+	// The durable record: every entry exists as ONE JSONL line under
 	// the daemon data dir, parseable as protocol.EventEntry.
 	soon(t, time.Second, "needs_input event persisted", func() bool {
-		entries, err := ReadEventsFile(m.log.Path())
+		entries, err := ReadEventsDir(filepath.Dir(m.log.dir))
 		if err != nil {
 			return false
 		}
@@ -31,7 +32,7 @@ func TestEventsFileShapeIsJSONLEventEntry(t *testing.T) {
 		}
 		return false
 	})
-	entries, err := ReadEventsFile(m.log.Path())
+	entries, err := ReadEventsDir(filepath.Dir(m.log.dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,24 +54,6 @@ func TestEventsFileShapeIsJSONLEventEntry(t *testing.T) {
 		}
 	}
 	if !started {
-		t.Fatal("job_started must be the first ring/file entry")
-	}
-}
-
-// The ring is bounded: 500 entries per WI, oldest dropped.
-func TestEventRingBounded(t *testing.T) {
-	h := newFakeHandle("att_1")
-	m, _ := newTestMonitor(t, h, nil)
-	for i := 0; i < RingCap+50; i++ {
-		if err := m.log.Append("wi_ring", "t_event", nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// The ring-bound pin goes through a cursor inside the ring window
-	// (the ring answers): EventLog.Since was deleted with the audit's
-	// dead-code sweep, and a seq floor of 0 would serve the durable
-	// files instead once the ring has rotated.
-	if got := len(m.log.SinceAfter("wi_ring", 50)); got != RingCap {
-		t.Fatalf("ring size: got %d, want %d", got, RingCap)
+		t.Fatal("job_started must be in the work item's file")
 	}
 }
