@@ -11,11 +11,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/polyforge/crashpoint"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
@@ -123,7 +125,8 @@ func (d *Daemon) replaySubmitQueue() {
 	// reconciliation finished, and the claim's own probe and the hub's CAS
 	// decide them then.
 	probe := !d.rt.Reconciling()
-	for _, e := range entries {
+	var keep []qEntry
+	for i, e := range entries {
 		if e.WorkItemID == "" {
 			continue
 		}
@@ -145,13 +148,14 @@ func (d *Daemon) replaySubmitQueue() {
 				continue
 			}
 		}
-		if err := d.q.Enqueue(e); err != nil {
-			fmt.Fprintf(os.Stderr, "daemon: submit replay: %s: queue persist failed: %v\n", e.WorkItemID, err)
-		}
+		crashpoint.At("queue.replay:" + strconv.Itoa(i))
+		keep = append(keep, e)
 	}
-	// Rewrite the file even when nothing survived, so dropped entries do
-	// not replay again on the next start.
-	if err := d.q.Flush(); err != nil {
-		fmt.Fprintf(os.Stderr, "daemon: submit replay: queue flush failed: %v\n", err)
+	// ONE write, after the filter: the file keeps the previous process's
+	// entries until then, so a crash mid-replay loses none of them; it is
+	// rewritten even when nothing survived, so dropped entries do not
+	// replay again on the next start.
+	if err := d.q.Restore(keep); err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: submit replay: queue persist failed: %v\n", err)
 	}
 }

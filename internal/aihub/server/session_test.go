@@ -7,6 +7,7 @@ package server
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -728,5 +729,39 @@ func TestReporterGateContinueAbandonOnly(t *testing.T) {
 	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+own+"/force-end-session", maintKey,
 		map[string]string{"reason": "holder lost"}, &got); code != 200 || got.Status != "queued" {
 		t.Fatalf("maintainer force-end-session: %d %s %s", code, raw, got.Status)
+	}
+}
+
+// TestClaimRefusedWithoutChainCommitsNothing (CR-8): the bare repo is
+// created before the claim transaction, so a hub that cannot create it
+// refuses the claim with nothing committed — the work item stays queued
+// for the retry, no claim waits on an idempotency-cache replay.
+func TestClaimRefusedWithoutChainCommitsNothing(t *testing.T) {
+	e := newSrvEnv(t)
+	id := createExecWIOverHTTP(t, e, "no chain")
+	// a file where the bare repo must go: git init fails
+	if err := os.MkdirAll(e.srv.Git.Root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(e.srv.Git.RepoDir(id), []byte("in the way"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, raw, _ := sessClaim(t, e, id, "81818181818181818181818181818181", "cr8"); code != 500 {
+		t.Fatalf("claim without a chain: %d %s", code, raw)
+	}
+	var wi struct {
+		Status string `json:"status"`
+	}
+	if code, raw := e.do(t, "GET", "/api/v1/work-items/"+id, e.key, nil, &wi); code != 200 {
+		t.Fatalf("get: %d %s", code, raw)
+	}
+	if wi.Status != api.StatusQueued {
+		t.Fatalf("a refused claim must commit nothing: status %q", wi.Status)
+	}
+	if err := os.Remove(e.srv.Git.RepoDir(id)); err != nil {
+		t.Fatal(err)
+	}
+	if code, raw, _ := sessClaim(t, e, id, "81818181818181818181818181818181", "cr8"); code != 200 {
+		t.Fatalf("the retry must claim: %d %s", code, raw)
 	}
 }

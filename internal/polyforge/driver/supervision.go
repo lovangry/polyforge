@@ -747,6 +747,7 @@ func (d *Driver) applyStepFailedLocked(req TransitionRequest, info *appliedInfo)
 		f.Cause = FailExitModel
 	}
 	dec := d.decideFailureLocked(req.StepID, st, f)
+	st.Dispatch = 0
 	st.Attempts = append(st.Attempts, capsule.Attempt{
 		Cause:         CauseInfraFailure,
 		FailureCause:  f.Cause,

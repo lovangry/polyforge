@@ -22,7 +22,8 @@
 //     proxy;
 //   - an index.lock that has outlived the stale bound is removed at
 //     acquisition (see cleanStaleLocks for why age, not PID, is the only
-//     safe signal);
+//     safe signal while step processes may run); once they are reaped,
+//     ClearIndexLocks removes them whatever their age;
 //   - NO gitlink ever enters local history: `git add -A` followed by a
 //     `git ls-files --stage` scan refuses mode-160000 entries with the
 //     typed GIT-412 LOCAL_GITLINK_DETECTED error BEFORE the commit is
@@ -1346,6 +1347,32 @@ func cleanStaleLocks(gitDir string) error {
 	return os.Remove(lockPath)
 }
 
+// ClearIndexLocks removes the work item's index.lock files whatever
+// their age: the capsule git-dir's and each task repo's under
+// capsuleDir/repos. Only for a caller that has just reaped every step
+// process of the work item; the per-WI git mutex taken here excludes
+// the daemon's own git invocations, so no holder of those locks is
+// alive. Returns the removed paths.
+func ClearIndexLocks(workItemID, gitDir, capsuleDir string) []string {
+	release := Lock(workItemID)
+	defer release()
+	var paths []string
+	if gitDir != "" {
+		paths = append(paths, filepath.Join(gitDir, "index.lock"))
+	}
+	if capsuleDir != "" {
+		repos, _ := filepath.Glob(filepath.Join(capsuleDir, capsule.DirRepos, "*", ".git", "index.lock"))
+		paths = append(paths, repos...)
+	}
+	var removed []string
+	for _, p := range paths {
+		if os.Remove(p) == nil {
+			removed = append(removed, p)
+		}
+	}
+	return removed
+}
+
 // EventTaskRefDiverged is the error event kind raised when the carrier
 // push of one task repo is rejected non-fast-forward.
 const EventTaskRefDiverged = "task_ref_diverged"
@@ -1413,6 +1440,29 @@ func IsPermanentPushRejection(err error) bool {
 	return strings.Contains(msg, "[remote rejected]") ||
 		strings.Contains(msg, "pre-receive hook declined") ||
 		IsNonFastForward(err, "")
+}
+
+// IsTransientRemoteFailure reports a remote git call that failed for a
+// reason a retry can change: the hub unreachable, the connection cut, a
+// timeout, or a 5xx answer. An answer the server gave on purpose (auth
+// refused, ref or repository not found, any other 4xx) and a local
+// failure are not transient. Matches git's C-locale output (callers run
+// git under CEnv).
+func IsTransientRemoteFailure(err error) bool {
+	var text string
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		text += " " + strings.ToLower(e.Error())
+	}
+	for _, m := range []string{
+		"timed out", "could not resolve host", "connection refused", "connection reset",
+		"failed to connect", "couldn't connect", "early eof", "remote end hung up",
+		"empty reply from server", "recv failure", "send failure", "returned error: 5",
+	} {
+		if strings.Contains(text, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsNonFastForward reports a push refused because the remote ref is not an

@@ -30,6 +30,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/common/workflow"
+	"github.com/silgrid/polyforge/internal/polyforge/crashpoint"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
@@ -914,6 +915,7 @@ func (r *Runtime) claimLocked(ctx context.Context, wi, id string, probe *api.Wor
 	}
 	// The claim goes out under the canonical id: the journal entry, the
 	// lock and the claim all name the same work item.
+	crashpoint.At("claim.before-answer")
 	resp, err := r.hub.SessionClaim(api.SessionClaimRequest{
 		WorkItemID:     id,
 		SessionID:      sessionID,
@@ -951,6 +953,7 @@ func (r *Runtime) claimLocked(ctx context.Context, wi, id string, probe *api.Wor
 		cerr := fmt.Errorf("runtime: %s: the claim answer names work item %s", id, cid)
 		return nil, r.abandonClaim(ctx, &job{wi: id, sessionID: sessionID}, id, cerr, cerr.Error())
 	}
+	crashpoint.At("claim.after-answer")
 	return r.claimPlaceholder(ctx, wi, id, sessionID, resp, wcfg, manual)
 }
 
@@ -1615,15 +1618,61 @@ func quarantineCapsule(capsuleDir, gitDir string) error {
 	if !dirExists(capsuleDir) {
 		return nil // nothing to move (a capsule never materialized)
 	}
+	// The worktree's .git pointer names the git-dir by absolute path. It
+	// follows the git-dir BEFORE the worktree moves: left in place it
+	// would name the fresh clone's git-dir that takes the old path, and a
+	// git run in the quarantined tree would commit that tree onto the
+	// live chain.
+	if err := repointWorktree(capsuleDir, gitDir, movedGit); err != nil {
+		if movedGit != "" {
+			if rerr := renameFn(movedGit, gitDir); rerr != nil {
+				return fmt.Errorf("quarantine split the scene: repointing the worktree failed (%w) and restoring the git-dir from %s failed (%v)", err, movedGit, rerr)
+			}
+		}
+		return fmt.Errorf("quarantine of the capsule failed, git-dir restored: %w", err)
+	}
+	crashpoint.At("quarantine.between")
 	if err := renameFn(capsuleDir, capsuleDir+".quarantined."+ts); err != nil {
 		if movedGit != "" {
 			if rerr := renameFn(movedGit, gitDir); rerr != nil {
 				return fmt.Errorf("quarantine split the scene: moving the worktree failed (%w) and restoring the git-dir from %s failed (%v)", err, movedGit, rerr)
 			}
+			_ = repointWorktree(capsuleDir, movedGit, gitDir)
 		}
 		return fmt.Errorf("quarantine of the capsule failed, git-dir restored: %w", err)
 	}
 	return nil
+}
+
+// samePath compares two absolute paths whose last element may not exist
+// (git records the git-dir with its parent's symlinks resolved).
+func samePath(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	resolve := func(p string) string {
+		dir, err := filepath.EvalSymlinks(filepath.Dir(p))
+		if err != nil {
+			return filepath.Clean(p)
+		}
+		return filepath.Join(dir, filepath.Base(p))
+	}
+	return resolve(a) == resolve(b)
+}
+
+// repointWorktree rewrites a worktree's .git pointer that names gitDir
+// from to the git-dir to; an empty to (the git-dir is gone) removes the
+// pointer. A pointer naming anything else is left alone.
+func repointWorktree(worktree, from, to string) error {
+	pointer := filepath.Join(worktree, ".git")
+	raw, err := os.ReadFile(pointer)
+	if err != nil || from == "" || !samePath(strings.TrimSpace(strings.TrimPrefix(string(raw), "gitdir:")), from) {
+		return nil
+	}
+	if to == "" {
+		return os.Remove(pointer)
+	}
+	return atomicfile.Write(pointer, []byte("gitdir: "+to+"\n"), 0o644)
 }
 
 // renameFn is the filesystem move quarantineCapsule uses (a seam for the
@@ -2185,6 +2234,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 		}
 		return fmt.Errorf("runtime: %s: session-end failed (job left sealing, retrying): %w", j.wi, endErr)
 	}
+	crashpoint.At("seal.ended")
 	if err := sealReadOnly(j.capsuleDir); err != nil {
 		// The generation is closed; a chmod failure is a scene-preservation
 		// wart, not a seal failure. Loud, non-fatal.
@@ -2224,6 +2274,7 @@ func (r *Runtime) sealNetwork(ctx context.Context, j *job, reason, note string, 
 		// push degrades the terminal reason to blocked — the local commit
 		// keeps the bytes, but the server never heard the final state.
 		r.syncLiveTranscript(j.capsuleDir)
+		crashpoint.At("seal.committing")
 		_, _, _, perr := gitops.CommitPush(j.git, "seal: "+reason)
 		for i := 0; i < 2 && perr != nil; i++ {
 			_, perr = gitops.Push(j.git)
@@ -2256,6 +2307,7 @@ func (r *Runtime) sealNetwork(ctx context.Context, j *job, reason, note string, 
 			j.mu.Lock()
 			j.sealedPush = true
 			j.mu.Unlock()
+			crashpoint.At("seal.pushed")
 		}
 	}
 	// Task-repo uncommitted work (polyforge#167): every close but wrapped
@@ -2308,11 +2360,10 @@ func (r *Runtime) sealNetwork(ctx context.Context, j *job, reason, note string, 
 //	stay so the holder daemon's restart can attach once the operator
 //	clears clean_pause (M3).
 //
-// A SessionEnd failure leaves the record PAUSED against a hub that
-// still says running: the restart reconciliation self-heals exactly
-// that shape (verify matches + running + a local Paused record →
-// resume through the recovery engine), so the error is loud but never
-// a dangling half-close.
+// A SessionEnd failure (or a crash before it) leaves the record PAUSED
+// against a hub that still says running: the restart reconciliation
+// replays the pause (replayPause), so the operator's pause is never lost
+// and the error is loud but never a dangling half-close.
 func (r *Runtime) pauseOp(ctx context.Context, j *job) error {
 	if err := j.transition(StatePaused); err != nil {
 		return err
@@ -2323,6 +2374,7 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job) error {
 	j.cleanPause = true
 	j.mu.Unlock()
 	r.persist()
+	crashpoint.At("pause.persisted")
 	// Six-layer teardown: no writer survives into the retained scene.
 	r.killAgentTree(j)
 	// The retained record carries no live agent: clear the pid so the

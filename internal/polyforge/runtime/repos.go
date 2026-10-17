@@ -147,6 +147,14 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 	return out, nil
 }
 
+// fetchTaskRefFn is the carrier read (a seam for the hub-blip test);
+// carrierFetchBackoff is the first wait of its retries of a transient
+// failure (then doubled, three retries in all).
+var (
+	fetchTaskRefFn      = gitops.FetchTaskRef
+	carrierFetchBackoff = time.Second
+)
+
 // restoreTaskRepoState moves a FRESH task-repo clone to the head the
 // previous session left in the WI's carrier ref (gitops.TaskRefName):
 // fetch the ref, point a local branch at it, sync index and worktree.
@@ -163,7 +171,19 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 // is a just-created clone with no local state.
 func (r *Runtime) restoreTaskRepoState(ctx context.Context, j *job, name, dir string) (string, error) {
 	ref := gitops.TaskRefName(name)
-	sha, err := gitops.FetchTaskRef(ctx, j.git, dir, name)
+	sha, err := fetchTaskRefFn(ctx, j.git, dir, name)
+	// a hub blip must not park the work item blocked: a transient failure
+	// is retried with backoff before the claim gives up on it; a refusal
+	// (auth, no such repository) fails at once
+	for wait := carrierFetchBackoff; gitops.IsTransientRemoteFailure(err) && wait <= 4*carrierFetchBackoff; wait *= 2 {
+		fmt.Fprintf(os.Stderr, "runtime: %s: repo %s: carrier %s fetch failed, retrying in %s: %v\n", j.wi, name, ref, wait, err)
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("carrier %s fetch failed: %w", ref, err)
+		case <-time.After(wait):
+		}
+		sha, err = fetchTaskRefFn(ctx, j.git, dir, name)
+	}
 	if err != nil {
 		return "", fmt.Errorf("carrier %s fetch failed: %w", ref, err)
 	}

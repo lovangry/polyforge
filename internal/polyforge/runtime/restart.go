@@ -535,6 +535,15 @@ func (r *Runtime) attachPaused(ctx context.Context, rec *jobRecord, cause, detai
 	if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
 		return err
 	}
+	// The hub answered paused with clean_pause cleared: the local mirror
+	// follows BEFORE the attach flips the hub to running, so a crash
+	// between the two never reads as a pending operator pause.
+	j.mu.Lock()
+	j.cleanPause = false
+	j.mu.Unlock()
+	if err := r.persist(); err != nil {
+		return err
+	}
 	// The attach runs under the work item's lock (the caller's): a Stop or
 	// a second resume of it answers DAEMON-409 meanwhile, the other work
 	// items' doors stay open.
@@ -737,6 +746,35 @@ func (r *Runtime) restartRunning(ctx context.Context, rec *jobRecord) error {
 	return r.restartResume(ctx, rec, j, causeDaemonRestart, "daemon restart (crash mid-run)")
 }
 
+// pausePending reports the operator pause whose SessionEnd(paused) never
+// reached the hub: pauseOp persists the Paused record with clean_pause
+// FIRST, and every attach clears the local clean_pause before it flips
+// the hub back to running — so a clean Paused record facing a running
+// hub is that pause, never an interrupted resume.
+func pausePending(rec *jobRecord) bool {
+	return rec.State == string(StatePaused) && rec.CleanPause && rec.StopReason == protocol.FinishPaused
+}
+
+// replayPause finishes the pending operator pause at restart: orphans
+// reaped, the pause's network half (seal push, WIP, SessionEnd(paused))
+// run again. A failure keeps the record and defers to the verify retry
+// (awaitVerify): its next answer reconciles the record again, so the
+// pause lands once the hub takes it.
+func (r *Runtime) replayPause(ctx context.Context, rec *jobRecord, j *job) {
+	r.reapOrphans(rec.WorkItemID, j.capsuleDir)
+	if r.cfg.EventTap != nil {
+		r.cfg.EventTap(rec.WorkItemID, "pending_pause_replay", map[string]any{
+			"session_fingerprint": j.fingerprint(),
+			"note":                "crash between the pause record persist and SessionEnd(paused); the pause replayed at restart",
+		})
+	}
+	if err := r.pauseNetwork(j); err != nil {
+		r.awaitVerify(ctx, rec, fmt.Errorf("pending pause replay: %w", err))
+		return
+	}
+	fmt.Fprintf(os.Stderr, "runtime: %s: pending operator pause replayed; record retained paused\n", rec.WorkItemID)
+}
+
 // isTerminalStopReason reports whether a persisted stop_reason is a
 // TERMINAL close verdict (wrapped|failed|blocked) — as opposed to the
 // retained operator pause's own "paused" reason or an unset one. The
@@ -793,10 +831,9 @@ func (r *Runtime) restartResume(ctx context.Context, rec *jobRecord, j *job, rec
 		// Finding 2 (v1.5 review): a RETAINED paused record returns to
 		// RUNNING through the legal edge before the engine resumes it —
 		// reached from the attach path (the hub said paused +
-		// clean_pause=false after the operator's resume) and as the
-		// self-heal of a pause close whose SessionEnd never reached the
-		// hub (verify answered running: the hub is the authority and
-		// still wants the work item run).
+		// clean_pause=false after the operator's resume) and for a
+		// graceful-shutdown record the hub still runs (a pending operator
+		// pause never gets here: replayPause finishes it).
 		if err := j.transition(StateRunning); err != nil {
 			return err
 		}
@@ -914,6 +951,10 @@ func (r *Runtime) restartVerified(ctx context.Context, rec *jobRecord, v *api.Se
 			// abort.
 			if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
 				r.blockUnrecoverable(ctx, rec, err)
+				return
+			}
+			if j := r.jobOf(rec.WorkItemID); j != nil && pausePending(rec) {
+				r.replayPause(ctx, rec, j)
 				return
 			}
 			if serr := r.restartRunning(ctx, rec); serr != nil {
@@ -1161,7 +1202,12 @@ func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bo
 	// was live when Restart returned, then the daemon's startup
 	// re-attachment pass hands it over.
 	r.announceReconciled(j.wi)
-	return true
+	// a reconciliation that deferred again (a pending pause whose
+	// SessionEnd failed) keeps this retry going
+	j.mu.Lock()
+	again := j.awaitingHub
+	j.mu.Unlock()
+	return !again
 }
 
 // clearAwaitingHub drops j's deferred-verify latch and persists the change.
