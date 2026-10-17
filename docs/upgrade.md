@@ -1287,3 +1287,22 @@ it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
   `pf daemon ensure` and `tools/install.sh` use) instead of
   `m-<full hostname>`. A recorded id always wins, so running machines keep
   theirs.
+
+## Work machines: per-work-item events and owner subscriptions (polyforge#181)
+
+The daemon now keeps one events file per work item under
+`<data-dir>/events/` (`wi-<id>.jsonl`, daemon scope `daemon.jsonl`; a
+file silent for 30 days is removed at start) and no longer reads the old
+`events.log`, `events.log.1`…`.3` and `events.seq`; delete them by hand
+once the new daemon runs. Numbering restarts per work item, and a
+watcher whose cursor is past the new file replays it from the start. A
+decision carried only by an event (`step_dead`, `candidates_exhausted`,
+`submit_rejected`, `submit_dropped`, `daemon_restarted`,
+`carrier_push_failed`, `human_gate_unasked`) that no watcher had acked
+before the upgrade is not re-delivered; state-based decisions
+(needs_input, blocked, paused, completed, failed, canceled) are, from
+execution.json and the hub. The watcher's progress file moves to
+`$XDG_RUNTIME_DIR/polyforge/chat-<chat>.status`, and a resident watcher's
+start subscribes its chat to the work items it or its owner holds (the
+attention and heartbeat routes are gone): restart running `pf watch
+--chat` processes with the new `pf`.
