@@ -193,6 +193,15 @@ type ForceEndSessionRequest struct {
 	Reason string `json:"reason"`
 }
 
+// ResumeBlockedRequest is the resume-blocked door's body. AcceptLostWork
+// is the human's explicit acceptance that the work the sealing machine
+// never pushed is lost: the door then clears the blocked seal (the
+// recorded head and machine, see SessionClaim.SealedHead) so a claim on
+// any machine continues from the chain aihub holds.
+type ResumeBlockedRequest struct {
+	AcceptLostWork bool `json:"accept_lost_work,omitempty"`
+}
+
 // SessionAttachRequest resumes a paused WI under the SAME session (M3:
 // same-machine restart resume; clean_pause WIs refuse attach).
 type SessionAttachRequest struct {

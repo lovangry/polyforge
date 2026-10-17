@@ -68,10 +68,6 @@ func (m *OwnerManager) CheckSessionCredential(wiID, username, secret string) (st
 	return fp.String, nil
 }
 
-func (m *WIManager) hasUnfinishedBlockers(wiID string) (bool, error) {
-	return unfinishedBlockers(m.db, wiID)
-}
-
 // unfinishedBlockers is the shared query (owner must not depend on the
 // WIManager instance; both reach the same single-writer connection, and
 // the queryRower surface lets the session claim recheck it inside its own
