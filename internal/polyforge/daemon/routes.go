@@ -554,7 +554,7 @@ func (d *Daemon) statusJobs() ([]statusJob, int) {
 			SpawnN:             ji.SpawnN,
 			SessionFingerprint: ji.SessionFingerprint,
 			AgentPID:           ji.AgentPID,
-			Origin:             (*protocol.Origin)(ji.Origin),
+			Origin:             ji.Origin,
 		}
 		if qid, ok := pending[ji.WorkItem]; ok {
 			sj.QuestionID = qid

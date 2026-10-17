@@ -15,6 +15,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
@@ -190,13 +191,10 @@ const (
 	OriginAuto = "auto" // auto-claim (pf ops auto on)
 )
 
-// Origin is the daemon-side record of where a job came from. ChatID is a
-// notification label, not a credential. Owner may be empty (unknown).
-type Origin struct {
-	Kind   string `json:"kind"`
-	ChatID string `json:"chat_id,omitempty"`
-	Owner  string `json:"owner,omitempty"`
-}
+// Origin is the record of where a job came from (the one wire shape,
+// protocol.Origin). ChatID is a notification label, not a credential.
+// Owner may be empty (unknown).
+type Origin = protocol.Origin
 
 func (j *job) record() *jobRecord {
 	j.mu.Lock()

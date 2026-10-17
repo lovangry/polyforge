@@ -413,11 +413,8 @@ func (d *Daemon) watchSnapshot(wi string, item *api.WorkItem, hubRead bool, afte
 		snap.Known, held = true, true
 		snap.Slug = j.Slug
 		localLive = j.Status != string(runtime.StatePaused)
-		wj := &protocol.WatchJob{Status: j.Status,
+		wj := &protocol.WatchJob{Status: j.Status, Origin: j.Origin,
 			QuestionID: j.QuestionID, LastProgressAgoSec: j.LastWorkAgoSec}
-		if j.Origin != nil {
-			wj.Origin = &protocol.Origin{Kind: j.Origin.Kind, ChatID: j.Origin.ChatID, Owner: j.Origin.Owner}
-		}
 		snap.Job = wj
 	}
 	// The hub record (read at most once per snapshot, by the resolution
