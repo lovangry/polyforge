@@ -90,10 +90,9 @@ commits on a reviewed, verified tree.
 Its two defining properties:
 
 - **Review is the owner-rules gate.** `review` carries the same fixed owner-rules
-  checklist as `bug-fix` and `feature-full` (no faked concurrency semantics, no
-  unrequested concepts, no manual-gate bypass, no backward-compatibility code,
-  agent-reachability statement for new daemon/aihub entry points) on top of plan
-  conformance — a deletion-type change cannot dodge the rules by riding the light
+  checklist and shared principles as `bug-fix` and `feature-full` (no faked
+  concurrency semantics, no unrequested concepts, no manual-gate bypass, no unruled
+  behavior change, among others) on top of plan conformance — a deletion-type change cannot dodge the rules by riding the light
   lane. If a "chore" turns out to need genuine design or spec work rather than
   removal judgment, it was misrouted: cancel and re-file on `feature-full`.
 - **No release slot.** Deliverable does not mean self-releasing: the lane's changes

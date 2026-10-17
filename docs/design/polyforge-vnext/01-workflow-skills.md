@@ -133,6 +133,7 @@ workflows/<bundle-name>/
 └── steps/
     └── <step-id>.md       # 每 step 一个；文件名 = step id
 workflows/_shared/
+├── principles.md          # 通用工程原则：由 {{principles}} 渲染进 grill/spec/plan/code 类 step 与 review
 └── steps/
     └── <step-id>.md       # 多个 bundle 共用的 step 定义（deliver.md、verification.md、review.md）
 ```
@@ -142,6 +143,8 @@ workflows/_shared/
 **共享 step 定义（2026-10-16 裁定 G1）**：查找顺序由 `workflow.StepDefinitionPath` 决定——bundle 自己的 `steps/<id>.md` 存在即用它（可覆盖共享版本）；否则回退到 `workflows/_shared/steps/<id>.md`。`_shared` 不是 bundle（没有 `workflow.md`），物化时整目录拷到 capsule 的 `workflows/_shared/`。不要用 symlink 共享：物化的 `copyTree` 跳过 symlink。多个 bundle 逐字相同的 step 文件必须放进 `_shared`（`driver/shared_steps_test.go` 守护）。
 
 **step 变量（2026-10-16 裁定 G1 后续）**：车道之间只差几处事实（rewind 目标、产物名、车道专属检查）的 step 也只写一份共享文本，差异写成 `{{name}}` 占位符，由 workflow.md 里该 step 条目的 `vars:` 填值（`common/workflow.RenderStepVars`；`name` 为 `[a-z][a-z0-9_]*`）。规则只有三条：渲染作用于整个定义文件（frontmatter 的 `output` schema 与正文都渲染，`readStepDefinition` 与 `loadStepOutputSchema` 读的是同一份渲染结果）；值原样插入（YAML 块标量的结尾换行被去掉），不再二次展开；两个方向都 fail-closed——文件里用了却没声明的占位符、声明了却没被用到的变量都是错误（派发时 step 定义不可读，schema 记 `output_schema_unloadable`；`TestShippedStepDefinitionsResolve` 对所有出厂 bundle 守护）。能用中性措辞表达的差异不开变量。字面的 `{{name}}` 没有转义写法；变量值原样插入（在 schema 行里即未加引号的 YAML），bundle 视为可信、由测试守护（`TestShippedStepOutputSchemasCompile`、`TestShippedStepDefinitionsResolve`）。出厂的 `verification`（`output_required`、`build_step`、`position`、`lane_checks`、`never_pre_existing`）与 `review`（`build_step`、`scope_source`、`intro`、`judge`）按此共享；`TestSharedStepPromptsKeepLaneFacts` 逐 bundle 派发并核对每条车道事实仍在 prompt 里、且不混入别的车道的事实。workflow.md 正文的交付与发版说明也只留一段指向 `_shared/steps/deliver.md` 的「Delivery and releases」。
+
+**共享原则（polyforge#191）**：`workflows/_shared/principles.md` 是对任何项目都成立的工程原则（简单、可恢复、最小权限、证据、行为由所有者决定），外加一条要求：step 开工前先读 `repos/` 下每个仓库根目录的 `AGENTS.md`（否则 `CLAUDE.md`），项目规则同等约束、冲突时以项目规则为准并在产物里注明。全文只有这一份：step 定义文件里写 `{{principles}}` 即由 `workflow.ReadStepDefinition` 渲染成该文件内容——这是唯一不需要在 `vars:` 里声明的占位符，step 条目声明同名变量是错误；没用到它的定义不读该文件（物化前的旧 capsule 照常运行）。每个用到它的 step 在 `## Principles` 节里先写一段本 step 怎么用这些原则，再放 `{{principles}}`。出厂覆盖：feature-full 的 `grill`、`spec`、`plan`、`code`；autopilot 的 `grill`（兼写 memo，按 grill+spec 用）、`fix`（plan/code 类）；bug-fix 的 `root-cause`（给修复范围指引，按 plan 类+证据用）、`fix`；chore 的 `plan`、`code`；以及共享的 `review`（每条原则都是阻断检查，检查清单逐条展开）。每节不超过 1500 字节（`driver/principles_test.go` 守护覆盖范围、恰好一次与字节上限）。只对某一个仓库成立的规则不进 `workflows/`，写在该仓库自己的 `AGENTS.md`——polyforge 自己的（向后兼容代码、daemon/aihub 新入口的可达性声明等）在本仓库根目录的 `AGENTS.md`，`CLAUDE.md` 只有一行 `@AGENTS.md`（Claude Code 按 import 读入；pi 每个目录只加载第一个存在的 `AGENTS.md`/`CLAUDE.md`，读到的就是 `AGENTS.md`）。
 
 frontmatter 字段——**driver 只读 `output`**：
 

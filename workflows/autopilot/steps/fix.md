@@ -64,6 +64,12 @@ reasonable effort, do not fabricate a passing `build_status: green`. Leave it `r
 explain the blocker in `summary`, and let the honest state surface: a dishonest green
 here corrupts `verification` downstream.
 
+## Principles
+
+Pick the simplest mechanism; before adding timing, shutdown or retry logic, check whether the recovery path already covers it; no I/O under a lock.
+
+{{principles}}
+
 ## Output
 
 Emit the final JSON object per the schema above: every commit actually made, the final

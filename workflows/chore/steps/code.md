@@ -64,6 +64,12 @@ leave `build_status: red` and explain the blocker in `summary`. On this lane a r
 off is doubly important — `review` and `verification` are what stand between your
 tree and merge.
 
+## Principles
+
+Pick the simplest mechanism; before adding timing, shutdown or retry logic, check whether the recovery path already covers it; no I/O under a lock.
+
+{{principles}}
+
 ## Output
 
 Emit the final JSON object per the schema above: every commit actually made, the final

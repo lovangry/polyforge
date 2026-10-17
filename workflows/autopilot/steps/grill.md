@@ -78,6 +78,12 @@ requester, so whatever `fix` needs to know must end up in your memo.
   approach from the memo; that is why the memo states behavior, not mechanics.
 - Do not write test scenarios or code.
 
+## Principles
+
+Ask whether the change alters behavior or only the implementation and who may reach any new entry point; put each behavior-changing point to the owner. The memo states that existing behavior stays unchanged and what is out of scope.
+
+{{principles}}
+
 ## Output
 
 Emit the final JSON object per the schema above: the Q&A log path, the memo path, the

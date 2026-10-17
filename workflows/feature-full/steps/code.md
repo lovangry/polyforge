@@ -79,6 +79,12 @@ honestly: leave `build_status: red` and explain the blocker in `summary`. A dish
 green here corrupts every downstream gate (`verification`, `review`) that
 trusts this step's word for it.
 
+## Principles
+
+Pick the simplest mechanism; before adding timing, shutdown or retry logic, check whether the recovery path already covers it; no I/O under a lock.
+
+{{principles}}
+
 ## Output
 
 Emit the final JSON object per the schema above: every commit actually made (step id, sha,
