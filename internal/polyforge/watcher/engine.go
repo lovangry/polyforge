@@ -77,9 +77,10 @@ var ErrParentGone = errors.New("parent process gone")
 
 // Run is the resident watcher. Every cycle it first subscribes the chat
 // to the work items it or its owner holds (so a WI that becomes the
-// owner's while the watcher runs is picked up within one cycle), then
-// lists the chat's subscriptions and — per WI — reconciles the authoritative state BEFORE
-// it replays events after the daemon-held cursor (so a WI that ended
+// owner's while the watcher runs is picked up within one cycle; a failed
+// call is reported and retried next cycle, it does not stop the cycle),
+// then lists the chat's subscriptions and — per WI — reconciles the
+// authoritative state BEFORE it replays events after the daemon-held cursor (so a WI that ended
 // while the watcher was down is reported, never missed, and a reconnect
 // after a daemon restart needs no special case). Decisions print as
 // fixed-template lines on Out — those of the work items the first
@@ -105,6 +106,9 @@ func Run(ctx context.Context, api API, opts Options) error {
 		// print one by one.
 		owned bool
 		fresh map[string]bool
+		// ownedFailing: the last subscribe-owned call failed and said so;
+		// the cycle went on with the subscriptions the chat already has.
+		ownedFailing bool
 		// unacked holds the keys (outLine.key) of the lines already
 		// printed whose ack failed: the daemon still holds the old
 		// cursor, so the next cycle re-derives the same decisions —
@@ -124,16 +128,14 @@ func Run(ctx context.Context, api API, opts Options) error {
 			b     batch
 			err   error
 		)
-		var added []protocol.ChatSub
-		if added, err = api.SubscribeOwned(opts.Owner); err == nil && !owned {
+		added, ownErr := api.SubscribeOwned(opts.Owner)
+		if ownErr == nil && !owned {
 			owned, fresh = true, map[string]bool{}
 			for _, sub := range added {
 				fresh[sub.WI] = true
 			}
 		}
-		if err == nil {
-			lines, b, err = cycle(api, &opts, fresh)
-		}
+		lines, b, err = cycle(api, &opts, fresh)
 		if err != nil {
 			if !paused || opts.Now().Sub(lastNotice) >= time.Minute {
 				fmt.Fprintf(opts.Err, "polyforge watch: %s (%s); retrying in %s\n", pausedText(err), shortErr(err), backoff)
@@ -151,6 +153,12 @@ func Run(ctx context.Context, api API, opts Options) error {
 			fmt.Fprintln(opts.Err, "polyforge watch: daemon reachable again; reconciled")
 			paused = false
 		}
+		// A failed subscribe-owned only delays picking up newly owned
+		// work items: the subscribed ones keep delivering meanwhile.
+		if ownErr != nil && !ownedFailing {
+			fmt.Fprintf(opts.Err, "polyforge watch: cannot subscribe the owner's work items (%s); retrying every poll\n", shortErr(ownErr))
+		}
+		ownedFailing = ownErr != nil
 		backoff = time.Second
 		writeStatus(&opts, lines)
 		printed := 0

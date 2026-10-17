@@ -130,7 +130,8 @@ proactive face, and it carries exactly two kinds of signal:
 **Subscription is the whole ownership model.** A chat (`PF_CHAT_ID`) is
 subscribed to the work items it submits (`pf submit` does it); it subscribes to
 others with `pf watch subscribe <wi>` and drops them with `pf watch
-unsubscribe <wi>` (`pf watch list` shows them). The subscriptions and the
+unsubscribe <wi>` (`pf watch list` shows them; an unsubscribed work item stays
+out until you subscribe it again). The subscriptions and the
 per-chat read cursors live in the daemon, not in any file you can write. There
 is no arming, no script copying and no adoption prompt: a new session simply
 subscribes to the work items it wants. A running watcher also subscribes its

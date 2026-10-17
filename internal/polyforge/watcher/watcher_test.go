@@ -24,6 +24,7 @@ type fakeAPI struct {
 	owned     []string // the WIs subscribe-owned adds when the chat lacks them
 	ownedN    int      // SubscribeOwned calls
 	down      error    // returned by Subscriptions and SubscribeOwned while set
+	ownedErr  error    // returned by SubscribeOwned alone while set
 	acks      []protocol.ChatAck
 	snapCalls []int64
 	ackFails  int   // the next ackFails Ack calls fail
@@ -78,6 +79,9 @@ func (f *fakeAPI) SubscribeOwned(string) ([]protocol.ChatSub, error) {
 	f.ownedN++
 	if f.down != nil {
 		return nil, f.down
+	}
+	if f.ownedErr != nil {
+		return nil, f.ownedErr
 	}
 	var added []protocol.ChatSub
 	for _, wi := range f.owned {
@@ -591,6 +595,46 @@ func TestWIOwnedAfterStartDecidesWithinOneCycle(t *testing.T) {
 	}
 	if out.String() != want {
 		t.Fatalf("out = %q, want wi_8's line exactly once", out.String())
+	}
+}
+
+// A failing subscribe-owned does not pause the watcher: decisions of the
+// work items already subscribed keep printing, the failure is said once,
+// and the owned WIs are picked up once the call works again.
+func TestSubscribeOwnedFailureDoesNotStopDelivery(t *testing.T) {
+	snap := running("wi_1", "s1")
+	snap.Events = []protocol.EventEntry{ev(1, "step_dead")}
+	snap.LastSeq = 1
+	api := &fakeAPI{
+		subs:     protocol.ChatSubscriptions{Subscriptions: []protocol.ChatSub{sub("wi_1", 0)}},
+		snaps:    map[string]*protocol.WatchSnapshot{"wi_1": snap, "wi_8": blocked("wi_8")},
+		owned:    []string{"wi_8"},
+		ownedErr: errors.New("daemon error DAEMON-500"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	polls := 0
+	var out, errOut bytes.Buffer
+	var afterFail string
+	_ = Run(ctx, api, Options{Out: &out, Err: &errOut, Sleep: func(context.Context, time.Duration) {
+		switch polls++; polls {
+		case 3:
+			afterFail = out.String()
+			api.mu.Lock()
+			api.ownedErr = nil
+			api.mu.Unlock()
+		case 5:
+			cancel()
+		}
+	}})
+	if strings.Count(afterFail, "wi_1 step_dead") != 1 || strings.Contains(afterFail, "wi_8") {
+		t.Fatalf("while subscribe-owned fails: out = %q, want wi_1's decision only", afterFail)
+	}
+	if n := strings.Count(errOut.String(), "cannot subscribe the owner's work items"); n != 1 || strings.Contains(errOut.String(), "paused") {
+		t.Fatalf("stderr = %q, want the failure said once and no pause", errOut.String())
+	}
+	if !strings.Contains(out.String(), "1 WI needs you: wi_8") {
+		t.Fatalf("out = %q, want wi_8 picked up after the call recovered", out.String())
 	}
 }
 

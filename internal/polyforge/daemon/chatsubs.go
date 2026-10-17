@@ -47,6 +47,10 @@ type subsDoc struct {
 
 type chatDoc struct {
 	Subs map[string]*protocol.ChatSub `json:"subs"`
+	// Muted holds the WIs the chat explicitly unsubscribed from: the
+	// owner routing (SubscribeNew) never re-adds them; an explicit
+	// subscribe clears the mark.
+	Muted map[string]bool `json:"muted,omitempty"`
 }
 
 // subStore persists subscriptions and cursors.
@@ -102,13 +106,15 @@ func (s *subStore) Subscribe(chat, wi, slug string, cursor int64) (bool, error) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.chatLocked(chat, true)
+	unmuted := c.Muted[wi]
+	delete(c.Muted, wi)
 	if sub, ok := c.Subs[wi]; ok {
 		fill := sub.Slug == "" && slug != ""
 		if fill {
 			sub.Slug = slug // a subscription recorded before its slug was known
 		}
 		if !sub.Done {
-			if fill {
+			if fill || unmuted {
 				return false, s.persistLocked()
 			}
 			return false, nil
@@ -121,36 +127,45 @@ func (s *subStore) Subscribe(chat, wi, slug string, cursor int64) (bool, error) 
 }
 
 // SubscribeNew adds a subscription only when the chat has none for wi
-// (a finished one is left finished). Reports whether it added one.
+// and has not muted it (a finished one is left finished). Reports
+// whether it added one.
 func (s *subStore) SubscribeNew(chat, wi, slug string, cursor int64) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.chatLocked(chat, true)
-	if c.Subs[wi] != nil {
+	if c.Subs[wi] != nil || c.Muted[wi] {
 		return false, nil
 	}
 	c.Subs[wi] = &protocol.ChatSub{WI: wi, Slug: slug, Cursor: cursor}
 	return true, s.persistLocked()
 }
 
-// Has reports whether the chat has a subscription (live or finished)
-// for wi.
-func (s *subStore) Has(chat, wi string) bool {
+// Settled reports whether SubscribeNew would leave wi alone for the
+// chat: it holds a subscription (live or finished) or muted it.
+func (s *subStore) Settled(chat, wi string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.chatLocked(chat, false)
-	return c != nil && c.Subs[wi] != nil
+	return c != nil && (c.Subs[wi] != nil || c.Muted[wi])
 }
 
+// Unsubscribe drops the chat's subscription to wi and mutes wi, so the
+// owner routing does not re-add it. Reports whether a subscription was
+// dropped.
 func (s *subStore) Unsubscribe(chat, wi string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c := s.chatLocked(chat, false)
-	if c == nil || c.Subs[wi] == nil {
+	c := s.chatLocked(chat, true)
+	had := c.Subs[wi] != nil
+	if !had && c.Muted[wi] {
 		return false, nil
 	}
 	delete(c.Subs, wi)
-	return true, s.persistLocked()
+	if c.Muted == nil {
+		c.Muted = map[string]bool{}
+	}
+	c.Muted[wi] = true
+	return had, s.persistLocked()
 }
 
 // List answers the chat's subscriptions, sorted by WI.
@@ -261,11 +276,12 @@ func (d *Daemon) ackRoute(w http.ResponseWriter, r *http.Request) {
 // subscribeOwnedRoute is POST /chats/{id}/subscribe-owned {"owner"}:
 // every watcher cycle subscribes its chat to every held work item the
 // chat submitted or the owner owns (origin owner, else the WI reporter)
-// that the chat has no subscription for, and gets the added ones back. A
+// that the chat has no subscription for and has not unsubscribed from,
+// and gets the added ones back. A
 // new subscription's cursor sits just before the WI's newest decision
 // event, so a decision nobody has been told about yet is replayed; the
 // state-backed decisions come from the snapshot anyway. A WI the chat is
-// already subscribed to costs one map lookup, and a reporter is fetched
+// already subscribed to (or muted) costs one map lookup, and a reporter is fetched
 // from the hub once per WI, so the per-cycle call stays cheap.
 func (d *Daemon) subscribeOwnedRoute(w http.ResponseWriter, r *http.Request) {
 	id, ok := chatID(w, r)
@@ -282,7 +298,7 @@ func (d *Daemon) subscribeOwnedRoute(w http.ResponseWriter, r *http.Request) {
 	added := []protocol.ChatSub{}
 	jobs, _ := d.statusJobs()
 	for _, j := range jobs {
-		if d.subs.Has(id, j.WorkItemID) {
+		if d.subs.Settled(id, j.WorkItemID) {
 			continue
 		}
 		mine := j.Origin != nil && j.Origin.ChatID == id
