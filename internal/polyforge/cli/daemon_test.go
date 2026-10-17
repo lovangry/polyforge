@@ -357,4 +357,7 @@ func TestOpsAutoAndMaxVerbs(t *testing.T) {
 	if len(d.rec.all()) != n {
 		t.Fatal("a refused argument reached the daemon")
 	}
+	if _, _, stderr := runPf(t, env, "ops", "max", "--reset"); !strings.Contains(stderr, "--reset was removed") || !strings.Contains(stderr, "max_concurrent_jobs on daemon restart") {
+		t.Fatalf("ops max --reset refusal = %q, want the removal explained", stderr)
+	}
 }

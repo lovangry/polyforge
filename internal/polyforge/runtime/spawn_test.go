@@ -103,14 +103,14 @@ func TestSpawnEnvSanitized(t *testing.T) {
 	t.Setenv("POLYFORGE_API_KEY", "machine-key")
 	t.Setenv("PF_LEAK", "leak")
 	t.Setenv("PLAIN_VAR", "keep-me")
-	// the retired PF_AGENT_ROLE / PF_DAEMON_SOCKET markers must be
-	// stripped with the rest of the inherited PF_* family and never
-	// re-injected.
+	// the retired PF_AGENT_ROLE marker and an inherited PF_DAEMON_SOCKET
+	// are stripped with the rest of the inherited PF_* family; the socket
+	// the step gets is the daemon's own.
 	t.Setenv("PF_AGENT_ROLE", "spoofed-role")
 	t.Setenv("PF_CHAT_ID", "chat_leak") // a chat id is a notification label: never reaches a step agent
 	t.Setenv("PF_DAEMON_SOCKET", "/spoofed.sock")
 	t.Setenv("SOME_OTHER_NAME", "machine-key") // renamed secret: value match
-	sp := newPiSpawner(&Config{MachineID: "m-env", EnvSecrets: []string{"machine-key"}})
+	sp := newPiSpawner(&Config{MachineID: "m-env", DaemonSocket: "/d/daemon.sock", EnvSecrets: []string{"machine-key"}})
 	cmd := sp.buildCmd(SpawnParams{WorkItemID: "wi_env", CapsuleDir: "/caps", SessionHandle: "ab12cd34", SpawnN: 2})
 	env := strings.Join(cmd.Env, "\n")
 	if strings.Contains(env, "POLYFORGE_API_KEY") || strings.Contains(env, "PF_LEAK=") {
@@ -119,6 +119,9 @@ func TestSpawnEnvSanitized(t *testing.T) {
 	if strings.Contains(env, "PF_CHAT_ID") {
 		t.Fatalf("PF_CHAT_ID must be stripped, got:\n%s", env)
 	}
+	if strings.Contains(env, "/spoofed.sock") {
+		t.Fatalf("an inherited PF_DAEMON_SOCKET must be stripped, got:\n%s", env)
+	}
 	if strings.Contains(env, "SOME_OTHER_NAME=machine-key") {
 		t.Fatal("a renamed variable carrying the configured secret must be stripped")
 	}
@@ -126,7 +129,7 @@ func TestSpawnEnvSanitized(t *testing.T) {
 		t.Fatal("the blacklist must not strip unrelated variables")
 	}
 	for _, want := range []string{
-		"PF_WI_ID=wi_env", "PF_DAEMON_ID=m-env",
+		"PF_WI_ID=wi_env", "PF_DAEMON_ID=m-env", "PF_DAEMON_SOCKET=/d/daemon.sock",
 	} {
 		if !strings.Contains(env, want) {
 			t.Fatalf("env must carry %q, got:\n%s", want, env)
@@ -146,7 +149,8 @@ func TestSpawnEnvRetiredVarsNeverInjected(t *testing.T) {
 	sp := newPiSpawner(&Config{})
 	cmd := sp.buildCmd(SpawnParams{WorkItemID: "wi_env", CapsuleDir: "/caps"})
 	env := strings.Join(cmd.Env, "\n")
-	// the deleted identity/role/socket vars must never come back
+	// the deleted identity/role vars must never come back; a Config
+	// without a daemon socket injects none
 	for _, gone := range []string{"PF_INSTANCE_ID", "PF_SESSION_ID", "PF_GENERATION", "PF_DAEMON_SOCKET", "PF_AGENT_ROLE"} {
 		if strings.Contains(env, gone) {
 			t.Fatalf("the deleted %s must not be injected, got:\n%s", gone, env)
@@ -163,6 +167,8 @@ func TestSpawnSessionIdentityEnvReachesChild(t *testing.T) {
 	capDir, sp := scriptedHarness(t)
 	envDump := filepath.Join(capDir, "child-env.txt")
 	t.Setenv("GO_BE_ENV", envDump)
+	sock := filepath.Join(t.TempDir(), "elsewhere", "daemon.sock")
+	sp.cfg.DaemonSocket = sock
 	secret := fakeSession("wi_inst")
 	h, err := sp.Spawn(context.Background(), SpawnParams{
 		WorkItemID:    "wi_inst",
@@ -197,6 +203,10 @@ func TestSpawnSessionIdentityEnvReachesChild(t *testing.T) {
 	}
 	if strings.Contains(string(raw), secret) {
 		t.Fatalf("the session SECRET must never reach the child env, got:\n%s", raw)
+	}
+	// the step's pf dials the daemon where it actually listens
+	if !strings.Contains(string(raw), `"PF_DAEMON_SOCKET=`+sock+`"`) {
+		t.Fatalf("the child env lacks the daemon's socket %s, got:\n%s", sock, raw)
 	}
 }
 

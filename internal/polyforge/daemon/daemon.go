@@ -309,6 +309,7 @@ func New(cfg Config) (*Daemon, error) {
 	// without file credentials carries on with a warning.
 	rtCfg := runtime.Config{
 		MachineID:                cfg.MachineID,
+		DaemonSocket:             cfg.SocketPath,
 		Mapping:                  cfg.Mapping,
 		DataDir:                  cfg.DataDir,
 		GitRemoteBase:            cfg.GitRemoteBase,

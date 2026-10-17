@@ -511,6 +511,9 @@ func opsMax(ctx *Context, d *DaemonClient, args []string) error {
 			return fmt.Sprintf("max: %d", s.Queue.MaxConcurrent)
 		})
 	case 1:
+		if args[0] == "--reset" {
+			return fmt.Errorf("ops max: --reset was removed; the cap returns to cli.toml's [daemon] max_concurrent_jobs on daemon restart")
+		}
 		n, err := strconv.Atoi(args[0])
 		if err != nil || n < 1 {
 			return fmt.Errorf("ops max: N must be an integer >= 1")
