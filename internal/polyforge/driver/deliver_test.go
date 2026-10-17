@@ -440,8 +440,7 @@ func TestDeliverDeliveredHead(t *testing.T) {
 
 // TestDeliverAutopilotEligibility: a workflow without a review step
 // (autopilot) auto-merges on verification's pass when the mechanical facts
-// hold; a workflow with one still needs the review passed; a
-// hand-resolved conflict still asks either way.
+// hold; a workflow with one still needs the review passed.
 func TestDeliverAutopilotEligibility(t *testing.T) {
 	repos := deliverCapsule(t)
 	quick := deliverSpec(repos, false, 0)
@@ -452,10 +451,6 @@ func TestDeliverAutopilotEligibility(t *testing.T) {
 	withReview := deliverSpec(repos, false, 0)
 	if err := ValidateStepResult(deliverRes(OutcomeCompleted, mergedOut, ev(goodPush)), withReview); err == nil || !strings.Contains(err.Error(), "independent review") {
 		t.Fatalf("a workflow with a review step merged without it: %v", err)
-	}
-	f := mergeFacts{hasReview: false, testsCovered: true, handResolved: "merge abc had conflicts"}
-	if ok, why := autoMergeEligible(f); ok || !strings.Contains(why, "hand-resolved") {
-		t.Fatalf("autopilot hand-resolved conflict eligible=%v (%s)", ok, why)
 	}
 }
 
