@@ -240,12 +240,14 @@ func spawnStepPrompt(t *testing.T, bundle, stepID string) string {
 	t.Helper()
 	capDir := capsuleWithShippedBundle(t, bundle)
 	shared, _ := filepath.Glob(filepath.Join(shippedWorkflowsDir, workflow.SharedDir, "steps", "*.md"))
+	shared = append(shared, filepath.Join(shippedWorkflowsDir, workflow.SharedDir, workflow.PrinciplesFile))
 	for _, p := range shared {
 		raw, err := os.ReadFile(p)
 		if err != nil {
 			t.Fatal(err)
 		}
-		writeCapsuleFile(t, capDir, "workflows/"+workflow.SharedDir+"/steps/"+filepath.Base(p), string(raw))
+		rel, _ := filepath.Rel(shippedWorkflowsDir, p)
+		writeCapsuleFile(t, capDir, "workflows/"+filepath.ToSlash(rel), string(raw))
 	}
 	sp := &captureSpawner{}
 	ad, err := NewStepSpawnAdapter(StepSpawnAdapter{
@@ -296,7 +298,7 @@ func TestSharedStepPromptsKeepLaneFacts(t *testing.T) {
 	common := map[string][]string{
 		"verification": {"command_evidence: [{argv, exit_code, duration_ms}]", "AT LEAST ONE entry", "## Pre-existing failures", "`test_bar`", "`no-untracked-test-files`",
 			"Write `artifacts/verification-report.md`", "which plan step or memo scope item"},
-		"review": {"No faked concurrency semantics", "Agent reachability for new entry points", "**Do not run tests or builds.**", "Write `artifacts/review.md`", "If any of the change's own requirements"},
+		"review": {"No faked concurrency semantics", "**Unruled behavior change.**", "**I/O under a lock.**", "**Weak tests.**", "**Stale docs.**", "**Leaked credentials**", "**Guess as fact.**", "**Do not run tests or builds.**", "Write `artifacts/review.md`", "If any of the change's own requirements"},
 	}
 	for stepID, byBundle := range lanes {
 		for bundle, f := range byBundle {

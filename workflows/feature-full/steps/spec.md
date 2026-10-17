@@ -85,6 +85,12 @@ Example:
 - Do not write an implementation plan or file-level breakdown — that is `plan`'s job.
 - Do not write test code or e2e scenarios — that is `e2e-author`'s job.
 
+## Principles
+
+State that existing behavior stays unchanged and what is out of scope; write no requirement that forces an invented mechanism.
+
+{{principles}}
+
 ## Output
 
 Emit the final JSON object per the schema above: the artifact path, the list of

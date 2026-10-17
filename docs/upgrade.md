@@ -1017,6 +1017,21 @@ with `pf queue` and `pf watch`), or accept that those few runs skip the
 evidence gate. A work item claimed fresh after the upgrade gets the new
 bundle and is not affected.
 
+## Shared engineering principles in step prompts (polyforge#191)
+
+- `workflows/_shared/principles.md` is rendered into the grill, spec,
+  plan and code-like steps of every bundle and into the shared `review`
+  (each adds at most 1.5 KB to its prompt). Those steps first read each
+  task repo's `AGENTS.md` (else `CLAUDE.md`); project rules win on a
+  conflict. Put a project's own rules there, not into `workflows/`.
+- The review checklist no longer carries "no backward-compatibility
+  code" or the daemon/aihub entry-point reachability item: both are
+  polyforge's own rules, now in this repository's `AGENTS.md`. It gains
+  generic checks (unruled behavior change, I/O under a lock, weak tests,
+  stale docs, leaked credentials, guesses stated as facts).
+- Nothing to configure. A capsule materialized earlier keeps its own
+  snapshot and runs as before.
+
 ## Compat shims removed (decision 2026-10-16 G5)
 
 The remaining v1→v2 / pre-#175 read-compat code is deleted ("v2 keeps

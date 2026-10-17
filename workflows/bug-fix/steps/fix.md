@@ -75,6 +75,12 @@ If the fix is infeasible as diagnosed, or the build cannot be made green within
 reasonable effort, do not fabricate `build_status: green`. Leave it `red`, explain in
 `summary`. A dishonest green corrupts `verification` and `review` downstream.
 
+## Principles
+
+Pick the simplest mechanism; before adding timing, shutdown or retry logic, check whether the recovery path already covers it; no I/O under a lock.
+
+{{principles}}
+
 ## Output
 
 Emit the final JSON object per the schema above: every commit made (at least one - the
