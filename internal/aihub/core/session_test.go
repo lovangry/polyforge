@@ -642,8 +642,8 @@ func TestSessionPauseCleanFlagDistinction(t *testing.T) {
 }
 
 // TestWorkItemCarriesPublicSessionBlockNeverHash: the m4 read surface —
-// the work item view carries the public audit fields, and no view anywhere contains
-// session_hash.
+// the work item view carries the public audit fields, and no view
+// anywhere contains session_hash.
 func TestWorkItemCarriesPublicSessionBlockNeverHash(t *testing.T) {
 	env, m := sessionEnv(t)
 	secret := "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f"

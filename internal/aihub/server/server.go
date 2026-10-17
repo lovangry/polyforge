@@ -506,7 +506,7 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity
 // ---------------------------------------------------------------------------
 // v1.5 session endpoints (reference.md §3). The claim path is the machine
 // execution surface (a scope-checked key with writer/maintainer membership
-// or admin — hSessionClaim's requireWrite); force-end-session keeps
+// or admin — hSessionClaim's mustWrite); force-end-session keeps
 // the human decision gate (admin or project maintainer).
 
 // sessionClaimEnvelope is the claim/attach response: the SAME

@@ -279,6 +279,7 @@ type (
 	RepoRef              = api.ProjectRepo
 )
 
+// CreateUser issues a user (M1).
 func (c *Client) CreateUser(req UserCreateRequest) (json.RawMessage, error) {
 	return c.raw("POST", "/api/v1/users", req)
 }
