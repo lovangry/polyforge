@@ -17,7 +17,7 @@ import (
 // startForPolicy runs one Start of wi on project "proj", with yaml (when
 // non-empty) as the workspace's .polyforge.yaml, and answers the
 // capsule's memory-policy.json.
-func startForPolicy(t *testing.T, wi, yaml string) memoryPolicyDoc {
+func startForPolicy(t *testing.T, wi, yaml string) workspace.MemoryPolicy {
 	t.Helper()
 	setGitIdentity(t)
 	hub := newFakeHub()
@@ -39,7 +39,7 @@ func startForPolicy(t *testing.T, wi, yaml string) memoryPolicyDoc {
 	if err != nil {
 		t.Fatalf("memory-policy.json: %v", err)
 	}
-	var doc memoryPolicyDoc
+	var doc workspace.MemoryPolicy
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("memory-policy.json unparsable: %v", err)
 	}
@@ -51,11 +51,11 @@ func startForPolicy(t *testing.T, wi, yaml string) memoryPolicyDoc {
 // policy with one.
 func TestClaimWritesMemoryPolicy(t *testing.T) {
 	doc := startForPolicy(t, "wi_mp1", "")
-	if doc.Project != "proj" || doc.Source != "built-in" || !reflect.DeepEqual(doc.MemoryPolicy, workspace.DefaultMemoryPolicy()) {
+	if !reflect.DeepEqual(doc, workspace.DefaultMemoryPolicy()) {
 		t.Fatalf("no yaml: %+v", doc)
 	}
 	doc = startForPolicy(t, "wi_mp2", "memory_policy:\n  default:\n    record: [a]\n    skip: [b]\n  proj:\n    record: [c]\n")
-	if doc.Source != "workspace" || !reflect.DeepEqual(doc.Record, []string{"a", "c"}) || !reflect.DeepEqual(doc.Skip, []string{"b"}) {
+	if !reflect.DeepEqual(doc.Record, []string{"a", "c"}) || !reflect.DeepEqual(doc.Skip, []string{"b"}) {
 		t.Fatalf("workspace policy: %+v", doc)
 	}
 }

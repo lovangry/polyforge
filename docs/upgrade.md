@@ -1138,22 +1138,22 @@ it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
   `pf ops shutdown`, wait until it is gone, `pf daemon ensure`
   (tools/install.sh restarts it when it stages a new binary).
 
-## Memory write-back: `memory_policy` and the step memory duty
+## Memory write-back: `memory_policy` and the wrap summary
 
 - Every step prompt now asks the step agent to run `pf recall --any`
-  itself at the start and to write at most one `experience.*` memory at
-  the end (`workflows/_shared/memory.md`); the workflow's last step also
-  writes one `experience.wrap` summary per work item
+  itself at the start (`workflows/_shared/memory.md`); only the
+  workflow's last step writes a memory: one `experience.wrap` summary per
+  work item, guided by the memory policy
   (`workflows/_shared/memory-wrap.md`). Step agents hold no aihub
-  credential path: inside a step (`PF_WI_ID` and `PF_DAEMON_ID` set) `pf recall` / `pf memory
-  show` read through the daemon socket, `pf remember` queues a file in
-  `artifacts/memory-outbox/` that the daemon uploads with its machine
-  credential after the step (outcomes in `artifacts/memory-log.md`), and
-  every other aihub verb, `pf doctor` and `pf daemon` are refused
+  credential path: inside a step (`PF_WI_ID` and `PF_DAEMON_ID` set)
+  `pf recall` / `pf memory show` read through the daemon socket,
+  `pf remember` sends the summary synchronously to the daemon, which
+  stores it with its machine credential (idempotent per step dispatch),
+  and every other aihub verb, `pf doctor` and `pf daemon` are refused
   (DAEMON-403). An operator shell that inherited both variables is in step
   mode too (the refusal names them): unset them. Nothing to configure;
   the machine credential needs memory read and writer access on the
-  project. A failing call or upload never fails the step. `cli.toml` stays
+  project. A failing call never fails the step. `cli.toml` stays
   readable under the shared HOME — this guards against accidents, not
   against an agent that reads it on purpose.
 - `.polyforge.yaml` gains the optional `memory_policy:` section (README,

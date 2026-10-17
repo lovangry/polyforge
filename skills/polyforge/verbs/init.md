@@ -60,9 +60,9 @@ the user saying "init workspace".
    involved. An invalid file refuses the claim (DAEMON-414) before it is
    made: the work item stays queued, so fix the file and resubmit.
 
-   The file's second optional section, `memory_policy:`, is what step
-   agents judge their end-of-step memory against (`record`: worth one
-   memory; `skip`: never a memory). `pf init` (step 5) appends the
+   The file's second optional section, `memory_policy:`, guides the
+   work item's `experience.wrap` summary the workflow's last step writes
+   (`record`: worth remembering; `skip`: never in it). `pf init` (step 5) appends the
    default section when the file has none; tune it per project:
 
    ```yaml

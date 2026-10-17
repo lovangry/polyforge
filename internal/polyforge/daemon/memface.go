@@ -4,9 +4,8 @@ package daemon
 // of the recalled-memories snapshot. The aihub call is made HERE, with
 // the daemon's own machine credential: the spawned agents hold no aihub
 // credential, no aihub URL and no direct server path (the hard
-// constraint of the F6 ruling). A step's live memory access is
-// daemon-mediated as well: the read face in stepmem.go and the outbox
-// upload in memoutbox.go.
+// constraint of the F6 ruling). The UDS recall/remember proxies (F6-B)
+// were retired with the WI-Agent lane (polyforge#106).
 //
 // The wire shape is the aihub memory search endpoint's own (with the F6
 // excerpt extension — a bounded content prefix per hit), behind the

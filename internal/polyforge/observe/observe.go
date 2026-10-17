@@ -283,15 +283,6 @@ func (o *Observe) MarkClosing(wi string) {
 	}
 }
 
-// CloseRefused withdraws a MarkClosing whose close the runtime refused:
-// the suppression is cleared, and an agent exit it already swallowed is
-// handed to recovery. No monitor is a no-op.
-func (o *Observe) CloseRefused(wi string) {
-	if m := o.lookup(wi); m != nil {
-		m.signalCloseRefused()
-	}
-}
-
 func (o *Observe) takeMonitor(wi string) *Monitor {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -328,8 +319,6 @@ func (o *Observe) newMonitor(at Attach) *Monitor {
 		link:   link,
 		rtQ:    supervise.NewQueue[Attach](),
 		stopCh: make(chan struct{}),
-
-		closeRefused: make(chan struct{}, 1),
 
 		gate:       make(chan struct{}, 1),
 		pushDone:   make(chan pushResult, 1),

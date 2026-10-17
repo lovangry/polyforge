@@ -476,13 +476,8 @@ const (
 	memoryTypeRunes  = 80
 )
 
-// memoryNoise are the titles of id-only memories that carry nothing a
-// step can use: a verification report or a controller-sink artifact
-// named by its id alone.
-var memoryNoise = []*regexp.Regexp{
-	regexp.MustCompile(`^Verification Report — \S+$`),
-	regexp.MustCompile(`^Controller-sink artifact`),
-}
+// memoryNoise matches the titles of id-only memories a step cannot use.
+var memoryNoise = regexp.MustCompile(`^(Verification Report — \S+$|Controller-sink artifact)`)
 
 // oneLine collapses every whitespace run (newlines included) to one space
 // and caps the result at max runes, so a recalled field cannot break out
@@ -528,7 +523,7 @@ func recalledMemoriesSection(capsuleDir string) string {
 	var lines []string
 	for _, m := range snap.Items {
 		title := oneLine(memoryTitle(m.ID, m.Title, m.Excerpt), memoryTitleRunes)
-		if title == "" || noiseTitle(title) {
+		if title == "" || memoryNoise.MatchString(title) {
 			continue
 		}
 		lines = append(lines, fmt.Sprintf("- [%s] %s\n", oneLine(m.Type, memoryTypeRunes), title))
@@ -548,37 +543,15 @@ func recalledMemoriesSection(capsuleDir string) string {
 	return b.String()
 }
 
-func noiseTitle(title string) bool {
-	for _, re := range memoryNoise {
-		if re.MatchString(title) {
-			return true
-		}
-	}
-	return false
-}
-
-// The shared memory-duty templates under workflows/_shared/ (beside the
-// bundles, like the shared step definitions).
-const (
-	memoryDutyFile = "memory.md"
-	memoryWrapFile = "memory-wrap.md"
-)
-
-// memoryDutySection renders the step's memory duty: the shared
-// memory.md (recall at the start, at most one memory at the end, judged
-// against the claimed project's memory policy) and, for the workflow's
-// last step, memory-wrap.md (the work item's one experience.wrap
-// memory). The project and work item come from the materialized
-// work-item.json, the policy from capsule.MemoryPolicyJSON (the built-in
-// default when the capsule has none). A capsule without the templates or
-// a task definition renders nothing.
+// memoryDutySection renders workflows/_shared/memory.md (recall first,
+// every step) and, for the workflow's last step, memory-wrap.md (the work
+// item's one experience.wrap summary, with the claimed project's memory
+// policy from capsule.MemoryPolicyJSON, else the built-in default). No
+// task definition or no template renders nothing.
 func memoryDutySection(bundleDir, capsuleDir string, last bool) string {
-	raw, err := os.ReadFile(filepath.Join(capsuleDir, filepath.FromSlash(capsule.WorkItemJSON)))
-	if err != nil {
-		return ""
-	}
 	var wi capsule.WorkItemDoc
-	if json.Unmarshal(raw, &wi) != nil || wi.Project == "" {
+	raw, err := os.ReadFile(filepath.Join(capsuleDir, filepath.FromSlash(capsule.WorkItemJSON)))
+	if err != nil || json.Unmarshal(raw, &wi) != nil || wi.Project == "" {
 		return ""
 	}
 	ref := wi.Slug
@@ -587,38 +560,30 @@ func memoryDutySection(bundleDir, capsuleDir string, last bool) string {
 	}
 	policy := workspace.DefaultMemoryPolicy()
 	if raw, err := os.ReadFile(filepath.Join(capsuleDir, filepath.FromSlash(capsule.MemoryPolicyJSON))); err == nil {
-		var doc workspace.MemoryPolicy
-		if json.Unmarshal(raw, &doc) == nil && (doc.Record != nil || doc.Skip != nil) {
-			policy = doc
-		}
+		_ = json.Unmarshal(raw, &policy)
 	}
-	files := map[string]map[string]string{
-		memoryDutyFile: {"project": wi.Project, "work_item": ref,
-			"record": policyBullets(policy.Record), "skip": policyBullets(policy.Skip)},
-		memoryWrapFile: {"project": wi.Project, "work_item": ref},
-	}
-	names := []string{memoryDutyFile}
+	vars := map[string]string{"project": wi.Project, "work_item": ref}
+	names := []string{"memory.md"}
 	if last {
-		names = append(names, memoryWrapFile)
+		names = append(names, "memory-wrap.md")
 	}
 	var b strings.Builder
 	for _, name := range names {
+		if name == "memory-wrap.md" {
+			vars["record"], vars["skip"] = policyBullets(policy.Record), policyBullets(policy.Skip)
+		}
 		path := filepath.Join(filepath.Dir(bundleDir), workflow.SharedDir, name)
 		tmpl, err := os.ReadFile(path)
+		if err == nil {
+			tmpl, err = workflow.RenderStepVars(tmpl, vars)
+		}
 		if err != nil {
 			if !os.IsNotExist(err) {
 				fmt.Fprintf(os.Stderr, "driver: memory duty %s: %v\n", path, err)
 			}
-			return b.String()
+			break
 		}
-		out, err := workflow.RenderStepVars(tmpl, files[name])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "driver: memory duty %s: %v\n", path, err)
-			return b.String()
-		}
-		b.WriteString("\n")
-		b.WriteString(strings.TrimSpace(string(out)))
-		b.WriteString("\n")
+		b.WriteString("\n" + strings.TrimSpace(string(tmpl)) + "\n")
 	}
 	return b.String()
 }

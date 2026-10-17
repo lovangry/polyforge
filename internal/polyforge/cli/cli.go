@@ -33,12 +33,8 @@ type Context struct {
 	Step string
 }
 
-// aihub returns the direct-aihub client for the resolved config — inside
-// a workflow step, a client that refuses every request (stepctx.go).
+// aihub returns the direct-aihub client for the resolved config.
 func (ctx *Context) aihub() *aihubclient.Client {
-	if ctx.Step != "" {
-		return stepAihubClient()
-	}
 	return aihubclient.New(ctx.Cfg.Server, ctx.Cfg.APIKey)
 }
 
@@ -198,8 +194,8 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			renderError(ctx, err)
 			return exitCode(err)
 		}
-		ctx.Step = wi
-		ctx.Cfg.APIKey = ""
+		// no key, and an unresolvable server: nothing reaches aihub directly
+		ctx.Step, ctx.Cfg.APIKey, ctx.Cfg.Server = wi, "", "http://step-mode.invalid"
 	}
 
 	fs := flag.NewFlagSet("pf "+cmd.Name, flag.ContinueOnError)

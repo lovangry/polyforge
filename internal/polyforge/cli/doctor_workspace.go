@@ -109,12 +109,12 @@ func memoryPolicyCheck(wss []string) doctorCheck {
 	var missing []string
 	builtin := 0
 	for _, ws := range existingWorkspaces(wss) {
-		exists, declared, err := workspace.MemoryPolicyDeclared(ws)
+		_, serr := os.Stat(workspace.PathFor(ws))
+		cfg, err := workspace.Load(ws, "", nil)
 		switch {
-		case err != nil:
-		case !exists:
+		case os.IsNotExist(serr):
 			builtin++
-		case !declared:
+		case err == nil && (cfg == nil || cfg.MemoryPolicy == nil):
 			missing = append(missing, ws)
 		}
 	}

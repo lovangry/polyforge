@@ -286,11 +286,11 @@ func (d *Daemon) routes() *http.ServeMux {
 	mux.HandleFunc("POST /chats/{id}/ack", d.ackRoute)
 	mux.HandleFunc("POST /chats/{id}/heartbeat", d.heartbeatRoute)
 	mux.HandleFunc("GET /chats/{id}/attention", d.attentionRoute)
-	// the step agent's memory read face (stepmem.go): reads only, scoped
-	// to the calling step's own work item and project
-	mux.HandleFunc("GET /step/context", d.stepContextRoute)
+	// the step agent's memory face (stepmem.go), scoped to the calling
+	// step's own work item and project
 	mux.HandleFunc("GET /step/memories/search", d.stepSearchRoute)
 	mux.HandleFunc("GET /step/memories/{id}", d.stepMemoryRoute)
+	mux.HandleFunc("POST "+stepMemoriesPath, d.stepRememberRoute)
 	mux.HandleFunc("POST /chats/{id}/attention/ack", d.attentionAckRoute)
 	return mux
 }
@@ -619,33 +619,12 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 	// fence drops the OB message either way — the event log is the
 	// observable lie this closes).
 	d.obs.MarkClosing(wi)
-	// The memories the run's steps left in the outbox go up before the
-	// seal: a RUNNING job's agent is stopped first (no step writes behind
-	// the flush), then the bounded final flush (it closes the outbox),
-	// then rt.Stop seals — its own teardown finds the driver already
-	// stopped. Every other state goes straight to rt.Stop's own admission.
-	if ji.State == runtime.StateRunning && ji.Agent != nil && !ji.Agent.Done() {
-		if err := ji.Agent.Terminate(outboxStopWait); err != nil {
-			fmt.Fprintf(os.Stderr, "daemon: %s: stopping the agent before the close: %v\n", wi, err)
-		}
-	}
-	d.finalFlush(outboxTarget{wi: ji.WorkItem, project: ji.Project, capsuleDir: ji.CapsuleDir}, outboxFlushWait)
-	stop := d.rt.Stop
-	if d.stopFn != nil {
-		stop = d.stopFn
-	}
-	if err := stop(ctx, wi, reason); err != nil {
+	if err := d.rt.Stop(ctx, wi, reason); err != nil {
 		graceful, ae := d.mapCloseErr(err)
 		if graceful {
 			writeJSON(w, http.StatusOK, closeResponse{WorkItemID: wi, Slug: ji.Slug, Outcome: "already_terminal"})
 			return
 		}
-		// The close did not happen: withdraw the expected-exit
-		// suppression — an agent this close already stopped goes to the
-		// normal recovery — and reopen the outbox for the run that
-		// continues (a recovery installs a new handle and reopens it too).
-		d.obs.CloseRefused(wi)
-		d.reopenOutbox(ji.WorkItem)
 		writeJSON(w, ae.HTTPStatus(), ae)
 		return
 	}
@@ -874,7 +853,10 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 // answer keeps its own #122 wording (answerFromStepProcess).
 func (d *Daemon) refuseStepOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if (r.Method != http.MethodGet && r.Method != http.MethodHead) || attentionRecords(r) {
+		// the one write a step may send: its memory, which the route
+		// itself scopes to the caller's own work item (stepmem.go)
+		stepWrite := r.Method == http.MethodPost && r.URL.Path == stepMemoriesPath
+		if (r.Method != http.MethodGet && r.Method != http.MethodHead && !stepWrite) || attentionRecords(r) {
 			if reason := d.stepOriginRefusal(r); reason != "" {
 				writeErr(w, api.ErrDaemonForbidden, reason)
 				return

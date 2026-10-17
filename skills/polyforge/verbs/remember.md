@@ -55,26 +55,24 @@ Pass the body as `@file` (≤1 MiB). A memory cannot be edited — store a
 new one (or redact). Local disposable output belongs in the workspace's
 `scratch/` only (`pf doctor` reports entries older than 14 days).
 
-## Step agents write memories too (daemon-mediated)
+## The wrap summary a workflow writes (daemon-mediated)
 
-Every workflow step's prompt carries a memory duty: at the end of the
-step the agent writes at most ONE `experience.<kind>` memory, judged
-against the workspace's `memory_policy` (`.polyforge.yaml`; `verbs/init.md`);
-a lesson outside the policy's `record` list carries the `policy-proposal`
-tag and a "建议新增条目：…" line. The workflow's last step writes the work
-item's one `experience.wrap` summary (title `<wi slug>: <what was done>`).
-A step agent holds no aihub credential path: inside a step (`PF_WI_ID` and
-`PF_DAEMON_ID` set) the same `pf remember` command queues the memory in the capsule's
-`artifacts/memory-outbox/` and prints `queued <path>`; the daemon
-validates it (`--type experience.*`, `--title` required, body ≤ 2 KB, no
-credential values, one per step attempt plus the wrap — the CLI refuses
-a second one or a credential value at once), skips a
-duplicate title of the same work item, uploads it with its own credential
-attributed to the step's work item and project, and logs the outcome in
-`artifacts/memory-log.md` (an aihub outage retries at the next step end).
-Such memories are attributed with `--work-item`; filter them with
-`pf recall --project P --any '<words>' --type experience.wrap` or
-`--tags policy-proposal`.
+Only the workflow's last step writes a memory: the work item's ONE
+`experience.wrap` summary (title `<wi slug>: <what was done>`; body
+≤ 2 KB: 做了什么、关键决定、遗留, guided by the workspace's `memory_policy`
+— `.polyforge.yaml`, `verbs/init.md`; an out-of-policy lesson worth
+keeping carries a "建议新增条目：…" line and the `policy-proposal` tag). A
+step agent holds no aihub credential path: inside a step (`PF_WI_ID` and
+`PF_DAEMON_ID` set) the same `pf remember` command goes synchronously to
+the daemon (`POST /step/memories`). The daemon accepts type
+`experience.wrap` only, requires `--title`, refuses a body over 2 KB or a
+credential value (the CLI checks the same first), attributes the memory
+to the step's own work item and project, and stores it with an
+idempotency key of the step dispatch — a retry returns the same memory.
+It prints `stored <id>`, or a clear error (aihub down: DAEMON-503); the
+prompt tells the agent a failure never fails the step. Filter these
+memories with `pf recall --project P --any '<words>' --type
+experience.wrap` or `--tags policy-proposal`.
 
 ## Success
 

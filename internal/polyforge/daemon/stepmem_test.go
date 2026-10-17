@@ -9,6 +9,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -29,13 +30,23 @@ import (
 // stepGet issues one GET over the daemon socket and answers status + body.
 func stepGet(t *testing.T, sock, path string) (int, string) {
 	t.Helper()
+	return stepDo(t, sock, "GET", path, "")
+}
+
+// stepDo issues one request over the daemon socket.
+func stepDo(t *testing.T, sock, method, path, body string) (int, string) {
+	t.Helper()
 	c := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		var d net.Dialer
 		return d.DialContext(ctx, "unix", sock)
 	}}}
-	resp, err := c.Get("http://daemon" + path)
+	req, err := http.NewRequest(method, "http://daemon"+path, strings.NewReader(body))
 	if err != nil {
-		t.Fatalf("GET %s: %v", path, err)
+		t.Fatal(err)
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
@@ -47,7 +58,7 @@ func stepDaemon(t *testing.T, wi string) *testDaemon {
 	t.Helper()
 	td := newTestDaemon(t, nil)
 	td.submitClaim(t, wi)
-	td.stepOriginOf = func(*http.Request) (stepOrigin, string) { return stepOrigin{wi: wi, step: "fix", attempt: 2}, "" }
+	td.stepOriginOf = func(*http.Request) (stepJob, string) { return stepJob{wi: wi, step: "fix", attempt: 2}, "" }
 	return td
 }
 
@@ -123,16 +134,100 @@ func TestStepMemoryShowOwnProjectOnly(t *testing.T) {
 	}
 }
 
-func TestStepContextAnswersTheCallersJob(t *testing.T) {
-	td := stepDaemon(t, "wi_sm3")
-	code, body := stepGet(t, td.sock, "/step/context")
-	var sc stepJob
-	if code != 200 || json.Unmarshal([]byte(body), &sc) != nil || sc.WorkItemID != "wi_sm3" || sc.Project != "proj" || sc.CapsuleDir == "" || sc.Step != "fix" || sc.Attempt != 2 {
-		t.Fatalf("context = %d %s", code, body)
+// memHub scripts the step memory write: stores (idempotently by key)
+// or fails with fail while it is non-nil.
+type memHub struct {
+	mu    sync.Mutex
+	fail  error
+	posts []map[string]any
+	byKey map[string]string
+}
+
+func (m *memHub) do(method, path string, body, out any) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if method != "POST" || path != "/api/v1/memories" {
+		return fmt.Errorf("unexpected %s %s", method, path)
 	}
-	td.stepOriginOf = func(*http.Request) (stepOrigin, string) { return stepOrigin{wi: "wi_gone"}, "" }
-	if code, _ := stepGet(t, td.sock, "/step/context"); code != 404 {
-		t.Fatalf("a step of no live job = %d, want 404", code)
+	if m.fail != nil {
+		return m.fail
+	}
+	b := body.(map[string]any)
+	m.posts = append(m.posts, b)
+	key, _ := b["idempotency_key"].(string)
+	if m.byKey == nil {
+		m.byKey = map[string]string{}
+	}
+	id, ok := m.byKey[key]
+	if !ok {
+		id = fmt.Sprintf("mem_%d", len(m.byKey)+1)
+		m.byKey[key] = id
+	}
+	return json.Unmarshal([]byte(`{"id":"`+id+`","type":"`+b["type"].(string)+`","visibility":"project"}`), out)
+}
+
+func wrapBody(extra string) string {
+	return `{"type":"experience.wrap","title":"proj#1: did it","tags":["policy-proposal"],"content":"做了什么\n建议新增条目：x\n"` + extra + `}`
+}
+
+func TestStepRememberStoresAttributedAndIdempotent(t *testing.T) {
+	td := stepDaemon(t, "wi_sr1")
+	mh := &memHub{}
+	td.hub.mu.Lock()
+	td.hub.memDo = mh.do
+	td.hub.mu.Unlock()
+	code, body := stepDo(t, td.sock, "POST", "/step/memories", wrapBody(`,"project":"proj","work_item":"wi_sr1"`))
+	if code != 200 || !strings.Contains(body, `"id":"mem_1"`) {
+		t.Fatalf("store = %d %s", code, body)
+	}
+	p := mh.posts[0]
+	if p["project"] != "proj" || p["work_item_id"] != "wi_sr1" || p["type"] != "experience.wrap" || p["visibility"] != "project" ||
+		p["idempotency_key"] != "pf-step-memory:wi_sr1:fix:2" || p["title"] != "proj#1: did it" {
+		t.Fatalf("forwarded %+v", p)
+	}
+	// a retry after a lost answer: same key, the same memory comes back
+	if code, body := stepDo(t, td.sock, "POST", "/step/memories", wrapBody("")); code != 200 || !strings.Contains(body, `"id":"mem_1"`) {
+		t.Fatalf("retry = %d %s", code, body)
+	}
+	if len(mh.byKey) != 1 {
+		t.Fatalf("a retry stored a second memory: %v", mh.byKey)
+	}
+}
+
+func TestStepRememberRefusalsAndOutage(t *testing.T) {
+	td := stepDaemon(t, "wi_sr2")
+	mh := &memHub{}
+	td.hub.mu.Lock()
+	td.hub.memDo = mh.do
+	td.hub.mu.Unlock()
+	for _, tc := range []struct{ body, want string }{
+		{`{"type":"experience.debug","title":"t","content":"b"}`, "writes only its experience.wrap summary"},
+		{`{"type":"experience.wrap","title":"","content":"b"}`, "a title is required"},
+		{`{"type":"experience.wrap","title":"t","content":"` + strings.Repeat("x", 2049) + `"}`, "at most 2048"},
+		{`{"type":"experience.wrap","title":"t","content":"token ghp_abcdefghijklmnopqrstuvwxyz0123"}`, "credential value"},
+		{wrapBody(`,"project":"other"`), `writes to project`},
+		{wrapBody(`,"work_item":"wi_other"`), "attributed to its own work item wi_sr2"},
+	} {
+		if code, body := stepDo(t, td.sock, "POST", "/step/memories", tc.body); code < 400 || code >= 500 || !strings.Contains(body, tc.want) {
+			t.Fatalf("%s: %d %s, want %q", tc.body, code, body, tc.want)
+		}
+	}
+	if len(mh.posts) != 0 {
+		t.Fatalf("refused memories were forwarded: %+v", mh.posts)
+	}
+	// a where-it-lives line is fine
+	if code, body := stepDo(t, td.sock, "POST", "/step/memories", `{"type":"experience.wrap","title":"t","content":"the key lives in ~/.config/polyforge/cli.toml (api_key=${PF_API_KEY})"}`); code != 200 {
+		t.Fatalf("where-it-lives: %d %s", code, body)
+	}
+	mh.mu.Lock()
+	mh.fail = errors.New("dial tcp: connection refused")
+	mh.mu.Unlock()
+	if code, body := stepDo(t, td.sock, "POST", "/step/memories", wrapBody("")); code != 503 || !strings.Contains(body, "aihub unreachable, the memory was not stored") {
+		t.Fatalf("aihub down: %d %s", code, body)
+	}
+	td.stepOriginOf = nil // the real resolver: this test process is no step
+	if code, body := stepDo(t, td.sock, "POST", "/step/memories", wrapBody("")); code != 403 || !strings.Contains(body, "serves step agents only") {
+		t.Fatalf("non-step POST: %d %s", code, body)
 	}
 }
 
@@ -142,7 +237,7 @@ func TestStepContextAnswersTheCallersJob(t *testing.T) {
 //	relay  — spawns a "step" child with PF_WI_ID=STEPMEM_INNER_WI
 //	step   — writes its pid to STEPMEM_PIDFILE, waits for STEPMEM_GO,
 //	         spawns the caller (PF_WI_ID=STEPMEM_CALLER_WI when set)
-//	caller — GETs /step/context and prints the answer
+//	caller — POSTs a wrap memory and prints the answer
 //
 // Every role relays its child's output.
 func TestStepMemoryHelperProcess(t *testing.T) {
@@ -173,7 +268,7 @@ func TestStepMemoryHelperProcess(t *testing.T) {
 		}
 		child("caller", env...)
 	default:
-		code, body := stepGet(t, sock, "/step/context")
+		code, body := stepDo(t, sock, "POST", "/step/memories", wrapBody(""))
 		fmt.Printf("STEPMEM %d %s\n", code, body)
 	}
 }
@@ -222,6 +317,10 @@ func TestStepRoutesResolveTheSpawnedStep(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	td.submitClaim(t, "wi_sm4")
 	td.submitClaim(t, "wi_sm5")
+	mh := &memHub{}
+	td.hub.mu.Lock()
+	td.hub.memDo = mh.do
+	td.hub.mu.Unlock()
 	ji4, _ := td.rt.Info("wi_sm4")
 	ji5, _ := td.rt.Info("wi_sm5")
 	marks := []string{"PF_WI_ID=wi_sm4", "PF_DAEMON_ID=m-test"}
@@ -233,10 +332,14 @@ func TestStepRoutesResolveTheSpawnedStep(t *testing.T) {
 			{WorkItem: "wi_sm4", StepID: "review", SpawnN: 8, PID: 1 << 22},
 		})
 	}
-	if out := stepTree(t, td, "step", journalStep, marks...); !strings.Contains(out, "STEPMEM 200") || !strings.Contains(out, `"work_item_id":"wi_sm4"`) ||
-		!strings.Contains(out, `"step":"fix"`) || !strings.Contains(out, `"attempt":7`) {
+	if out := stepTree(t, td, "step", journalStep, marks...); !strings.Contains(out, "STEPMEM 200") {
 		t.Fatalf("step child: %s", out)
 	}
+	mh.mu.Lock()
+	if len(mh.posts) != 1 || mh.posts[0]["work_item_id"] != "wi_sm4" || mh.posts[0]["idempotency_key"] != "pf-step-memory:wi_sm4:fix:7" {
+		t.Fatalf("resolved write = %+v", mh.posts)
+	}
+	mh.mu.Unlock()
 	if out := stepTree(t, td, "step", journalStep, append(marks, "STEPMEM_CALLER_WI=wi_sm5")...); !strings.Contains(out, "STEPMEM 403") || !strings.Contains(out, "claims PF_WI_ID=wi_sm5") {
 		t.Fatalf("a caller claiming another work item: %s", out)
 	}
@@ -245,7 +348,7 @@ func TestStepRoutesResolveTheSpawnedStep(t *testing.T) {
 		writeJournal(t, ji4.CapsuleDir, []capsule.SpawnJournalEntry{{WorkItem: "wi_sm4", StepID: "fix", SpawnN: 1, PID: top}})
 		writeJournal(t, ji5.CapsuleDir, []capsule.SpawnJournalEntry{{WorkItem: "wi_sm5", StepID: "fix", SpawnN: 1, PID: step}})
 	}
-	if out := stepTree(t, td, "relay", both, append(marks, "STEPMEM_INNER_WI=wi_sm5")...); !strings.Contains(out, "STEPMEM 403") || !strings.Contains(out, "several work items (wi_sm4, wi_sm5)") {
+	if out := stepTree(t, td, "relay", both, append(marks, "STEPMEM_INNER_WI=wi_sm5")...); !strings.Contains(out, "STEPMEM 403") || !strings.Contains(out, "several work items") {
 		t.Fatalf("a tree reaching two steps: %s", out)
 	}
 	writeJournal(t, ji4.CapsuleDir, nil)
@@ -269,5 +372,23 @@ func TestDaemonMainRefusedInsideAStep(t *testing.T) {
 		if code := Main(argv, nil, io.Discard, &stderr); code != 1 || !strings.Contains(stderr.String(), "refused inside a workflow step") {
 			t.Fatalf("Main(%v) = %d %s", argv, code, stderr.String())
 		}
+	}
+}
+
+// writeJournal writes the capsule's spawn journal.
+func writeJournal(t *testing.T, capDir string, entries []capsule.SpawnJournalEntry) {
+	t.Helper()
+	var b strings.Builder
+	for _, e := range entries {
+		raw, _ := json.Marshal(e)
+		b.Write(raw)
+		b.WriteString("\n")
+	}
+	path := filepath.Join(capDir, capsule.DirRuntimeState, capsule.SpawnJournalFile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

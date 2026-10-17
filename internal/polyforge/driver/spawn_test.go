@@ -997,7 +997,7 @@ func TestRecalledMemoriesSectionFieldsStayOnOneLine(t *testing.T) {
 // into the capsule's workflows/_shared/, as materialization does.
 func copySharedMemoryTemplates(t *testing.T, capDir string) {
 	t.Helper()
-	for _, name := range []string{memoryDutyFile, memoryWrapFile} {
+	for _, name := range []string{"memory.md", "memory-wrap.md"} {
 		raw, err := os.ReadFile(filepath.Join(shippedWorkflowsDir, workflow.SharedDir, name))
 		if err != nil {
 			t.Fatal(err)
@@ -1030,36 +1030,46 @@ func TestSpawnStepPromptCarriesMemoryDuty(t *testing.T) {
 	prompt := p.InitialPrompt
 	for _, want := range []string{
 		"# Project memory", "non-binding history",
-		"pf recall --project e2e --any '<keyword set 1>'", "中文",
-		"Record (worth a memory):\n- sqlite pitfalls\n- owner rulings\n", "Skip (never a memory):\n- step logs\n",
-		"at most ONE memory", "artifacts/memory-outbox/", "the daemon uploads it after this step",
-		"pf remember --project e2e --type experience.<kind> --work-item 'e2e#7' --title '<one-line title>' @<file>",
-		"≤ 2 KB", "--tags policy-proposal", "建议新增条目：", "Never put a secret",
+		"pf recall --project e2e --any '<keyword set 1>'", "中文", "pf memory show <id>",
+		"Steps do not write memories, except the last step's one wrap summary",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q\n%s", want, prompt)
 		}
 	}
-	if strings.Contains(prompt, "experience.wrap") {
-		t.Fatalf("a non-last step carries the wrap duty\n%s", prompt)
+	for _, unwanted := range []string{"pf remember", "experience.wrap", "sqlite pitfalls"} {
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("a non-last step carries the write duty (%q)\n%s", unwanted, prompt)
+		}
 	}
-	if strings.Index(prompt, "# Project memory") > strings.Index(prompt, "# Result delivery") {
-		t.Fatal("the memory duty must precede the delivery contract")
-	}
-
-	os.Remove(filepath.Join(capDir, filepath.FromSlash(capsule.MemoryPolicyJSON)))
 	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 4}); err != nil {
 		t.Fatalf("SpawnStep: %v", err)
 	}
 	p, _ = sp.last()
 	for _, want := range []string{
-		"- 踩坑和根因（现象→原因→解法）", "- 密钥和凭据的值",
 		"# Work item wrap summary", "exactly ONE `experience.wrap` memory",
-		"--type experience.wrap --work-item 'e2e#7' --title 'e2e#7: <what was done, one line>'",
-		"做了什么", "关键决定", "遗留", "policy-proposal memories:", "before the work item is sealed",
+		"Record (worth remembering):\n- sqlite pitfalls\n- owner rulings\n", "Skip (never in the summary):\n- step logs\n",
+		"pf remember --project e2e --type experience.wrap --work-item 'e2e#7' --title 'e2e#7: <what was done, one line>' @<file>",
+		"≤ 2 KB", "做了什么", "关键决定", "遗留", "建议新增条目：", "--tags policy-proposal", "Never a secret",
+		"complete the step anyway", "A retry of the same command in this step returns the same memory",
 	} {
 		if !strings.Contains(p.InitialPrompt, want) {
 			t.Fatalf("last-step prompt missing %q\n%s", want, p.InitialPrompt)
+		}
+	}
+	if strings.Index(prompt, "# Project memory") > strings.Index(prompt, "# Result delivery") {
+		t.Fatal("the memory duty must precede the delivery contract")
+	}
+
+	// without a policy file the built-in default renders
+	os.Remove(filepath.Join(capDir, filepath.FromSlash(capsule.MemoryPolicyJSON)))
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 5}); err != nil {
+		t.Fatalf("SpawnStep: %v", err)
+	}
+	p, _ = sp.last()
+	for _, want := range []string{"- 踩坑和根因（现象→原因→解法）", "- 密钥和凭据的值"} {
+		if !strings.Contains(p.InitialPrompt, want) {
+			t.Fatalf("built-in policy missing %q\n%s", want, p.InitialPrompt)
 		}
 	}
 }
@@ -1077,7 +1087,7 @@ func TestShippedBundlesRenderMemoryDuty(t *testing.T) {
 		}
 		for _, s := range wf.Steps {
 			sec := memoryDutySection(dir, capDir, wf.lastStep(s.ID))
-			if !strings.Contains(sec, "pf recall --project polyforge --any") || !strings.Contains(sec, "--work-item 'wi_1'") {
+			if !strings.Contains(sec, "pf recall --project polyforge --any") || !strings.Contains(sec, "work item `wi_1`") {
 				t.Fatalf("%s/%s: memory duty not rendered:\n%s", filepath.Base(dir), s.ID, sec)
 			}
 			if got := strings.Contains(sec, "experience.wrap"); got != (s.ID == wf.Steps[len(wf.Steps)-1].ID) {

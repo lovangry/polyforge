@@ -1,17 +1,20 @@
 package runtime
 
-// recall.go: the F6-A lane — the claim-time memory snapshot. At claim
-// time the daemon recalls the project's memories — goal + the content's
-// head as the query, the aihub memory search face's ranked any-term mode
-// (match=any) as the index — and writes the top-K hits as a static
-// snapshot into the capsule: runtime-state/recalled-memories.json, which
-// the driver renders into every step prompt as `[type] title` lines of
-// non-binding history (driver/spawn.go recalledMemoriesSection, decision
-// 2026-10-16 G3). The live half is daemon-mediated too: inside a step
-// `pf recall` reads through the daemon's /step/memories face and
-// `pf remember` queues into the capsule's memory outbox, which the daemon
-// uploads with its own credential (daemon/stepmem.go, memoutbox.go) —
-// the step agent holds no aihub credential path.
+// recall.go: the F6-A lane — the claim-time memory snapshot. The goal's
+// v0-era "recall the lessons ledger first" instruction was in-contract
+// unexecutable in v1 (the agent holds no aihub credential and no read
+// path existed at all); the F6 ruling answers it in two halves, and this
+// file is the STATIC half:
+//
+//   - at claim time the daemon recalls the project's memories — goal +
+//     the content's head as the query, the aihub memory search face's
+//     ranked any-term mode (match=any) as the index — and writes the
+//     top-K hits as a static snapshot into the capsule:
+//     runtime-state/recalled-memories.json, which the driver renders
+//     into every step prompt as non-binding history
+//     (driver/spawn.go recalledMemoriesSection, decision 2026-10-16 G3);
+//   - the live half is the daemon's step memory face (daemon/stepmem.go:
+//     `pf recall` / `pf remember` inside a step, with the daemon's key).
 //
 // The snapshot is an ENRICHMENT, never a gate: an unreachable aihub, a
 // refused search or a zero-hit query all degrade to an empty list plus a

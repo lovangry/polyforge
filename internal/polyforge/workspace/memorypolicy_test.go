@@ -169,27 +169,11 @@ func TestEnsureMemoryPolicyLeavesDeclaredAndBrokenFiles(t *testing.T) {
 func TestParseTrailingContentReason(t *testing.T) {
 	for _, raw := range []string{"{steps: {}}\nmemory_policy:\n  default:\n    skip: [a]\n", "steps:\n...\nmemory_policy: {}\n"} {
 		_, reason := parse([]byte(raw), nil)
-		if !strings.Contains(reason, "content after the end of the top-level document does not parse") || strings.Contains(reason, "second `---`") {
+		if !strings.Contains(reason, "content after the top-level document does not parse") || strings.Contains(reason, "second `---`") {
 			t.Fatalf("%q: reason %q", raw, reason)
 		}
 	}
 	if _, reason := parse([]byte("a: 1\n---\nb: 2\n"), nil); !strings.Contains(reason, "found a second `---` document") {
 		t.Fatalf("two documents: %q", reason)
-	}
-}
-
-// TestMemoryPolicyDeclared pins the read-only presence probe doctor uses.
-func TestMemoryPolicyDeclared(t *testing.T) {
-	if ex, d, err := MemoryPolicyDeclared(t.TempDir()); ex || d || err != nil {
-		t.Fatalf("absent: %v %v %v", ex, d, err)
-	}
-	if ex, d, err := MemoryPolicyDeclared(writeYaml(t, "steps:\n")); !ex || d || err != nil {
-		t.Fatalf("steps only: %v %v %v", ex, d, err)
-	}
-	if ex, d, err := MemoryPolicyDeclared(writeYaml(t, "memory_policy:\n")); !ex || !d || err != nil {
-		t.Fatalf("declared: %v %v %v", ex, d, err)
-	}
-	if _, _, err := MemoryPolicyDeclared(writeYaml(t, "- a\n")); err == nil {
-		t.Fatal("a list document: want an error")
 	}
 }

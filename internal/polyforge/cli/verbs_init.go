@@ -13,10 +13,9 @@ import (
 // verbs_init.go: `pf init [<workspace-dir>]` — the local half of
 // workspace init (polyforge#177). It gives an existing workspace its
 // runtime-artifact layout: scratch/, the convention section of
-// CLAUDE.md's polyforge-managed block and the default memory_policy
-// section of .polyforge.yaml when it has none (workspace.Init:
-// idempotent, the human part of CLAUDE.md is never touched and the yaml
-// only ever gains the appended section). It needs no config, no
+// CLAUDE.md's polyforge-managed block and .polyforge.yaml's default
+// memory_policy (workspace.Init: idempotent, the human part of CLAUDE.md
+// is never touched). It needs no config, no
 // aihub and no daemon; mapping the workspace stays the operator's
 // cli.toml edit (skills/polyforge/verbs/init.md). Machine install is
 // tools/install.sh, not this verb.

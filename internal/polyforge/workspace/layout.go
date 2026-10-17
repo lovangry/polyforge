@@ -320,18 +320,15 @@ type InitResult struct {
 	YamlWarning string `json:"polyforge_yaml_warning,omitempty"`
 }
 
-// Init gives an existing workspace directory its local layout: scratch/,
-// the layout section of CLAUDE.md and the memory_policy section of
-// .polyforge.yaml. It is idempotent and never touches CLAUDE.md outside
-// the layout section: a file without one gets it inside its
-// polyforge-managed block (or a new managed block on top); a file with
-// one gets that section replaced. CLAUDE.md is written atomically (temp
-// file + rename, mode kept); a symlinked CLAUDE.md has its target
-// written, the link stays. .polyforge.yaml only ever gains the default
-// memory_policy section, appended as text (planMemoryPolicy); that step
-// is planned before anything is written, and a yaml that cannot take it
-// (it does not load) is left untouched and reported in YamlWarning
-// while scratch/ and CLAUDE.md are still laid out.
+// Init gives an existing workspace directory its local layout: scratch/
+// and the layout section of CLAUDE.md. It is idempotent and never
+// touches CLAUDE.md outside the layout section: a file without one gets
+// it inside its polyforge-managed block (or a new managed block on top);
+// a file with one gets that section replaced. CLAUDE.md is written
+// atomically (temp file + rename, mode kept); a symlinked CLAUDE.md has
+// its target written, the link stays. .polyforge.yaml gains the default
+// memory_policy section (planMemoryPolicy, planned first); a yaml that
+// does not load is left untouched and reported in YamlWarning.
 func Init(root string) (InitResult, error) {
 	res := InitResult{Workspace: root}
 	st, err := os.Stat(root)
@@ -341,7 +338,7 @@ func Init(root string) (InitResult, error) {
 	if !st.IsDir() {
 		return res, fmt.Errorf("%s is not a directory", root)
 	}
-	yamlPlan, yerr := planMemoryPolicy(root)
+	ypath, ydata, ymode, yhow, yerr := planMemoryPolicy(root)
 	scratch := filepath.Join(root, ScratchDir)
 	switch st, err := os.Lstat(scratch); {
 	case err == nil && st.IsDir():
@@ -391,8 +388,10 @@ func Init(root string) (InitResult, error) {
 		res.Yaml, res.YamlWarning = "skipped", yerr.Error()
 		return res, nil
 	}
-	res.Yaml = yamlPlan.how
-	return res, yamlPlan.write()
+	if res.Yaml = yhow; ydata != nil {
+		return res, writeAtomic(ypath, ydata, ymode)
+	}
+	return res, nil
 }
 
 // writeAtomic replaces path with data through a temp file in the same

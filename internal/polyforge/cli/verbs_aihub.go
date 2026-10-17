@@ -679,10 +679,8 @@ var cmdRecall = &Command{
 		if proj == "" {
 			return fmt.Errorf("recall: --project is required — there is no default project (polyforge#113); the routing skill derives it from the WI under discussion")
 		}
-		if ctx.Step == "" {
-			if err := requireMappedProject(ctx, "recall", proj); err != nil {
-				return err
-			}
+		if err := requireMappedProject(ctx, "recall", proj); err != nil && ctx.Step == "" {
+			return err
 		}
 		var tagList []string
 		if tags := stringFlag(fs, "tags"); tags != "" {
@@ -692,12 +690,7 @@ var cmdRecall = &Command{
 		if boolFlag(fs, "any") {
 			match = "any"
 		}
-		var raw json.RawMessage
-		if ctx.Step != "" {
-			raw, err = stepRecall(ctx, proj, q, memType, tagList, limit, match)
-		} else {
-			raw, err = ctx.aihub().SearchMemories(proj, q, memType, tagList, limit, match)
-		}
+		raw, err := ctx.searchMemories(proj, q, memType, tagList, limit, match)
 		if err != nil {
 			return err
 		}
@@ -768,10 +761,8 @@ var cmdRemember = &Command{
 		if proj == "" {
 			return fmt.Errorf("remember: --project is required — there is no default project (polyforge#113)")
 		}
-		if ctx.Step == "" {
-			if err := requireMappedProject(ctx, "remember", proj); err != nil {
-				return err
-			}
+		if err := requireMappedProject(ctx, "remember", proj); err != nil && ctx.Step == "" {
+			return err
 		}
 		// The content: positional text, '-' for stdin, '@file' for a file.
 		var content string
@@ -898,19 +889,9 @@ func memoryShow(ctx *Context, args []string) error {
 		return fmt.Errorf("memory show: --max-bytes must be >= 0 (0 = unlimited)")
 	}
 	id := rest[0]
-	var metaRaw json.RawMessage
-	var body []byte
-	if ctx.Step != "" {
-		if metaRaw, body, err = stepMemory(ctx, id); err != nil {
-			return err
-		}
-	} else {
-		if metaRaw, err = ctx.aihub().GetMemory(id); err != nil {
-			return err
-		}
-		if body, err = ctx.aihub().GetMemoryContent(id); err != nil {
-			return err
-		}
+	metaRaw, body, err := ctx.readMemory(id)
+	if err != nil {
+		return err
 	}
 	var meta memoryMetaView
 	if err := json.Unmarshal(metaRaw, &meta); err != nil {
