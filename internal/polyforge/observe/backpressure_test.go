@@ -3,7 +3,8 @@ package observe
 // backpressure_test.go: §九 — a failed push is retried with an
 // exponential delay (bounded by PushBackoffMax); reaching the bound
 // writes ONE push_backpressure event and NEVER kills the agent; a newer
-// Version is pushed at once, and a success ends the episode.
+// Version is pushed at once without resetting the delay, and only a
+// success ends the episode.
 
 import (
 	"context"
@@ -93,4 +94,25 @@ func TestNewerVersionPushesAtOnceDespiteBackoff(t *testing.T) {
 	rec.setFail(false)
 	m.writeExec(t, 2, "code")
 	soon(t, time.Second, "the newer Version published at once", func() bool { return len(eventsOf(m, EvPublished)) == 1 })
+}
+
+// Versions that keep arriving during an outage are each pushed at once,
+// but they do not restart the ladder: the failures still climb to the
+// cap and the degradation event fires once.
+func TestBackpressureFiresWhileVersionsKeepArriving(t *testing.T) {
+	rec := &pushRecorder{fail: true}
+	m, _ := newTestMonitor(t, newFakeHandle("att_1"), func(c *monitorCfg) {
+		c.PushRetryBackoff = time.Hour
+		c.PushBackoffMax = 4 * time.Hour // reached at the third failure
+		c.push = rec.push
+	})
+	for v := int64(1); v <= 5; v++ {
+		m.writeExec(t, v, "code")
+		soon(t, time.Second, "the new Version pushed at once", func() bool { return len(rec.attempts()) == int(v) })
+	}
+	soon(t, time.Second, "the degradation event", func() bool { return len(eventsOf(m, EvPushBackpressure)) == 1 })
+	time.Sleep(50 * time.Millisecond)
+	if n := len(eventsOf(m, EvPushBackpressure)); n != 1 {
+		t.Fatalf("push_backpressure events: %d, want exactly 1", n)
+	}
 }

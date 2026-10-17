@@ -165,8 +165,8 @@ type Monitor struct {
 
 	// push retry backoff (monitor goroutine only): after a failure the
 	// same Version is retried at retryAt; the delay doubles per failure
-	// up to PushBackoffMax. A newer Version is pushed at once, and it or
-	// a success resets the delay. backpressured: the episode's one
+	// up to PushBackoffMax. A newer Version is pushed at once; only a
+	// success resets the delay. backpressured: the episode's one
 	// push_backpressure event (the delay reached its cap) was written.
 	failedPushes  int
 	failedVersion int64
@@ -638,9 +638,6 @@ func (m *Monitor) schedulePush() {
 	case m.gate <- struct{}{}:
 	default:
 		return // one already in flight; the next tick retries
-	}
-	if newer {
-		m.backoff = 0 // a new commit boundary restarts the retry ladder
 	}
 	version := m.dirtyVersion
 	tr := m.transcriptSnapshot() // captured BEFORE the spawn: no shared-field reads
