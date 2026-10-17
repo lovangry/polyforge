@@ -8,9 +8,10 @@
 // "pre-existing"), and so do the authored acceptance tests and the
 // regression test. The driver therefore rejects — through the ordinary
 // envelope-rejection retry lane — a completed result that classifies a
-// repro check or any protected test as pre_existing, a pre_existing
-// check that names no base commit or is not backed by a well-formed
-// `<repo-relative path>: <test>` pre_existing_failures entry, and (bug-fix)
+// repro check as pre_existing, a pre_existing_failures entry naming a
+// protected test, a pre_existing check that names no base commit or is
+// not backed by a well-formed `<repo-relative path>: <test>`
+// pre_existing_failures entry, and (bug-fix)
 // a verification pass that does not show the reproduced bug's repro
 // check passing.
 package driver
@@ -133,20 +134,6 @@ func protectedPath(p string, protected []string) string {
 	return ""
 }
 
-// mentionsProtected scans free text (a check name or detail) token by
-// token — never a bare substring — for a protected path.
-func mentionsProtected(text string, protected []string) string {
-	for _, tok := range strings.FieldsFunc(text, func(r rune) bool {
-		return r == ' ' || r == '\t' || r == '\n' || strings.ContainsRune(",;()[]{}\"'`", r)
-	}) {
-		tok = strings.TrimRight(tok, ":.")
-		if pr := protectedPath(tok, protected); pr != "" {
-			return pr
-		}
-	}
-	return ""
-}
-
 // checkPreExisting judges one completed output against the boundary.
 // verification marks the step whose pass must show the repro (bug-fix).
 func checkPreExisting(output json.RawMessage, rules PreExistingRules, verification bool) error {
@@ -176,12 +163,9 @@ func checkPreExisting(output json.RawMessage, rules PreExistingRules, verificati
 			continue
 		}
 		preChecks++
-		pr := mentionsProtected(c.Name+" "+c.Detail, rules.Protected)
 		switch {
 		case reproName.MatchString(c.Name):
 			problems = append(problems, fmt.Sprintf("check %q is the repro of the bug being fixed — it fails on the base by definition, so it can never be pre_existing", c.Name))
-		case pr != "":
-			problems = append(problems, fmt.Sprintf("check %q covers the protected test %s", c.Name, pr))
 		case !baseSHAShape.MatchString(c.Detail):
 			problems = append(problems, fmt.Sprintf("check %q is pre_existing but its detail names no base commit sha", c.Name))
 		}

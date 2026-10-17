@@ -91,11 +91,11 @@ func verificationEnv(t *testing.T) (*Driver, *fakeSpawner, string) {
 
 func verificationDone(output string) fakeEntry {
 	e := done(output)
-	e.res.CommandEvidence = goodEvidence()
+	e.res.CommandEvidence = rawEvidence(goodEvidence())
 	return e
 }
 
-// H3, record-only (v2.5.0): a verification "pass" carrying a failed
+// H3, record-only (every step but release/deploy): a verification "pass" carrying a failed
 // check contradicts the declared schema (its oneOf). The result is
 // accepted, and the violation is a durable output_schema_violation event.
 func TestRunRecordsOutputViolatingDeclaredSchema(t *testing.T) {
@@ -128,28 +128,79 @@ func TestRunRecordsOutputViolatingDeclaredSchema(t *testing.T) {
 	}
 }
 
-// H3, enforcing (the one switch flipped): the same output is rejected
-// in-process with the schema error as feedback, and the rewrite accepted.
-func TestRunEnforcedSchemaRejectsViolation(t *testing.T) {
-	enforceOutputSchemas = true
-	defer func() { enforceOutputSchemas = false }()
-	d, sp, execPath := verificationEnv(t)
+// H3, enforced on the release bundle's `release` step: a pass that
+// names no published artifact violates the shipped schema; it is rejected
+// in-process with the schema error as feedback, and the conforming rewrite is accepted.
+func TestRunEnforcedReleaseSchemaRejectsViolation(t *testing.T) {
+	d, sp, execPath := runEnv(t, gateSpec(releaseStepID, releaseStepID))
+	writeCapsuleFile(t, d.wi.CapsuleDir, "workflows/b/steps/release.md", shippedStepDef(t, "release", releaseStepID))
 	sp.script = []fakeEntry{
-		done(`{}`), // fix
-		verificationDone(`{"verdict":"pass","checks":[{"name":"unit","status":"fail"}]}`),
-		verificationDone(`{"verdict":"pass","checks":[{"name":"unit","status":"pass"}]}`),
+		done(`{"verdict":"pass","version":"v1.6.0","commit":"abc1234"}`),
+		done(`{"verdict":"pass","version":"v1.6.0","commit":"abc1234","artifacts_published":["tag:v1.6.0"]}`),
 	}
 	if err := d.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := sp.dispatched(); len(got) != 3 {
-		t.Fatalf("the contradictory pass must be re-dispatched once (no rewind), got %v", got)
+	if got := sp.dispatched(); len(got) != 2 {
+		t.Fatalf("the non-conforming pass must be re-dispatched once (no rewind), got %v", got)
 	}
-	if fb := sp.spawnAt(2).PriorRejection; !strings.Contains(fb, "declared output schema") {
+	if fb := sp.spawnAt(1).PriorRejection; !strings.Contains(fb, "declared output schema") {
 		t.Fatalf("feedback must name the schema violation: %q", fb)
 	}
 	if exec := readExec(t, execPath); exec.WorkflowStatus != StatusCompleted {
 		t.Fatalf("the conforming rewrite must be accepted: %s", exec.WorkflowStatus)
+	}
+	for _, e := range d.log.(*eventLog).entries {
+		if e.kind == EvOutputSchemaViolation {
+			t.Fatalf("an enforced schema rejects, it never records: %+v", e)
+		}
+	}
+}
+
+// An enforced step fails closed: with no loadable schema (absent,
+// unloadable, no bundle) its completed result is rejected, never accepted
+// unchecked; a native gate_failed and a record-only step are unaffected.
+func TestEnforcedStepWithoutSchemaFailsClosed(t *testing.T) {
+	for _, step := range []string{releaseStepID, deployStepID} {
+		res := releaseRes(step, OutcomeCompleted, `{"verdict":"pass","version":"v1"}`)
+		err := ValidateStepResult(res, ResultSpec{WIID: "wi_run", StepID: step, SpawnN: 1, Gate: true})
+		if err == nil || !strings.Contains(err.Error(), "output schema unloadable") {
+			t.Fatalf("%s: want the unloadable-schema rejection, got %v", step, err)
+		}
+		failed := releaseRes(step, OutcomeGateFailed, `{"verdict":"fail","fail_reason":"x"}`)
+		if err := ValidateStepResult(failed, ResultSpec{WIID: "wi_run", StepID: step, SpawnN: 1, Gate: true}); err != nil {
+			t.Fatalf("%s: a native gate_failed is not judged by the schema: %v", step, err)
+		}
+	}
+	if err := ValidateStepResult(releaseRes("verify", OutcomeCompleted, `{"verdict":"pass"}`), ResultSpec{WIID: "wi_run", StepID: "verify", SpawnN: 1}); err != nil {
+		t.Fatalf("a record-only step without a schema is accepted: %v", err)
+	}
+
+	// Through Run: an unloadable release schema blocks the step
+	// result_invalid after the retry bound, naming the reason.
+	d, sp, _ := runEnv(t, gateSpec(releaseStepID, releaseStepID))
+	writeCapsuleFile(t, d.wi.CapsuleDir, "workflows/b/steps/release.md", "---\noutput:\n  type: object\n  required: 7\n---\nrelease")
+	for i := 0; i <= maxEnvelopeRejects; i++ {
+		sp.script = append(sp.script, done(`{"verdict":"pass","version":"v1","commit":"abc","artifacts_published":["t"]}`))
+	}
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if x := d.Snapshot(); x.WorkflowStatus != StatusBlocked || !strings.Contains(x.BlockedReason, "output schema unloadable") {
+		t.Fatalf("status %q reason %q, want blocked naming the unloadable schema", x.WorkflowStatus, x.BlockedReason)
+	}
+}
+
+// The prompt states the consequence the step's schema lane applies:
+// rejection on release/deploy, a record everywhere else.
+func TestOutputSchemaPromptStatesEnforcement(t *testing.T) {
+	for step, want := range map[string]string{
+		releaseStepID: "rejects a non-conforming envelope", deployStepID: "rejects a non-conforming envelope",
+		verificationStepID: "records every violation",
+	} {
+		if p := assembleStepPrompt(promptParts{StepID: step, OutputSchema: "type: object"}); !strings.Contains(p, want) {
+			t.Fatalf("%s prompt must say %q:\n%s", step, want, p)
+		}
 	}
 }
 

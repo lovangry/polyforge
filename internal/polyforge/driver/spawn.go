@@ -402,7 +402,7 @@ func assembleStepPrompt(p promptParts) string {
 	if p.OutputSchema != "" {
 		b.WriteString("# Output schema\n\n")
 		b.WriteString("The `output` object of a `completed` result envelope must validate against this JSON Schema (draft-07, written as YAML; omit an optional property rather than writing null). ")
-		if enforceOutputSchemas {
+		if outputSchemaEnforced(p.StepID) {
 			b.WriteString("The driver validates it and rejects a non-conforming envelope:\n\n```yaml\n")
 		} else {
 			b.WriteString("The driver validates it and records every violation for the owner:\n\n```yaml\n")
@@ -1043,11 +1043,7 @@ func (r *stepRun) collect() (*StepResult, error) {
 	}
 	var res StepResult
 	if err := json.Unmarshal(raw, &res); err != nil {
-		salvaged, ok := salvageEvidence(raw)
-		if !ok {
-			return nil, fmt.Errorf("envelope at %s is not valid JSON: %w", r.dropPath, err)
-		}
-		res = *salvaged
+		return nil, fmt.Errorf("envelope at %s is not valid JSON: %w", r.dropPath, err)
 	}
 	// Light completion checks — the identity fields a minimal-contract
 	// envelope may leave to the dispatch are filled from the dispatch
@@ -1074,52 +1070,6 @@ func (r *stepRun) collect() (*StepResult, error) {
 		return nil, fmt.Errorf("driver: envelope outcome %q is not in the closed set", clipAgentText(string(res.Outcome)))
 	}
 	return &res, nil
-}
-
-// salvageEvidence is the tolerant re-parse of an envelope that failed to
-// decode: step agents persistently write command_evidence as a string
-// list instead of the object array. The well-formed object entries are
-// kept (a mixed list must not drop real evidence before the V4 gate
-// looks at it), every other entry is dropped with its reason recorded
-// (evidenceDropped), and the rest of the envelope is decoded as is.
-// ok is false when the envelope still does not decode.
-func salvageEvidence(raw []byte) (res *StepResult, ok bool) {
-	var m map[string]interface{}
-	var shadow struct {
-		CommandEvidence json.RawMessage `json:"command_evidence"`
-	}
-	if json.Unmarshal(raw, &shadow) != nil || json.Unmarshal(raw, &m) != nil {
-		return nil, false
-	}
-	delete(m, "command_evidence")
-	var dropped []string
-	var elems []json.RawMessage
-	if json.Unmarshal(shadow.CommandEvidence, &elems) == nil {
-		kept := []json.RawMessage{}
-		for i, el := range elems {
-			var ce CommandEvidence
-			if !strings.HasPrefix(strings.TrimSpace(string(el)), "{") {
-				dropped = append(dropped, fmt.Sprintf("command_evidence[%d] is not an OBJECT", i))
-			} else if uerr := json.Unmarshal(el, &ce); uerr != nil {
-				dropped = append(dropped, fmt.Sprintf("command_evidence[%d] could not be decoded: %v (started_at must be RFC3339, argv a string list, numbers numeric)", i, uerr))
-			} else {
-				kept = append(kept, el)
-			}
-		}
-		if len(kept) > 0 {
-			m["command_evidence"] = kept
-		}
-	}
-	cleaned, err := json.Marshal(m)
-	if err != nil {
-		return nil, false
-	}
-	res = &StepResult{}
-	if json.Unmarshal(cleaned, res) != nil {
-		return nil, false
-	}
-	res.evidenceDropped = dropped
-	return res, true
 }
 
 // archive lands the collected envelope at the R14 staging path —
