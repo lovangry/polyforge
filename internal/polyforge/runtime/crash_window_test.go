@@ -250,3 +250,47 @@ func TestAttachClearsCleanPauseBeforeTheHubFlips(t *testing.T) {
 		terminateJobAgent(r, wi)
 	}
 }
+
+// TestPauseReplayFailureRetriesUntilItLands (CR-11): the replayed
+// SessionEnd(paused) meets a hub blip (more than once): the record stays
+// paused, nothing resumes, and the verify retry lands the pause once the
+// hub takes it.
+func TestPauseReplayFailureRetriesUntilItLands(t *testing.T) {
+	hub := newFakeHub()
+	sp := &scriptedSpawner{}
+	r, _, _ := newTestRuntime(t, hub, sp)
+	r.cfg.EndRetryBase = 10 * time.Millisecond
+	wi := "wi_cr11_blip"
+	rec := matrixRecord(r, wi, 0, "")
+	rec.State = string(StatePaused)
+	rec.StopReason = protocol.FinishPaused
+	rec.CleanPause = true
+	hub.hold(wi, rec.SessionID, api.StatusRunning)
+	hub.end[wi] = fmt.Errorf("connection refused")
+	if err := os.MkdirAll(rec.CapsuleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeStateFile(t, r, []*jobRecord{rec})
+
+	if err := r.Restart(context.Background()); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond) // several failed retries
+	if ji, ok := r.Info(wi); !ok || ji.State != StatePaused {
+		t.Fatalf("a failed pause replay must keep the record paused: %+v (ok=%v)", ji, ok)
+	}
+	hub.mu.Lock()
+	delete(hub.end, wi)
+	hub.mu.Unlock()
+	waitFor(t, "the pause to land", func() bool {
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		return hub.status[wi] == api.StatusPaused
+	})
+	if sp.callCount() != 0 {
+		t.Fatal("the operator's pause must never be resumed")
+	}
+	if !hub.lastEnd().CleanPause {
+		t.Fatalf("the landed pause must be clean: %+v", hub.lastEnd())
+	}
+}

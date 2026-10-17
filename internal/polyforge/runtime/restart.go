@@ -757,8 +757,10 @@ func pausePending(rec *jobRecord) bool {
 
 // replayPause finishes the pending operator pause at restart: orphans
 // reaped, the pause's network half (seal push, WIP, SessionEnd(paused))
-// run again. A failure keeps the record; the next restart retries.
-func (r *Runtime) replayPause(rec *jobRecord, j *job) {
+// run again. A failure keeps the record and defers to the verify retry
+// (awaitVerify): its next answer reconciles the record again, so the
+// pause lands once the hub takes it.
+func (r *Runtime) replayPause(ctx context.Context, rec *jobRecord, j *job) {
 	r.reapOrphans(rec.WorkItemID, j.capsuleDir)
 	if r.cfg.EventTap != nil {
 		r.cfg.EventTap(rec.WorkItemID, "pending_pause_replay", map[string]any{
@@ -767,7 +769,7 @@ func (r *Runtime) replayPause(rec *jobRecord, j *job) {
 		})
 	}
 	if err := r.pauseNetwork(j); err != nil {
-		fmt.Fprintf(os.Stderr, "runtime: %s: pending pause replay failed, record kept: %v\n", rec.WorkItemID, err)
+		r.awaitVerify(ctx, rec, fmt.Errorf("pending pause replay: %w", err))
 		return
 	}
 	fmt.Fprintf(os.Stderr, "runtime: %s: pending operator pause replayed; record retained paused\n", rec.WorkItemID)
@@ -952,7 +954,7 @@ func (r *Runtime) restartVerified(ctx context.Context, rec *jobRecord, v *api.Se
 				return
 			}
 			if j := r.jobOf(rec.WorkItemID); j != nil && pausePending(rec) {
-				r.replayPause(rec, j)
+				r.replayPause(ctx, rec, j)
 				return
 			}
 			if serr := r.restartRunning(ctx, rec); serr != nil {
@@ -1200,7 +1202,12 @@ func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bo
 	// was live when Restart returned, then the daemon's startup
 	// re-attachment pass hands it over.
 	r.announceReconciled(j.wi)
-	return true
+	// a reconciliation that deferred again (a pending pause whose
+	// SessionEnd failed) keeps this retry going
+	j.mu.Lock()
+	again := j.awaitingHub
+	j.mu.Unlock()
+	return !again
 }
 
 // clearAwaitingHub drops j's deferred-verify latch and persists the change.
