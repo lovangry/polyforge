@@ -65,7 +65,8 @@ type Config struct {
 	MachineID string
 	// DisplayName is the display-only daemon name (default: hostname).
 	DisplayName string
-	SocketPath  string
+	// SocketPath is required (main.go resolves it like the CLI does).
+	SocketPath string
 	// Mapping is the REQUIRED workspace→projects plan of record
 	// (polyforge#113), assembled in main.go from the shared config's
 	// [workspace."<path>"] sections. Capsules route per project through
@@ -169,9 +170,6 @@ func (c SupervisionConfig) limits() supervise.Defaults {
 }
 
 func (c *Config) fill() {
-	if c.SocketPath == "" {
-		c.SocketPath = "/run/polyforge.sock"
-	}
 	// The Go execution driver is THE engine (polyforge#106): the legacy
 	// WI-Agent selection surface is deleted — there is nothing to
 	// default and nothing to flip.
@@ -311,6 +309,7 @@ func New(cfg Config) (*Daemon, error) {
 	// without file credentials carries on with a warning.
 	rtCfg := runtime.Config{
 		MachineID:                cfg.MachineID,
+		DaemonSocket:             cfg.SocketPath,
 		Mapping:                  cfg.Mapping,
 		DataDir:                  cfg.DataDir,
 		GitRemoteBase:            cfg.GitRemoteBase,
@@ -441,14 +440,11 @@ func New(cfg Config) (*Daemon, error) {
 	}
 	d.q.persist = d.persistQueue
 
-	// The persisted mode/concurrency bookkeeping (the daemon's OWN state
-	// file; jobs/attempts bookkeeping is Runtime's state.json and is
-	// never duplicated here).
+	// The persisted auto switch (the daemon's OWN state file;
+	// jobs/attempts bookkeeping is Runtime's state.json and is never
+	// duplicated here).
 	if err := d.loadDaemonState(); err != nil {
 		return nil, err
-	}
-	if note := capOverrideNotice(d.q.ExplicitMax(), cfg.MaxConcurrent); note != "" {
-		fmt.Fprintln(os.Stderr, note)
 	}
 	// cfg.Auto is an EXPLICIT flag override only (#18): nil keeps the
 	// persisted switch — an auto daemon restarting stays auto — and
@@ -832,7 +828,7 @@ func (l driverEventLog) Append(wi, kind string, body any) error {
 
 // occupiedSlots is the set of WIs holding a concurrency slot: the
 // runtime's live jobs, whoever started them (dispatch, restart recovery,
-// resume-blocked). Finding 2 (v1.5 review): a RETAINED paused job
+// a blocked resume). Finding 2 (v1.5 review): a RETAINED paused job
 // holds no agent and no writer — it must not pin a slot (four
 // operator-paused jobs would otherwise starve the whole daemon).
 func (d *Daemon) occupiedSlots() map[string]bool {
@@ -894,9 +890,7 @@ func (d *Daemon) startEntry(e qEntry) {
 		if e.Deferrals == 0 {
 			fmt.Fprintf(os.Stderr, "daemon: start %s deferred, will retry with backoff: %v\n", e.WorkItemID, err)
 		}
-		if rerr := d.q.Requeue(e.WorkItemID); rerr != nil {
-			fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, rerr)
-		}
+		d.q.Requeue(e.WorkItemID)
 		return
 	}
 	if errors.As(err, &ae) && ae.Code == api.ErrDaemonConflict {

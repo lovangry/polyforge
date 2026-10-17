@@ -122,7 +122,8 @@ func rankOf(priority string) int {
 
 // qEntry is one pending submit. The JSON tags are the persisted shape
 // (submit-queue.json, v2-converge §5): the answered `accepted` must
-// survive a daemon restart.
+// survive a daemon restart. Only the submit's intent is persisted; the
+// backoff is the running process's own and starts over at a restart.
 type qEntry struct {
 	WorkItemID string    `json:"work_item_id"`
 	Priority   string    `json:"priority,omitempty"`
@@ -140,10 +141,8 @@ type qEntry struct {
 	// NotBefore/Deferrals are the DAEMON-503 backoff: a claim the hub
 	// could not be reached for is held back until NotBefore (Take skips
 	// it, so other entries proceed) and each deferral doubles the wait.
-	// Both persist with the entry, so a restart keeps the remaining wait
-	// (at most deferralMax) instead of hammering a down hub.
-	NotBefore time.Time `json:"not_before,omitempty"`
-	Deferrals int       `json:"deferrals,omitempty"`
+	NotBefore time.Time `json:"-"`
+	Deferrals int       `json:"-"`
 }
 
 // Hub-unavailable backoff bounds: 1s, 2s, 4s ... capped at deferralMax.
@@ -168,25 +167,26 @@ type jobQueue struct {
 	mu      sync.Mutex
 	pending []qEntry
 	// inflight holds entries Take()n but not yet Settled: the dispatcher
-	// popped them and the claim has not finished. They stay in the
-	// persisted file so a crash between the pop and the claim journal
-	// cannot lose an accepted submit; replay's aihub check + claiming
-	// dedupe make a re-attempt harmless.
+	// popped them and the claim has not finished. Which entries are in
+	// flight is not persisted, but the entries stay in the file until
+	// Settle, so a crash between the pop and the claim journal cannot
+	// lose an accepted submit; the claiming-journal dedupe makes the
+	// replayed attempt harmless.
 	inflight map[string]qEntry
 	// occupied returns the WIs holding a concurrency slot, derived from
 	// the runtime's live job list — the single source of truth, so jobs
 	// recovered by a restart count like dispatched
 	// ones (there is no separate running set to drift).
 	occupied func() map[string]bool
-	maxConc  int
-	// maxExplicit marks maxConc as set by an explicit `pf ops max N` (the
-	// only cap that is persisted); false = the configured cap
-	// (--max-concurrent-jobs / cli.toml [daemon] / default).
-	maxExplicit bool
+	// maxConc is the cap: the configured one (--max-concurrent-jobs /
+	// cli.toml [daemon] / default) until a `pf ops max N`, which lasts
+	// until the daemon restarts.
+	maxConc int
 	// now is the clock (tests inject one); nil means time.Now.
 	now func() time.Time
 	// persist, when non-nil, atomically rewrites the queue file from the
-	// given snapshot (pending + inflight). Called under mu.
+	// given snapshot (pending + inflight). Called under mu, only when the
+	// set of entries changes (Enqueue, Settle, Restore, PurgeOrigin).
 	persist func([]qEntry) error
 }
 
@@ -209,64 +209,6 @@ func (q *jobQueue) SetMaxConcurrent(n int) error {
 	defer q.mu.Unlock()
 	q.maxConc = n
 	return nil
-}
-
-// SetExplicitMax is `pf ops max N`: the cap that is persisted and wins
-// over the configured one until ResetMax.
-func (q *jobQueue) SetExplicitMax(n int) error {
-	if n < 1 {
-		return fmt.Errorf("max_concurrent_jobs must be >= 1 (DAEMON-400)")
-	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.maxConc, q.maxExplicit = n, true
-	return nil
-}
-
-// ResetMax is `pf ops max --reset`: back to the configured cap.
-func (q *jobQueue) ResetMax(configured int) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.maxConc, q.maxExplicit = configured, false
-}
-
-// ExplicitMax answers the explicit `pf ops max` cap, 0 when none is set.
-func (q *jobQueue) ExplicitMax() int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if !q.maxExplicit {
-		return 0
-	}
-	return q.maxConc
-}
-
-// MaxState answers the effective cap and where it comes from, read under
-// one lock: "ops" (a persisted explicit `pf ops max`) or "config".
-func (q *jobQueue) MaxState() (int, string) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.maxExplicit {
-		return q.maxConc, "ops"
-	}
-	return q.maxConc, "config"
-}
-
-// MaxSource answers the source half of MaxState.
-func (q *jobQueue) MaxSource() string {
-	_, src := q.MaxState()
-	return src
-}
-
-// capOverrideNotice is the boot line for a persisted cap that overrides
-// a DIFFERENT configured one ("" otherwise). After the G2 upgrade nearly
-// every machine carries such a cap — older daemons persisted the cap on
-// every graceful shutdown — so the configured max_concurrent_jobs would
-// otherwise do nothing without a word.
-func capOverrideNotice(persisted, configured int) string {
-	if persisted <= 0 || persisted == configured {
-		return ""
-	}
-	return fmt.Sprintf("daemon: job cap %d comes from %s (an explicit pf ops max, or a cap an older daemon persisted at shutdown); it overrides the configured cap %d (cli.toml [daemon] max_concurrent_jobs / --max-concurrent-jobs / default 4) — run `pf ops max --reset` to use the configured cap", persisted, daemonStateFile, configured)
 }
 
 func (q *jobQueue) MaxConcurrent() int {
@@ -342,22 +284,22 @@ func (q *jobQueue) Settle(wi string) error {
 }
 
 // Requeue returns a Take()n entry to pending (the claim attempt did not
-// run to a verdict — a transient hub failure) and persists; the next
-// dispatch pass after the entry's backoff retries it (Take skips it until
-// then, so other entries are not starved by one WI's failure). The entry
-// keeps its original enqueue time, so its rank is unchanged.
-func (q *jobQueue) Requeue(wi string) error {
+// run to a verdict — a transient hub failure); the next dispatch pass
+// after the entry's backoff retries it (Take skips it until then, so
+// other entries are not starved by one WI's failure). The entry keeps its
+// original enqueue time, so its rank is unchanged. Nothing is written:
+// the entry never left the file.
+func (q *jobQueue) Requeue(wi string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	e, ok := q.inflight[wi]
 	if !ok {
-		return nil
+		return
 	}
 	delete(q.inflight, wi)
 	e.Deferrals++
 	e.NotBefore = q.clock().Add(deferralBackoff(e.Deferrals))
 	q.pending = append(q.pending, e)
-	return q.persistLocked()
 }
 
 // Restore appends the entries a restart replays and persists the queue
@@ -495,24 +437,21 @@ func (q *jobQueue) Take() *qEntry {
 	}
 	e := q.pending[best]
 	q.pending = append(q.pending[:best], q.pending[best+1:]...)
-	q.inflight[e.WorkItemID] = e // persisted until Settle; a persist error here is non-fatal (the entry is merely re-listed on disk)
-	_ = q.persistLocked()
+	q.inflight[e.WorkItemID] = e // stays in the file until Settle
 	return &e
 }
 
 // ---------------------------------------------------------------------------
-// The daemon's own state file: auto switch + the EXPLICIT `pf ops max`
-// cap only (daemon-state.json, reference.md §6.4; the archived 04 §4.1 shape minus jobs[], which is Runtime's
-// state.json). A configured cap is never persisted (decision 2026-10-16
-// G2): max_concurrent_jobs absent/0 = use the configured cap. Same atomic-write
-// discipline as every daemon-side state file.
+// The daemon's own state file: the auto switch (daemon-state.json,
+// reference.md §6.4). The cap is never persisted: every start takes the
+// configured one. Same atomic-write discipline as every daemon-side
+// state file.
 
 const daemonStateFile = "daemon-state.json"
 
 type daemonState struct {
-	Version           int  `json:"version"`
-	Auto              bool `json:"auto"`
-	MaxConcurrentJobs int  `json:"max_concurrent_jobs,omitempty"`
+	Version int  `json:"version"`
+	Auto    bool `json:"auto"`
 }
 
 func (d *Daemon) statePath() string {
@@ -537,23 +476,11 @@ func (d *Daemon) loadDaemonState() error {
 	d.modes.mu.Lock()
 	d.modes.auto = st.Auto
 	d.modes.mu.Unlock()
-	// A persisted cap is an explicit `pf ops max` — including one an
-	// older daemon wrote on every shutdown (treated as explicit; `pf ops
-	// max --reset` returns to the configured cap).
-	if st.MaxConcurrentJobs > 0 {
-		if err := d.q.SetExplicitMax(st.MaxConcurrentJobs); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
 func (d *Daemon) persistDaemonState() error {
-	st := daemonState{
-		Version:           1,
-		Auto:              d.modes.Auto(),
-		MaxConcurrentJobs: d.q.ExplicitMax(),
-	}
+	st := daemonState{Version: 1, Auto: d.modes.Auto()}
 	blob, err := json.MarshalIndent(&st, "", "  ")
 	if err != nil {
 		return err
@@ -562,7 +489,7 @@ func (d *Daemon) persistDaemonState() error {
 	return atomicfile.Write(path, blob, 0o600)
 }
 
-// persistModeQuietly lands the auto/max bookkeeping after an ops change;
+// persistModeQuietly lands the auto switch after a change;
 // a persist failure is loud but never fails the change that already
 // happened in memory.
 func (d *Daemon) persistModeQuietly() {

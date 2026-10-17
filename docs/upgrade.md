@@ -1264,3 +1264,26 @@ it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
   the old way (rows == `memory.md` files in the backup).
 - `pf backup` (`VACUUM INTO`) now holds every memory; it still does not
   include the git repos.
+
+## Work machines: job cap, socket default and daemon id (polyforge#183)
+
+- `pf ops max N` changes the cap of the running daemon only; every daemon
+  start takes the configured cap (`--max-concurrent-jobs`, else cli.toml
+  `[daemon] max_concurrent_jobs`, else 4). `pf ops max --reset` is gone
+  (nothing to reset), and so are the boot line about a persisted cap and
+  `max_source` in the `GET /status` and `POST /ops/config` answers.
+- A `max_concurrent_jobs` an older daemon left in
+  `<data-dir>/daemon-state.json` is ignored from the first start of this
+  version on. A machine that relied on it: put the number into the
+  `[daemon]` table before upgrading.
+- With no socket named anywhere (no `--socket`, `PF_DAEMON_SOCKET` or
+  `daemon_socket`), `pf` and the daemon use `daemon.sock` in
+  `$POLYFORGE_DATA_DIR`, else `~/.local/share/polyforge`, instead of
+  `/run/polyforge.sock`. `tools/install.sh` wrote that same
+  path into every `cli.toml` it created, so installed machines see no
+  change; a fresh `cli.toml` no longer carries the key.
+- A daemon started with no `-machine-id` and no recorded
+  `<data-dir>/daemon-id` derives `m-<short hostname>` (the one
+  `pf daemon ensure` and `tools/install.sh` use) instead of
+  `m-<full hostname>`. A recorded id always wins, so running machines keep
+  theirs.

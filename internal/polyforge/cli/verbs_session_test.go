@@ -106,7 +106,7 @@ func TestWrapFailOnBlockedPrintsResumeOrCancelHint(t *testing.T) {
 
 // TestResumeBlockedDoorWiring (polyforge#116): a workflow parked blocked
 // answers the §6.4 owner move, not the pause copy — the hub status picks
-// the door, and the blocked door contacts the daemon's resume-blocked
+// the door, and the blocked door contacts the daemon's claim
 // route (the paused door now contacts the daemon's resume-paused route —
 // the live-holder continuation of wi_seWTgHeKtaa8; the test above pins
 // that door's wire shape).
@@ -119,7 +119,7 @@ func TestResumeBlockedDoorWiring(t *testing.T) {
 		io.WriteString(w, blockedWI)
 	})
 	d := newDaemonFixture(t)
-	d.answer("POST", "/jobs/wi_blocked/resume-blocked", `{"resumed":true,"work_item_id":"wi_blocked"}`)
+	d.answer("POST", "/jobs/wi_blocked/claim", `{"resumed":true,"work_item_id":"wi_blocked"}`)
 	code, stdout, stderr := runPf(t, map[string]string{
 		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock, "PF_API_KEY": "human-key",
 	}, "resume", "wi_blocked")
@@ -149,12 +149,12 @@ func TestResumeBlockedDoorWiring(t *testing.T) {
 	}
 	// The daemon's owner-move route is contacted exactly once.
 	calls := d.rec.all()
-	if len(calls) != 1 || calls[0].Path != "/jobs/wi_blocked/resume-blocked" {
-		t.Errorf("resume must contact the daemon's resume-blocked route once: %+v", calls)
+	if len(calls) != 1 || calls[0].Path != "/jobs/wi_blocked/claim" || !strings.Contains(calls[0].Body, `"resume":true`) {
+		t.Errorf("resume must contact the daemon's claim route once, asking for the synchronous start: %+v", calls)
 	}
 	// A refused door (non-owner member) stops before the daemon is asked.
 	d2 := newDaemonFixture(t)
-	d2.answer("POST", "/jobs/wi_blocked/resume-blocked", `{"resumed":true,"work_item_id":"wi_blocked"}`)
+	d2.answer("POST", "/jobs/wi_blocked/claim", `{"resumed":true,"work_item_id":"wi_blocked"}`)
 	deny := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" {
 			w.WriteHeader(http.StatusForbidden)
@@ -263,7 +263,7 @@ func TestPauseRefusalWritesNothing(t *testing.T) {
 }
 
 // TestResumeDispatchByWIState pins the two-way `pf resume` order: blocked ->
-// human-key door then daemon resume-blocked; otherwise (paused) -> the plain
+// human-key door then the daemon's synchronous claim; otherwise (paused) -> the plain
 // clean_pause PATCH and the daemon's resume-paused route (the live-holder
 // continuation, wi_seWTgHeKtaa8).
 func TestResumeDispatchByWIState(t *testing.T) {
@@ -282,7 +282,7 @@ func TestResumeDispatchByWIState(t *testing.T) {
 		wantStdoutIn string
 	}{
 		{"paused", "paused", true, true, false, []string{"/jobs/wi_abc/resume-paused"}, "clean_pause cleared"},
-		{"blocked", "blocked", false, false, true, []string{"/jobs/wi_abc/resume-blocked"}, "parked blocked"},
+		{"blocked", "blocked", false, false, true, []string{"/jobs/wi_abc/claim"}, "parked blocked"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -291,7 +291,7 @@ func TestResumeDispatchByWIState(t *testing.T) {
 				io.WriteString(w, wiWith(tc.hubStatus, tc.clean))
 			})
 			d := newDaemonFixture(t)
-			d.answer("POST", "/jobs/wi_abc/resume-blocked", `{"resumed":true,"work_item_id":"wi_abc"}`)
+			d.answer("POST", "/jobs/wi_abc/claim", `{"resumed":true,"work_item_id":"wi_abc"}`)
 			d.answer("POST", "/jobs/wi_abc/resume-paused", `{"resumed":true,"work_item_id":"wi_abc","outcome":"attached"}`)
 			d.answer("POST", "/jobs/wi_abc/resume", `{"accepted":true,"work_item_id":"wi_abc"}`)
 			code, stdout, stderr := runPf(t, map[string]string{
@@ -319,6 +319,9 @@ func TestResumeDispatchByWIState(t *testing.T) {
 			for _, r := range d.rec.all() {
 				if r.Method == "POST" {
 					posts = append(posts, r.Path)
+					if r.Path == "/jobs/wi_abc/claim" && !strings.Contains(r.Body, `"resume":true`) {
+						t.Errorf("the blocked resume's claim body %s does not ask for the synchronous start", r.Body)
+					}
 				}
 			}
 			if strings.Join(posts, ",") != strings.Join(tc.wantDaemon, ",") {
