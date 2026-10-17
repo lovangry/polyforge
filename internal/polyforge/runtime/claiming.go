@@ -6,8 +6,8 @@ package runtime
 // again — the v0 known gap "#Start-crash" (D5). The journal closes it
 // from both sides:
 //
-//   - BEFORE the claim call, the minted session secret and the claim's
-//     idempotency key are persisted durably. The entry is cleared once
+//   - BEFORE the claim call, the minted session secret is persisted
+//     durably. The entry is cleared once
 //     the start settles (live job registered, the session ended blocked
 //     as compensation — or kept end_pending in state.json — or the claim
 //     refused).
@@ -48,11 +48,10 @@ type claimingFile struct {
 // reference.md §3.5 shape): the minted session secret is the replay anchor — a
 // verify of it answers "did our claim land, and is it still ours?".
 type claimingRec struct {
-	WorkItemID     string `json:"work_item_id"`    // the claimed id (an older entry: the submitted spelling)
-	SessionID      string `json:"session_id"`      // the minted SECRET (replay anchor)
-	IdempotencyKey string `json:"idempotency_key"` // sent with the claim; aihub does not read it (the secret is the D4 replay key)
-	MachineID      string `json:"machine_id"`
-	At             string `json:"at"`
+	WorkItemID string `json:"work_item_id"` // the claimed id (an older entry: the submitted spelling)
+	SessionID  string `json:"session_id"`   // the minted SECRET (replay anchor, D4)
+	MachineID  string `json:"machine_id"`
+	At         string `json:"at"`
 	// Models is the manual `pf submit --models` list of this start, so a
 	// crash-replayed claim keeps it.
 	Models []string `json:"models,omitempty"`
@@ -109,20 +108,19 @@ func (r *Runtime) writeClaiming(items map[string]*claimingRec) error {
 }
 
 // noteClaiming journals one claim intention — the minted session secret
-// plus the idempotency key — BEFORE the claim call. A write failure is
+// — BEFORE the claim call. A write failure is
 // fatal to the start (the caller refuses to claim): a claim we cannot
 // journal is exactly the dangling-session risk this file exists to close.
-func (r *Runtime) noteClaiming(wi, sessionID, key string, models []string) error {
+func (r *Runtime) noteClaiming(wi, sessionID string, models []string) error {
 	r.claimMu.Lock()
 	defer r.claimMu.Unlock()
 	items := r.loadClaiming()
 	items[wi] = &claimingRec{
-		WorkItemID:     wi,
-		SessionID:      sessionID,
-		IdempotencyKey: key,
-		MachineID:      r.cfg.MachineID,
-		At:             nowStamp(),
-		Models:         models,
+		WorkItemID: wi,
+		SessionID:  sessionID,
+		MachineID:  r.cfg.MachineID,
+		At:         nowStamp(),
+		Models:     models,
 	}
 	return r.writeClaiming(items)
 }

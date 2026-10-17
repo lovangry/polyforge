@@ -246,7 +246,7 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 	if n := hub.endCount(); n != 0 {
 		t.Fatalf("the shutdown ended %d session(s): %+v — a cancelled clone must not block the work item", n, hub.lastEnd())
 	}
-	if got := journaled(r, wi); got == nil || got.SessionID != rec.SessionID || got.IdempotencyKey != rec.IdempotencyKey {
+	if got := journaled(r, wi); got == nil || got.SessionID != rec.SessionID {
 		t.Fatalf("claiming journal after the deferral = %+v, want the original entry", got)
 	}
 	if r.jobOf(wi) != nil {
@@ -256,16 +256,9 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 		t.Fatalf("a start after the shutdown answered %v, want the deferral", err)
 	}
 
-	// The next daemon start: same data dir, the remote reachable again
-	// (the hub's replay cache answers the original claim, so its repo
-	// inventory is dropped there too).
+	// The next daemon start: same data dir, the remote reachable again.
 	hub.mu.Lock()
 	hub.reposFor[wi] = nil
-	for _, resp := range hub.keyClaims {
-		if resp.Claim.WorkItemID == wi {
-			resp.Claim.Repos = nil
-		}
-	}
 	claimsBefore := len(hub.claims)
 	hub.mu.Unlock()
 	sp := &scriptedSpawner{}
@@ -283,8 +276,8 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 	hub.mu.Lock()
 	replays := hub.claims[claimsBefore:]
 	hub.mu.Unlock()
-	if len(replays) != 1 || replays[0].IdempotencyKey != rec.IdempotencyKey {
-		t.Fatalf("restart claims = %+v, want one replay with the journaled key", replays)
+	if len(replays) != 1 || replays[0].SessionID != rec.SessionID {
+		t.Fatalf("restart claims = %+v, want one replay with the journaled session", replays)
 	}
 	if hub.endCount() != 0 {
 		t.Fatalf("the replay ended a session: %+v", hub.lastEnd())

@@ -87,15 +87,15 @@ head (§3.5), through a direct update that bypasses the create-time check, so cr
 
 ### 3.2 Claim <!-- §3.2 -->
 
-`POST /api/v1/work-items/{id}/claim` body `{work_item_id, session_id, machine_id, idempotency_key}`
+`POST /api/v1/work-items/{id}/claim` body `{work_item_id, session_id, machine_id}`
 (`api.SessionClaimRequest`); caller needs writer/maintainer membership or admin (key scope alone does
 not authorize). One transaction (`core/session.go` `Claim`), checked in order: not terminal
 (`CORE-410 TERMINAL_STATE`), no session (`CORE-409 ALREADY_HELD`), queued (`NOT_CLAIMABLE`), no
 unfinished blocker (`DEPENDENCY_BLOCKED`), bundle present (`NOT_CLAIMABLE`); then
 `UPDATE … WHERE status='queued' AND session_hash IS NULL` (0 rows → `CORE-409 RACE_LOST`); a declared inventory repo that left the project → `CORE-409 INVENTORY_REPO_GONE`. Response `{claim, work_item}`
 (`api.SessionClaimResponse`; `claim.repos` = the inventory-filtered project repos; `sealed_head` /
-`sealed_machine` from the blocked seal). Idempotency is keyed on the session secret (`idempotency_key` is
-not read): a repeat by the session that holds the WI answers the same claim, re-read from the row, with no
+`sealed_machine` from the blocked seal). Idempotency is keyed on the session secret (an `idempotency_key` an older
+daemon sends is ignored): a repeat by the session that holds the WI answers the same claim, re-read from the row, with no
 write; a secret whose `session_claimed` event exists but that no longer holds the WI (force-ended,
 superseded, ended) → `CORE-403 STALE_SESSION` before any gate, so it never claims again.
 
@@ -115,7 +115,7 @@ aihub proxy only — pushes a step makes to an external origin are not fenced.
 
 ### 3.5 Daemon-side session state <!-- §3.5 -->
 
-- **Claiming journal** `<data-dir>/claiming.json` (`runtime/claiming.go`): `{work_item_id, session_id, idempotency_key, machine_id, at, models, ending, end_note}`, keyed by the canonical work-item id (an entry an older build keyed by the submitted spelling replays the same way), written durably **before** the claim call (write failure refuses the claim); cleared when the start settles. A post-claim failure whose compensation `SessionEnd(blocked)` does not land marks the entry `ending` and retries in the background: a Start of the work item answers `DAEMON-503` until it lands. Restart replay (`resumeClaiming`): `ending` → end the session blocked (no claim replay; retried in the background on failure); verify transport error → keep; no match → drop; already in the job table → drop; else re-claim with the same session secret; a refused re-claim ends the session blocked. An adopted replay enters the job table as a CLAIMING placeholder; its capsule clone and materialize run after Restart returns, outside every runtime lock (a shutdown defers it, entry kept). Corrupt file → quarantined `claiming.json.corrupt.<ts>`.
+- **Claiming journal** `<data-dir>/claiming.json` (`runtime/claiming.go`): `{work_item_id, session_id, machine_id, at, models}`, keyed by the canonical work-item id (an entry an older build keyed by the submitted spelling replays the same way), written durably **before** the claim call (write failure refuses the claim); cleared when the start settles. A post-claim failure whose compensation `SessionEnd(blocked)` does not land marks the entry `ending` and retries in the background: a Start of the work item answers `DAEMON-503` until it lands. Restart replay (`resumeClaiming`): `ending` → end the session blocked (no claim replay; retried in the background on failure); verify transport error → keep; no match → drop; already in the job table → drop; else re-claim with the same session secret; a refused re-claim ends the session blocked. An adopted replay enters the job table as a CLAIMING placeholder; its capsule clone and materialize run after Restart returns, outside every runtime lock (a shutdown defers it, entry kept). Corrupt file → quarantined `claiming.json.corrupt.<ts>`.
 - **Job record** `<data-dir>/runtime-state.json` (`runtime/state.go`): secret, fingerprint, job state, capsule/git dirs, remote, `spawn_n`, recovery-failure count, per-step candidate snapshot.
 - **M4 revalidation**: the monitor re-verifies every running job's session (default every 30s, `--revalidate-every`, `observe/session.go`; a boundary push the git face refuses for its credential re-checks at once, and a recovery push refused that way stops the work item once a verify confirms the mismatch); `matches=false` → kill tree, quarantine the capsule (`<name>.quarantined.<ts>`), drop the record, event `session_superseded`; no hub transition.
 - **end_pending** (`runtime/runtime.go` `pendingClose`, `restart.go` `closeBlocked`; retried by the work item's actor, `actor.go` `retry`): a failed `SessionEnd(blocked)` is retried (pushing the local chain first) until aihub accepts it or verify shows the session is no longer held; a permanently rejected chain push is recorded on the job record (`end_push_gave_up`) and the retry, restarts included, closes without it.

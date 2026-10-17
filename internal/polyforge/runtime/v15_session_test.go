@@ -28,8 +28,7 @@ func TestJournalReplayUnstartableCompensatesBlocked(t *testing.T) {
 	r, _, _ := newTestRuntimeAt(t, hub, sp, dataDir)
 
 	session := fakeSession("wi_adoptfail")
-	key := randomKey()
-	if err := r.noteClaiming("wi_adoptfail", session, key, nil); err != nil {
+	if err := r.noteClaiming("wi_adoptfail", session, nil); err != nil {
 		t.Fatal(err)
 	}
 	hub.hold("wi_adoptfail", session, api.StatusRunning)

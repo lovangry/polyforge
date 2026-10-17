@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -622,16 +621,6 @@ func sessionPathFor(capsuleDir, token string) string {
 	return filepath.Join(capsuleDir, capsule.DirSession, "session-"+token+".jsonl")
 }
 
-// randomKey mints the claim's idempotency key (NOT a secret; aihub does
-// not read it — the session secret is the D4 replay key).
-func randomKey() string {
-	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
-		return strconv.FormatInt(time.Now().UnixNano(), 36)
-	}
-	return hex.EncodeToString(b)
-}
-
 // mintSessionID mints the v1.5 SECRET (reference.md §3.1): 32 crypto-random
 // bytes, hex — 64 chars. A CSPRNG failure is FATAL to the start: a
 // session secret must never fall back to a clock (a guessable credential,
@@ -723,8 +712,7 @@ func (r *Runtime) probeWorkItem(wi string) (*api.WorkItem, error) {
 // placeholder of the claiming journal may sit in the table; any other
 // job refuses.
 //
-// B1: the session secret and the idempotency key are journaled durably
-// BEFORE the claim call. A journal entry left by an earlier attempt is
+// B1: the session secret is journaled durably BEFORE the claim call. A journal entry left by an earlier attempt is
 // reused when its session still holds the work item (the claim is then a
 // D4 replay that hands the same answer back), so a claim whose answer was
 // lost is adopted instead of orphaned.
@@ -737,19 +725,18 @@ func (r *Runtime) claim(ctx context.Context, spelling, id string, manual []strin
 	if r.stopped(ctx) {
 		return claimDeferredError(id)
 	}
-	sessionID, key, replay, err := r.claimIntent(id)
+	sessionID, replay, err := r.claimIntent(id)
 	if err != nil {
 		return err
 	}
-	if err := r.noteClaiming(id, sessionID, key, manual); err != nil {
+	if err := r.noteClaiming(id, sessionID, manual); err != nil {
 		return fmt.Errorf("runtime: %s: claiming journal write failed (refusing to claim): %w", id, err)
 	}
 	crashpoint.At("claim.before-answer")
 	resp, err := r.hub.SessionClaim(api.SessionClaimRequest{
-		WorkItemID:     id,
-		SessionID:      sessionID,
-		MachineID:      r.cfg.MachineID,
-		IdempotencyKey: key,
+		WorkItemID: id,
+		SessionID:  sessionID,
+		MachineID:  r.cfg.MachineID,
 	})
 	bare := &job{wi: id, sessionID: sessionID}
 	if err != nil {
@@ -802,30 +789,26 @@ func hubUnavailable(err error) bool {
 	return errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable
 }
 
-// claimIntent answers the session secret and idempotency key this start
-// claims with. With no journal entry for id it mints a fresh pair. An
-// entry left by an earlier attempt is checked first: its session holds
-// the WI → reuse the pair (the secret replays the same claim, D4); it
-// does not → drop the entry and mint fresh (aihub would refuse that
-// secret STALE_SESSION); verify
+// claimIntent answers the session secret this start claims with. With
+// no journal entry for id it mints a fresh one. An entry left by an
+// earlier attempt is checked first: its session holds the WI → reuse the
+// secret (it replays the same claim, D4); it does not → drop the entry
+// and mint fresh (aihub would refuse that secret STALE_SESSION); verify
 // unreachable → the typed transient, entry kept.
-func (r *Runtime) claimIntent(id string) (sessionID, key string, replay bool, err error) {
-	if rec := r.loadClaiming()[id]; rec != nil && rec.SessionID != "" && rec.IdempotencyKey != "" {
+func (r *Runtime) claimIntent(id string) (sessionID string, replay bool, err error) {
+	if rec := r.loadClaiming()[id]; rec != nil && rec.SessionID != "" {
 		v, verr := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
 		switch {
 		case verr != nil && !claimRefused(verr):
-			return "", "", false, &api.Error{Code: api.ErrDaemonHubUnavailable,
+			return "", false, &api.Error{Code: api.ErrDaemonHubUnavailable,
 				Detail: fmt.Sprintf("%s: verify of the journaled claim failed (claiming journal kept; retry later): %v", id, verr)}
 		case verr == nil && v.Matches:
-			return rec.SessionID, rec.IdempotencyKey, true, nil
+			return rec.SessionID, true, nil
 		}
 		r.clearClaimingSession(id, rec.SessionID)
 	}
 	sessionID, err = mintSessionID()
-	if err != nil {
-		return "", "", false, err
-	}
-	return sessionID, randomKey(), false, nil
+	return sessionID, false, err
 }
 
 // claimPlaceholder is the post-claim bookkeeping of one OPEN claim: the
@@ -847,8 +830,7 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, spelling, sessionID stri
 	bare := &job{wi: id, sessionID: sessionID}
 	if c.SessionFingerprint != "" && c.SessionFingerprint != fp {
 		// the server computed a different fingerprint for our secret: the
-		// answer belongs to another session (a stale idempotency cache).
-		// Refuse rather than adopt someone else's claim.
+		// answer belongs to another session. Refuse rather than adopt someone else's claim.
 		return nil, nil, fmt.Errorf("runtime: %s: claim answer fingerprint %s does not match this session (%s)", id, c.SessionFingerprint, fp)
 	}
 	if ex := r.jobOf(id); ex != nil {

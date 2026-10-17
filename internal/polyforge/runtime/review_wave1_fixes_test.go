@@ -253,8 +253,8 @@ func TestStartRefusedReplayOfOpenSessionEndsIt(t *testing.T) {
 	hub := newFakeHub()
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	const wi = "wi_rf_replay"
-	session, key := fakeSession(wi), randomKey()
-	if err := r.noteClaiming(wi, session, key, nil); err != nil {
+	session := fakeSession(wi)
+	if err := r.noteClaiming(wi, session, nil); err != nil {
 		t.Fatal(err)
 	}
 	hub.hold(wi, session, api.StatusRunning)
@@ -277,8 +277,8 @@ func TestRestartRefusedReplayOfOpenSessionEndsIt(t *testing.T) {
 	hub := newFakeHub()
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	const wi = "wi_rf_replay2"
-	session, key := fakeSession(wi), randomKey()
-	if err := r.noteClaiming(wi, session, key, nil); err != nil {
+	session := fakeSession(wi)
+	if err := r.noteClaiming(wi, session, nil); err != nil {
 		t.Fatal(err)
 	}
 	hub.hold(wi, session, api.StatusRunning)

@@ -227,6 +227,8 @@ func TestClaimFlowOverHTTP(t *testing.T) {
 			CleanPause         bool   `json:"clean_pause"`
 		} `json:"work_item"`
 	}
+	// idempotency_key: an older daemon still sends it; the claim accepts
+	// and ignores it.
 	code, raw := e.do(t, "POST", "/api/v1/work-items/"+wi.ID+"/claim", e.key,
 		map[string]string{"session_id": secret, "machine_id": "m1", "idempotency_key": "http-1"}, &resp)
 	if code != 200 {

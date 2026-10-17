@@ -3,7 +3,7 @@ package runtime
 // candidates_test.go: the F4/I2 candidate chain — spawn-time pinning of the
 // bundle's defaults model_candidates, provider-error-only advancement
 // (INV-1g), bounded wrap-around, crash-safe ordinal persistence across a
-// restart, and the D5 claiming journal (durable claim idempotency +
+// restart, and the D5 claiming journal (durable claim replay +
 // post-claim failure compensation). Candidate ids in fixtures are
 // provider-qualified placeholders; no real model or vendor names appear
 // anywhere here.
@@ -142,9 +142,9 @@ func TestSpawnFailureBlocksGeneration(t *testing.T) {
 
 // A crash between the claim call and the spawn leaves a durable claiming
 // record; Restart verifies the journaled session, replays the claim with
-// the SAME idempotency key (D4: the same answer), adopts the session and
+// the SAME session secret (D4: the same answer), adopts the session and
 // finishes the start.
-func TestClaimCrashRestartReplaysSameKey(t *testing.T) {
+func TestClaimCrashRestartReplaysSameSecret(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
 	sp := &countingSpawner{}
@@ -152,12 +152,11 @@ func TestClaimCrashRestartReplaysSameKey(t *testing.T) {
 	r, _, _ := newTestRuntimeAt(t, hub, sp, dataDir)
 
 	// the crash shape: the journal holds an unsettled claim intention
-	// (the minted secret and the key), state.json holds no job for it
+	// (the minted secret), state.json holds no job for it
 	// (the crash predates registration) — but the claim DID land on the
 	// hub, so the hub reports the journaled session as the holder.
-	key := randomKey()
 	session := fakeSession("wi_crashd")
-	if err := r.noteClaiming("wi_crashd", session, key, nil); err != nil {
+	if err := r.noteClaiming("wi_crashd", session, nil); err != nil {
 		t.Fatal(err)
 	}
 	hub.hold("wi_crashd", session, api.StatusRunning)
@@ -173,9 +172,6 @@ func TestClaimCrashRestartReplaysSameKey(t *testing.T) {
 	settleReplays(t, r2) // the journal replays clone outside Restart
 	if n := hub2.claimCount(); n != 1 {
 		t.Fatalf("the replay must issue exactly one claim, got %d", n)
-	}
-	if got := hub2.claims[0].IdempotencyKey; got != key {
-		t.Fatalf("the replay must carry the journaled key %q, got %q", key, got)
 	}
 	if got := hub2.claims[0].SessionID; got != session {
 		t.Fatalf("the replay must carry the journaled session secret, got %q", got)
@@ -208,7 +204,7 @@ func TestStaleClaimingEntryDropped(t *testing.T) {
 	sp := &countingSpawner{}
 	r, _, _ := newTestRuntime(t, hub, sp)
 
-	if err := r.noteClaiming("wi_stalec", fakeSession("wi_stalec"), randomKey(), nil); err != nil {
+	if err := r.noteClaiming("wi_stalec", fakeSession("wi_stalec"), nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := restartSettled(t, r); err != nil {

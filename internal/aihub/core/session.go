@@ -274,7 +274,8 @@ func (m *WIManager) Views(wis []api.WorkItem) ([]WIView, error) {
 // WI the repeat answers the same claim, re-read from the row. A secret
 // that claimed this WI before but no longer holds it is refused
 // STALE_SESSION: a superseded or ended session never claims again.
-// idempotency_key is not read.
+// An idempotency_key an older daemon still sends is an unknown body field
+// and ignored by the decoder.
 func (m *SessionManager) Claim(wiID string, req api.SessionClaimRequest, callerIdentity string) (*api.SessionClaim, error) {
 	if strings.TrimSpace(req.SessionID) == "" {
 		return nil, Fail(api.ErrCoreBadInput, "", "session_id required (the client-minted secret)")

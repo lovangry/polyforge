@@ -547,7 +547,7 @@ func upgradeRun(t *testing.T, populate bool) {
 	id := mustCreateExecWI(t, env, "post-upgrade smoke ticket", nil, "")
 	m := NewSessionManager(env.DB)
 	if _, err := m.Claim(id, api.SessionClaimRequest{
-		SessionID: strings.Repeat("7", 32), MachineID: "m1", IdempotencyKey: "up-1",
+		SessionID: strings.Repeat("7", 32), MachineID: "m1",
 	}, env.UserID); err != nil {
 		t.Fatalf("post-upgrade claim: %v", err)
 	}
@@ -704,7 +704,7 @@ func TestUpgradeRollbackRoundTrip(t *testing.T) {
 	id := mustCreateExecWI(t, env, "round-trip smoke ticket", nil, "")
 	m := NewSessionManager(env.DB)
 	if _, err := m.Claim(id, api.SessionClaimRequest{
-		SessionID: strings.Repeat("3", 32), MachineID: "m1", IdempotencyKey: "rt-1",
+		SessionID: strings.Repeat("3", 32), MachineID: "m1",
 	}, env.UserID); err != nil {
 		t.Fatalf("post-upgrade claim: %v", err)
 	}
