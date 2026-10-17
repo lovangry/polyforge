@@ -148,10 +148,7 @@ func deliverMergeRule(res *StepResult, branch string, spec ResultSpec) error {
 		if strings.TrimSpace(r.PRURL) == "" || strings.TrimSpace(r.MergeCommit) == "" {
 			return fmt.Errorf("driver: deliver output %s is merged and owes its pr_url and merge_commit", label)
 		}
-		f := deliverFacts(spec, r, branch, res.CommandEvidence)
-		f.selfReportedConflict = r.LLMResolvedConflict
-		f.selfReportedTestsFailed = r.TestsPassed != nil && !*r.TestsPassed
-		if ok, why := autoMergeEligible(f); !ok {
+		if why := mergeBlocker(spec, r, branch, res.CommandEvidence); why != "" {
 			human = append(human, r.Name+": merged although "+why)
 		}
 	}
@@ -350,17 +347,10 @@ func checkCommand(seg []string, i int, branch string, depth int, gitEnv []string
 			}
 		}
 	case "git":
-		j := 0
+		j, opts := gitSubcommand(args)
 		hooksOff := false
-		for j < len(args) && strings.HasPrefix(args[j], "-") {
-			switch args[j] {
-			case "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env":
-				if args[j] == "-c" && j+1 < len(args) && strings.HasPrefix(strings.ToLower(args[j+1]), "core.hookspath") {
-					hooksOff = true
-				}
-				j++
-			}
-			j++
+		for _, o := range opts {
+			hooksOff = hooksOff || o[0] == "-c" && strings.HasPrefix(strings.ToLower(o[1]), "core.hookspath")
 		}
 		if j < len(args) && args[j] == "push" {
 			if len(gitEnv) > 0 {
@@ -400,6 +390,25 @@ func checkCommand(seg []string, i int, branch string, depth int, gitEnv []string
 		}
 	}
 	return nil
+}
+
+// gitSubcommand answers the index of the subcommand in git's arguments
+// (the words after `git`) and the global options before it that take a
+// separate value, as {option, value} pairs in order.
+func gitSubcommand(args []string) (int, [][2]string) {
+	j := 0
+	var opts [][2]string
+	for j < len(args) && strings.HasPrefix(args[j], "-") {
+		switch args[j] {
+		case "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env":
+			if j+1 < len(args) {
+				opts = append(opts, [2]string{args[j], args[j+1]})
+			}
+			j++
+		}
+		j++
+	}
+	return j, opts
 }
 
 // checkPush: an explicit refspec to the feature branch, nothing that
