@@ -679,7 +679,7 @@ var cmdRecall = &Command{
 		if proj == "" {
 			return fmt.Errorf("recall: --project is required — there is no default project (polyforge#113); the routing skill derives it from the WI under discussion")
 		}
-		if err := requireMappedProject(ctx, "recall", proj); err != nil {
+		if err := requireMappedProject(ctx, "recall", proj); err != nil && ctx.Step == "" {
 			return err
 		}
 		var tagList []string
@@ -690,7 +690,7 @@ var cmdRecall = &Command{
 		if boolFlag(fs, "any") {
 			match = "any"
 		}
-		raw, err := ctx.aihub().SearchMemories(proj, q, memType, tagList, limit, match)
+		raw, err := ctx.searchMemories(proj, q, memType, tagList, limit, match)
 		if err != nil {
 			return err
 		}
@@ -761,7 +761,7 @@ var cmdRemember = &Command{
 		if proj == "" {
 			return fmt.Errorf("remember: --project is required — there is no default project (polyforge#113)")
 		}
-		if err := requireMappedProject(ctx, "remember", proj); err != nil {
+		if err := requireMappedProject(ctx, "remember", proj); err != nil && ctx.Step == "" {
 			return err
 		}
 		// The content: positional text, '-' for stdin, '@file' for a file.
@@ -786,6 +786,9 @@ var cmdRemember = &Command{
 		}
 		if strings.TrimSpace(content) == "" {
 			return fmt.Errorf("remember: content is required")
+		}
+		if ctx.Step != "" {
+			return stepRemember(ctx, fs, memType, proj, content)
 		}
 		body := map[string]any{
 			"project":    proj,
@@ -886,17 +889,13 @@ func memoryShow(ctx *Context, args []string) error {
 		return fmt.Errorf("memory show: --max-bytes must be >= 0 (0 = unlimited)")
 	}
 	id := rest[0]
-	metaRaw, err := ctx.aihub().GetMemory(id)
+	metaRaw, body, err := ctx.readMemory(id)
 	if err != nil {
 		return err
 	}
 	var meta memoryMetaView
 	if err := json.Unmarshal(metaRaw, &meta); err != nil {
 		return fmt.Errorf("memory show: metadata decode: %w", err)
-	}
-	body, err := ctx.aihub().GetMemoryContent(id)
-	if err != nil {
-		return err
 	}
 	if ctx.JSON {
 		doc, err := memoryJSONWithContent(metaRaw, string(body))

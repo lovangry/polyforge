@@ -123,7 +123,7 @@ func run(m *testing.M, atExit []func() error) (int, error) {
 		os.Setenv(k, v)
 	}
 	// Ambient daemon/connection settings must not leak in either.
-	for _, k := range []string{"PF_DAEMON_SOCKET", "POLYFORGE_MACHINE_ID", "TMUX", "TMUX_PANE", "PI_CODING_AGENT_DIR"} {
+	for _, k := range []string{"PF_DAEMON_SOCKET", "PF_WI_ID", "PF_DAEMON_ID", "POLYFORGE_MACHINE_ID", "TMUX", "TMUX_PANE", "PI_CODING_AGENT_DIR"} {
 		os.Unsetenv(k)
 	}
 	code := m.Run()

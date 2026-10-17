@@ -239,6 +239,17 @@ Five standing rules, binding on every polyforge session:
    file refuses the claim (DAEMON-414) WITHOUT claiming — the work item
    stays queued for other machines. Schema, syntax and precedence: the
    README's "Per-project model candidates" paragraphs (via `verbs/init.md`).
+   Its second optional section, `memory_policy:` (`default` / `<project>`:
+   `{ record: [...], skip: [...] }`, a project's lists appended to
+   `default`'s), says what the last step puts into the work item's
+   `experience.wrap` summary memory; a
+   missing section is the built-in default policy, never a refusal, and
+   `pf init` appends the default section (see `verbs/init.md`). Step
+   agents hold no aihub credential path: inside a workflow step
+   (`PF_WI_ID` and `PF_DAEMON_ID` set) `pf recall` / `pf memory show` go through the daemon,
+   the last step's `pf remember` sends the work item's one
+   `experience.wrap` summary to the daemon, which stores it, and every
+   other data-plane verb is refused (DAEMON-403).
    The repo inventory and clone URLs always come from the aihub project
    registry; the cli.toml `[workspace]` mapping is the only placement source.
 

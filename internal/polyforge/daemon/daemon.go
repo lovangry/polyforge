@@ -293,6 +293,10 @@ type Daemon struct {
 	// The probe alone races (both processes can observe a dead socket
 	// and both bind); the flock is the kernel-serialized half.
 	dataLock *os.File
+
+	// stepOriginOf resolves a /step/* caller to its work item (nil = the
+	// UDS peer's process tree, peerStepOrigin; tests bind a stub).
+	stepOriginOf func(*http.Request) (stepJob, string)
 }
 
 // New validates and assembles the daemon. Restart reconciliation is NOT

@@ -343,8 +343,22 @@ read — injected into the prompt and checked record-only (`driver/outputschema.
 `inherit` steps get the body of the nearest earlier `handoff: true` step's `artifacts/handoff-<id>.md`
 (producer must be done; a missing file only omits the section); `fresh` steps get none
 (`driver/spawn.go`). The claim-time memory snapshot `runtime-state/recalled-memories.json` is rendered
-into every step prompt as non-binding history (§9) — only when it has items; at most 400 runes per
-excerpt and 6000 bytes per section (`driver/spawn.go`). Retry shape: first retry resumes the transcript,
+into every step prompt as non-binding history (§9) — one `[type] title` line per memory (no ids or
+bodies; a blank title falls back to the excerpt's first non-empty line), id-only noise titles
+(`^Verification Report — \S+$`, `^Controller-sink artifact`) dropped, at most 10 lines, no section when
+none is left (`driver/spawn.go`). Every step prompt also asks for `pf recall --any` with 2–3
+phrasings at the start (`workflows/_shared/memory.md`); only the workflow's last step writes a memory,
+the work item's one `experience.wrap` summary guided by the project's memory policy from
+`runtime-state/memory-policy.json` (`workflows/_shared/memory-wrap.md`). Step agents hold no
+aihub credential path; memory access is daemon-mediated: inside a step (`PF_WI_ID` and `PF_DAEMON_ID`
+set) `pf recall` / `pf memory show` read through `GET /step/memories/search|{id}` and `pf remember`
+posts synchronously to `POST /step/memories` (the step-origin guard's one step-allowed write), all
+scoped to the one work item whose journaled step process is the caller's ancestor (never the caller's
+own env) and its project (`daemon/stepmem.go`). The write accepts `experience.wrap` only, ≤ 2 KB, a
+title, no credential value (`internal/common/stepmem`, shared with the CLI), and creates it with the
+aihub idempotency key `pf-step-memory:<wi>:<step>:<attempt>`; aihub down answers DAEMON-503 and the
+prompt says a failure never fails the step. Every other aihub verb, `pf doctor` and `pf daemon` are
+refused there (DAEMON-403). `cli.toml` stays readable under the shared HOME: a guard against accidents, not malice. Retry shape: first retry resumes the transcript,
 later retries start fresh with the old transcript as read-only reference (`v2-converge.md#§2.3`).
 
 ### 7.5 Model candidates <!-- §7.5 -->

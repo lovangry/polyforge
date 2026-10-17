@@ -351,7 +351,7 @@ see "Per-step harness" below); any other key is refused, naming it. YAML anchors
 **No backward compatibility — edit all three workspace files together
 with the deploy.** A file that still has the top-level `models:` section
 is refused at every claim (DAEMON-414: `unknown top-level key "models"
-(only `steps`)`; earlier versions added a migration hint, dropped by
+(only `steps` and `memory_policy`)`; earlier versions added a migration hint, dropped by
 decision 2026-10-16 G10 once every workspace was rewritten), the work
 item stays queued, and `pf doctor` reports the same under `workspace
 yaml`. Deploying this version therefore requires rewriting osp-ws,
@@ -1137,3 +1137,41 @@ it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
   `ANTHROPIC_*` or credential-looking name in it. Restart it clean:
   `pf ops shutdown`, wait until it is gone, `pf daemon ensure`
   (tools/install.sh restarts it when it stages a new binary).
+
+## Memory write-back: `memory_policy` and the wrap summary
+
+- Every step prompt now asks the step agent to run `pf recall --any`
+  itself at the start (`workflows/_shared/memory.md`); only the
+  workflow's last step writes a memory: one `experience.wrap` summary per
+  work item, guided by the memory policy
+  (`workflows/_shared/memory-wrap.md`). Step agents hold no aihub
+  credential path: inside a step (`PF_WI_ID` and `PF_DAEMON_ID` set)
+  `pf recall` / `pf memory show` read through the daemon socket,
+  `pf remember` sends the summary synchronously to the daemon, which
+  stores it with its machine credential (idempotent per step dispatch),
+  and every other aihub verb, `pf doctor` and `pf daemon` are refused
+  (DAEMON-403). An operator shell that inherited both variables is in step
+  mode too (the refusal names them): unset them. Nothing to configure;
+  the machine credential needs memory read and writer access on the
+  project. A failing call never fails the step. `cli.toml` stays
+  readable under the shared HOME — this guards against accidents, not
+  against an agent that reads it on purpose.
+- `.polyforge.yaml` gains the optional `memory_policy:` section (README,
+  "Memory policy"). Nothing is required: a missing section is the
+  built-in default. Run `pf init <ws>` once per workspace to append the
+  default section (as text — existing bytes and comments are kept), then
+  tune it; `pf doctor`'s new `workspace memory policy` row warns about a
+  `.polyforge.yaml` without the section (no file at all passes: the
+  built-in default applies).
+- **Rollback hazard:** a pf/daemon binary older than this version parses
+  `.polyforge.yaml` strictly and does not know `memory_policy`, so after
+  `pf init` appended the section an older daemon refuses EVERY claim of
+  that workspace's projects (DAEMON-414: `unknown top-level key
+  "memory_policy"`) until the section is removed. Remedy before (or right
+  after) rolling back, per workspace — the appended section is the file's
+  tail, starting at its `# memory_policy:` comment line:
+  `sed -i '/^# memory_policy:/,$d' <workspace>/.polyforge.yaml`
+  (a hand-written section elsewhere in the file: delete it by hand).
+- The claim-time recall section of the step prompt is now `[type] title`
+  lines only (at most 10, id-only noise titles dropped); ids and excerpts
+  stay in `runtime-state/recalled-memories.json`.

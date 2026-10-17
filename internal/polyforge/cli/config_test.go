@@ -14,7 +14,7 @@ import (
 // clearEnv removes the PF_* overrides for a hermetic config test.
 func clearEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"PF_SERVER", "PF_API_KEY", "PF_DAEMON_SOCKET", "PF_USER_ID", "PF_CHAT_ID"} {
+	for _, k := range []string{"PF_SERVER", "PF_API_KEY", "PF_DAEMON_SOCKET", "PF_USER_ID", "PF_CHAT_ID", "PF_WI_ID"} {
 		t.Setenv(k, "")
 	}
 	t.Setenv("XDG_CONFIG_HOME", "")

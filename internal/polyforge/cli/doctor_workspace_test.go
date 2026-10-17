@@ -195,11 +195,42 @@ func TestDoctorScratchSymlinkNeverPruned(t *testing.T) {
 	}
 }
 
+// TestDoctorMemoryPolicyWarnsUntilInit pins the read-only memory policy
+// row: no .polyforge.yaml passes on the built-in default; a file without
+// the section warns with the `pf init` fix and doctor writes nothing;
+// after `pf init` the row passes.
+func TestDoctorMemoryPolicyWarnsUntilInit(t *testing.T) {
+	env, ws := doctorWorkspace(t)
+	_, _, doc := doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, docChMemPolicy); st != "pass" || !strings.Contains(detail, "built-in default") || !strings.Contains(detail, "editable copy") {
+		t.Fatalf("no yaml: memory policy = %s (%s), want pass on the built-in default", st, detail)
+	}
+	steps := "# mine\nsteps:\n  polyforge:\n    default: { models: [pi:a] }\n"
+	if err := os.WriteFile(workspace.PathFor(ws), []byte(steps), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _, doc = doctorStatus(t, env, "--json", "doctor")
+	st, detail := doctorFind(t, doc, docChMemPolicy)
+	if st != "warn" || !strings.Contains(detail, "declares no memory_policy") || !strings.Contains(detail, "run `pf init "+ws+"`") {
+		t.Fatalf("memory policy = %s (%s), want warn with the pf init fix", st, detail)
+	}
+	if raw, _ := os.ReadFile(workspace.PathFor(ws)); string(raw) != steps {
+		t.Fatalf("doctor rewrote %s", workspace.PathFor(ws))
+	}
+	if code, _, stderr := runPf(t, env, "init", ws); code != 0 {
+		t.Fatalf("pf init: exit %d (%s)", code, stderr)
+	}
+	_, _, doc = doctorStatus(t, env, "--json", "doctor")
+	if st, detail := doctorFind(t, doc, docChMemPolicy); st != "pass" {
+		t.Fatalf("memory policy after init = %s (%s), want pass", st, detail)
+	}
+}
+
 func TestDoctorWorkspaceChecksSkipWithoutMapping(t *testing.T) {
 	srv := aiSever(t, &reqRecorder{}, nil, 0, "")
 	env := doctorServerConfig(t, srv.URL, "k", "")
 	_, _, doc := doctorStatus(t, env, "--json", "doctor")
-	for _, name := range []string{docChLayout, docChScratch} {
+	for _, name := range []string{docChLayout, docChScratch, docChMemPolicy} {
 		if st, _ := doctorFind(t, doc, name); st != "skip" {
 			t.Fatalf("%s = %s without a mapping, want skip", name, st)
 		}
@@ -216,8 +247,8 @@ func TestInitVerb(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("pf init: exit %d (%s)", code, stderr)
 	}
-	var res struct{ Workspace, Scratch, Claude_md string }
-	if err := json.Unmarshal([]byte(stdout), &res); err != nil || res.Workspace != ws || res.Scratch != "created" || res.Claude_md != "inserted" {
+	var res struct{ Workspace, Scratch, Claude_md, Polyforge_yaml string }
+	if err := json.Unmarshal([]byte(stdout), &res); err != nil || res.Workspace != ws || res.Scratch != "created" || res.Claude_md != "inserted" || res.Polyforge_yaml != "created" {
 		t.Fatalf("pf --json init = %s (%v)", stdout, err)
 	}
 	raw, _ := os.ReadFile(filepath.Join(ws, "CLAUDE.md"))
@@ -225,8 +256,17 @@ func TestInitVerb(t *testing.T) {
 		t.Fatalf("CLAUDE.md after init:\n%s", raw)
 	}
 	code, stdout, _ = runPf(t, nil, "init", ws)
-	if code != 0 || !strings.Contains(stdout, "scratch/  exists") || !strings.Contains(stdout, "layout section unchanged") {
+	if code != 0 || !strings.Contains(stdout, "scratch/  exists") || !strings.Contains(stdout, "layout section unchanged") || !strings.Contains(stdout, "memory_policy section unchanged") {
 		t.Fatalf("second pf init: exit %d output %s", code, stdout)
+	}
+	bad := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bad, workspace.FileName), []byte("steps: [\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr = runPf(t, nil, "init", bad)
+	if code != 0 || !strings.Contains(stdout, "layout section created") || !strings.Contains(stdout, "memory_policy section skipped") ||
+		!strings.Contains(stdout, "warning: .polyforge.yaml left untouched:") {
+		t.Fatalf("pf init over a broken yaml: exit %d output %s (%s)", code, stdout, stderr)
 	}
 	if code, _, stderr := runPf(t, nil, "init", filepath.Join(ws, "nope")); code != 1 || !strings.Contains(stderr, "does not exist") {
 		t.Fatalf("pf init on a missing dir: exit %d (%s)", code, stderr)

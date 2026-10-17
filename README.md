@@ -603,7 +603,8 @@ their capsule.
 the docs/upgrade.md pointer) is the one authority for the workspace yaml's shape,
 candidate syntax and precedence; the routing skill's fragments, `pf
 submit --models` and docs/upgrade.md point here. A workspace root may carry a
-`.polyforge.yaml` whose only section is `steps` (strict: unknown keys at
+`.polyforge.yaml` with two optional sections, `steps` and `memory_policy`
+(below) (strict: unknown keys at
 any level, duplicate keys, type mismatches, empty model ids and a
 per-step key that is no step id of the daemon's installed workflows, a
 project the cli.toml mapping does not route to this workspace, and
@@ -652,6 +653,42 @@ unknown per-step key and a leftover `models:` section included) before
 any claim. An edit takes effect on the next claim with no daemon restart
 (the file is read fresh before every claim). Upgrading from the pre-#169
 shape: see [docs/upgrade.md](docs/upgrade.md).
+
+**Memory policy (`memory_policy:` in `.polyforge.yaml`).** What the
+workflow's last step puts into the work item's one `experience.wrap`
+summary memory (no other step writes memories): `record` lists what is
+worth remembering, `skip` what never is. Shape — `default` and per-project entries, each with optional
+`record` / `skip` lists of non-empty, unique strings (no other key):
+
+```yaml
+memory_policy:
+  default:                       # every project; an undeclared list is the built-in default's
+    record: [踩坑和根因（现象→原因→解法）, 所有者的裁决和约定]
+    skip: [临时状态, 密钥和凭据的值]
+  polyforge:                     # a project of this workspace: lists APPENDED to default's
+    record: [daemon 上线前后的环境差异]
+```
+
+A missing section means the built-in default policy (the section `pf
+init` appends: record 踩坑和根因 / 代码与 git 里看不出来的环境与外部系统事实 /
+所有者的裁决和约定; skip 过程流水与 step 输出与完整 spec/plan / 代码与 git 能直接看出来的东西 /
+临时状态 / 密钥和凭据的值) and never refuses a claim; a malformed section refuses
+it like any other defect of the file (DAEMON-414). The daemon writes the
+claimed project's effective policy to the capsule
+(`runtime-state/memory-policy.json`) and renders it into the last step's
+wrap duty (`workflows/_shared/memory-wrap.md`); every step's prompt asks
+it to recall first (`workflows/_shared/memory.md`). `pf init <ws>` appends the default
+section as text when the file has none (existing bytes kept exactly) and
+`pf doctor` warns about a `.polyforge.yaml` without one (no file at all
+passes on the built-in default). Step agents hold no aihub credential
+path: inside a step `pf recall` / `pf memory show` read through the
+daemon (scoped to the step's own project); `pf remember` sends the wrap
+summary synchronously to the daemon (`POST /step/memories`), which
+validates it (type `experience.wrap`, a title, ≤ 2 KB, no credential
+value), attributes it to the step's own work item and project and stores
+it with an idempotency key of the step dispatch (a retry returns the same
+memory); a failure is reported and never fails the step. Every other
+aihub verb, `pf doctor` and `pf daemon` are refused there (DAEMON-403).
 
 Supervision bounds (v2-converge 2.4) — Go duration strings (e.g. `700ms`,
 `5m`), no environment fallbacks. Omitting a flag, or passing `0`, keeps

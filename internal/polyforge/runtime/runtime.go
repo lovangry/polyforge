@@ -1758,6 +1758,7 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	// an unreachable aihub or a zero-hit query degrades to an empty list
 	// plus a notice, never a failed spawn (see recall.go).
 	r.writeRecalledMemories(j)
+	r.writeMemoryPolicy(j)
 	// F7: the bundle copy is ONE atomic set with a completion marker
 	// (materialize.go): the bundle lands under workflows/<bundle>, and
 	// sync/materialized.json gates every later consumer.

@@ -32,6 +32,10 @@ const (
 	// RecalledMemoriesJSON is the claim-time memory snapshot the daemon
 	// writes and the driver renders into every step prompt.
 	RecalledMemoriesJSON = "runtime-state/recalled-memories.json"
+	// MemoryPolicyJSON is the claimed project's effective memory policy
+	// (the workspace yaml's memory_policy, else the built-in default),
+	// written by the daemon at claim and rendered into every step prompt.
+	MemoryPolicyJSON = "runtime-state/memory-policy.json"
 )
 
 // GitignoreContent is the .gitignore written at capsule init (v1 ruling C1 (archive/v1-architecture-spec.md)).

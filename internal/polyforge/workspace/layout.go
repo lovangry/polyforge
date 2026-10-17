@@ -8,14 +8,15 @@ package workspace
 // only what is local:
 //
 //	<workspace>/
-//	  .polyforge.yaml   the human-written model candidates
+//	  .polyforge.yaml   the human-written model candidates and memory policy
 //	  CLAUDE.md         the workspace notes (polyforge-managed block + human part)
 //	  .repo/<repo>/     clones for humans and interactive agents
 //	  capsules/<wi>/    work item workspaces (daemon-managed)
 //	  .polyforge/       polyforge-generated files only (no documents)
 //	  scratch/          disposable output; entries older than 14 days are stale
 //
-// `pf init` creates scratch/ and writes the convention into CLAUDE.md
+// `pf init` creates scratch/, writes the convention into CLAUDE.md and
+// appends the default memory_policy to .polyforge.yaml when it has none
 // (Init); `pf doctor` warns about entries outside it (StrayEntries) and
 // about a CLAUDE.md without the layout section (LayoutSection), and
 // reports — or, with --prune-scratch, removes — stale scratch entries
@@ -312,6 +313,11 @@ type InitResult struct {
 	Workspace string `json:"workspace"`
 	Scratch   string `json:"scratch"`   // created | exists
 	NotesFile string `json:"claude_md"` // created | inserted | updated | unchanged
+	// Yaml is what happened to .polyforge.yaml's memory_policy section:
+	// created (a new file holding only it) | appended | unchanged |
+	// skipped (the file does not load: YamlWarning says why).
+	Yaml        string `json:"polyforge_yaml"`
+	YamlWarning string `json:"polyforge_yaml_warning,omitempty"`
 }
 
 // Init gives an existing workspace directory its local layout: scratch/
@@ -320,7 +326,9 @@ type InitResult struct {
 // it inside its polyforge-managed block (or a new managed block on top);
 // a file with one gets that section replaced. CLAUDE.md is written
 // atomically (temp file + rename, mode kept); a symlinked CLAUDE.md has
-// its target written, the link stays.
+// its target written, the link stays. .polyforge.yaml gains the default
+// memory_policy section (planMemoryPolicy, planned first); a yaml that
+// does not load is left untouched and reported in YamlWarning.
 func Init(root string) (InitResult, error) {
 	res := InitResult{Workspace: root}
 	st, err := os.Stat(root)
@@ -330,6 +338,7 @@ func Init(root string) (InitResult, error) {
 	if !st.IsDir() {
 		return res, fmt.Errorf("%s is not a directory", root)
 	}
+	ypath, ydata, ymode, yhow, yerr := planMemoryPolicy(root)
 	scratch := filepath.Join(root, ScratchDir)
 	switch st, err := os.Lstat(scratch); {
 	case err == nil && st.IsDir():
@@ -370,10 +379,19 @@ func Init(root string) (InitResult, error) {
 		return res, fmt.Errorf("%s: %w", notes, err)
 	}
 	res.NotesFile = how
-	if how == "unchanged" {
+	if how != "unchanged" {
+		if err := writeAtomic(notes, []byte(text), mode); err != nil {
+			return res, err
+		}
+	}
+	if yerr != nil {
+		res.Yaml, res.YamlWarning = "skipped", yerr.Error()
 		return res, nil
 	}
-	return res, writeAtomic(notes, []byte(text), mode)
+	if res.Yaml = yhow; ydata != nil {
+		return res, writeAtomic(ypath, ydata, ymode)
+	}
+	return res, nil
 }
 
 // writeAtomic replaces path with data through a temp file in the same
