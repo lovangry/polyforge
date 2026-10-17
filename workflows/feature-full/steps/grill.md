@@ -73,7 +73,7 @@ every ambiguity you can find as a question, not an assumption.
 
 ## Principles
 
-Ask first whether the change alters behavior or only the implementation; for a new entry point, ask who may reach it; list each behavior-changing point as a question for the owner.
+Separate the destination (features, guarantees) from the path; ask the owner only about destination changes and who may reach a new entry point.
 
 {{principles}}
 

@@ -100,7 +100,7 @@ these present:
   must be refused" where both serializations are valid, which is what drove a sleep+latch hack - do not pass
   the diff for faithfully implementing it: flag it as a blocking finding and
   propose the spec change in that finding instead.
-- **Unruled behavior change.** Existing behavior changed without an owner ruling.
+- **Unruled destination change.** A feature removed or a guarantee weakened without an owner ruling (a shorter path with the same destination is not a finding).
 - **I/O under a lock.** Network or disk I/O while holding a lock.
 - **Weak tests.** A new test that passes on the old code, or an assertion relaxed
   without a stated reason.

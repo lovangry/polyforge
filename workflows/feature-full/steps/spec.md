@@ -87,7 +87,7 @@ Example:
 
 ## Principles
 
-State that existing behavior stays unchanged and what is out of scope; write no requirement that forces an invented mechanism.
+State the destination (features and guarantees) and non-goals; no requirement may force an invented mechanism or pin an intermediate path.
 
 {{principles}}
 
