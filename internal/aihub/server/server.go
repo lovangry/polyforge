@@ -151,18 +151,6 @@ func decodeBody(r *http.Request, v any) error {
 	return nil
 }
 
-// decodeBodyStrict is decodeBody that refuses a key the body type does not
-// declare: a create field aihub does not support (repo_inventory_base, a
-// misspelt key) is refused by name instead of silently dropped.
-func decodeBodyStrict(r *http.Request, v any) error {
-	dec := json.NewDecoder(io.LimitReader(r.Body, 16<<20))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(v); err != nil {
-		return core.Fail(api.ErrCoreBadInput, "", "invalid JSON body: %v", err)
-	}
-	return nil
-}
-
 // ---------------------------------------------------------------------------
 // Authentication and authorization
 
@@ -325,11 +313,23 @@ func (s *Server) wiProject(idn *identity, idOrSlug string) (string, string, erro
 // Work items
 
 func (s *Server) hCreateWI(w http.ResponseWriter, r *http.Request, idn *identity) {
-	var req core.CreateRequest
-	if err := decodeBodyStrict(r, &req); err != nil {
+	var body struct {
+		core.CreateRequest
+		// RepoInventoryBase is the removed pre-v2.5.0 second array:
+		// refused by name, never silently dropped (absent, null and []
+		// mean "no bases").
+		RepoInventoryBase json.RawMessage `json:"repo_inventory_base"`
+	}
+	if err := decodeBody(r, &body); err != nil {
 		writeErr(w, err)
 		return
 	}
+	if b := strings.TrimSpace(string(body.RepoInventoryBase)); b != "" && b != "null" && b != "[]" {
+		writeErr(w, core.Fail(api.ErrCoreBadInput, "INVENTORY_BASE_UNSUPPORTED",
+			"repo_inventory_base is not supported; omit it (the work machine clones each repo's default branch)"))
+		return
+	}
+	req := body.CreateRequest
 	req.Reporter = idn.UserID
 	projectID, err := s.projectIDOf(req.Project)
 	if err != nil {
