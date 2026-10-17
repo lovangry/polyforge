@@ -574,7 +574,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 - 事实集合多一条 `exec_committed{version}`：事件触发推送需要"driver 提交了新 Version"的提示，否则只能回到轮询 `execution.json`。
 - 事实/判定走 `supervise.Link`（进程内）；driver 与 supervisor 之外的"harness 海量输出"由翻译器直接折叠进每派发一份的 `Tracker`（只保留最新状态，不排队）。
 - `driver_stalled`：supervisor 同时向 driver 发判定，并经 `OBNeedsRecovery(reason=driver_stalled)` 交给恢复引擎——卡死的 driver 无法自己消费判定；恢复引擎杀树并重拉，计入连续恢复失败计数器。当前 driver 自身不做 git/推送（推送在 supervisor 的推送环里，受 60s 单次上界约束），所以该规则管的是"driver 在步骤之间的任何卡死"。
-- **终态关闭的封存推送**（repo review 2026-10-16 B-7）：workflow 以 completed / failed 结束时，关闭路径照常执行一次 seal 推送（`CommitPush`，干净树只是重推 HEAD），不再假设 driver 已推送（driver 不做 git，终态 `execution.json` 与 transcript 尾只经推送到达 hub）；最终推送重试后仍失败则关闭降级为 **blocked**（本地提交保留字节，hub 从未收到终态），而不是在缺终态的链上 `SessionEnd(wrapped|failed)`。
+- **终态关闭的封存推送**（repo review 2026-10-16 B-7）：workflow 以 completed / failed 结束时，关闭路径照常执行一次 seal 推送（`CommitPush`，干净树只是重推 HEAD），不再假设 driver 已推送（driver 不做 git，终态 `execution.json` 与 transcript 尾只经推送到达 hub）；最终推送重试后仍失败则关闭降级为 **blocked**（本地提交保留字节，hub 从未收到终态），而不是在缺终态的链上 `SessionEnd(wrapped|failed)`；这个 blocked 关闭与其他 blocked 关闭一样带本地链 head（`head_sha`），hub 据此写 `attrs.blocked_seal`，别的机器从缺这些提交的 hub head 继续会被 `DAEMON-518` 拒绝（E.3）。
 - 前一次 transcript 作为"只读参考"仅在 capsule 里读得到时才附上（capsule 内的转录靠提交边界同步，进程刚死时可能还没有）；声明的 resume 路径不可读时，resume 退化为 fresh。
 
 ## 附录 E：运行中实际存在的契约清单（自代码生成，2026-10-16，decision 2026-10-16 G17） <!-- §E -->

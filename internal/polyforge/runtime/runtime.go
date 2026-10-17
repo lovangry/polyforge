@@ -1398,6 +1398,10 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 // revoked credential) — the task-repo WIP lane and the fenced SessionEnd.
 // A persistently failed push degrades the close to blocked (the local
 // commit keeps the bytes, but the server never heard the final state).
+// A blocked close carries the local chain head, as every blocked verdict
+// does (endBlockedAtHub): aihub records it as the blocked seal, so a
+// continue on another machine refuses a clone that lacks the unpushed
+// commits instead of silently dropping them.
 func (r *Runtime) sealNetwork(j *job, reason, note string, alreadyPushed bool) (string, error) {
 	finalReason := reason
 	chainOK := true
@@ -1430,12 +1434,11 @@ func (r *Runtime) sealNetwork(j *job, reason, note string, alreadyPushed bool) (
 	// v1.5: the terminal close is SessionEnd, fenced on the session hash.
 	// A STALE_SESSION refusal surfaces as the error and leaves the job
 	// SEALING; its retry finishes it locally (finishSeal).
-	endErr := r.hub.SessionEnd(j.wi, api.SessionEndRequest{
-		SessionID: j.sessionID,
-		Status:    finalReason,
-		Note:      note,
-	})
-	return finalReason, endErr
+	req := api.SessionEndRequest{SessionID: j.sessionID, Status: finalReason, Note: note}
+	if finalReason == protocol.FinishBlocked {
+		req.HeadSHA, _ = gitops.Head(j.git)
+	}
+	return finalReason, r.hub.SessionEnd(j.wi, req)
 }
 
 // pauseOp is the operator pause close (v1.5 review Finding 2): the M3

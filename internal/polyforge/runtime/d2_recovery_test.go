@@ -357,3 +357,53 @@ func writeExecutionState(t *testing.T, capDir, workflowStatus string) {
 		t.Fatal(err)
 	}
 }
+
+// A close whose seal push the hub permanently refuses degrades to
+// blocked; that blocked verdict carries the local chain head, so the hub
+// records the blocked seal and a continue on another machine — whose
+// clone lacks the unpushed commit — is refused instead of silently
+// dropping this machine's work.
+func TestDegradedSealCarriesHeadAndGuardsOtherMachine(t *testing.T) {
+	setGitIdentity(t)
+	hub := newFakeHub()
+	a, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	const wi = "wi_seal_degraded_head"
+	startRunning(t, a, wi)
+	j := a.jobOf(wi)
+	if j == nil {
+		t.Fatal("no job after Start")
+	}
+	base := hub.capsuleRepoBase
+	bare := filepath.Join(base, wi+".git")
+	hook := filepath.Join(bare, "hooks", "pre-receive")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\necho refused >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(j.capsuleDir, "unpushed.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.Stop(context.Background(), wi, protocol.FinishWrapped); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	head, err := gitops.Head(j.git)
+	if err != nil || head == "" {
+		t.Fatalf("local head: %q %v", head, err)
+	}
+	end := hub.lastEnd()
+	if end.Status != api.StatusBlocked || end.HeadSHA != head {
+		t.Fatalf("the degraded close = %+v, want blocked carrying the local head %s", end, head)
+	}
+
+	b, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	b.cfg.MachineID = "m-other"
+	hub.mu.Lock()
+	hub.capsuleRepoBase = base // the same hub's capsule repos
+	hub.mu.Unlock()
+	b.cfg.GitRemoteBase = base
+	t.Cleanup(func() { terminateJobAgent(b, wi) })
+	err = b.Start(context.Background(), wi)
+	if err == nil || !strings.Contains(err.Error(), api.ErrDaemonSealedHeadMismatch) {
+		t.Fatalf("a continue on another machine from the stale hub head = %v, want %s", err, api.ErrDaemonSealedHeadMismatch)
+	}
+}

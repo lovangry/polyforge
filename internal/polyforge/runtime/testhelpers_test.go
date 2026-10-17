@@ -77,6 +77,13 @@ type fakeHub struct {
 	// "attach", "end") for one work item (canonical id) until released — a hung
 	// hub for that call alone (installed with hangCall).
 	gates map[string]*hubGate
+	// machine records the claiming machine of each work item's session
+	// and seals its blocked seal (aihub attrs.blocked_seal): a blocked
+	// SessionEnd with a head records {head, session machine}, a blocked
+	// one without keeps the standing seal, any other verdict clears it;
+	// the claim answer carries it.
+	machine map[string]string
+	seals   map[string]api.SessionClaim
 }
 
 // hubGate is one parked hub call: entered closes once a call parked,
@@ -158,6 +165,8 @@ func newFakeHub() *fakeHub {
 		cleanPause: map[string]bool{},
 		lookupErr:  map[string]error{},
 		end:        map[string]error{},
+		machine:    map[string]string{},
+		seals:      map[string]api.SessionClaim{},
 	}
 }
 
@@ -199,6 +208,8 @@ func (h *fakeHub) claimResponse(wi, sessionID string) *api.SessionClaimResponse 
 			SessionFingerprint: api.SessionFingerprint(sessionID),
 			BundleName:         "demo-bundle",
 			Repos:              repos,
+			SealedHead:         h.seals[wi].SealedHead,
+			SealedMachine:      h.seals[wi].SealedMachine,
 		},
 		WorkItem: h.itemFor(wi),
 	}
@@ -238,6 +249,7 @@ func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimRe
 	}
 	resp := h.claimResponse(id, req.SessionID)
 	h.held[id] = req.SessionID
+	h.machine[id] = req.MachineID
 	h.status[id] = api.StatusRunning
 	if fault != nil {
 		return nil, fault.err // committed, answer lost
@@ -328,6 +340,12 @@ func (h *fakeHub) SessionEnd(wi string, req api.SessionEndRequest) error {
 		h.held[id] = "" // terminal + blocked clear the session (M2)
 	default:
 		// paused keeps the session (the design's paused-with-session)
+	}
+	switch {
+	case req.Status == api.StatusBlocked && req.HeadSHA != "":
+		h.seals[id] = api.SessionClaim{SealedHead: req.HeadSHA, SealedMachine: h.machine[id]}
+	case req.Status != api.StatusBlocked:
+		delete(h.seals, id)
 	}
 	h.status[id] = req.Status
 	return nil
