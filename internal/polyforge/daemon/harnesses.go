@@ -1,29 +1,16 @@
 package daemon
 
-// harnesses.go: the daemon's view of the step harness binaries
-// (polyforge#159), reported on GET /status so `pf doctor` — which runs
-// CLI-side and cannot see the daemon's environment (a systemd unit, say)
-// — judges what the daemon will actually run. Only facts are reported:
-// whether the binary resolves, its version (claude --version; cached per
-// binary path + mtime), and whether the credential variables are SET.
-//
-// polyforge#171 (ruling 8): the claude entry additionally reports the
-// harness-root layout and the single credential authority layer —
-//   - the three harness dirs' existence (step-agent, step-agent-sessions,
-//     claude-config under the daemon's harness root);
-//   - the claude-config/settings.json env block's key facts
-//     (ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL,
-//     CLAUDE_CONFIG_DIR) as
-//     set/unset — values are read in-memory for the pairing heuristic
-//     and NEVER reported;
-//   - its heuristic warnings: an OAuth setup-token (sk-ant-oat01-)
-//     paired with a gateway BASE_URL is a rejected combination, and a
-//     CLAUDE_CONFIG_DIR set in the settings env block would override the
-//     adapter's hard-set value.
-//
-// No value is ever reported, no login is attempted, no model is called.
+// harnesses.go: the daemon's view of the step harnesses, reported on
+// GET /status?harnesses=1 so `pf doctor` — which runs CLI-side and cannot
+// see the daemon's environment — judges what the daemon will actually
+// run: whether each binary resolves, claude's version (cached per binary
+// path + mtime), whether the credential variables are SET, the three
+// harness dirs' existence, and the claude-config settings.json env
+// block's key facts with its pairing warnings. Values are read in-memory
+// only and never reported; no login is attempted, no model is called.
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -31,11 +18,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/polyforge/cli"
 )
 
 // minClaudeVersion is the oldest Claude Code version the adapter's
@@ -44,34 +34,25 @@ import (
 // never a dispatch refusal (decision 2026-10-16 G15).
 const minClaudeVersion = "2.1.296"
 
-// claudeVersionAtLeast reports whether v (a dotted numeric version, e.g.
-// "2.1.296") is >= min. An unparsable v is false.
+// claudeVersionAtLeast reports whether the dotted numeric version v is
+// >= min. An unparsable v is false.
 func claudeVersionAtLeast(v, min string) bool {
 	a, okA := parseDotted(v)
 	b, okB := parseDotted(min)
 	if !okA || !okB {
 		return false
 	}
-	for i := 0; i < len(a) || i < len(b); i++ {
-		var x, y int
-		if i < len(a) {
-			x = a[i]
-		}
-		if i < len(b) {
-			y = b[i]
-		}
-		if x != y {
-			return x > y
-		}
+	for len(a) < len(b) {
+		a = append(a, 0)
 	}
-	return true
+	for len(b) < len(a) {
+		b = append(b, 0)
+	}
+	return slices.Compare(a, b) >= 0
 }
 
 // parseDotted parses "1.2.3" into its numeric parts; anything else fails.
 func parseDotted(v string) ([]int, bool) {
-	if v == "" {
-		return nil, false
-	}
 	var out []int
 	for _, p := range strings.Split(v, ".") {
 		n, err := strconv.Atoi(p)
@@ -83,49 +64,18 @@ func parseDotted(v string) ([]int, bool) {
 	return out, true
 }
 
-// harnessDirStatus is one harness dir's existence fact (dir → path +
-// exists) of the claude status entry (polyforge#171, ruling 8).
-type harnessDirStatus struct {
-	Path   string `json:"path,omitempty"`
-	Exists bool   `json:"exists"`
-}
+// The /status harness entry is the CLI's wire shape.
+type (
+	harnessStatus    = cli.HarnessStatus
+	harnessDirStatus = cli.HarnessDir
+)
 
 // settingsEnvKeys are the env block keys the doctor reports facts about.
 var settingsEnvKeys = []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR"}
 
 // settingsTokenPrefix is the OAuth setup-token prefix Claude Code mints
-// (`claude setup-token`, scoped to the subscription, ~365d live).
+// (`claude setup-token`).
 const settingsTokenPrefix = "sk-ant-oat01-"
-
-// harnessStatus is one harness's /status entry.
-type harnessStatus struct {
-	Bin     string `json:"bin"`
-	Found   bool   `json:"found"`
-	Path    string `json:"path,omitempty"`
-	Version string `json:"version,omitempty"`
-	// Verified: Version parses and is >= MinVersion.
-	Verified   bool   `json:"verified,omitempty"`
-	MinVersion string `json:"min_version,omitempty"`
-	// VersionError is the --version probe's failure, when it failed.
-	VersionError string `json:"version_error,omitempty"`
-	// set|unset only — never a value.
-	AuthTokenEnv    string `json:"auth_token_env,omitempty"`
-	APIKeyEnv       string `json:"api_key_env,omitempty"`
-	BaseURLEnv      string `json:"base_url_env,omitempty"`
-	BackgroundTasks string `json:"background_tasks,omitempty"`
-
-	// polyforge#171 claude entry:
-	// SettingsEnv is the claude-config settings.json env block's key
-	// facts (key → set|unset; values read in-memory only, never reported).
-	SettingsEnv map[string]string `json:"settings_env,omitempty"`
-	// HarnessDirs is the claude status entry's layout facts: the three
-	// harness dirs under the daemon's harness root (polyforge#171, rule 3).
-	HarnessDirs map[string]harnessDirStatus `json:"harness_dirs,omitempty"`
-	// SettingsWarning is the settings.json pairing heuristic result (the
-	// oat01+gateway-URL rejection and the CLAUDE_CONFIG_DIR override),
-	// pre-computed daemon-side (the CLI never sees a value).
-	SettingsWarning string `json:"settings_warning,omitempty"`
-}
 
 // versionCache memoizes `claude --version` per binary path + mtime.
 type versionCache struct {
@@ -142,23 +92,27 @@ func setOrUnset(v string) string {
 	return "unset"
 }
 
+// harnessRoot is the parent of the step harness state dirs.
+func (d *Daemon) harnessRoot() string {
+	if d.cfg.HarnessRoot != "" {
+		return d.cfg.HarnessRoot
+	}
+	return d.cfg.DataDir
+}
+
 // harnessStatuses answers the /status harnesses section.
 func (d *Daemon) harnessStatuses() map[string]harnessStatus {
-	pi := harnessStatus{Bin: d.cfg.PiBin}
-	if pi.Bin == "" {
-		pi.Bin = "pi"
-	}
+	pi := harnessStatus{Bin: cmp.Or(d.cfg.PiBin, "pi")}
 	if p, err := exec.LookPath(pi.Bin); err == nil {
 		pi.Found, pi.Path = true, p
 	}
-	cl := harnessStatus{Bin: d.cfg.ClaudeBin}
-	if cl.Bin == "" {
-		cl.Bin = "claude"
+	cl := harnessStatus{
+		Bin:             cmp.Or(d.cfg.ClaudeBin, "claude"),
+		AuthTokenEnv:    setOrUnset(os.Getenv("ANTHROPIC_AUTH_TOKEN")),
+		APIKeyEnv:       setOrUnset(os.Getenv("ANTHROPIC_API_KEY")),
+		BaseURLEnv:      setOrUnset(os.Getenv("ANTHROPIC_BASE_URL")),
+		BackgroundTasks: "disabled by the adapter (--bare, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1, --tools allowlist)",
 	}
-	cl.AuthTokenEnv = setOrUnset(os.Getenv("ANTHROPIC_AUTH_TOKEN"))
-	cl.APIKeyEnv = setOrUnset(os.Getenv("ANTHROPIC_API_KEY"))
-	cl.BaseURLEnv = setOrUnset(os.Getenv("ANTHROPIC_BASE_URL"))
-	cl.BackgroundTasks = "disabled by the adapter (--bare, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1, --tools allowlist)"
 	cl.SettingsEnv, cl.HarnessDirs, cl.SettingsWarning = d.claudeConfigFacts()
 	if p, err := exec.LookPath(cl.Bin); err == nil {
 		cl.Found, cl.Path = true, p
@@ -174,10 +128,7 @@ func (d *Daemon) harnessStatuses() map[string]harnessStatus {
 // configured is exactly the doctor's "carries nothing" verdict, and the
 // in-repo fake-cfg tests below pin the un-configured default shape).
 func (d *Daemon) claudeConfigFacts() (map[string]string, map[string]harnessDirStatus, string) {
-	root := d.cfg.HarnessRoot
-	if root == "" {
-		root = d.cfg.DataDir
-	}
+	root := d.harnessRoot()
 	ccDir := filepath.Join(root, "claude-config")
 	dirs := map[string]harnessDirStatus{
 		"step_agent":          {Path: filepath.Join(root, "step-agent")},
@@ -227,11 +178,7 @@ var modelsEnvRefRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za
 // Sorted, deduplicated; never a value (a literal key or a `!command`
 // value contributes nothing). Absent or unparsable file: none.
 func (d *Daemon) piModelsEnvRefs() []string {
-	root := d.cfg.HarnessRoot
-	if root == "" {
-		root = d.cfg.DataDir
-	}
-	raw, err := os.ReadFile(filepath.Join(root, "step-agent", "models.json"))
+	raw, err := os.ReadFile(filepath.Join(d.harnessRoot(), "step-agent", "models.json"))
 	if err != nil {
 		return nil
 	}
@@ -269,7 +216,8 @@ func (d *Daemon) piModelsEnvRefs() []string {
 	return out
 }
 
-// claudeVersion runs `<path> --version` (bounded), cached per path+mtime.
+// claudeVersion runs `<path> --version` (bounded), cached per
+// path+mtime. The probe runs outside the cache lock.
 func (d *Daemon) claudeVersion(path string) (string, string) {
 	st, err := os.Stat(path)
 	if err != nil {
@@ -278,20 +226,21 @@ func (d *Daemon) claudeVersion(path string) (string, string) {
 	key := path + "@" + st.ModTime().UTC().Format(time.RFC3339Nano)
 	c := &d.claudeVer
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.key == key {
+		defer c.mu.Unlock()
 		return c.ver, c.error
 	}
+	c.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "--version").Output()
-	c.key, c.ver, c.error = key, "", ""
-	if err != nil {
-		c.error = "claude --version: " + err.Error()
-		return c.ver, c.error
+	var ver, verr string
+	if out, err := exec.CommandContext(ctx, path, "--version").Output(); err != nil {
+		verr = "claude --version: " + err.Error()
+	} else if f := strings.Fields(string(out)); len(f) > 0 {
+		ver = f[0]
 	}
-	if f := strings.Fields(string(out)); len(f) > 0 {
-		c.ver = f[0]
-	}
-	return c.ver, c.error
+	c.mu.Lock()
+	c.key, c.ver, c.error = key, ver, verr
+	c.mu.Unlock()
+	return ver, verr
 }

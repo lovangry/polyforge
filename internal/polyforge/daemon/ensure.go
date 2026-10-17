@@ -1,46 +1,19 @@
 package daemon
 
-// ensure.go: `pf daemon ensure` (polyforge#174) — the ONLY way the daemon
-// is started on a work machine. tools/install.sh calls it after an
-// install or upgrade; the harness adapters (pi's pf-chat extension, the
-// Claude Code SessionStart hook) call it when a human's session starts or
-// resumes, which is what brings the daemon back after a container or
-// machine restart (tmux does not survive one).
-//
-//   - Idempotent: a daemon answering GET /status on the configured socket
-//     means nothing to do (exit 0).
-//   - Otherwise a tmux session (supervisor.SessionName) runs the restart
-//     loop: `pf daemon <canonical argv>`; a non-zero exit (crash, panic,
-//     kill) restarts it after 5s, a clean exit (0: `pf ops shutdown`,
-//     SIGTERM/SIGINT — the graceful sequence) ENDS the loop and the
-//     session, so `pf ops shutdown` stops the daemon for good. ensure
-//     waits until the socket answers. The daemon ignores SIGHUP (nohup):
-//     killing the tmux session (a fallback for a stuck loop) never kills
-//     the daemon itself.
-//   - An flock on <data-dir>/ensure.lock serializes concurrent calls (a
-//     pi-web restart resumes many sessions at once): the holder starts at
-//     most one loop; a caller that does not get the lock waits for the
-//     holder to finish and answers by the socket, starting nothing.
-//     tools/install.sh holds the same lock across an upgrade (stop →
-//     swap), so an adapter's ensure in that window starts nothing.
-//   - A step agent (PF_WI_ID set) is refused outright.
-//   - The daemon's environment is exactly the supervisor allow-list
-//     (supervisor/env.go) taken from the CALLER of ensure, never the tmux
-//     server's (see daemonEnv).
-//   - Without tmux it falls back to one unsupervised detached start and
-//     says so loudly.
-//
-// The canonical argv is the one tools/install.sh used to launch with:
-// --config, -machine-id (the recorded <data-dir>/daemon-id, else
-// m-<short hostname>), -data-dir, -socket (the config's daemon_socket)
-// and -workflows-dir <data-dir>/release/current/workflows — nothing
-// else. The production knobs live in the config's [daemon] table, which
-// the daemon reads itself from --config (decision 2026-10-16 G2); ensure
-// only validates the file (a bad table refuses the start). Every other
-// daemon flag is test/dev-only. Auto and an explicit `pf ops max` stay
-// the daemon's persisted settings.
+// ensure.go: `pf daemon ensure`, the only way the daemon is started on a
+// work machine (by tools/install.sh and by the harness adapters at session
+// start, which brings it back after a machine restart tmux does not
+// survive). A live daemon on the socket means nothing to do; otherwise a
+// tmux session runs the restart loop of ensure_loop.sh.tmpl (exit 0 and
+// ExitNeedsOperator end it, so a graceful stop stays stopped and an
+// operator-only failure does not spin). An flock on <data-dir>/ensure.lock
+// serializes concurrent calls: a pi-web restart resumes many sessions at
+// once, and tools/install.sh holds the lock across an upgrade. The
+// production knobs live in the config's [daemon] table, which the daemon
+// reads itself, so the argv stays fixed.
 
 import (
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -52,49 +25,31 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"text/template"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
 	"github.com/silgrid/polyforge/internal/polyforge/supervisor"
 )
 
-// ensureLockFile is the flock file serializing concurrent ensure calls.
-const ensureLockFile = "ensure.lock"
-
-// daemonLogFile is the daemon's log under its data dir (appended; the
-// loop rotates it to daemon.log.1 past logRotateBytes).
 const (
+	ensureLockFile = "ensure.lock"
 	daemonLogFile  = "daemon.log"
 	logRotateBytes = 10 << 20
+	restartDelay   = 5 // seconds
 )
 
-// restartDelay is the pause before a failed daemon is restarted.
-const restartDelay = 5
-
-// ensurePlan is everything one ensure run decided before acting.
 type ensurePlan struct {
-	pfBin        string
-	configPath   string
-	dataDir      string
-	socket       string
-	workflowsDir string
-	machineID    string
-	home         string
-	timeout      time.Duration
-	// refuse, when set, is why no daemon may be started (checked after
-	// the socket probe: a live daemon is "nothing to do" regardless)
+	pfBin, configPath, dataDir, socket, workflowsDir, machineID, home string
+	timeout                                                           time.Duration
+	// refuse is checked after the socket probe: a live daemon wins
 	refuse error
 }
 
 // daemonArgv is the canonical `pf daemon` argv (without the binary).
 func (p *ensurePlan) daemonArgv() []string {
-	return []string{"daemon",
-		"--config", p.configPath,
-		"-machine-id", p.machineID,
-		"-data-dir", p.dataDir,
-		"-socket", p.socket,
-		"-workflows-dir", p.workflowsDir,
-	}
+	return []string{"daemon", "--config", p.configPath, "-machine-id", p.machineID,
+		"-data-dir", p.dataDir, "-socket", p.socket, "-workflows-dir", p.workflowsDir}
 }
 
 func (p *ensurePlan) logPath() string { return filepath.Join(p.dataDir, daemonLogFile) }
@@ -120,70 +75,58 @@ func Ensure(argv []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	plan, err := planEnsure(*cfgPath, *workflowsDir, *timeout)
+	if err == nil {
+		err = plan.run(stdout, stderr)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "pf daemon ensure: %v\n", err)
 		return 1
 	}
-	return plan.run(stdout, stderr)
+	return 0
 }
 
-// planEnsure resolves the canonical launch from the config and the
-// environment. A config without a workspace mapping is refused here: the
-// daemon would refuse to start, and a restart loop around it would only
-// spin.
+// planEnsure resolves the canonical launch. A config without a workspace
+// mapping is refused: the daemon would refuse it and the loop would spin.
 func planEnsure(cfgPath, workflowsDir string, timeout time.Duration) (*ensurePlan, error) {
 	if cfgPath == "" {
 		cfgPath = cli.DefaultConfigPath()
 	}
-	if abs, err := filepath.Abs(cfgPath); err == nil {
-		cfgPath = abs
-	}
+	cfgPath = absOr(cfgPath)
 	shared, err := cli.LoadConfig(cfgPath)
 	if err != nil {
 		return nil, err
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("cannot locate the pf binary: %w", err)
 	}
 	home, _ := os.UserHomeDir()
 	dataDir := os.Getenv("POLYFORGE_DATA_DIR")
 	if dataDir == "" {
 		dataDir = filepath.Join(home, ".local", "share", "polyforge")
 	}
-	p := &ensurePlan{
-		configPath: cfgPath,
-		dataDir:    dataDir,
-		socket:     shared.DaemonSocket,
-		home:       home,
-		timeout:    timeout,
+	if workflowsDir == "" {
+		workflowsDir = filepath.Join(dataDir, "release", "current", "workflows")
 	}
-	p.workflowsDir = workflowsDir
-	if p.workflowsDir == "" {
-		p.workflowsDir = filepath.Join(dataDir, "release", "current", "workflows")
-	}
-	if abs, err := filepath.Abs(p.workflowsDir); err == nil {
-		p.workflowsDir = abs
-	}
-	p.machineID = ensureMachineID(dataDir)
-	exe, err := os.Executable()
-	if err != nil {
-		return nil, fmt.Errorf("cannot locate the pf binary: %w", err)
-	}
-	p.pfBin = exe
+	p := &ensurePlan{pfBin: exe, configPath: cfgPath, dataDir: dataDir, socket: shared.DaemonSocket,
+		workflowsDir: absOr(workflowsDir), machineID: ensureMachineID(dataDir), home: home, timeout: timeout}
 	if shared.Mapping.Empty() {
-		p.refuse = errNoMapping{cfgPath}
+		p.refuse = fmt.Errorf("not starting the daemon: %s has no [workspace.\"<path>\"] mapping, so the daemon would refuse to start — add one, check it with `pf doctor`, then run `pf daemon ensure` again", cfgPath)
 	}
 	return p, nil
 }
 
-// errNoMapping is the refusal for a config without a [workspace] section.
-type errNoMapping struct{ path string }
-
-func (e errNoMapping) Error() string {
-	return fmt.Sprintf("not starting the daemon: %s has no [workspace.\"<path>\"] mapping, so the daemon would refuse to start — add one, check it with `pf doctor`, then run `pf daemon ensure` again", e.path)
+func absOr(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
 }
 
 var hostSanitizeRe = regexp.MustCompile(`[^a-z0-9-]`)
 
 // ensureMachineID answers the recorded daemon id, else m-<short host>
-// sanitized exactly as tools/install.sh always did.
+// sanitized exactly as tools/install.sh does.
 func ensureMachineID(dataDir string) string {
 	if raw, err := os.ReadFile(filepath.Join(dataDir, daemonIDFile)); err == nil {
 		if id := strings.TrimSpace(string(raw)); id != "" {
@@ -195,86 +138,72 @@ func ensureMachineID(dataDir string) string {
 	return "m-" + hostSanitizeRe.ReplaceAllString(strings.ToLower(host), "-")
 }
 
-// daemonAnswers probes GET /status on the socket (short bound).
-func daemonAnswers(sock string) (string, bool) {
-	c := cli.NewDaemonClient(sock)
-	c.HTTP.Timeout = 3 * time.Second
-	raw, err := c.Status()
-	if err != nil {
-		return "", false
-	}
-	var st cli.StatusResponse
-	_ = json.Unmarshal(raw, &st)
-	return st.MachineID, true
-}
-
-func (p *ensurePlan) run(stdout, stderr io.Writer) int {
-	if id, ok := daemonAnswers(p.socket); ok {
-		fmt.Fprintf(stdout, "daemon %s answers on %s\n", id, p.socket)
-		return 0
+func (p *ensurePlan) run(stdout, stderr io.Writer) error {
+	if p.answers(stdout) {
+		return nil
 	}
 	if p.refuse != nil {
-		fmt.Fprintf(stderr, "pf daemon ensure: %v\n", p.refuse)
-		return 1
+		return p.refuse
 	}
 	if err := os.MkdirAll(p.dataDir, 0o755); err != nil {
-		fmt.Fprintf(stderr, "pf daemon ensure: %v\n", err)
-		return 1
+		return err
 	}
 	lock, err := os.OpenFile(filepath.Join(p.dataDir, ensureLockFile), os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
-		fmt.Fprintf(stderr, "pf daemon ensure: %v\n", err)
-		return 1
+		return err
 	}
 	defer lock.Close() // closing the fd drops the flock
+	tryLock := func() bool { return syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil }
 	deadline := time.Now().Add(p.timeout)
-	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
-		// Another ensure is starting the daemon: wait for it to finish,
-		// then answer by the socket — never start a second loop.
+	if !tryLock() {
+		// Another ensure is starting the daemon: wait for it, then answer
+		// by the socket — never start a second loop.
 		fmt.Fprintln(stdout, "another `pf daemon ensure` is starting the daemon; waiting for it")
-		for syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
-			if time.Now().After(deadline) {
-				break
-			}
+		for !tryLock() && time.Now().Before(deadline) {
 			time.Sleep(100 * time.Millisecond)
 		}
-		return p.verdict(stdout, stderr)
+		return p.await(time.Now(), stdout)
 	}
-	// Holder: the daemon may have come up while we waited for the lock.
-	if id, ok := daemonAnswers(p.socket); ok {
-		fmt.Fprintf(stdout, "daemon %s answers on %s\n", id, p.socket)
-		return 0
+	// The daemon may have come up while we waited for the lock.
+	if p.answers(stdout) {
+		return nil
 	}
 	if st, err := os.Stat(p.workflowsDir); err != nil || !st.IsDir() {
-		fmt.Fprintf(stderr, "pf daemon ensure: not starting the daemon: the workflows dir %s is missing (run tools/install.sh, or pass --workflows-dir)\n", p.workflowsDir)
-		return 1
+		return fmt.Errorf("not starting the daemon: the workflows dir %s is missing (run tools/install.sh, or pass --workflows-dir)", p.workflowsDir)
 	}
 	if err := p.start(stdout, stderr); err != nil {
-		fmt.Fprintf(stderr, "pf daemon ensure: %v\n", err)
-		return 1
+		return err
 	}
-	for time.Now().Before(deadline) {
-		if _, ok := daemonAnswers(p.socket); ok {
-			break
+	return p.await(deadline, stdout)
+}
+
+// answers probes GET /status (short bound) and says so when it answers.
+func (p *ensurePlan) answers(stdout io.Writer) bool {
+	c := cli.NewDaemonClient(p.socket)
+	c.HTTP.Timeout = 3 * time.Second
+	raw, err := c.Status()
+	if err != nil {
+		return false
+	}
+	var st cli.StatusResponse
+	_ = json.Unmarshal(raw, &st)
+	fmt.Fprintf(stdout, "daemon %s answers on %s\n", st.MachineID, p.socket)
+	return true
+}
+
+// await probes the socket at least once, polling until the deadline.
+func (p *ensurePlan) await(deadline time.Time, stdout io.Writer) error {
+	for !p.answers(stdout) {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the daemon does not answer on %s after %s; check %s (`pf doctor` names config problems)%s",
+				p.socket, p.timeout, p.logPath(), logTail(p.logPath(), 10))
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	return p.verdict(stdout, stderr)
+	return nil
 }
 
-// verdict answers the exit code by the socket.
-func (p *ensurePlan) verdict(stdout, stderr io.Writer) int {
-	if id, ok := daemonAnswers(p.socket); ok {
-		fmt.Fprintf(stdout, "daemon %s answers on %s\n", id, p.socket)
-		return 0
-	}
-	fmt.Fprintf(stderr, "pf daemon ensure: the daemon does not answer on %s after %s; check %s (`pf doctor` names config problems)%s\n",
-		p.socket, p.timeout, p.logPath(), logTail(p.logPath(), 10))
-	return 1
-}
-
-// start launches the supervision loop in tmux (or, without tmux, one
-// unsupervised daemon).
+// start launches the tmux loop, or without tmux one unsupervised daemon.
 func (p *ensurePlan) start(stdout, stderr io.Writer) error {
 	running, err := supervisor.LoopRunning()
 	if errors.Is(err, supervisor.ErrNoTmux) {
@@ -282,8 +211,7 @@ func (p *ensurePlan) start(stdout, stderr io.Writer) error {
 		return p.startDetached()
 	}
 	if running {
-		// the loop is between two iterations (or its daemon is still
-		// booting): it starts the daemon itself — never a second loop
+		// between two iterations or still booting: the loop starts it
 		fmt.Fprintf(stdout, "supervision loop (tmux session %s) present; waiting for its daemon\n", supervisor.SessionName)
 		return nil
 	}
@@ -293,68 +221,6 @@ func (p *ensurePlan) start(stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "started the daemon supervision loop (tmux session %s; log %s)\n", supervisor.SessionName, p.logPath())
 	return nil
-}
-
-// daemonEnv is the daemon's whole environment (env hygiene): the
-// supervisor allow-list (supervisor.DaemonEnv — the one place it is
-// defined) filtered from the ENSURE CALLER's environment, HOME pinned to
-// the resolved home, plus the supervision marker when the loop starts
-// it. Nothing else — in particular nothing of the tmux server's
-// environment (ANTHROPIC_*, stale keys, harness-session markers such as
-// TMUX*, CLAUDE*, PF_CHAT_ID, PF_WI_ID) — reaches the daemon or the step
-// agents it spawns.
-func (p *ensurePlan) daemonEnv(marker bool) []string {
-	env := []string{"HOME=" + p.home}
-	for _, kv := range supervisor.DaemonEnv(os.Environ()) {
-		// HOME is pinned; PWD is the shell's own (the loop's /bin/sh
-		// exports its cwd), never the caller's
-		if !strings.HasPrefix(kv, "HOME=") && !strings.HasPrefix(kv, "PWD=") {
-			env = append(env, kv)
-		}
-	}
-	if marker {
-		env = append(env, supervisor.MarkerEnv+"=tmux:"+supervisor.SessionName)
-	}
-	return env
-}
-
-// loopScript is the sh program the tmux session runs. The tmux session
-// itself runs in the TMUX SERVER's environment (captured when that server
-// first started, plus the client's update-environment variables), so the
-// script's first act (after cd'ing to the home) is
-// `exec /usr/bin/env -i <daemonEnv assignments> /bin/sh -c <loop>`: the loop — and every daemon it (re)starts — runs in exactly
-// the allow-listed environment of the ensure caller, and the tmux
-// server's environment is irrelevant.
-func (p *ensurePlan) loopScript() string {
-	env := p.daemonEnv(true)
-	assign := make([]string, 0, len(env))
-	for _, kv := range env {
-		name, val, _ := strings.Cut(kv, "=")
-		assign = append(assign, name+"="+shQuote(val))
-	}
-	return fmt.Sprintf("cd %s 2>/dev/null || cd /\nexec /usr/bin/env -i %s /bin/sh -c %s\n",
-		shQuote(p.home), strings.Join(assign, " "), shQuote(p.loopBody()))
-}
-
-// loopBody is the restart loop itself (run by loopScript's clean sh).
-func (p *ensurePlan) loopBody() string {
-	argv := []string{"nohup", shQuote(p.pfBin)}
-	for _, a := range p.daemonArgv() {
-		argv = append(argv, shQuote(a))
-	}
-	log := shQuote(p.logPath())
-	var b strings.Builder
-	b.WriteString("while :; do\n")
-	fmt.Fprintf(&b, "  if [ \"$(wc -c < %s 2>/dev/null || echo 0)\" -gt %d ]; then mv -f %s %s.1; fi\n", log, logRotateBytes, log, log)
-	fmt.Fprintf(&b, "  echo \"pf daemon ensure loop: starting the daemon at $(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)\" >> %s\n", log)
-	fmt.Fprintf(&b, "  %s < /dev/null >> %s 2>&1\n", strings.Join(argv, " "), log)
-	b.WriteString("  rc=$?\n")
-	fmt.Fprintf(&b, "  if [ \"$rc\" -eq 0 ]; then echo \"pf daemon ensure loop: the daemon exited cleanly; the loop ends\" >> %s; break; fi\n", log)
-	fmt.Fprintf(&b, "  if [ \"$rc\" -eq %d ]; then echo \"pf daemon ensure loop: the daemon refused to start (exit $rc: needs an operator fix, see above); the loop ends — fix the cause, then run pf daemon ensure\" >> %s; break; fi\n", ExitNeedsOperator, log)
-	fmt.Fprintf(&b, "  echo \"pf daemon ensure loop: the daemon failed (exit $rc); restarting in %ds\" >> %s\n", restartDelay, log)
-	fmt.Fprintf(&b, "  sleep %d\n", restartDelay)
-	b.WriteString("done\n")
-	return b.String()
 }
 
 // startDetached starts one daemon in its own session (no tmux).
@@ -375,7 +241,57 @@ func (p *ensurePlan) startDetached() error {
 	return cmd.Process.Release()
 }
 
-// shQuote single-quotes s for sh.
+// daemonEnv is the daemon's whole environment: the supervisor allow-list
+// filtered from the ENSURE CALLER's environment (never the tmux server's),
+// HOME pinned, plus the supervision marker when the loop starts it.
+func (p *ensurePlan) daemonEnv(marker bool) []string {
+	env := []string{"HOME=" + p.home}
+	for _, kv := range supervisor.DaemonEnv(os.Environ()) {
+		// PWD is the loop shell's own cwd, never the caller's
+		if !strings.HasPrefix(kv, "HOME=") && !strings.HasPrefix(kv, "PWD=") {
+			env = append(env, kv)
+		}
+	}
+	if marker {
+		env = append(env, supervisor.MarkerEnv+"=tmux:"+supervisor.SessionName)
+	}
+	return env
+}
+
+// loopTmpl renders what tmux runs ("script") and the restart loop
+// ("body"); every value goes through q (shell single-quoting). A tmux
+// session inherits the TMUX SERVER's environment (captured when the server
+// first started), so "script" re-execs through `env -i` with exactly
+// daemonEnv. The daemon runs under nohup: killing the session never kills it.
+//
+//go:embed ensure_loop.sh.tmpl
+var loopTmplText string
+var loopTmpl = template.Must(template.New("").Funcs(template.FuncMap{"q": shQuote}).Parse(loopTmplText))
+
+func renderLoop(name string, data any) string {
+	var b strings.Builder
+	if err := loopTmpl.ExecuteTemplate(&b, name, data); err != nil {
+		panic(err) // fixed template, fixed data shape
+	}
+	return b.String()
+}
+
+func (p *ensurePlan) loopScript() string {
+	var assign []string
+	for _, kv := range p.daemonEnv(true) {
+		name, val, _ := strings.Cut(kv, "=") // names are shell-safe (supervisor.DaemonEnvAllowed)
+		assign = append(assign, name+"="+shQuote(val))
+	}
+	return renderLoop("script", map[string]any{"Home": p.home, "Env": assign, "Body": p.loopBody()})
+}
+
+func (p *ensurePlan) loopBody() string {
+	return renderLoop("body", map[string]any{
+		"Log": p.logPath(), "Argv": append([]string{p.pfBin}, p.daemonArgv()...),
+		"RotateBytes": logRotateBytes, "NeedsOperator": ExitNeedsOperator, "Delay": restartDelay,
+	})
+}
+
 func shQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
@@ -386,9 +302,7 @@ func logTail(path string, n int) string {
 	if err != nil || len(raw) == 0 {
 		return ""
 	}
-	if len(raw) > 64<<10 {
-		raw = raw[len(raw)-64<<10:]
-	}
+	raw = raw[max(0, len(raw)-64<<10):] // the log may be up to 10 MiB
 	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
 	if len(lines) > n {
 		lines = lines[len(lines)-n:]
