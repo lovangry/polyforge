@@ -407,8 +407,10 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest, info *appliedInfo)
 		if err != nil {
 			return err
 		}
-		if len(res.CommandEvidence) > 0 {
-			out["commands"] = res.CommandEvidence // B10: the only accepted command evidence
+		// B10: the only accepted command evidence, decoded (known fields
+		// only; ValidateStepResult already proved it decodes)
+		if ev, _ := decodeCommandEvidence(res.CommandEvidence); len(ev) > 0 {
+			out["commands"] = ev
 		}
 		// H4: the authored-tests baseline is driver-written only — a
 		// step-supplied value is never kept (it would forge the bar).

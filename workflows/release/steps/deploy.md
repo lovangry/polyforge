@@ -26,16 +26,18 @@ output:
     - description: A completed deploy - production serves the verified version.
       properties:
         verdict: { type: string, enum: [pass] }
-        version: { type: string, minLength: 1 }
+        version: { type: string, pattern: '\S' }
       required: [verdict, version]
     - description: A failed deploy - requires a non-empty fail_reason that states where production ended up.
       properties:
         verdict: { type: string, enum: [fail] }
-        fail_reason: { type: string, minLength: 1 }
+        fail_reason: { type: string, pattern: '\S' }
       required: [verdict, fail_reason]
-    - description: A deferred deploy - no deploy procedure in this capsule, so nothing was executed; owes no version.
+    - description: A deferred deploy - no deploy procedure in this capsule, so nothing was executed; carries no version and no published artifacts.
       properties:
         verdict: { type: string, enum: [defer] }
+        version: { type: string, maxLength: 0 }
+        artifacts_published: { type: array, maxItems: 0 }
       required: [verdict]
 ---
 

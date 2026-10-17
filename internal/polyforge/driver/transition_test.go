@@ -335,15 +335,41 @@ func TestTransitionStepStartIllegal(t *testing.T) {
 // ---------------------------------------------------------------------------
 // step_result
 
+// output.commands persists the decoded evidence (known fields only): an
+// unknown key an agent adds to an entry, such as a full stdout dump,
+// never reaches execution.json.
+func TestTransitionCommandsKeepKnownFieldsOnly(t *testing.T) {
+	d, _, _, execPath := testEnv(t, spec("a"))
+	mustInit(t, d)
+	mustStart(t, d, "a", 1)
+	big := strings.Repeat("x", 64<<10)
+	res := completedResult("a", 1, `{}`)
+	res.CommandEvidence = json.RawMessage(`[{"argv":["go","test"],"duration_ms":5,"stdout":"` + big + `"}]`)
+	if err := d.transition(TransitionRequest{Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: res}); err != nil {
+		t.Fatalf("result: %v", err)
+	}
+	raw, err := os.ReadFile(execPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "stdout") || strings.Contains(string(raw), big[:1024]) {
+		t.Fatalf("an unknown evidence key must not be persisted (%d bytes)", len(raw))
+	}
+	cmds, _ := d.Snapshot().Steps["a"].Output["commands"].([]any)
+	if len(cmds) != 1 {
+		t.Fatalf("the decoded entry must be persisted: %+v", d.Snapshot().Steps["a"].Output["commands"])
+	}
+}
+
 func TestTransitionStepResultCompleted(t *testing.T) {
 	d, _, _, _ := testEnv(t, spec("a"))
 	mustInit(t, d)
 	mustStart(t, d, "a", 1)
 	res := completedResult("a", 1, `{"summary":"A"}`)
-	res.CommandEvidence = []CommandEvidence{{
+	res.CommandEvidence = rawEvidence([]CommandEvidence{{
 		Argv: []string{"go", "test", "./..."}, Cwd: "/w", ExitCode: 0,
 		StartedAt: time.Now(), DurationMs: 1200, LogPath: "logs/a.log",
-	}}
+	}})
 	if err := d.transition(TransitionRequest{Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: res}); err != nil {
 		t.Fatalf("result: %v", err)
 	}
