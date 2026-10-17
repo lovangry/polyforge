@@ -92,7 +92,7 @@ this create-time check; a create cannot plant one.
 
 `POST /api/v1/work-items/{id}/claim` body `{work_item_id, session_id, machine_id, idempotency_key}`
 (`api.SessionClaimRequest`); caller needs writer/maintainer membership or admin (key scope alone does
-not authorize). One transaction (`core/session.go` `claimTx`), checked in order: not terminal
+not authorize). One transaction (`core/session.go` `Claim`), checked in order: not terminal
 (`CORE-410 TERMINAL_STATE`), no session (`CORE-409 ALREADY_HELD`), queued (`NOT_CLAIMABLE`), no
 unfinished blocker (`DEPENDENCY_BLOCKED`), bundle present (`NOT_CLAIMABLE`); then
 `UPDATE … WHERE status='queued' AND session_hash IS NULL` (0 rows → `CORE-409 RACE_LOST`); a declared inventory repo that left the project → `CORE-409 INVENTORY_REPO_GONE`. Response `{claim, work_item}`

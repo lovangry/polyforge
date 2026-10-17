@@ -36,17 +36,27 @@ func New(baseURL, apiKey string) *Client {
 // Do performs a typed request. body may be nil. out receives the decoded
 // JSON response when non-nil. Non-2xx answers decode as *api.Error.
 func (c *Client) Do(method, path string, body, out any) error {
+	data, err := c.send(method, path, body)
+	if err != nil || out == nil || len(data) == 0 {
+		return err
+	}
+	return json.Unmarshal(data, out)
+}
+
+// send performs one authenticated request and returns the response body
+// (bounded to 32 MiB); a non-2xx answer is the typed error.
+func (c *Client) send(method, path string, body any) ([]byte, error) {
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		rdr = bytes.NewReader(b)
 	}
 	req, err := http.NewRequest(method, c.BaseURL+path, rdr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	if body != nil {
@@ -54,20 +64,17 @@ func (c *Client) Do(method, path string, body, out any) error {
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return typedError(resp.StatusCode, data)
+		return nil, typedError(resp.StatusCode, data)
 	}
-	if out == nil || len(data) == 0 {
-		return nil
-	}
-	return json.Unmarshal(data, out)
+	return data, nil
 }
 
 // raw performs one CLI-facing passthrough call: out is the undecoded
@@ -82,8 +89,7 @@ func (c *Client) raw(method, path string, body any) (json.RawMessage, error) {
 
 // typedError maps a non-2xx response body back into *api.Error: the
 // typed envelope when one is present, a status-synthesized code
-// otherwise (a proxy's HTML 502/504 page, a bare 404). Shared by Do and
-// the text/markdown read so every error carries the same envelope.
+// otherwise (a proxy's HTML 502/504 page, a bare 404).
 func typedError(status int, data []byte) error {
 	var ae api.Error
 	if json.Unmarshal(data, &ae) == nil && ae.Code != "" {
@@ -257,29 +263,10 @@ func (c *Client) GetMemory(id string) (json.RawMessage, error) {
 
 // GetMemoryContent reads one memory's body (GET
 // /api/v1/memories/{id}?format=content): the server answers the bare
-// body (no front-matter) as text/markdown, NOT JSON, so the body bytes are returned undecoded — a
-// JSON decode would refuse plain markdown. Auth and the typed-error
-// envelope are exactly Do's (the shared non-2xx path), and the response
-// is bounded to the same 32 MiB cap.
+// body (no front-matter) as text/markdown, NOT JSON, so the body bytes
+// are returned undecoded — a JSON decode would refuse plain markdown.
 func (c *Client) GetMemoryContent(id string) ([]byte, error) {
-	req, err := http.NewRequest("GET", c.BaseURL+"/api/v1/memories/"+url.PathEscape(id)+"?format=content", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.APIKey)
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, typedError(resp.StatusCode, data)
-	}
-	return data, nil
+	return c.send("GET", "/api/v1/memories/"+url.PathEscape(id)+"?format=content", nil)
 }
 
 // UserCreateRequest is the M1 create body. v1 field: user_type

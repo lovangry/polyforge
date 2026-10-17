@@ -379,67 +379,9 @@ func (m *SessionManager) Claim(wiID string, req api.SessionClaimRequest, callerI
 			return cached, err
 		}
 	}
-	// Fast-fail diagnosis on the live row; the transaction below rechecks
-	// every gate on the single writer's snapshot (a lost race dies on the
-	// guarded UPDATE).
-	row, err := loadSessionRow(m.db, wiID)
-	if err != nil {
-		return nil, err
-	}
-	if err := diagnoseClaimGate(row); err != nil {
-		return nil, err
-	}
-	if blocked, err := unfinishedBlockers(m.db, wiID); err != nil {
-		return nil, err
-	} else if blocked {
-		return nil, Fail(api.ErrCoreConflict, "DEPENDENCY_BLOCKED", dependencyBlockedDetail)
-	}
-	if err := diagnoseClaimBundle(row); err != nil {
-		return nil, err
-	}
-	return m.claimTx(wiID, req, callerIdentity)
-}
-
-// dependencyBlockedDetail is the DEPENDENCY_BLOCKED refusal text
-// (polyforge#161: failed/canceled blockers keep the dependent waiting).
-const dependencyBlockedDetail = "work item has an unfinished blocking dependency " +
-	"(only a wrapped blocker releases; remove the edge with `pf file dep rm` to proceed)"
-
-// diagnoseClaimGate is the M1 joint CAS gate's error face. Order matters:
-// terminal first (CORE-410), then session-held (the precise double-claim
-// diagnosis), then status; blockers and the bundle are checked after
-// these by the caller (the v1 precedence — DEPENDENCY_BLOCKED wins over
-// NOT_CLAIMABLE for a WI with both problems — is preserved).
-func diagnoseClaimGate(row *sessionRow) error {
-	if isTerminal(row.Status) {
-		return Fail(api.ErrCoreGone, "TERMINAL_STATE", "work item is in terminal state %s", row.Status)
-	}
-	if sessionHeld(row) {
-		return Fail(api.ErrCoreConflict, "ALREADY_HELD",
-			"the work item is already held by session %s", row.Fingerprint.String)
-	}
-	if row.Status != api.StatusQueued {
-		return Fail(api.ErrCoreConflict, "NOT_CLAIMABLE",
-			"claim requires a queued work item (got %s)", row.Status)
-	}
-	return nil
-}
-
-// diagnoseClaimBundle is the gate's bundle leg (registration tickets never
-// execute, #17).
-func diagnoseClaimBundle(row *sessionRow) error {
-	if !row.BundleName.Valid || row.BundleName.String == "" {
-		return Fail(api.ErrCoreConflict, "NOT_CLAIMABLE",
-			"registration-only work item (no workflow bundle) is not claimable")
-	}
-	return nil
-}
-
-// claimTx opens the session inside ONE transaction. The guarded UPDATE
-// re-validates the joint gate (status + empty session) on the writer's
-// own snapshot: 0 rows = the race was lost, and the fresh row is
-// re-diagnosed for the precise wire error.
-func (m *SessionManager) claimTx(wiID string, req api.SessionClaimRequest, callerIdentity string) (*api.SessionClaim, error) {
+	// The joint gate is diagnosed on the transaction's own snapshot and the
+	// guarded UPDATE writes it; the store has a single connection (Open:
+	// SetMaxOpenConns(1)), so nothing interleaves between the two.
 	tx, err := m.db.Begin()
 	if err != nil {
 		return nil, err
@@ -478,14 +420,6 @@ func (m *SessionManager) claimTx(wiID string, req api.SessionClaimRequest, calle
 		return nil, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		// Re-diagnose inside the same snapshot for the typed refusal.
-		fresh, err := loadSessionRow(tx, wiID)
-		if err != nil {
-			return nil, err
-		}
-		if derr := diagnoseClaimGate(fresh); derr != nil {
-			return nil, derr
-		}
 		return nil, Fail(api.ErrCoreConflict, "RACE_LOST", "state changed concurrently")
 	}
 
@@ -515,6 +449,41 @@ func (m *SessionManager) claimTx(wiID string, req api.SessionClaimRequest, calle
 		return nil, err
 	}
 	return claim, nil
+}
+
+// dependencyBlockedDetail is the DEPENDENCY_BLOCKED refusal text
+// (polyforge#161: failed/canceled blockers keep the dependent waiting).
+const dependencyBlockedDetail = "work item has an unfinished blocking dependency " +
+	"(only a wrapped blocker releases; remove the edge with `pf file dep rm` to proceed)"
+
+// diagnoseClaimGate is the M1 joint CAS gate's error face. Order matters:
+// terminal first (CORE-410), then session-held (the precise double-claim
+// diagnosis), then status; blockers and the bundle are checked after
+// these by the caller (the v1 precedence — DEPENDENCY_BLOCKED wins over
+// NOT_CLAIMABLE for a WI with both problems — is preserved).
+func diagnoseClaimGate(row *sessionRow) error {
+	if isTerminal(row.Status) {
+		return Fail(api.ErrCoreGone, "TERMINAL_STATE", "work item is in terminal state %s", row.Status)
+	}
+	if sessionHeld(row) {
+		return Fail(api.ErrCoreConflict, "ALREADY_HELD",
+			"the work item is already held by session %s", row.Fingerprint.String)
+	}
+	if row.Status != api.StatusQueued {
+		return Fail(api.ErrCoreConflict, "NOT_CLAIMABLE",
+			"claim requires a queued work item (got %s)", row.Status)
+	}
+	return nil
+}
+
+// diagnoseClaimBundle is the gate's bundle leg (registration tickets never
+// execute, #17).
+func diagnoseClaimBundle(row *sessionRow) error {
+	if !row.BundleName.Valid || row.BundleName.String == "" {
+		return Fail(api.ErrCoreConflict, "NOT_CLAIMABLE",
+			"registration-only work item (no workflow bundle) is not claimable")
+	}
+	return nil
 }
 
 // replay answers a cached claim response when the SAME idempotency key,
