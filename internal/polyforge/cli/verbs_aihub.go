@@ -152,7 +152,10 @@ func fileCreate(ctx *Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := json.Unmarshal(raw, &req); err != nil {
+		// unknown keys are refused, never dropped: aihub refuses them too
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&req); err != nil {
 			return fmt.Errorf("stdin JSON: %w", err)
 		}
 	}

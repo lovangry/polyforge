@@ -100,6 +100,19 @@ func TestVerbFileCreateRepoInventory(t *testing.T) {
 	if len(rec.all()) != sent {
 		t.Fatal("the refused create still reached aihub")
 	}
+
+	// A stdin key the create body does not declare (the removed
+	// repo_inventory_base) is refused locally, never dropped.
+	stdout.Reset()
+	errb.Reset()
+	removed := `{"project":"polyforge","goal":"g","repo_inventory_base":[{"name":"app","base":"abc"}]}`
+	if code := Run([]string{"file", "create", "--stdin"}, strings.NewReader(removed), &stdout, &errb); code != 1 ||
+		!strings.Contains(errb.String(), `unknown field "repo_inventory_base"`) {
+		t.Fatalf("stdin repo_inventory_base: code=%d stderr=%s", code, errb.String())
+	}
+	if len(rec.all()) != sent {
+		t.Fatal("the refused stdin create still reached aihub")
+	}
 }
 
 // TestVerbFileCreateProjectContract pins the #113 placement contract at

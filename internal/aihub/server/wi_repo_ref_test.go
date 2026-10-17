@@ -67,6 +67,21 @@ func TestWIRepoInventoryHTTPRefusals(t *testing.T) {
 		nothingPersisted(t, e)
 	})
 
+	t.Run("create/removed-base-array", func(t *testing.T) {
+		e := newSrvEnv(t)
+		code, raw := e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{
+			"project": "alpha", "goal": "an undeclared create key is refused, never dropped",
+			"repo_inventory":      []map[string]any{{"name": "polyforge"}},
+			"repo_inventory_base": []map[string]any{{"name": "polyforge", "base": "abc123"}},
+		}, nil)
+		var envl api.Error
+		if code != http.StatusBadRequest || json.Unmarshal(raw, &envl) != nil || envl.Code != api.ErrCoreBadInput ||
+			!strings.Contains(envl.Detail, `unknown field "repo_inventory_base"`) {
+			t.Fatalf("repo_inventory_base must be refused CORE-400 naming the field, got %d %s", code, raw)
+		}
+		nothingPersisted(t, e)
+	})
+
 	t.Run("create/client-url", func(t *testing.T) {
 		e := newSrvEnv(t)
 		code, raw := e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{
