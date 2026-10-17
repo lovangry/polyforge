@@ -13,8 +13,8 @@ package runtime
 //     runtime-state/recalled-memories.json, which the driver renders
 //     into every step prompt as non-binding history
 //     (driver/spawn.go recalledMemoriesSection, decision 2026-10-16 G3);
-//   - there is no runtime half (recall/remember over the UDS face,
-//     v2-converge); the snapshot is the step agent's only memory path.
+//   - the live half is the daemon's step memory face (daemon/stepmem.go:
+//     `pf recall` / `pf remember` inside a step, with the daemon's key).
 //
 // The snapshot is an ENRICHMENT, never a gate: an unreachable aihub, a
 // refused search or a zero-hit query all degrade to an empty list plus a

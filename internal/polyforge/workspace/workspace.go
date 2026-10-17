@@ -11,6 +11,7 @@
 //	    default: { models: [...] }       # optional: every step of this project
 //	    <step-id>: { models: [...] }     # optional: the steps with this id,
 //	                                     # in every bundle (fix, code, review, ...)
+//	memory_policy: ...                   # optional section (memorypolicy.go)
 //
 // A step entry's one key is `models`: a list of model candidates, each
 // `<harness>:<model>` (polyforge#175 — harness ∈ pi | claude, split on
@@ -66,6 +67,8 @@ type Config struct {
 	// list): steps.<project>.<key>.models, flattened for the compose.
 	// Every candidate is in canonical `<harness>:<model>` form.
 	Models map[string]map[string][]string
+	// MemoryPolicy is the declared memory_policy section (nil = absent).
+	MemoryPolicy map[string]PolicyEntry
 }
 
 // Error is the typed load failure: the file that refused and the
@@ -130,8 +133,10 @@ func parse(raw []byte, projects []string) (*Config, string) {
 		return nil, strings.ReplaceAll(err.Error(), "\n", "; ")
 	}
 	var second yaml.Node
-	if err := dec.Decode(&second); !errors.Is(err, io.EOF) {
+	if err := dec.Decode(&second); err == nil {
 		return nil, "the file must hold exactly one YAML document (found a second `---` document)"
+	} else if !errors.Is(err, io.EOF) {
+		return nil, "content after the top-level document does not parse (no keys may follow a flow-style `{...}` top level or a `...` end marker): " + strings.ReplaceAll(err.Error(), "\n", "; ")
 	}
 	if len(doc.Content) == 0 {
 		return nil, ""
@@ -141,20 +146,30 @@ func parse(raw []byte, projects []string) (*Config, string) {
 		return nil, ""
 	}
 	if root.Kind != yaml.MappingNode {
-		return nil, "the file must be a mapping with one `steps:` section"
+		return nil, "the file must be a mapping with a `steps:` and/or a `memory_policy:` section"
 	}
 	top, reason := mapping(root, "")
 	if reason != "" {
 		return nil, reason
 	}
 	var stepsNode *yaml.Node
+	cfg := &Config{}
 	for _, kv := range top {
-		if kv.key != "steps" {
-			return nil, fmt.Sprintf("unknown top-level key %q (only `steps`)", kv.key)
+		switch kv.key {
+		case "steps":
+			stepsNode = kv.val
+		case MemoryPolicyKey:
+			if cfg.MemoryPolicy, reason = parseMemoryPolicy(kv.val, projects); reason != "" {
+				return nil, reason
+			}
+		default:
+			return nil, fmt.Sprintf("unknown top-level key %q (only `steps` and `memory_policy`)", kv.key)
 		}
-		stepsNode = kv.val
 	}
 	if stepsNode == nil || isNull(stepsNode) {
+		if cfg.MemoryPolicy != nil {
+			return cfg, ""
+		}
 		return nil, "" // a file declaring nothing governs nothing
 	}
 	if stepsNode.Kind != yaml.MappingNode {
@@ -164,7 +179,7 @@ func parse(raw []byte, projects []string) (*Config, string) {
 	if reason != "" {
 		return nil, reason
 	}
-	cfg := &Config{Models: make(map[string]map[string][]string, len(byProject))}
+	cfg.Models = make(map[string]map[string][]string, len(byProject))
 	var unmapped []string
 	for _, pkv := range byProject {
 		project, pn := pkv.key, pkv.val

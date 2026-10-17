@@ -9,8 +9,8 @@ Two levels, never mixed:
   script defers to the operator is reproduced below (the `[workspace]`
   example edit).
 - **Workspace init** is the agent-driven flow that maps a workspace's
-  projects on this machine (and optionally gives it a `.polyforge.yaml`
-  of model candidates) — this fragment's core, and the part a polyforge
+  projects on this machine (and gives it a `.polyforge.yaml` memory
+  policy, plus optionally model candidates) — this fragment's core, and the part a polyforge
   session performs with the operator.
 
 ## Machine install — the pointer
@@ -60,6 +60,24 @@ the user saying "init workspace".
    involved. An invalid file refuses the claim (DAEMON-414) before it is
    made: the work item stays queued, so fix the file and resubmit.
 
+   The file's second optional section, `memory_policy:`, guides the
+   work item's `experience.wrap` summary the workflow's last step writes
+   (`record`: worth remembering; `skip`: never in it). `pf init` (step 5) appends the
+   default section when the file has none; tune it per project:
+
+   ```yaml
+   memory_policy:
+     default:                       # every project; an undeclared list is the built-in one
+       record: [踩坑和根因（现象→原因→解法）, 所有者的裁决和约定]
+       skip: [临时状态, 密钥和凭据的值]
+     polyforge:                     # optional: appended to default's lists
+       record: [daemon 上线前后的环境差异]
+   ```
+
+   Lists are non-empty, unique strings; `record` and `skip` are the only
+   keys. A missing section means the built-in default (never a refusal);
+   a malformed one refuses the claim like any other defect of the file.
+
 5. **Lay out the workspace**: `pf init <workspace-root>` (default: the
    current directory) creates `scratch/` and writes the runtime-artifact
    convention (polyforge#177) into CLAUDE.md as a layout section inside
@@ -71,13 +89,20 @@ the user saying "init workspace".
    `doc.decision` / `doc.audit` memories; experience → `experience.*` /
    `fact.*`); locally only `.repo/`, `capsules/`, `.polyforge/`
    (polyforge-generated only) and `scratch/` (disposable, reported by
-   `pf doctor` after 14 days).
+   `pf doctor` after 14 days). It also appends the default
+   `memory_policy:` section to `.polyforge.yaml` when the file declares
+   none — as text after the existing bytes (comments and layout are kept
+   exactly, never re-marshalled) — or creates the file holding only it.
+   A file that already declares `memory_policy` is left alone; one that
+   does not load is left untouched too and reported as a `warning:` line
+   (exit 0 — scratch/ and CLAUDE.md are still laid out; fix the file —
+   `pf doctor` names the defect — and re-run `pf init`).
 
 ## Verify
 
 ```
 pf doctor           # machine face: config + [workspace] mapping + workspace layout + connectivity + supervision + harness layout
-cat <workspace>/.polyforge.yaml   # the model pins the daemon reads (if any)
+cat <workspace>/.polyforge.yaml   # the memory policy and model pins the daemon reads
 ```
 
 The daemon-side check is a claim: the next submitted WI in this workspace

@@ -103,7 +103,7 @@ func TestLoadRefusals(t *testing.T) {
 		{"duplicate project key", "steps:\n  e2e:\n    code: { models: [pi:a] }\n  e2e:\n    code: { models: [pi:b] }\n", []string{"e2e"}},
 		{"duplicate step key", "steps:\n  e2e:\n    code: { models: [pi:a] }\n    code: { models: [pi:b] }\n", []string{"code"}},
 		{"duplicate steps key", "steps:\n  e2e:\n    code: { models: [pi:a] }\nsteps:\n  x:\n    code: { models: [pi:b] }\n", []string{"steps"}},
-		{"legacy top-level models", "models:\n  e2e:\n    default: [a]\n", []string{`unknown top-level key "models" (only ` + "`steps`)"}},
+		{"legacy top-level models", "models:\n  e2e:\n    default: [a]\n", []string{`unknown top-level key "models" (only ` + "`steps` and `memory_policy`)"}},
 		{"legacy models beside steps", "steps:\n  e2e:\n    default: { models: [pi:a] }\nmodels:\n  e2e:\n    code: [b]\n", []string{`unknown top-level key "models"`}},
 		{"unknown sub-key", "steps:\n  e2e:\n    fix: { models: [pi:a], modles: [b] }\n", []string{"steps.e2e.fix.modles", "a step entry's only key is `models`"}},
 		// polyforge#175: the retired harness key and the candidate format

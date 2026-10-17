@@ -105,6 +105,7 @@ fail):
 | Check | `pass` | `warn` | `skip` |
 |---|---|---|---|
 | `workspace layout` | the root holds only `.repo/`, `capsules/`, `scratch/`, `.polyforge/`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENTS.md`, `go.work` / `go.work.sum` (a Go workspace tying the `.repo/` clones together) and dot-entries (`.polyforge.yaml`, `.gitignore`, `.pi`, `.claude`, `.mcp.json`, … — harness/tool owned), and `.polyforge/` only `repo-map/` and `watchers/` (legacy v1 artifacts nothing generates any more — tolerated, safe to delete) | each other entry, with its destination: a document (`.md`, `.txt`, `.pdf`, `.html`, …) → aihub (`pf file edit <wi> --content @f` while the work item is open, else `pf remember --type doc.design\|doc.review\|doc.decision\|doc.audit`); a `.polyforge.yaml.*` backup or other file → `scratch/`; a directory holding `.git` → `.repo/`; another directory → `scratch/`. Also a `CLAUDE.md` whose `polyforge:managed` block has no `<!-- polyforge:layout -->` section — run `pf init <ws>` (a workspace without `CLAUDE.md` is not flagged). Nothing is moved or deleted | no mapping |
+| `workspace memory policy` | every mapped workspace's `.polyforge.yaml` declares a `memory_policy` section, or the workspace has no `.polyforge.yaml` at all (the built-in default applies; `pf init <ws>` writes an editable copy) | a workspace whose `.polyforge.yaml` declares no `memory_policy` — the step prompts then carry the built-in default policy; run `pf init <ws>` to append the default section (doctor itself never writes it). A file that does not load is the `workspace yaml` check's fail, not this row's | no mapping |
 | `workspace scratch` | no `scratch/` entry older than 14 days (or `--prune-scratch` removed them — the detail lists each path) | entries whose newest change — the later of mtime and ctime, of the entry and everything under it, so a download keeping old mtimes is not stale on arrival — is older than 14 days, listed; run `pf doctor --prune-scratch` to remove them. Also a `scratch` that is a symlink or a file (never scanned or pruned), and an entry that could not be read (skipped, the rest still judged) | no mapping |
 
 Stale scratch is reported, not removed, by default: the doctor is a probe
@@ -118,7 +119,9 @@ section.
 The `workspace yaml` check loads every mapped workspace's `.polyforge.yaml`
 with the daemon's own loader, so it fails exactly where a claim would be
 refused (DAEMON-414): a malformed shape (each entry is
-`steps.<project>.<default|step-id>: { models: [...] }`), a candidate that
+`steps.<project>.<default|step-id>: { models: [...] }`; a `memory_policy`
+entry is `<default|project>: { record: [...], skip: [...] }`, lists of
+non-empty unique strings), a candidate that
 is not `<harness>:<model>` (`pi:` or `claude:`; the detail names the
 entry and index), a leftover `harness` key (with the rewrite hint), a
 leftover pre-#169 top-level `models:` section (with the migration

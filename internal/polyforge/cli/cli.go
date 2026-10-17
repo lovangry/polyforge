@@ -28,6 +28,9 @@ type Context struct {
 	// default location). Only the NoConfigLoad verbs (doctor, init) need it;
 	// everything else reads the resolved Cfg.
 	ConfigPath string
+	// Step is the work item of the workflow step this invocation runs in
+	// ("" = not inside a step; stepctx.go).
+	Step string
 }
 
 // aihub returns the direct-aihub client for the resolved config.
@@ -185,6 +188,14 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		Stderr:     stderr,
 		Stdin:      stdin,
 		ConfigPath: *cfgFlag,
+	}
+	if wi := stepWorkItem(); wi != "" {
+		if err := stepRefusal(cmd); err != nil {
+			renderError(ctx, err)
+			return exitCode(err)
+		}
+		// no key, and an unresolvable server: nothing reaches aihub directly
+		ctx.Step, ctx.Cfg.APIKey, ctx.Cfg.Server = wi, "", "http://step-mode.invalid"
 	}
 
 	fs := flag.NewFlagSet("pf "+cmd.Name, flag.ContinueOnError)
