@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -17,14 +16,10 @@ type API interface {
 	Subscriptions() (protocol.ChatSubscriptions, error)
 	Snapshot(wi string, after int64) (*protocol.WatchSnapshot, error)
 	Ack(a protocol.ChatAck) error
-	Heartbeat(pid int) error
-	// Attention lists WIs that need a human and have no live watcher, for
-	// this chat or owner. Items carrying a Key stay listed until acked via
-	// AckAttention (fetch-then-ack); an older daemon marks them shown at
-	// fetch and answers no Key.
-	Attention(owner string) ([]protocol.ChatAttentionItem, error)
-	// AckAttention records the printed attention notices by Key.
-	AckAttention(keys []string) error
+	// SubscribeOwned subscribes the chat to every work item the daemon
+	// holds that this chat submitted or owner owns, and answers the
+	// subscriptions it added.
+	SubscribeOwned(owner string) ([]protocol.ChatSub, error)
 }
 
 // Options configure Run.
@@ -79,13 +74,16 @@ func (o *Options) defaults() {
 // ErrParentGone ends a run whose harness process disappeared.
 var ErrParentGone = errors.New("parent process gone")
 
-// Run is the resident watcher. Every cycle it heartbeats, lists the chat's
-// subscriptions and — per WI — reconciles the authoritative state BEFORE it
-// replays events after the daemon-held cursor (so a WI that ended while the
-// watcher was down is reported, never missed, and a reconnect after a
-// daemon restart needs no special case). Decisions print as fixed-template
-// lines on Out; progress goes to the status file. With WaitDecision the
-// first non-empty batch is printed, acked and Run returns nil.
+// Run is the resident watcher. It starts by subscribing the chat to the
+// work items it or its owner holds; then every cycle it lists the chat's
+// subscriptions and — per WI — reconciles the authoritative state BEFORE
+// it replays events after the daemon-held cursor (so a WI that ended
+// while the watcher was down is reported, never missed, and a reconnect
+// after a daemon restart needs no special case). Decisions print as
+// fixed-template lines on Out — those of the work items the start
+// subscribed fold into one "N WIs need you" line; progress goes to the
+// status file. With WaitDecision the first non-empty batch is printed,
+// acked and Run returns nil.
 //
 // Delivery is fetch-then-ack: nothing the daemon hands out counts as
 // delivered until the watcher acks it after printing, so a crash between
@@ -99,20 +97,16 @@ func Run(ctx context.Context, api API, opts Options) error {
 		backoff    = time.Second
 		paused     bool
 		lastNotice time.Time
-		attended   bool
+		// owned: the start's subscribe-owned call landed; fresh holds the
+		// work items it added, until their first decisions are acked.
+		owned bool
+		fresh map[string]bool
 		// unacked holds the lines already printed whose ack failed:
 		// the daemon still holds the old cursor,
 		// so the next cycle re-derives the same decisions — they are not
 		// printed again, only their acks retried, until an ack round
 		// fully succeeds.
 		unacked = map[string]bool{}
-		// attnKeys are the attention notices printed but not yet acked
-		// (B-25 WA-4): retried every cycle until an ack lands.
-		attnKeys []string
-		// attnWarned: the attention-ack failure was reported (once until an
-		// ack lands); attnNoRoute: the daemon has no attention/ack route
-		// (older daemon, it marked at fetch) — stop acking.
-		attnWarned, attnNoRoute bool
 	)
 	for {
 		if opts.ParentAlive != nil && !opts.ParentAlive() {
@@ -121,19 +115,24 @@ func Run(ctx context.Context, api API, opts Options) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		lines, batch, err := cycle(api, &opts, &attended)
-		if err != nil {
-			// A cycle that fails after fetching the attention notice still
-			// prints it (an older daemon marked it shown at fetch); its ack
-			// waits for the daemon to come back (B-25 WA-4).
-			for _, l := range batch.out {
-				if _, werr := fmt.Fprintln(opts.Out, l); werr != nil {
-					return werr
+		var (
+			lines []string
+			b     batch
+			err   error
+		)
+		if !owned {
+			var added []protocol.ChatSub
+			if added, err = api.SubscribeOwned(opts.Owner); err == nil {
+				owned, fresh = true, map[string]bool{}
+				for _, sub := range added {
+					fresh[sub.WI] = true
 				}
 			}
-			if !attnNoRoute {
-				attnKeys = append(attnKeys, batch.attnKeys...)
-			}
+		}
+		if err == nil {
+			lines, b, err = cycle(api, &opts, fresh)
+		}
+		if err != nil {
 			if !paused || opts.Now().Sub(lastNotice) >= time.Minute {
 				fmt.Fprintf(opts.Err, "polyforge watch: %s (%s); retrying in %s\n", pausedText(err), shortErr(err), backoff)
 				lastNotice = opts.Now()
@@ -153,7 +152,7 @@ func Run(ctx context.Context, api API, opts Options) error {
 		backoff = time.Second
 		writeStatus(&opts, lines)
 		printed := 0
-		for _, l := range batch.out {
+		for _, l := range b.out {
 			if unacked[l] {
 				continue
 			}
@@ -165,7 +164,7 @@ func Run(ctx context.Context, api API, opts Options) error {
 		// Ack only after the lines are out: a crash between print and
 		// ack re-delivers (at-least-once), never loses.
 		var ackErr error
-		for _, a := range batch.acks {
+		for _, a := range b.acks {
 			if aerr := api.Ack(a); aerr != nil && ackErr == nil {
 				ackErr = aerr
 			}
@@ -174,26 +173,12 @@ func Run(ctx context.Context, api API, opts Options) error {
 			if len(unacked) == 0 {
 				fmt.Fprintf(opts.Err, "polyforge watch: ack failed (%s); retrying without re-printing\n", shortErr(ackErr))
 			}
-			for _, l := range batch.out {
+			for _, l := range b.out {
 				unacked[l] = true
 			}
 		} else {
 			unacked = map[string]bool{}
-		}
-		if !attnNoRoute {
-			attnKeys = append(attnKeys, batch.attnKeys...)
-		}
-		if len(attnKeys) > 0 {
-			switch aerr := api.AckAttention(attnKeys); {
-			case aerr == nil:
-				attnKeys, attnWarned = nil, false
-			case routeAbsent(aerr):
-				// an older daemon: it marked the notices shown at fetch
-				attnKeys, attnNoRoute = nil, true
-			case !attnWarned:
-				fmt.Fprintf(opts.Err, "polyforge watch: attention ack failed (%s); retrying without re-printing\n", shortErr(aerr))
-				attnWarned = true
-			}
+			fresh = nil // the start's reminder is delivered; later decisions print one by one
 		}
 		if printed > 0 && opts.WaitDecision {
 			return nil
@@ -221,15 +206,6 @@ func sleepChecked(ctx context.Context, o *Options, d time.Duration) {
 type batch struct {
 	out  []string
 	acks []protocol.ChatAck
-	// attnKeys: the Keys of the attention notices in out (fetch-then-ack)
-	attnKeys []string
-}
-
-// routeAbsent reports the daemon's answer for a route it does not serve
-// (the mux's untyped 404/405, decoded as HTTP-404/HTTP-405).
-func routeAbsent(err error) bool {
-	var ae *api.Error
-	return errors.As(err, &ae) && (ae.Code == "HTTP-404" || ae.Code == "HTTP-405")
 }
 
 func pausedText(err error) string {
@@ -258,37 +234,17 @@ func writeStatus(o *Options, lines []string) {
 }
 
 // cycle runs one poll: the whole of it fails (returns err) only when the
-// daemon cannot list subscriptions; a single WI's failure shows as its
-// progress line and is retried next cycle.
-func cycle(d API, o *Options, attended *bool) ([]string, batch, error) {
+// daemon cannot list subscriptions or goes away mid-cycle; a single WI's
+// failure shows as its progress line and is retried next cycle. The
+// decisions of the fresh work items fold into one AttentionLine.
+func cycle(d API, o *Options, fresh map[string]bool) ([]string, batch, error) {
 	var b batch
 	subs, err := d.Subscriptions()
 	if err != nil {
 		return nil, b, err
 	}
-	_ = d.Heartbeat(os.Getpid())
-	if !*attended {
-		items, aerr := d.Attention(o.Owner)
-		if aerr != nil {
-			return nil, b, aerr
-		}
-		*attended = true
-		if len(items) > 0 {
-			wis := make([]string, 0, len(items))
-			for _, it := range items {
-				wis = append(wis, api.DisplayName(it.Slug, it.WI))
-			}
-			b.out = append(b.out, AttentionLine(wis))
-			for _, it := range items {
-				if it.Key != "" {
-					b.attnKeys = append(b.attnKeys, it.Key)
-				}
-			}
-		}
-	}
-	attention := batch{out: append([]string(nil), b.out...), attnKeys: b.attnKeys}
 	now := o.Now()
-	var lines []string
+	var lines, needYou []string
 	for _, sub := range subs.Subscriptions {
 		if sub.Done {
 			continue
@@ -307,21 +263,28 @@ func cycle(d API, o *Options, attended *bool) ([]string, batch, error) {
 		if err != nil {
 			var ae *api.Error
 			if !errors.As(err, &ae) {
-				// transport: the daemon went away mid-cycle; only the
-				// already-fetched (and daemon-marked) attention line survives
-				return nil, attention, err
+				return nil, batch{}, err // transport: the daemon went away mid-cycle
 			}
 			lines = append(lines, safeID(api.DisplayName(sub.Slug, sub.WI))+" unavailable ("+ae.Code+")")
 			continue
 		}
 		lines = append(lines, ProgressLine(snap, now))
 		res := Evaluate(sub, snap)
-		for _, dec := range res.Decisions {
-			b.out = append(b.out, dec.Line())
+		if fresh[sub.WI] {
+			if len(res.Decisions) > 0 {
+				needYou = append(needYou, api.DisplayName(snap.Slug, sub.WI))
+			}
+		} else {
+			for _, dec := range res.Decisions {
+				b.out = append(b.out, dec.Line())
+			}
 		}
 		if len(res.Decisions) > 0 || res.Cursor != sub.Cursor || res.Done || !sameKeys(res.Notified, sub.Notified) {
 			b.acks = append(b.acks, protocol.ChatAck{WI: sub.WI, Cursor: res.Cursor, Notified: res.Notified, Done: res.Done})
 		}
+	}
+	if len(needYou) > 0 {
+		b.out = append([]string{AttentionLine(needYou)}, b.out...)
 	}
 	return lines, b, nil
 }

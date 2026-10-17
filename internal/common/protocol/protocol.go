@@ -110,9 +110,11 @@ const PushTimeout = 60 * 1e9 // 60 seconds (ns, for time.Duration)
 // 2. pf CLI ↔ daemon UDS HTTP API (reference.md §6.1; v0 surface minus publish_request)
 // ---------------------------------------------------------------------------
 
-// Daemon job states.
+// Daemon job states the watcher decides on.
 const (
 	JobNeedsInput = "needs_input"
+	// JobEndPending: blocked, the hub not told yet (runtime.StateEndPending).
+	JobEndPending = "end_pending"
 )
 
 // EventEntry is one line of the daemon events file + observe output.

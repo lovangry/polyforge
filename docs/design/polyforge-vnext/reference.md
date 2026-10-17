@@ -232,8 +232,8 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 
 ### 6.1 UDS routes <!-- §6.1 -->
 
-`internal/polyforge/daemon/routes.go` `routes()` — 18 routes, all wrapped by `refuseStepOrigin`: every
-non-read request (including a `GET /chats/{id}/attention` with `mark=1` or `ack=1`) whose peer (or its ancestors / process-group leader) carries this daemon's
+`internal/polyforge/daemon/routes.go` `routes()` — 19 routes, all wrapped by `refuseStepOrigin`: every
+non-read request whose peer (or its ancestors / process-group leader) carries this daemon's
 `PF_WI_ID`+`PF_DAEMON_ID` markers — or whose peer credential cannot be read — is refused `DAEMON-403`
 (SO_PEERCRED capture `daemon/peercred.go`, check `runtime/stepproc.go` `StepProcessOrigin`).
 
@@ -252,9 +252,8 @@ non-read request (including a `GET /chats/{id}/attention` with `mark=1` or `ack=
 | GET | `/jobs/{wi}/watch?after=N` | per-WI snapshot + events | `pf watch <wi> --once` |
 | GET | `/chats/{id}/subscriptions` | list | `pf watch` |
 | POST | `/chats/{id}/subscribe`, `/unsubscribe` | manage subscriptions | `pf watch subscribe|unsubscribe` |
-| POST | `/chats/{id}/ack`, `/heartbeat` | cursor advance; watcher liveness (TTL 20s) | resident `pf watch --chat` |
-| GET | `/chats/{id}/attention?ack=1` | pending human decisions, each with a key; listed until acked (no `ack=1`: `mark=1` marks shown at fetch, legacy). With `mark=1`/`ack=1` it records state and is step-origin guarded (DAEMON-403); a plain list stays an open read | resident `pf watch --chat` |
-| POST | `/chats/{id}/attention/ack` | `{"keys"}` the watcher printed; idempotent, unknown keys ignored | resident `pf watch --chat` |
+| POST | `/chats/{id}/ack` | cursor advance | resident `pf watch --chat` |
+| POST | `/chats/{id}/subscribe-owned` | `{"owner"}`: subscribe the chat to every held WI it submitted or `owner` owns (origin owner, else reporter) that it has no subscription for; answers the added ones (cursor just before the WI's newest decision event) | resident `pf watch --chat` start |
 
 Socket: `--socket` > `PF_DAEMON_SOCKET` > cli.toml `daemon_socket` > `/run/polyforge.sock`
 (`cli/config.go`, `daemon/main.go`).

@@ -555,7 +555,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 ## 附录 C：已知缺口（集成分支，2026-10-12） <!-- §C -->
 
 - **(a) bundle digest**：已不存在——digest 链随 polyforge#149 B9 删除，`internal/` 中没有 `Digest` / `FileEntry`；`internal/common/workflow` 只读 frontmatter 的模型候选字段。`01-workflow-skills.md#§4.5` 的 digest 描述已归档。
-- **(b) 人工确认保证是事故护栏，不是对抗性防御**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证；step agent 可写 capsule，蓄意绕过不在 2026-10-14 信任模型的防御范围内（#135 冻结）。daemon 的 UDS 面（polyforge#122 起于 answer 路由，#164 并入；repo review 2026-10-16 V-1 扩到全部变更路由）按 UDS 对端 SO_PEERCRED pid 拒绝来自本 daemon step 进程树的一切非读请求（DAEMON-403）：对端、其祖先或其进程组 leader 带有 `PF_WI_ID` + `PF_DAEMON_ID=<本 daemon>` 标记即拒；取不到对端凭据也拒（fail closed）。拒绝面是一个包住整张路由表的中间件：`/jobs/{wi}/answer|claim|resume-blocked|resume-paused|pause|wrap`、`/ops/config`、`/shutdown`、`/chat/init`、`/chats/{id}/subscribe|unsubscribe|ack|heartbeat|attention/ack`，以及带 `mark=1` 或 `ack=1` 的 `GET /chats/{id}/attention`（它记录投递状态——标为已显示或待 ack——step 若能调用便可藏掉人的提醒；repo review 2026-10-16 B-25 WA-4）；开放的只有纯读：`GET /status`、`/jobs/{wi}/watch`、`/chats/{id}/subscriptions`、不带 `mark`/`ack` 的 `/chats/{id}/attention`。answer 路由保留其 #122 拒绝文案。残余：`setsid` 脱离进程组且清空环境的进程不在此检查内——这只能是蓄意行为，按信任模型不再追加防御（#135 冻结）。（曾有的 abandon-repair 路由随 repair_pending 一并删除，此实例已不存在。）
+- **(b) 人工确认保证是事故护栏，不是对抗性防御**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证；step agent 可写 capsule，蓄意绕过不在 2026-10-14 信任模型的防御范围内（#135 冻结）。daemon 的 UDS 面（polyforge#122 起于 answer 路由，#164 并入；repo review 2026-10-16 V-1 扩到全部变更路由）按 UDS 对端 SO_PEERCRED pid 拒绝来自本 daemon step 进程树的一切非读请求（DAEMON-403）：对端、其祖先或其进程组 leader 带有 `PF_WI_ID` + `PF_DAEMON_ID=<本 daemon>` 标记即拒；取不到对端凭据也拒（fail closed）。拒绝面是一个包住整张路由表的中间件：`/jobs/{wi}/answer|claim|resume-blocked|resume-paused|pause|wrap`、`/ops/config`、`/shutdown`、`/chat/init`、`/chats/{id}/subscribe|unsubscribe|subscribe-owned|ack`；开放的只有纯读：`GET /status`、`/jobs/{wi}/watch`、`/chats/{id}/subscriptions`。answer 路由保留其 #122 拒绝文案。残余：`setsid` 脱离进程组且清空环境的进程不在此检查内——这只能是蓄意行为，按信任模型不再追加防御（#135 冻结）。（曾有的 abandon-repair 路由随 repair_pending 一并删除，此实例已不存在。）
 - **(c) `pf watch` 进展字段**：已随监督重写合入——daemon watch 路由从 `Observe.Progress(wi)` 填充命令、命令时长、最近文件、工具调用数（见附录 D）。
 
 ## 附录 D：监督替换落地对照（第 9 节步骤 2–3，分支 `v2/a-supervision`） <!-- §D -->
@@ -614,7 +614,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | 路径 | 写者 | 内容 |
 |---|---|---|
 | `<data-dir>/chats.json` | daemon `identity.go` | (harness, harness-session) → chat id，让恢复的会话沿用同一 chat；chat id 只是通知标签，不是凭据 |
-| `<data-dir>/chat-subs.json` | daemon `chatsubs.go` | 每个 chat 订阅的 WI、事件游标、已送达的决策键与已显示的提醒；原子写 |
+| `<data-dir>/chat-subs.json` | daemon `chatsubs.go` | 每个 chat 订阅的 WI、事件游标与已送达的决策键；原子写 |
 | `$XDG_RUNTIME_DIR/polyforge/chat-<chat>.{lock,pid,status}`（无 `XDG_RUNTIME_DIR` 时为临时目录下按 uid 区分的 0700 目录） | 常驻 watcher `watcher/files.go` | 单实例锁、pid 文件、该 chat 的进度文件；临时目录不是本人所有或可被他人写入时拒绝使用 |
 
 ### E.3 `attrs.blocked_seal` 与 `sealed_head` / `sealed_machine`

@@ -48,11 +48,9 @@ func (c chatAPI) Snapshot(wi string, after int64) (*protocol.WatchSnapshot, erro
 	return c.d.WatchSnapshot(wi, after)
 }
 func (c chatAPI) Ack(a protocol.ChatAck) error { return c.d.ChatAck(c.chat, a) }
-func (c chatAPI) Heartbeat(pid int) error      { return c.d.ChatHeartbeat(c.chat, pid) }
-func (c chatAPI) Attention(owner string) ([]protocol.ChatAttentionItem, error) {
-	return c.d.ChatAttention(c.chat, owner)
+func (c chatAPI) SubscribeOwned(owner string) ([]protocol.ChatSub, error) {
+	return c.d.ChatSubscribeOwned(c.chat, owner)
 }
-func (c chatAPI) AckAttention(keys []string) error { return c.d.ChatAttentionAck(c.chat, keys) }
 
 var cmdWatch = &Command{
 	Name:    "watch",

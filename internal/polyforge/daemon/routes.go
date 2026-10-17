@@ -69,8 +69,7 @@ type statusJob struct {
 	Origin *runtime.Origin `json:"origin,omitempty"`
 	// StopReason is the recorded verdict of a close in flight or
 	// settled (wrapped/failed/blocked/paused) — empty while the job
-	// runs. The attention face (D9) derives the terminal decision
-	// classes from it.
+	// runs.
 	StopReason string `json:"stop_reason,omitempty"`
 }
 
@@ -280,14 +279,12 @@ func (d *Daemon) routes() *http.ServeMux {
 	mux.HandleFunc("POST /chats/{id}/subscribe", d.subscribeRoute(true))
 	mux.HandleFunc("POST /chats/{id}/unsubscribe", d.subscribeRoute(false))
 	mux.HandleFunc("POST /chats/{id}/ack", d.ackRoute)
-	mux.HandleFunc("POST /chats/{id}/heartbeat", d.heartbeatRoute)
-	mux.HandleFunc("GET /chats/{id}/attention", d.attentionRoute)
+	mux.HandleFunc("POST /chats/{id}/subscribe-owned", d.subscribeOwnedRoute)
 	// the step agent's memory face (stepmem.go), scoped to the calling
 	// step's own work item and project
 	mux.HandleFunc("GET /step/memories/search", d.stepSearchRoute)
 	mux.HandleFunc("GET /step/memories/{id}", d.stepMemoryRoute)
 	mux.HandleFunc("POST "+stepMemoriesPath, d.stepRememberRoute)
-	mux.HandleFunc("POST /chats/{id}/attention/ack", d.attentionAckRoute)
 	return mux
 }
 
@@ -820,9 +817,7 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 // refuseStepOrigin is the step-origin guard on the whole UDS face
 // (v2-converge.md Appendix C(b)): the agent executing a work item
 // must never drive the daemon. Every request that is not a read (GET/HEAD —
-// status, watch snapshot, subscriptions, attention stay open; a GET
-// attention with mark=1 or ack=1 records delivery state, so a step could
-// hide a human's notices — it is guarded like a mutation) is refused
+// status, watch snapshot, subscriptions stay open) is refused
 // DAEMON-403 when its UDS peer — the kernel's SO_PEERCRED record, never
 // anything from the request body — belongs to a step process tree of this
 // daemon (runtime.StepProcessOrigin: the PF_WI_ID/PF_DAEMON_ID markers on
@@ -834,7 +829,7 @@ func (d *Daemon) refuseStepOrigin(next http.Handler) http.Handler {
 		// the one write a step may send: its memory, which the route
 		// itself scopes to the caller's own work item (stepmem.go)
 		stepWrite := r.Method == http.MethodPost && r.URL.Path == stepMemoriesPath
-		if (r.Method != http.MethodGet && r.Method != http.MethodHead && !stepWrite) || attentionRecords(r) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && !stepWrite {
 			if reason := d.stepOriginRefusal(r); reason != "" {
 				writeErr(w, api.ErrDaemonForbidden, reason)
 				return
@@ -842,17 +837,6 @@ func (d *Daemon) refuseStepOrigin(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-// attentionRecords reports a GET /chats/{id}/attention that changes state:
-// mark=1 (shown at fetch) or ack=1 (pending until acked). A plain list is a
-// read.
-func attentionRecords(r *http.Request) bool {
-	if !strings.HasPrefix(r.URL.Path, "/chats/") || !strings.HasSuffix(r.URL.Path, "/attention") {
-		return false
-	}
-	q := r.URL.Query()
-	return q.Get("mark") == "1" || q.Get("ack") == "1"
 }
 
 // stepOriginRefusal answers the refusal reason for a mutating request

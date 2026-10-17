@@ -61,6 +61,13 @@ var eventRules = map[string]Rule{
 	"human_gate_unasked": {Class: "human_gate_unasked", Phrase: "a human checkpoint passed with zero questions asked"},
 }
 
+// IsEventDecision reports whether an event of this kind is a decision of
+// its own (an eventRules entry that is not state-backed).
+func IsEventDecision(kind string) bool {
+	r, ok := eventRules[kind]
+	return ok && !r.StateBacked
+}
+
 // statusRules maps a status to its terminal decision: the driver's
 // execution.json workflow_status (completed, failed_gate,
 // failed_rewind_exhausted, blocked) and the aihub status the daemon
@@ -127,8 +134,9 @@ func (d Decision) Line() string {
 	return fmt.Sprintf("[polyforge] %s %s%s — %s; %s", safeID(api.DisplayName(d.Slug, d.WI)), d.Class, qid, d.Phrase, suffix)
 }
 
-// AttentionLine is the fixed-template notice for WIs that need a human but
-// had no live watcher; wis are their display names (slug, else id).
+// AttentionLine is the fixed-template notice for the work items a
+// watcher's start subscribed that already hold a decision; wis are their
+// display names (slug, else id).
 func AttentionLine(wis []string) string {
 	ids := make([]string, 0, len(wis))
 	for _, w := range wis {
@@ -221,6 +229,11 @@ func Evaluate(sub protocol.ChatSub, snap *protocol.WatchSnapshot) Result {
 	if j := snap.Job; j != nil {
 		if pendingID == "" && j.QuestionID != "" && (j.Status == protocol.JobNeedsInput) {
 			pendingID = j.QuestionID
+		}
+		if j.Status == protocol.JobEndPending {
+			// a bounded-fail whose blocked close the hub has not heard yet:
+			// the work item is blocked already
+			fire("blocked", statusRules["blocked"].Rule)
 		}
 	}
 	if pendingID != "" {

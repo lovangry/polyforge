@@ -436,35 +436,17 @@ func (d *DaemonClient) ChatAck(chat string, a protocol.ChatAck) error {
 	return err
 }
 
-// ChatHeartbeat marks the chat's watcher live.
-func (d *DaemonClient) ChatHeartbeat(chat string, pid int) error {
-	_, err := d.do("POST", chatPath(chat, "heartbeat"), "", map[string]any{"pid": pid}, nil)
-	return err
-}
-
-// ChatAttention lists WIs that need a human and have no live watcher,
-// fetch-then-ack: a supporting daemon answers each item with a Key and
-// keeps listing it until ChatAttentionAck names it; an older one ignores
-// ack=1 and marks the items shown at fetch (mark=1), answering no Key.
-func (d *DaemonClient) ChatAttention(chat, owner string) ([]protocol.ChatAttentionItem, error) {
-	q := url.Values{"mark": {"1"}, "ack": {"1"}}
-	if owner != "" {
-		q.Set("owner", owner)
-	}
-	raw, err := d.do("GET", chatPath(chat, "attention"), q.Encode(), nil, nil)
+// ChatSubscribeOwned subscribes the chat to every work item the daemon
+// holds that the chat submitted or owner owns; answers the added
+// subscriptions.
+func (d *DaemonClient) ChatSubscribeOwned(chat, owner string) ([]protocol.ChatSub, error) {
+	raw, err := d.do("POST", chatPath(chat, "subscribe-owned"), "", map[string]string{"owner": owner}, nil)
 	if err != nil {
 		return nil, err
 	}
-	var out protocol.ChatAttention
+	var out protocol.ChatSubscriptions
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, err
 	}
-	return out.Items, nil
-}
-
-// ChatAttentionAck records the attention notices (by Key) the chat's
-// watcher printed. Idempotent; unknown keys are ignored by the daemon.
-func (d *DaemonClient) ChatAttentionAck(chat string, keys []string) error {
-	_, err := d.do("POST", chatPath(chat, "attention/ack"), "", protocol.ChatAttentionAck{Keys: keys}, nil)
-	return err
+	return out.Subscriptions, nil
 }

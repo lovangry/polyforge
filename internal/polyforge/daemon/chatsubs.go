@@ -3,20 +3,16 @@ package daemon
 // chatsubs.go: the daemon-held half of `pf watch` (v2-converge §3/§4).
 //
 //   - <data-dir>/chat-subs.json: per chat id, the subscribed WIs with their
-//     event cursor and the state-derived decision keys already delivered,
-//     plus which attention notices the chat was already shown. Written
-//     atomically; lives in the daemon data dir, never in an agent-writable
-//     place. A chat id is a notification label, not a credential.
-//   - watcher liveness: in-memory heartbeats (a watcher posts one per poll);
-//     a chat is "live" while its last heartbeat is recent. A daemon restart
-//     forgets them and the next poll restores them.
+//     event cursor and the state-derived decision keys already delivered.
+//     Written atomically. A chat id is a notification label, not a
+//     credential.
 //   - routes under /chats/{id}/..., the per-WI GET /jobs/{wi}/watch snapshot
 //     (execution.json authority + events after a cursor + job bookkeeping).
 //
-// Notification routing: nothing here pushes. Decisions for a WI nobody
-// watches stay un-acked (cursor not advanced) and surface through the
-// attention route the next time any watcher for the origin chat, or for the
-// WI's owner, starts.
+// Notification routing: nothing here pushes. A submit subscribes its chat;
+// a watcher's start subscribes its chat to every held WI the chat
+// submitted or its owner owns (subscribe-owned). Decisions stay un-acked
+// (cursor not advanced) until a watcher of a subscribed chat prints them.
 
 import (
 	"encoding/json"
@@ -29,7 +25,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
@@ -38,12 +33,10 @@ import (
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
+	"github.com/silgrid/polyforge/internal/polyforge/watcher"
 )
 
-const (
-	chatSubsFile   = "chat-subs.json"
-	liveWatcherTTL = 20 * time.Second
-)
+const chatSubsFile = "chat-subs.json"
 
 var chatIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
@@ -54,36 +47,18 @@ type subsDoc struct {
 
 type chatDoc struct {
 	Subs map[string]*protocol.ChatSub `json:"subs"`
-	// AttentionShown lists "<wi>|<reason>|<question>" notices this chat
-	// was shown (acked by its watcher, or marked at fetch by a legacy one).
-	AttentionShown []string `json:"attention_shown,omitempty"`
-	// AttentionPending lists the notices delivered to a fetch-then-ack
-	// watcher (GET attention?ack=1) and not yet acked: they stay listed on
-	// every fetch until POST attention/ack moves them to AttentionShown.
-	// It only scopes which keys an ack may record.
-	AttentionPending []string `json:"attention_pending,omitempty"`
 }
-
-// attentionKeep bounds AttentionShown and AttentionPending per chat.
-const attentionKeep = 200
 
 // subStore persists subscriptions and cursors.
 type subStore struct {
 	mu   sync.Mutex
 	path string
 	doc  subsDoc
-	live map[string]time.Time // chat id -> last watcher heartbeat
-	now  func() time.Time
-	// stale: the last persist failed, so the file lags the memory; an
-	// otherwise no-op attention ack persists again (the retry the watcher
-	// sends after the failed one must reach the disk).
-	stale bool
 }
 
 // newSubStore loads (or starts) the store at path.
 func newSubStore(path string) (*subStore, error) {
-	s := &subStore{path: path, live: map[string]time.Time{}, now: time.Now,
-		doc: subsDoc{Version: 1, Chats: map[string]*chatDoc{}}}
+	s := &subStore{path: path, doc: subsDoc{Version: 1, Chats: map[string]*chatDoc{}}}
 	raw, err := os.ReadFile(path)
 	switch {
 	case err == nil:
@@ -104,9 +79,7 @@ func (s *subStore) persistLocked() error {
 	if err != nil {
 		return err
 	}
-	err = atomicfile.Write(s.path, blob, 0o600)
-	s.stale = err != nil
-	return err
+	return atomicfile.Write(s.path, blob, 0o600)
 }
 
 func (s *subStore) chatLocked(id string, create bool) *chatDoc {
@@ -143,7 +116,20 @@ func (s *subStore) Subscribe(chat, wi, slug string, cursor int64) (bool, error) 
 		sub.Done, sub.Notified = false, nil
 		return true, s.persistLocked()
 	}
-	c.Subs[wi] = &protocol.ChatSub{WI: wi, Slug: slug, Cursor: cursor, SubscribedAt: s.now().UTC().Format(time.RFC3339)}
+	c.Subs[wi] = &protocol.ChatSub{WI: wi, Slug: slug, Cursor: cursor}
+	return true, s.persistLocked()
+}
+
+// SubscribeNew adds a subscription only when the chat has none for wi
+// (a finished one is left finished). Reports whether it added one.
+func (s *subStore) SubscribeNew(chat, wi, slug string, cursor int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.chatLocked(chat, true)
+	if c.Subs[wi] != nil {
+		return false, nil
+	}
+	c.Subs[wi] = &protocol.ChatSub{WI: wi, Slug: slug, Cursor: cursor}
 	return true, s.persistLocked()
 }
 
@@ -184,117 +170,6 @@ func (s *subStore) Ack(chat string, a protocol.ChatAck) error {
 	sub := c.Subs[a.WI]
 	sub.Cursor, sub.Notified, sub.Done = a.Cursor, a.Notified, a.Done
 	return s.persistLocked()
-}
-
-// Heartbeat marks the chat's watcher live.
-func (s *subStore) Heartbeat(chat string) {
-	s.mu.Lock()
-	s.live[chat] = s.now()
-	s.mu.Unlock()
-}
-
-func (s *subStore) liveLocked(chat string) bool {
-	t, ok := s.live[chat]
-	return ok && s.now().Sub(t) <= liveWatcherTTL
-}
-
-// CoveredBy reports whether any chat subscribed to wi has a live watcher.
-func (s *subStore) Covered(wi string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for id, c := range s.doc.Chats {
-		if sub := c.Subs[wi]; sub != nil && !sub.Done && s.liveLocked(id) {
-			return true
-		}
-	}
-	return false
-}
-
-// attnMode is how one attention fetch treats the notices it lists.
-type attnMode int
-
-const (
-	// attnPeek lists without recording anything.
-	attnPeek attnMode = iota
-	// attnMark (legacy ?mark=1) records each listed notice shown at fetch.
-	attnMark
-	// attnDeliver (?ack=1, fetch-then-ack) records each listed notice
-	// pending; it is shown only once the watcher acks it after printing.
-	attnDeliver
-)
-
-// MarkShown answers whether the attention notice key is new for chat (not
-// yet shown) and records it per mode: attnMark marks it shown, attnDeliver
-// marks it pending (still new until acked), attnPeek records nothing.
-func (s *subStore) MarkShown(chat, key string, mode attnMode) (fresh bool, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c := s.chatLocked(chat, mode != attnPeek)
-	if c != nil && contains(c.AttentionShown, key) {
-		return false, nil
-	}
-	switch mode {
-	case attnMark:
-		c.AttentionShown = appendBounded(c.AttentionShown, key)
-	case attnDeliver:
-		if contains(c.AttentionPending, key) {
-			return true, nil
-		}
-		c.AttentionPending = appendBounded(c.AttentionPending, key)
-	default:
-		return true, nil
-	}
-	return true, s.persistLocked()
-}
-
-// AckShown records the pending attention notices among keys as shown to
-// chat (the watcher printed them). Idempotent: a key already shown, or one
-// the chat was never delivered (unknown, garbage, from another chat), is
-// ignored. Answers how many keys were newly recorded. The move happens in
-// memory first; if persisting it fails the ack answers the error and the
-// watcher's retry — a no-op in memory by then — persists again.
-func (s *subStore) AckShown(chat string, keys []string) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c := s.chatLocked(chat, false)
-	if c == nil {
-		return 0, nil
-	}
-	n := 0
-	for _, k := range keys {
-		i := indexOf(c.AttentionPending, k)
-		if i < 0 {
-			continue
-		}
-		c.AttentionPending = append(c.AttentionPending[:i:i], c.AttentionPending[i+1:]...)
-		if !contains(c.AttentionShown, k) {
-			c.AttentionShown = appendBounded(c.AttentionShown, k)
-		}
-		n++
-	}
-	if n == 0 && !s.stale {
-		return 0, nil
-	}
-	return n, s.persistLocked()
-}
-
-func indexOf(list []string, k string) int {
-	for i, v := range list {
-		if v == k {
-			return i
-		}
-	}
-	return -1
-}
-
-func contains(list []string, k string) bool { return indexOf(list, k) >= 0 }
-
-func appendBounded(list []string, k string) []string {
-	list = append(list, k)
-	if len(list) > attentionKeep {
-		list = list[len(list)-attentionKeep:]
-	}
-	return list
 }
 
 // ---------------------------------------------------------------------------
@@ -374,167 +249,46 @@ func (d *Daemon) ackRoute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func (d *Daemon) heartbeatRoute(w http.ResponseWriter, r *http.Request) {
+// subscribeOwnedRoute is POST /chats/{id}/subscribe-owned {"owner"}: a
+// watcher's start subscribes its chat to every held work item the chat
+// submitted or the owner owns (origin owner, else the WI reporter) that
+// the chat has no subscription for, and gets the added ones back. A new
+// subscription's cursor sits just before the WI's newest decision event,
+// so a decision nobody has been told about yet is replayed; the
+// state-backed decisions come from the snapshot anyway.
+func (d *Daemon) subscribeOwnedRoute(w http.ResponseWriter, r *http.Request) {
 	id, ok := chatID(w, r)
 	if !ok {
 		return
 	}
-	d.subs.Heartbeat(id)
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
-func (d *Daemon) attentionRoute(w http.ResponseWriter, r *http.Request) {
-	id, ok := chatID(w, r)
-	if !ok {
+	var body struct {
+		Owner string `json:"owner"`
+	}
+	if !decodeBody(w, r, &body) {
 		return
 	}
-	q := r.URL.Query()
-	owner := strings.TrimSpace(q.Get("owner"))
-	// ack=1 (a fetch-then-ack watcher) wins over mark=1, which such a
-	// watcher also sends so an older daemon, ignoring ack=1, still marks
-	// at fetch as before.
-	mode := attnPeek
-	switch {
-	case q.Get("ack") == "1":
-		mode = attnDeliver
-	case q.Get("mark") == "1":
-		mode = attnMark
-	}
-	items, err := d.attention(id, owner, mode)
-	if err != nil {
-		writeErr(w, api.ErrDaemonInternal, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, protocol.ChatAttention{ChatID: id, Items: items})
-}
-
-// attentionAckRoute records the delivered attention notices the watcher
-// printed (POST /chats/{id}/attention/ack {"keys":[...]}). Idempotent;
-// keys the chat was not delivered are ignored.
-func (d *Daemon) attentionAckRoute(w http.ResponseWriter, r *http.Request) {
-	id, ok := chatID(w, r)
-	if !ok {
-		return
-	}
-	var a protocol.ChatAttentionAck
-	if !decodeBody(w, r, &a) {
-		return
-	}
-	if _, err := d.subs.AckShown(id, a.Keys); err != nil {
-		writeErr(w, api.ErrDaemonInternal, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
-// attention lists the WIs that need a human, have no live subscribed
-// watcher, and belong to this chat (origin) or this owner (origin owner,
-// falling back to the WI reporter), skipping what the chat was already
-// shown. mode says whether the listed notices are recorded shown at
-// fetch (legacy), pending until acked (fetch-then-ack), or not at all.
-// The reminder covers every decision class the held job presents (D9),
-// not only needs_input.
-func (d *Daemon) attention(chat, owner string, mode attnMode) ([]protocol.ChatAttentionItem, error) {
-	items := []protocol.ChatAttentionItem{}
+	owner := strings.TrimSpace(body.Owner)
+	added := []protocol.ChatSub{}
 	jobs, _ := d.statusJobs()
 	for _, j := range jobs {
-		if d.subs.Covered(j.WorkItemID) {
-			continue
-		}
-		mine := j.Origin != nil && j.Origin.ChatID == chat
+		mine := j.Origin != nil && j.Origin.ChatID == id
 		if !mine && !(owner != "" && d.ownerOf(j) == owner) {
 			continue
 		}
-		reason := d.attentionClass(j)
-		if hubCanceledCandidate(string(j.Status)) {
-			// a hub-side cancel of a record the daemon still holds is the
-			// newer decision: it outranks the retained-state class
-			if c := d.attentionClassHubCanceled(j); c != "" {
-				reason = c
-			}
+		cursor := d.lastSeq(j.WorkItemID)
+		if e, ok := d.obs.Events().Newest(j.WorkItemID, watcher.IsEventDecision); ok {
+			cursor = e.Seq - 1
 		}
-		if reason == "" {
-			continue
-		}
-		key := j.WorkItemID + "|" + reason + "|" + j.QuestionID
-		fresh, err := d.subs.MarkShown(chat, key, mode)
+		fresh, err := d.subs.SubscribeNew(id, j.WorkItemID, j.Slug, cursor)
 		if err != nil {
-			return nil, err
+			writeErr(w, api.ErrDaemonInternal, err.Error())
+			return
 		}
 		if fresh {
-			items = append(items, protocol.ChatAttentionItem{WI: j.WorkItemID, Slug: j.Slug, Reason: reason, Key: key})
+			added = append(added, protocol.ChatSub{WI: j.WorkItemID, Slug: j.Slug, Cursor: cursor})
 		}
 	}
-	sort.Slice(items, func(i, k int) bool { return items[i].WI < items[k].WI })
-	return items, nil
-}
-
-// attentionClass derives one held job's attention class (D9) from the
-// state the daemon holds — never a hub call. Status-backed classes
-// first: the needs_input projection, the retained operator pause, the
-// end_pending blocked close, and the recorded stop reason of a close
-// (completed/failed/blocked). Then the classes status alone cannot
-// distinguish — step_dead, candidates_exhausted, submit_rejected,
-// submit_dropped, daemon_restarted — from the WI's decision-event ring,
-// newest first. "" = the job presents no decision. (canceled, the one
-// class no local state can name, is attention's hub-checked arm.)
-func (d *Daemon) attentionClass(j statusJob) string {
-	switch {
-	case j.NeedsInput:
-		return protocol.JobNeedsInput
-	case j.Status == string(runtime.StatePaused):
-		return "paused"
-	case j.Status == string(runtime.StateEndPending):
-		return "blocked"
-	}
-	switch j.StopReason {
-	case protocol.FinishWrapped:
-		return "completed"
-	case protocol.FinishFailed:
-		return "failed"
-	}
-	if d.obs != nil {
-		if e, ok := d.obs.Events().Newest(j.WorkItemID, decisionEventKind); ok {
-			return e.Kind
-		}
-	}
-	return ""
-}
-
-// decisionEventKind reports the event kinds that are a decision only
-// the events name (the state-backed classes come from the job record).
-func decisionEventKind(kind string) bool {
-	switch kind {
-	case "step_dead", "candidates_exhausted",
-		observe.EvSubmitRejected, observe.EvSubmitDropped, observe.EvDaemonRestarted:
-		return true
-	}
-	return false
-}
-
-// hubCanceledCandidate reports whether a job in this state can have
-// been canceled at the hub while the daemon still holds its record
-// (pf cancel works on a paused or blocked WI; the record is dropped at
-// the next reconciliation, so the held window is exactly these states).
-func hubCanceledCandidate(status string) bool {
-	return status == string(runtime.StatePaused) || status == string(runtime.StateEndPending)
-}
-
-// attentionClassHubCanceled answers "canceled" — the one decision class
-// with no local face — for a held record the hub says was canceled.
-// "" otherwise.
-func (d *Daemon) attentionClassHubCanceled(j statusJob) string {
-	if d.hub == nil || !hubCanceledCandidate(string(j.Status)) {
-		return ""
-	}
-	item, err := d.hub.GetWorkItem(j.WorkItemID)
-	if err != nil || item == nil {
-		return ""
-	}
-	if item.Status == api.StatusCanceled {
-		return "canceled"
-	}
-	return ""
+	writeJSON(w, http.StatusOK, protocol.ChatSubscriptions{ChatID: id, Subscriptions: added})
 }
 
 // ownerOf answers a WI's owner: the origin owner, else the WI reporter.
