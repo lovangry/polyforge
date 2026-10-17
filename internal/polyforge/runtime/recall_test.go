@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,8 +54,7 @@ func readSnapshot(t *testing.T, path string) recalledSnapshot {
 	return snap
 }
 
-// A populated recall writes the query (the goal's keywords, never the
-// content), the top_k, the hits with bounded excerpts, and no notice.
+// A populated recall writes the query (the goal, never the content), the top_k, the hits with bounded excerpts, and no notice.
 func TestRecalledMemoriesSnapshotShape(t *testing.T) {
 	var gotQuery string
 	var gotProject string
@@ -72,8 +70,8 @@ func TestRecalledMemoriesSnapshotShape(t *testing.T) {
 	if snap.WorkItemID != "wi_rc1" {
 		t.Fatalf("work_item_id = %q", snap.WorkItemID)
 	}
-	if gotQuery != "flaky retry ladder" {
-		t.Fatalf("recall query = %q, want the goal's keywords", gotQuery)
+	if gotQuery != "fix the flaky retry ladder" {
+		t.Fatalf("recall query = %q, want the goal (never the content)", gotQuery)
 	}
 	if snap.Query != gotQuery {
 		t.Fatalf("snapshot query %q != seam query %q", snap.Query, gotQuery)
@@ -134,34 +132,16 @@ func TestRecalledMemoriesNilSeamWritesNothing(t *testing.T) {
 	}
 }
 
-// The claim query is a short keyword list of the goal and the labels:
-// identifiers first, stopwords and short words dropped, CJK clauses as
-// 3-rune shingles, deduplicated case-insensitively and capped.
-func TestRecallKeywords(t *testing.T) {
-	cases := []struct {
-		name, goal string
-		labels     []string
-		want       string
-	}{
-		{"words and identifiers", "Fix the flaky retry ladder in SessionClaim (claim_journal, s24b)", nil,
-			"SessionClaim claim_journal s24b flaky retry ladder"},
-		{"labels lead, duplicates fold", "retry the Retry ladder", []string{"retry", "runtime"},
-			"retry runtime ladder"},
-		{"cjk shingles at stride 2", "修复重试阶梯的问题", nil, "修复重 重试阶 阶梯的 的问题"},
-		{"particle-heavy shingle dropped", "这是在重试", nil, "在重试"},
-		{"mixed scripts split", "修复retry阶梯逻辑", nil, "retry 阶梯逻 梯逻辑"},
-		{"nothing informative", "fix it", nil, ""},
+// The claim query is the goal plus the labels, never the content; the
+// hub extracts the terms.
+func TestRecallQuery(t *testing.T) {
+	if got := recallQuery("  fix the retry ladder ", nil); got != "fix the retry ladder" {
+		t.Fatalf("goal only: %q", got)
 	}
-	for _, c := range cases {
-		if got := recallKeywords(c.goal, c.labels); got != c.want {
-			t.Errorf("%s: recallKeywords(%q, %v) = %q, want %q", c.name, c.goal, c.labels, got, c.want)
-		}
+	if got := recallQuery("修复重试阶梯", []string{"runtime", "claim"}); got != "修复重试阶梯 runtime claim" {
+		t.Fatalf("goal + labels: %q", got)
 	}
-	long := ""
-	for i := 0; i < 30; i++ {
-		long += fmt.Sprintf(" term%02d", i)
-	}
-	if got := strings.Fields(recallKeywords(long, nil)); len(got) != recallMaxTerms || got[0] != "term00" {
-		t.Fatalf("cap: %v, want the first %d terms", got, recallMaxTerms)
+	if got := recallQuery("", nil); got != "" {
+		t.Fatalf("empty goal: %q", got)
 	}
 }

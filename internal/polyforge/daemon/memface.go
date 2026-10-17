@@ -70,7 +70,7 @@ func recallSnapshot(hub Hub) func(query, project string, topK int) ([]runtime.Re
 func memSearch(hub Hub, query, project string, topK, excerptRunes int) ([]memSearchHit, error) {
 	v := url.Values{}
 	v.Set("q", query)
-	// Ranked any-term mode: the claim query is a keyword list, which the
+	// Ranked any-term mode: the claim query is a whole goal, which the
 	// default every-token-must-match search would rarely answer. An
 	// aihub that predates match= ignores it and ANDs (zero hits — the
 	// snapshot degrades to its noticed empty list), so aihub deploys
