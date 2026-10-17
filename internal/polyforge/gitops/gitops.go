@@ -51,6 +51,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 )
 
@@ -445,6 +446,9 @@ func CommitPush(ctx context.Context, o Opts, message string) (string, bool, Push
 	}
 
 	if err := cleanStaleLocks(o.GitDir); err != nil {
+		return "", false, timings, err
+	}
+	if err := excludeTempFiles(o); err != nil {
 		return "", false, timings, err
 	}
 	env := o.Env()
@@ -1196,6 +1200,42 @@ func SweepCarrierTemps(gitRoot string) error {
 // than the bound is stale by any honest reading — and a YOUNG lock,
 // foreign or not, is left alone for git to report loudly against (the
 // push fails and is retried at the next boundary).
+// tempFilePattern matches atomicfile's in-flight temp files
+// (".<name>.<rand>.tmp"): the driver writes execution.json and the
+// transcript copies that way inside the capsule while a publish runs.
+const tempFilePattern = ".*.tmp"
+
+// excludeTempFiles keeps those temp files out of `git add -A`: one may
+// vanish between the status listing and the add ("unable to stat"), and
+// none is ever capsule content. It lives in the capsule git-dir's
+// info/exclude, never in the tracked .gitignore.
+func excludeTempFiles(o Opts) error {
+	gitDir := o.GitDir
+	if gitDir == "" {
+		gitDir = filepath.Join(o.CapsuleDir, ".git")
+	}
+	if st, err := os.Stat(gitDir); err != nil || !st.IsDir() {
+		return nil // no git-dir: the git call itself reports it
+	}
+	path := filepath.Join(gitDir, "info", "exclude")
+	raw, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == tempFilePattern {
+			return nil
+		}
+	}
+	if len(raw) > 0 && !strings.HasSuffix(string(raw), "\n") {
+		raw = append(raw, '\n')
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return atomicfile.Write(path, append(raw, tempFilePattern+"\n"...), 0o644)
+}
+
 func cleanStaleLocks(gitDir string) error {
 	if gitDir == "" {
 		return nil
