@@ -1,13 +1,9 @@
 package memory
 
-// Memory tests: FTS round trip (create → search, update reindex, redact
-// removal, short CJK token widening) and the three reconcile scenarios
-// (orphan row rollback, authority file backfill, redacted forward
-// completion).
+// Memory tests: FTS round trip (create → search, redact removal, short
+// CJK token widening), idempotent create and search paging.
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -89,16 +85,16 @@ func TestFtsRoundTrip(t *testing.T) {
 		t.Fatalf("type filter should exclude: %v", hits)
 	}
 
-	// The authority file content matches what was written.
+	// The stored document matches what was written.
 	content, err := e.store.Content(entry.ID)
 	if err != nil {
 		t.Fatalf("content: %v", err)
 	}
 	if !strings.Contains(string(content), "xyzzyplugh") {
-		t.Fatalf("authority file stale: %s", content)
+		t.Fatalf("stored document stale: %s", content)
 	}
 	if !strings.HasPrefix(string(content), "---\n") {
-		t.Fatalf("authority file missing frontmatter: %q", string(content)[:40])
+		t.Fatalf("stored document missing frontmatter: %q", string(content)[:40])
 	}
 
 	// Redact: gone from search and from Get.
@@ -175,103 +171,6 @@ func TestSearchTypePrefixFilter(t *testing.T) {
 	hits, err = e.store.Search("xylophone", "experience", nil, 10, nil)
 	if err != nil || len(hits) != 1 || hits[0].Type != "experience" {
 		t.Fatalf("bare-type hits = %+v err=%v, want only the bare experience row", hits, err)
-	}
-}
-
-func TestReconcileOrphanRowRollback(t *testing.T) {
-	// Scenario: the row committed (step ②) but the authority file was
-	// never placed (crash before ③). Reconcile deletes the whole create.
-	e := newEnv(t)
-	entry := e.create(t, "about to be orphaned")
-	dir := filepath.Join(e.store.dataDir, "memory", entry.ProjectID, entry.ID)
-	// Simulate the crash window: file gone, row alive.
-	if err := os.Remove(filepath.Join(dir, "memory.md")); err != nil {
-		t.Fatalf("remove authority: %v", err)
-	}
-	// The INV-7f gate refuses to serve it.
-	if _, err := e.store.Get(entry.ID); err == nil {
-		t.Fatalf("orphan row served")
-	}
-	// And it is excluded from search.
-	if hits, _ := e.store.Search("orphaned", "", nil, 10, nil); len(hits) != 0 {
-		t.Fatalf("orphan row searchable")
-	}
-	// Rebuild: the row dies with its FTS row.
-	if _, err := e.store.RebuildIndex(); err != nil {
-		t.Fatalf("rebuild: %v", err)
-	}
-	var n int
-	if err := e.db.QueryRow(`SELECT COUNT(*) FROM memories WHERE id=?1`, entry.ID).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("orphan row survived rebuild: %v %d", err, n)
-	}
-	if err := e.db.QueryRow(`SELECT COUNT(*) FROM memory_fts WHERE mem_id=?1`, entry.ID).Scan(&n); err != nil || n != 0 {
-		t.Fatalf("orphan FTS row survived rebuild: %v %d", err, n)
-	}
-}
-
-func TestReconcileFileBackfill(t *testing.T) {
-	// Scenario: an authority file exists on disk with NO row (manual
-	// placement / restore-from-backup). Rebuild backfills the row
-	// entirely from the frontmatter (file wins, INV-7c).
-	e := newEnv(t)
-	entry := e.create(t, "the canonical content")
-	dir := filepath.Join(e.store.dataDir, "memory", entry.ProjectID, entry.ID)
-	raw, err := os.ReadFile(filepath.Join(dir, "memory.md"))
-	if err != nil {
-		t.Fatalf("read authority: %v", err)
-	}
-	// Plant a copy under a new mem id with a corrected frontmatter id.
-	// Simpler: nuke the row of the existing entry, keep the file.
-	if _, err := e.db.Exec(`DELETE FROM memory_fts WHERE mem_id=?1`, entry.ID); err != nil {
-		t.Fatalf("del fts: %v", err)
-	}
-	if _, err := e.db.Exec(`DELETE FROM memories WHERE id=?1`, entry.ID); err != nil {
-		t.Fatalf("del row: %v", err)
-	}
-	if n, err := e.store.RebuildIndex(); err != nil || n != 1 {
-		t.Fatalf("rebuild: %v %d", err, n)
-	}
-	back, err := e.store.load(entry.ID)
-	if err != nil {
-		t.Fatalf("backfill missing: %v", err)
-	}
-	if back.ContentSHA != shaHex(raw) || back.Status != "active" {
-		t.Fatalf("backfill wrong: %+v", back)
-	}
-	// And it is searchable again.
-	hits, err := e.store.Search("canonical", "", nil, 10, nil)
-	if err != nil || len(hits) != 1 || hits[0].ID != entry.ID {
-		t.Fatalf("backfilled entry not searchable: %v %+v", err, hits)
-	}
-}
-
-func TestReconcileRedactedForwardCompletion(t *testing.T) {
-	// Scenario: redact moved the directory into _redacted/ but crashed
-	// before committing step ②. Rebuild forward-completes from the file
-	// position — never rolls back.
-	e := newEnv(t)
-	entry := e.create(t, "to be redacted incompletely")
-	dir := filepath.Join(e.store.dataDir, "memory", entry.ProjectID, entry.ID)
-	dst := filepath.Join(e.store.dataDir, "memory", entry.ProjectID, "_redacted", entry.ID)
-	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.Rename(dir, dst); err != nil {
-		t.Fatalf("move: %v", err)
-	}
-	// Row is still active: the read-path gate must heal it, not serve it.
-	if _, err := e.store.Get(entry.ID); err == nil {
-		t.Fatalf("half-redacted entry served")
-	}
-	if _, err := e.store.RebuildIndex(); err != nil {
-		t.Fatalf("rebuild: %v", err)
-	}
-	var status string
-	if err := e.db.QueryRow(`SELECT status FROM memories WHERE id=?1`, entry.ID).Scan(&status); err != nil || status != "redacted" {
-		t.Fatalf("redact not forward-completed: %v %q", err, status)
-	}
-	if _, err := e.store.Get(entry.ID); err == nil {
-		t.Fatalf("forward-completed redaction still served")
 	}
 }
 

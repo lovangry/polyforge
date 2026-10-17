@@ -328,8 +328,8 @@ func TestFTSPageExactOrder(t *testing.T) {
 	for i, ts := range tieStamps {
 		id := fmt.Sprintf("mem_tie%02d", i)
 		if _, err := s.db.Exec(`INSERT INTO memories(id, project_id, owner_user_id, type, visibility,
-			authority_path, content_sha, content_len, created_at, updated_at)
-			VALUES (?1, ?2, ?3, 'rule.ops', 'project', 'memory/x', 'sha', 1, ?4, ?4)`, id, alpha, owner, ts); err != nil {
+			authority_path, content_sha, content_len, created_at, updated_at, content)
+			VALUES (?1, ?2, ?3, 'rule.ops', 'project', '', 'sha', 1, ?4, ?4, 'x')`, id, alpha, owner, ts); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.db.Exec(`INSERT INTO memory_fts(mem_id, body) VALUES (?1, 'gowork tie body')`, id); err != nil {

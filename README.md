@@ -234,7 +234,7 @@ One row per sub-package, exactly as `internal/` exists today:
 | `internal/common/workflow` | The minimal workflow-bundle frontmatter read surface (defaults + per-step `model_candidates`) that drives model and harness selection, and the step-definition lookup: a bundle's own `steps/<id>.md` wins, else the shared `workflows/_shared/steps/<id>.md` (`_shared` is not a bundle; it is materialized beside the bundle). No digest contract: the bundle digest chain was deleted (polyforge#149). |
 | `internal/aihub/core` | aihub persistent layer: SQLite store (single writer, WAL), the work-item state machine, claim/session arbitration (one live session per WI, its hashed push secret and public fingerprint), the ready queue and the admin face. |
 | `internal/aihub/git` | aihub git surface: per-WI bare-repo lifecycle, the git-http-backend smart-protocol proxy, session-secret auth (only the WI's live session secret pushes; session-fingerprint fencing) and the pre-receive hook enforcing the capsule-chain invariants. |
-| `internal/aihub/memory` | Core-side memory store: FTS5-trigram full-text search, authoritative `memory.md` files and the reconcile procedure. |
+| `internal/aihub/memory` | Core-side memory store: memories kept in the database (`memories.content`), FTS5-trigram full-text search, and the one-time content migration from the former `memory.md` files. |
 | `internal/aihub/server` | The AIHub HTTP face: business endpoints, the admin face, and the `/git/{wi}.git/...` proxy mount; Bearer API key auth, typed `api.Error` envelope. |
 | `internal/polyforge/aihubclient` | Shared HTTP client for the aihub server, used by runtime, observe and the CLI verbs; decodes the typed error envelope back into `*api.Error`. |
 | `internal/polyforge/cli` | The `pf` client CLI: the routing verbs (file, queue, cancel, recall, remember, memory, submit, `watch`, answer, pause, resume, wrap, ops), `chat`, the management face (users, api-keys, projects, machines, backup), the daemon client over the UDS socket, and config resolution. |
@@ -406,19 +406,19 @@ error caught by the global / verb-level flag parse. The routing skill's fragment
 | --- | --- |
 | Data-plane verbs (direct to aihub) | `file`, `queue`, `cancel`, `recall`, `remember`, `memory` |
 | Execution-plane verbs (local daemon UDS face) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`), `answer`, `pause`, `resume`, `wrap`, `ops` (`status`, `auto`, `max`, `shutdown`, and `end-session` — aihub-direct, admin/maintainer), `chat init` |
-| Management face (M1–M5) | `users`, `api-keys`, `projects`, `machines`, `backup` (DB-only snapshot, see below) |
+| Management face (M1–M5) | `users`, `api-keys`, `projects`, `machines`, `backup` (database snapshot, see below) |
 | Diagnostics | `doctor` (`--prune-scratch` removes stale `scratch/` entries), `init` (a workspace's local layout) |
 | Process | `daemon` (run the work machine; `pf daemon ensure` starts it) |
 
-`pf backup` writes a consistent DB-only snapshot (`VACUUM INTO`) under the
-server's data dir `backups/`, on the same disk. It does NOT include memory
-content (memory text lives only as files under `memory/`; the DB holds only its
-sha/length) nor the git repos (`git/`). For a full backup take the
-sqlite backup-API snapshot of `aihub.db` (not a plain file copy of a live WAL
-database) and rsync `memory/` and `git/` alongside it, as `deploy.sh` does. There
-is no backup-only mode: `deploy.sh`'s online backup (snapshot, rsync catch-up,
-consistency check, off-host copy) runs only as part of a deploy, so an ad-hoc full
-backup is these manual steps (or a copy of the whole data dir while aihub is stopped).
+`pf backup` writes a consistent snapshot of the database (`VACUUM INTO`) under
+the server's data dir `backups/`, on the same disk. Memories live entirely in
+the database, so the snapshot holds every memory; it does NOT include the git
+repos (`git/`). For a full backup take the sqlite backup-API snapshot of
+`aihub.db` (not a plain file copy of a live WAL database) and rsync `git/`
+alongside it, as `deploy.sh` does. There is no backup-only mode: `deploy.sh`'s
+online backup (snapshot, rsync catch-up, consistency check, off-host copy) runs
+only as part of a deploy, so an ad-hoc full backup is these manual steps (or a
+copy of the whole data dir while aihub is stopped).
 
 Human moves: continue = `pf resume <id>` (a paused or blocked
 WI), abandon = `pf cancel <id>` (queued, paused or blocked), owner's failed verdict on a live run = `pf wrap <id> --fail` (refused on a blocked WI). These run with the

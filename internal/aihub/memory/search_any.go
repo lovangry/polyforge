@@ -37,8 +37,8 @@ const (
 	// one any-term search examines: max(floor, perHit×limit), in bm25
 	// order, with no further paging. An OR of up to 32 terms (3-rune
 	// terms also match inside longer words) can match a large share of
-	// the table, and every candidate costs an entry load, an authority
-	// file check and the caller's membership check — the best-ranked
+	// the table, and every candidate costs an entry load and the
+	// caller's membership check — the best-ranked
 	// window is what a ranked recall wants anyway. (The AND mode keeps
 	// paging to the end: its candidate set is the exact match set.)
 	anyCandidateFloor   = 100

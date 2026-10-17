@@ -1172,7 +1172,7 @@ const maxMemoryExcerptRunes = 8192
 
 // memoryHit is one search answer row with a content excerpt attached:
 // every memory.Entry field (embedded, marshaled flat) plus the first
-// excerpt runes of the authority content. Only served when the caller
+// excerpt runes of the stored content. Only served when the caller
 // asked for an excerpt — the plain search answer carries no excerpt.
 type memoryHit struct {
 	memory.Entry
@@ -1237,11 +1237,11 @@ func (s *Server) hSearchRun(w http.ResponseWriter, match, query, memType string,
 }
 
 // excerptBody answers the first n runes of the memory's BODY: the
-// authority file's leading frontmatter block (the id/type/title rows
+// stored document's leading frontmatter block (the id/type/title rows
 // the hit already carries as fields) is skipped, so the excerpt is
 // content, not metadata echo.
-func excerptBody(authority string, n int) string {
-	return firstRunes(strings.TrimLeft(memory.Body([]byte(authority)), "\n"), n)
+func excerptBody(doc string, n int) string {
+	return firstRunes(strings.TrimLeft(memory.Body([]byte(doc)), "\n"), n)
 }
 
 // firstRunes answers the first n runes of s (shorter strings pass
