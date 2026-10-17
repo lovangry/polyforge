@@ -10,27 +10,19 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
-// doctor_workspace.go: the workspace runtime-artifact checks of `pf
-// doctor` (polyforge#177; the convention is workspace/layout.go's).
-// Both run per mapped workspace that exists (a missing one is the
-// "workspace dirs" check's fail) and never fail — warn at most:
+// doctor_workspace.go: the workspace layout checks of `pf doctor` (the
+// convention is workspace/layout.go's). They run per mapped workspace
+// that exists, never fail and never write — except --prune-scratch:
 //
-//   - "workspace layout": root entries outside the convention and
-//     non-generated entries under .polyforge/, each named with its
-//     suggested destination; and a CLAUDE.md whose polyforge-managed
-//     block lacks the layout section (`pf init <ws>` adds it — a
-//     workspace without CLAUDE.md is not flagged). Read-only: nothing is
-//     moved or deleted.
-//   - "workspace scratch": scratch/ entries whose newest change (mtime or ctime) is
-//     older than 14 days. By default they are only REPORTED (warn);
-//     `pf doctor --prune-scratch` removes them and lists what it removed.
-//     Report-by-default keeps doctor a read-only probe anyone may run at
-//     any time without side effects; deletion is an explicit operator
-//     act.
+//   - "workspace layout": root and .polyforge/ entries outside the
+//     convention, each with its suggested destination, and a CLAUDE.md
+//     whose polyforge-managed block lacks the layout section.
+//   - "workspace scratch": scratch/ entries older than 14 days, reported;
+//     `pf doctor --prune-scratch` removes them and lists them. Deletion
+//     stays an explicit operator act so doctor remains a probe anyone may
+//     run at any time.
 //   - "workspace memory policy": a .polyforge.yaml without a
-//     memory_policy section warns (`pf init <ws>` appends the default
-//     section); a workspace without the file passes on the built-in
-//     default. Read-only: doctor never writes it.
+//     memory_policy section (`pf init <ws>` appends the default).
 
 const (
 	docChLayout    = "workspace layout"
@@ -40,18 +32,6 @@ const (
 
 // docRowCap bounds the rows one check's detail lists.
 const docRowCap = 20
-
-// existingWorkspaces answers the mapped workspaces that exist as
-// directories.
-func existingWorkspaces(wss []string) []string {
-	var out []string
-	for _, ws := range wss {
-		if st, err := os.Stat(ws); err == nil && st.IsDir() {
-			out = append(out, ws)
-		}
-	}
-	return out
-}
 
 func capRows(rows []string) []string {
 	if len(rows) > docRowCap {
@@ -64,7 +44,7 @@ func capRows(rows []string) []string {
 func workspaceLayoutCheck(wss []string) doctorCheck {
 	c := doctorCheck{Name: docChLayout}
 	var rows, noLayout, errs []string
-	for _, ws := range existingWorkspaces(wss) {
+	for _, ws := range wss {
 		if exists, has, err := workspace.LayoutSection(ws); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", filepath.Join(ws, workspace.NotesFile), err))
 		} else if exists && !has {
@@ -108,7 +88,7 @@ func memoryPolicyCheck(wss []string) doctorCheck {
 	c := doctorCheck{Name: docChMemPolicy, Status: "pass"}
 	var missing []string
 	builtin := 0
-	for _, ws := range existingWorkspaces(wss) {
+	for _, ws := range wss {
 		_, serr := os.Stat(workspace.PathFor(ws))
 		cfg, err := workspace.Load(ws, "", nil)
 		switch {
@@ -138,24 +118,15 @@ func memoryPolicyCheck(wss []string) doctorCheck {
 // entries of every mapped workspace.
 func scratchCheck(wss []string, now time.Time, prune bool) doctorCheck {
 	c := doctorCheck{Name: docChScratch, Status: "pass"}
-	var stale, pruned, errs []string
-	for _, ws := range existingWorkspaces(wss) {
-		scan := workspace.StaleScratch
-		if prune {
-			scan = workspace.PruneScratch
-		}
-		rep, err := scan(ws, now, workspace.ScratchMaxAge)
+	var found, errs []string
+	for _, ws := range wss {
+		rep, err := workspace.Scratch(ws, now, workspace.ScratchMaxAge, prune)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", ws, err))
 			continue
 		}
 		for _, n := range rep.Stale {
-			p := filepath.Join(ws, workspace.ScratchDir, n)
-			if prune {
-				pruned = append(pruned, p)
-			} else {
-				stale = append(stale, p)
-			}
+			found = append(found, filepath.Join(ws, workspace.ScratchDir, n))
 		}
 		for _, sk := range rep.Skipped {
 			errs = append(errs, filepath.Join(ws, workspace.ScratchDir, sk))
@@ -163,11 +134,11 @@ func scratchCheck(wss []string, now time.Time, prune bool) doctorCheck {
 	}
 	var parts []string
 	switch {
-	case len(stale) > 0:
+	case len(found) > 0 && !prune:
 		c.Status = "warn"
-		parts = append(parts, fmt.Sprintf("%d scratch entr(ies) older than 14 days: %s — `pf doctor --prune-scratch` removes them", len(stale), strings.Join(capRows(stale), "; ")))
-	case len(pruned) > 0:
-		parts = append(parts, fmt.Sprintf("pruned %d scratch entr(ies) older than 14 days: %s", len(pruned), strings.Join(pruned, "; ")))
+		parts = append(parts, fmt.Sprintf("%d scratch entr(ies) older than 14 days: %s — `pf doctor --prune-scratch` removes them", len(found), strings.Join(capRows(found), "; ")))
+	case len(found) > 0:
+		parts = append(parts, fmt.Sprintf("pruned %d scratch entr(ies) older than 14 days: %s", len(found), strings.Join(found, "; ")))
 	case prune:
 		parts = append(parts, "no scratch entry older than 14 days: nothing pruned")
 	default:

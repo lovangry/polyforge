@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"slices"
@@ -20,61 +21,20 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
-// verbs_doctor.go: `pf doctor` — the daemon's single health face
-// (polyforge#113). One command reports every health dimension the
-// daemon depends on:
+// verbs_doctor.go: `pf doctor` — the daemon's single health face. Every
+// health dimension the daemon depends on is one row of doctorChecks:
+// the config and the workspace mapping (dirs, aihub projects, the
+// .polyforge.yaml a claim would load), the workspace layout
+// (doctor_workspace.go), connectivity (server reach, daemon socket,
+// auth), daemon supervision and environment hygiene, the claude step
+// harness, and the harness family (doctor_display.go, doctor_layout.go:
+// progress display and install layout; never fail, and `--harness` runs
+// them alone for tools/install.sh). A check whose prerequisite is
+// missing — an unloadable config, an absent mapping, an unreachable
+// aihub — is reported skip, never a faked pass. Credential values are
+// never shown: set/unset and names only.
 //
-//   - config: an unloadable (old-shape/malformed) file fails here with
-//     migration guidance, and every config-dependent check is reported
-//     skip — never a faked green;
-//   - the workspace mapping family: mapping absent (guidance to add the
-//     [workspace] shape), workspace dirs (each mapped path must pre-exist
-//     as a directory), aihub projects (every mapped project known to
-//     aihub, named with its workspace on a miss; the inverse-ambiguity
-//     and duplicate refusals surface through the config check, which
-//     names both workspaces);
-//   - the workspace layout (polyforge#177, doctor_workspace.go): per
-//     mapped workspace, root entries outside the runtime-artifact
-//     convention and non-generated files under .polyforge/ warn with
-//     their suggested destination (never moved); scratch/ entries older
-//     than 14 days are reported (warn) and removed only with
-//     --prune-scratch, which lists what it removed;
-//   - workspace yaml: every mapped workspace's .polyforge.yaml loads
-//     through the daemon's own loader, its per-step model keys checked
-//     against the step ids of the workflows the daemon runs (the
-//     workflows dir GET /status reports) — the same refusal a claim
-//     would meet (DAEMON-414), surfaced before any claim;
-//   - the step harnesses (polyforge#159, #175): every candidate is
-//     `<harness>:<model>`; the workspace yaml check also loads the
-//     daemon's installed bundles (a bundle whose candidates are not
-//     prefixed fails, naming file and step). When any resolved candidate
-//     is `claude:`, "harness claude" judges the daemon's view of the
-//     Claude Code CLI (GET /status?harnesses=1: binary found → else fail;
-//     version >= the verified minimum, the claude-config settings.json
-//     env block carrying ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY → else
-//     warn; claude steps
-//     do not inherit the daemon's ANTHROPIC_*, so those are reported
-//     only) and lists every such step
-//     with its whole candidate chain (each candidate's harness shown by
-//     its prefix) and the level it came from. Credential values are
-//     never shown — set/unset only;
-//   - the connectivity family: server reach (any HTTP answer proves it),
-//     daemon socket (GET /status over the UDS), auth (a signed aihub
-//     read getting past the key boundary — the same read face the
-//     projects check uses, no admin-only surface);
-//   - daemon supervision (polyforge#174, doctor_layout.go): a live
-//     daemon under the tmux restart loop (or an active systemd unit)
-//     passes, an unsupervised one warns with the fix; a dead daemon is
-//     the socket check's fail, which names `pf daemon ensure`;
-//   - the harness family (doctor_display.go, doctor_layout.go): Claude
-//     Code's statusLine and pi's pf-chat extension, the install layout
-//     tools/install.sh sets up (pi's local release package, Claude's
-//     skill symlink) and v1 polyforge leftovers — pass/warn/skip only,
-//     never fail, so they never move the exit code. `--harness` runs
-//     this family alone (tools/install.sh prints it).
-//
-// Exit codes: 0 every check passes, 1 any check fails, 2 usage errors
-// (the repo convention — unknown flags parse-fail before any check).
+// Exit codes: 0 every check passes, 1 any check fails, 2 usage errors.
 // --json emits {"ok": <bool>, "checks": [{"name", "status":
 // "pass"|"fail"|"skip"|"warn", "detail"}]}.
 //
@@ -88,15 +48,15 @@ type doctorCheck struct {
 	Detail string `json:"detail"`
 }
 
+func (c doctorCheck) row() (string, string) { return c.Status, c.Detail }
+
 // doctorReport is the --json document shape.
 type doctorReport struct {
 	OK     bool          `json:"ok"`
 	Checks []doctorCheck `json:"checks"`
 }
 
-// The check names (stable faces; the failure DETAILS carry the pinned
-// specifics — the missing path, the project and its workspace, the
-// retired key).
+// The check names (stable faces; the details carry the specifics).
 const (
 	docChConfig    = "config"
 	docChMapping   = "workspace mapping"
@@ -111,6 +71,69 @@ const (
 	docChDaemonEnv = "daemon env"
 )
 
+// doctorRun is what one run loaded and probed once; the checks read it.
+type doctorRun struct {
+	cfg               Config
+	present, missing  []string // mapped workspaces that exist as directories / do not
+	prune             bool
+	reachOK, sockOK   bool
+	reachMsg, sockMsg string
+	status            StatusResponse
+	claudeSteps       []workspace.StepResolution // set by the workspace yaml check
+	auth              doctorCheck                // set by the aihub projects check
+}
+
+// doctorNeed is a check's prerequisite beyond a loadable config.
+type doctorNeed int
+
+const (
+	needConfig  doctorNeed = iota
+	needMapping            // a non-empty [workspace] mapping
+	needAihub              // a reachable aihub, then a mapping
+)
+
+// doctorChecks is the check ladder in report order. A check whose need
+// is unmet is reported skip with the reason.
+var doctorChecks = []struct {
+	name string
+	need doctorNeed
+	run  func(*doctorRun) (string, string)
+}{
+	{docChMapping, needConfig, mappingCheck},
+	{docChDirs, needMapping, func(r *doctorRun) (string, string) {
+		if len(r.missing) > 0 {
+			return "fail", "mapped workspace directory missing or not a directory: " + strings.Join(r.missing, ", ") + " — create it (the daemon never does) or fix the [workspace] key"
+		}
+		return "pass", fmt.Sprintf("all %d mapped workspace(s) exist as directories", len(r.present))
+	}},
+	{docChLayout, needMapping, func(r *doctorRun) (string, string) { return workspaceLayoutCheck(r.present).row() }},
+	{docChScratch, needMapping, func(r *doctorRun) (string, string) { return scratchCheck(r.present, time.Now(), r.prune).row() }},
+	{docChMemPolicy, needMapping, func(r *doctorRun) (string, string) { return memoryPolicyCheck(r.present).row() }},
+	{docChServer, needConfig, func(r *doctorRun) (string, string) { return passOrFail(r.reachOK), r.reachMsg }},
+	{docChSocket, needConfig, func(r *doctorRun) (string, string) { return passOrFail(r.sockOK), r.sockMsg }},
+	{docChSupervision, needConfig, func(r *doctorRun) (string, string) { return supervisionCheck(r.sockOK).row() }},
+	{docChEnv, needConfig, func(r *doctorRun) (string, string) { return retiredEnvCheck(os.Getenv, r.status.EnvWarnings).row() }},
+	{docChDaemonEnv, needConfig, func(r *doctorRun) (string, string) {
+		return daemonEnvCheck(r.sockOK, r.status.EnvNames, r.status.PiModelsEnvRefs).row()
+	}},
+	{docChYaml, needMapping, func(r *doctorRun) (string, string) {
+		st, detail, steps := workspaceYamlCheck(r.cfg.Mapping, r.status.WorkflowsDir, r.sockOK)
+		r.claudeSteps = steps
+		return st, detail
+	}},
+	{docChClaude, needMapping, func(r *doctorRun) (string, string) {
+		// the daemon's harness view (it may run `claude --version`) is
+		// asked for only when some step actually runs on claude
+		var hs map[string]HarnessStatus
+		if len(r.claudeSteps) > 0 && r.sockOK {
+			hs = probeDaemonHarnesses(r.cfg.DaemonSocket)
+		}
+		return claudeHarnessCheck(r.claudeSteps, r.status.WorkflowsDir, r.sockOK, hs)
+	}},
+	{docChProjects, needAihub, projectsCheck},
+	{docChAuth, needAihub, func(r *doctorRun) (string, string) { return r.auth.row() }},
+}
+
 // retiredHarnessEnv are the POLYFORGE_* variables decision 2026-10-16 G2
 // stopped reading, with the [daemon] key that replaces each.
 var retiredHarnessEnv = []struct{ env, key string }{
@@ -121,7 +144,7 @@ var retiredHarnessEnv = []struct{ env, key string }{
 // retiredEnvCheck warns when a retired harness variable is set in this
 // shell, or the daemon reported one set in ITS environment to a value
 // differing from what it resolved: the variable is no longer read, so
-// harness state would move silently (ruled out by polyforge#171).
+// harness state would move silently.
 func retiredEnvCheck(getenv func(string) string, daemonWarnings []string) doctorCheck {
 	c := doctorCheck{Name: docChEnv, Status: "pass", Detail: "no retired POLYFORGE_* harness variable in effect"}
 	var notes []string
@@ -143,18 +166,17 @@ func retiredEnvCheck(getenv func(string) string, daemonWarnings []string) doctor
 // by the names GET /status reports (never values): any ANTHROPIC_* or
 // other credential-looking name outside the `pf daemon ensure`
 // allow-list (supervisor/env.go) means the daemon was started from a
-// polluted environment (e.g. an old ensure under a tmux server carrying
-// a human's credentials) — restart it clean. It also warns when the pi
+// polluted environment — restart it clean. It also warns when the pi
 // step agent's models.json interpolates a variable (`$NAME`) outside the
 // allow-list: pi steps would never see it.
 func daemonEnvCheck(daemonUp bool, names, piModelsRefs []string) doctorCheck {
-	c := doctorCheck{Name: docChDaemonEnv}
+	c := doctorCheck{Name: docChDaemonEnv, Status: "skip"}
 	switch {
 	case !daemonUp:
-		c.Status, c.Detail = "skip", "not run: the daemon does not answer"
+		c.Detail = "not run: the daemon does not answer"
 		return c
 	case len(names) == 0:
-		c.Status, c.Detail = "skip", "not run: the daemon reports no environment names (an older daemon?)"
+		c.Detail = "not run: the daemon reports no environment names (an older daemon?)"
 		return c
 	}
 	home, _ := os.UserHomeDir()
@@ -163,8 +185,6 @@ func daemonEnvCheck(daemonUp bool, names, piModelsRefs []string) doctorCheck {
 		notes = append(notes, "the daemon's environment carries "+strings.Join(bad, ", ")+
 			" (names only; outside the `pf daemon ensure` allow-list) — restart it clean (graceful; running jobs are checkpointed first): "+ensureFixCommand(home))
 	}
-	// pi steps see only the daemon's (allow-listed) environment: a
-	// models.json `$NAME` outside the list resolves to nothing
 	var unseen []string
 	for _, r := range piModelsRefs {
 		if !supervisor.DaemonEnvAllowed(r) {
@@ -197,12 +217,13 @@ var cmdDoctor = &Command{
 		if len(args) != 0 {
 			return fmt.Errorf("doctor: unexpected arguments %v", args)
 		}
-		var rep doctorReport
-		if boolFlag(fs, "harness") {
-			rep = doctorReport{OK: true, Checks: harnessDisplayChecks()}
-		} else {
-			rep = runDoctorChecks(ctx, boolFlag(fs, "prune-scratch"))
+		checks := harnessDisplayChecks()
+		if !boolFlag(fs, "harness") {
+			checks = append(runDoctorChecks(ctx, boolFlag(fs, "prune-scratch")), checks...)
 		}
+		rep := doctorReport{Checks: checks}
+		fails := countFails(rep)
+		rep.OK = fails == 0
 		if ctx.JSON {
 			b, err := json.Marshal(rep)
 			if err != nil {
@@ -215,11 +236,10 @@ var cmdDoctor = &Command{
 			}
 			fmt.Fprintf(ctx.Stdout, "\nok: %t\n", rep.OK)
 		}
-		// Exit-code semantics are the report's, not a wire error's: 0
-		// all-pass, 1 any-fail (renderError prints the one-line verdict;
-		// the report above is the payload).
-		if !rep.OK {
-			return fmt.Errorf("doctor: %d check(s) failed — see the report above", countFails(rep))
+		// Exit-code semantics are the report's: 0 all-pass, 1 any-fail
+		// (renderError prints the one-line verdict).
+		if fails > 0 {
+			return fmt.Errorf("doctor: %d check(s) failed — see the report above", fails)
 		}
 		return nil
 	},
@@ -236,158 +256,97 @@ func countFails(rep doctorReport) int {
 	return n
 }
 
-// runDoctorChecks executes the check ladder and assembles the report.
-// Ordering matters: config first; when it fails, every config-dependent
-// check is reported skip (not-run) rather than silently passing — the
-// not-faked-green contract. The aihub-flavored checks likewise refuse to
-// fake a verdict behind an unreachable server. pruneScratch lets the
+// runDoctorChecks runs the config check and then doctorChecks, skipping
+// each check whose prerequisite is missing. pruneScratch lets the
 // scratch check remove the stale entries it would otherwise report.
-func runDoctorChecks(ctx *Context, pruneScratch bool) doctorReport {
-	checks := []doctorCheck{}
-	add := func(name, status, detail string) {
-		checks = append(checks, doctorCheck{Name: name, Status: status, Detail: detail})
-	}
-
+func runDoctorChecks(ctx *Context, pruneScratch bool) []doctorCheck {
 	cfg, err := LoadConfig(ctx.ConfigPath)
 	if err != nil {
-		add(docChConfig, "fail", err.Error()+" — see the install docs for the migration steps")
-		for _, name := range []string{docChMapping, docChDirs, docChLayout, docChScratch, docChMemPolicy, docChYaml, docChClaude, docChProjects, docChServer, docChSocket, docChSupervision, docChEnv, docChAuth} {
-			add(name, "skip", "config-dependent check not run: the config could not be loaded")
+		checks := []doctorCheck{{docChConfig, "fail", err.Error() + " — see the install docs for the migration steps"}}
+		for _, d := range doctorChecks {
+			checks = append(checks, doctorCheck{d.name, "skip", "config-dependent check not run: the config could not be loaded"})
 		}
-		checks = append(checks, harnessDisplayChecks()...)
-		return doctorReport{OK: false, Checks: checks}
+		return checks
 	}
 	where := ctx.ConfigPath
 	if where == "" {
 		where = DefaultConfigPath()
 	}
-	add(docChConfig, "pass", "loaded from "+where)
+	checks := []doctorCheck{{docChConfig, "pass", "loaded from " + where}}
 
-	// Mapping absent: the fresh-template shape (zero [workspace]
-	// sections) fails with the shape guidance; otherwise pass.
-	if cfg.Mapping.Empty() {
-		add(docChMapping, "fail", "no workspace mapping is configured: add at least one [workspace.\"<path>\"] section with a projects = [...] list to the config (`pf doctor` re-checks after editing)")
-	} else {
-		add(docChMapping, "pass", fmt.Sprintf("%d workspace(s) mapping %d project(s)", len(cfg.Mapping.Workspaces()), len(cfg.Mapping.Projects())))
-	}
-
-	// Workspace dirs: every mapped workspace must pre-exist as a
-	// directory (the daemon creates nothing but capsules/ inside it).
-	if cfg.Mapping.Empty() {
-		add(docChDirs, "skip", "not run: the mapping is absent")
-	} else {
-		var missing []string
-		for _, ws := range cfg.Mapping.Workspaces() {
-			st, serr := os.Stat(ws)
-			if serr != nil || !st.IsDir() {
-				missing = append(missing, ws)
-			}
-		}
-		if len(missing) > 0 {
-			add(docChDirs, "fail", "mapped workspace directory missing or not a directory: "+strings.Join(missing, ", ")+" — create it (the daemon never does) or fix the [workspace] key")
+	r := &doctorRun{cfg: cfg, prune: pruneScratch}
+	for _, ws := range cfg.Mapping.Workspaces() {
+		if st, err := os.Stat(ws); err == nil && st.IsDir() {
+			r.present = append(r.present, ws)
 		} else {
-			add(docChDirs, "pass", fmt.Sprintf("all %d mapped workspace(s) exist as directories", len(cfg.Mapping.Workspaces())))
+			r.missing = append(r.missing, ws)
 		}
 	}
+	r.reachOK, r.reachMsg = probeServerReach(cfg.Server)
+	r.sockOK, r.sockMsg, r.status = probeDaemonSocket(cfg.DaemonSocket)
 
-	// The workspace layout (polyforge#177): warn-only, per mapped
-	// workspace that exists.
-	if cfg.Mapping.Empty() {
-		add(docChLayout, "skip", "not run: the mapping is absent")
-		add(docChScratch, "skip", "not run: the mapping is absent")
-		add(docChMemPolicy, "skip", "not run: the mapping is absent")
-	} else {
-		checks = append(checks, workspaceLayoutCheck(cfg.Mapping.Workspaces()),
-			scratchCheck(cfg.Mapping.Workspaces(), time.Now(), pruneScratch),
-			memoryPolicyCheck(cfg.Mapping.Workspaces()))
-	}
-
-	// Server reach: ANY http answer (even an error status) proves the
-	// server is reachable; only a transport failure is a fail.
-	reachOK, reachDetail := probeServerReach(cfg.Server)
-	add(docChServer, passOrFail(reachOK), reachDetail)
-
-	// Daemon socket: independent of aihub.
-	sockOK, sockDetail, status := probeDaemonSocket(cfg.DaemonSocket)
-	add(docChSocket, passOrFail(sockOK), sockDetail)
-	// polyforge#174: a live daemon should run under the restart loop.
-	checks = append(checks, supervisionCheck(sockOK))
-	checks = append(checks, retiredEnvCheck(os.Getenv, status.EnvWarnings))
-	checks = append(checks, daemonEnvCheck(sockOK, status.EnvNames, status.PiModelsEnvRefs))
-
-	if cfg.Mapping.Empty() {
-		add(docChYaml, "skip", "not run: the mapping is absent")
-		add(docChClaude, "skip", "not run: the mapping is absent")
-	} else {
-		st, detail, claudeSteps := workspaceYamlCheck(cfg.Mapping, status.WorkflowsDir, sockOK)
-		add(docChYaml, st, detail)
-		// the daemon's harness view (it may run `claude --version`) is
-		// asked for only when some step actually runs on claude
-		var harnesses map[string]HarnessStatus
-		if len(claudeSteps) > 0 && sockOK {
-			harnesses = probeDaemonHarnesses(cfg.DaemonSocket)
+	for _, d := range doctorChecks {
+		c := doctorCheck{Name: d.name, Status: "skip"}
+		switch {
+		case d.need == needAihub && !r.reachOK:
+			c.Detail = "not run: aihub unreachable (" + cfg.Server + ")"
+		case d.need >= needMapping && cfg.Mapping.Empty():
+			c.Detail = "not run: the mapping is absent"
+		default:
+			c.Status, c.Detail = d.run(r)
 		}
-		st, detail = claudeHarnessCheck(claudeSteps, status.WorkflowsDir, sockOK, harnesses)
-		add(docChClaude, st, detail)
+		checks = append(checks, c)
 	}
+	return checks
+}
 
-	// Auth + project knowledge ride the aihub PROJECT read (the same
-	// face the CLI uses; no admin-only surface). Reachability gates both:
-	// behind a dead server neither can be proven — skip, never fake.
-	if !reachOK {
-		add(docChProjects, "skip", "not run: aihub unreachable ("+cfg.Server+")")
-		add(docChAuth, "skip", "not run: aihub unreachable ("+cfg.Server+")")
-	} else if cfg.Mapping.Empty() {
-		add(docChProjects, "skip", "not run: the mapping is absent")
-		add(docChAuth, "skip", "not run: no mapped project to read with")
-	} else {
-		client := aihubclient.New(cfg.Server, cfg.APIKey)
-		var projectFails []string
-		authDenied := false
-		authProven := false
-		for _, project := range cfg.Mapping.Projects() {
-			ws, _ := cfg.Mapping.WorkspaceFor(project)
-			_, err := client.GetProject(project)
-			if err == nil {
-				authProven = true
+// mappingCheck fails the fresh-template shape (zero [workspace]
+// sections) with the shape guidance.
+func mappingCheck(r *doctorRun) (string, string) {
+	if r.cfg.Mapping.Empty() {
+		return "fail", "no workspace mapping is configured: add at least one [workspace.\"<path>\"] section with a projects = [...] list to the config (`pf doctor` re-checks after editing)"
+	}
+	return "pass", fmt.Sprintf("%d workspace(s) mapping %d project(s)", len(r.cfg.Mapping.Workspaces()), len(r.cfg.Mapping.Projects()))
+}
+
+// projectsCheck reads every mapped project from aihub (the same face the
+// CLI uses; no admin-only surface) and judges auth from the same reads
+// into r.auth: a 401/403 fails it, any successful read proves it.
+func projectsCheck(r *doctorRun) (string, string) {
+	client := aihubclient.New(r.cfg.Server, r.cfg.APIKey)
+	var fails []string
+	denied, proven := false, false
+	for _, project := range r.cfg.Mapping.Projects() {
+		ws, _ := r.cfg.Mapping.WorkspaceFor(project)
+		_, err := client.GetProject(project)
+		if err == nil {
+			proven = true
+			continue
+		}
+		var ae *api.Error
+		if errors.As(err, &ae) {
+			switch ae.HTTPStatus() {
+			case 401, 403:
+				denied = true
+			case 404:
+				fails = append(fails, fmt.Sprintf("project %q (workspace %s) is unknown to aihub: %s", project, ws, ae.Error()))
 				continue
 			}
-			var ae *api.Error
-			if errors.As(err, &ae) {
-				switch ae.HTTPStatus() {
-				case 401, 403:
-					authDenied = true
-				case 404:
-					projectFails = append(projectFails, fmt.Sprintf("project %q (workspace %s) is unknown to aihub: %s", project, ws, ae.Error()))
-					continue
-				}
-			}
-			projectFails = append(projectFails, fmt.Sprintf("project %q (workspace %s): %v", project, ws, err))
 		}
-		if len(projectFails) > 0 {
-			add(docChProjects, "fail", strings.Join(projectFails, "; "))
-		} else {
-			add(docChProjects, "pass", fmt.Sprintf("all %d mapped project(s) are known to aihub", len(cfg.Mapping.Projects())))
-		}
-		switch {
-		case authDenied:
-			add(docChAuth, "fail", fmt.Sprintf("aihub rejected the credential with a 401/403 answer — fix the api key (config api_key / PF_API_KEY)"))
-		case authProven:
-			add(docChAuth, "pass", "the api key got past aihub's auth boundary (the project read answered)")
-		default:
-			add(docChAuth, "skip", "not proven: the aihub project read failed for another reason")
-		}
+		fails = append(fails, fmt.Sprintf("project %q (workspace %s): %v", project, ws, err))
 	}
-
-	checks = append(checks, harnessDisplayChecks()...)
-
-	ok := true
-	for _, c := range checks {
-		if c.Status == "fail" {
-			ok = false
-		}
+	switch {
+	case denied:
+		r.auth = doctorCheck{Status: "fail", Detail: "aihub rejected the credential with a 401/403 answer — fix the api key (config api_key / PF_API_KEY)"}
+	case proven:
+		r.auth = doctorCheck{Status: "pass", Detail: "the api key got past aihub's auth boundary (the project read answered)"}
+	default:
+		r.auth = doctorCheck{Status: "skip", Detail: "not proven: the aihub project read failed for another reason"}
 	}
-	return doctorReport{OK: ok, Checks: checks}
+	if len(fails) > 0 {
+		return "fail", strings.Join(fails, "; ")
+	}
+	return "pass", fmt.Sprintf("all %d mapped project(s) are known to aihub", len(r.cfg.Mapping.Projects()))
 }
 
 func passOrFail(ok bool) string {
@@ -409,17 +368,12 @@ func probeServerReach(server string) (bool, string) {
 }
 
 // probeDaemonSocket dials the daemon's UDS face and asks GET /status;
-// it also answers the parsed status (the workflows dir the daemon
-// reports; zero when unreachable).
+// it also answers the parsed status (zero when unreachable).
 func probeDaemonSocket(sock string) (bool, string, StatusResponse) {
-	c := NewDaemonClient(sock)
-	c.HTTP.Timeout = 5 * time.Second
-	var st StatusResponse
-	raw, err := c.Status()
+	st, err := daemonStatus(sock, 5*time.Second, false)
 	if err != nil {
 		return false, fmt.Sprintf("daemon socket %s does not answer GET /status: %v — the daemon is not running: start it with `pf daemon ensure` (it starts the supervised restart loop)", sock, err), st
 	}
-	_ = json.Unmarshal(raw, &st)
 	return true, fmt.Sprintf("daemon socket %s answers (daemon %s)", sock, st.MachineID), st
 }
 
@@ -427,34 +381,36 @@ func probeDaemonSocket(sock string) (bool, string, StatusResponse) {
 // of the step harness binaries (nil when it does not answer or is too old
 // to report it).
 func probeDaemonHarnesses(sock string) map[string]HarnessStatus {
-	c := NewDaemonClient(sock)
-	c.HTTP.Timeout = 15 * time.Second
-	raw, err := c.StatusWithHarnesses()
-	if err != nil {
-		return nil
-	}
-	var st StatusResponse
-	_ = json.Unmarshal(raw, &st)
+	st, _ := daemonStatus(sock, 15*time.Second, true)
 	return st.Harnesses
 }
 
-// workspaceYamlCheck loads every mapped workspace's .polyforge.yaml the
-// way a claim does (every candidate `<harness>:<model>`, polyforge#175)
-// and the daemon's installed bundles (a bundle whose candidates are not
-// prefixed, or that still declares `harness`, is named with its load
-// error). Without the daemon's workflows dir the per-step keys cannot be
-// judged: a yaml that otherwise loads is a warn, never a pass. It also
-// answers every step that has at least one `claude:` candidate (the
-// "harness claude" check's subject).
+func daemonStatus(sock string, timeout time.Duration, harnesses bool) (StatusResponse, error) {
+	c := NewDaemonClient(sock)
+	c.HTTP.Timeout = timeout
+	status := c.Status
+	if harnesses {
+		status = c.StatusWithHarnesses
+	}
+	var st StatusResponse
+	raw, err := status()
+	if err == nil {
+		_ = json.Unmarshal(raw, &st)
+	}
+	return st, err
+}
+
+// workspaceYamlCheck loads every mapped workspace's .polyforge.yaml and
+// the daemon's installed bundles the way a claim does (the refusal it
+// would meet, DAEMON-414, surfaced before any claim). Without the
+// daemon's workflows dir the per-step keys cannot be judged: a yaml that
+// otherwise loads is a warn, never a pass. It also answers every step
+// with a `claude:` candidate (the "harness claude" check's subject).
 func workspaceYamlCheck(m *mapping.Plan, workflowsDir string, daemonUp bool) (string, string, []workspace.StepResolution) {
 	var fails []string
 	var claudeSteps []workspace.StepResolution
 	bundles, bad, _ := workspace.Bundles(workflowsDir, "")
-	bundleNames := make([]string, 0, len(bundles))
-	for name := range bundles {
-		bundleNames = append(bundleNames, name)
-	}
-	sort.Strings(bundleNames)
+	bundleNames := slices.Sorted(maps.Keys(bundles))
 	var badBundles []string
 	for name, err := range bad {
 		badBundles = append(badBundles, fmt.Sprintf("bundle %s: %v", name, err))
@@ -517,12 +473,10 @@ func workspaceYamlCheck(m *mapping.Plan, workflowsDir string, daemonUp bool) (st
 }
 
 // claudeHarnessCheck judges the Claude Code CLI the daemon would run for
-// the steps with a `claude:` candidate (polyforge#159, #175). It never
-// shows a credential value, never logs in and never calls a model: the
-// daemon reports the binary, `claude --version` and set/unset only.
-// polyforge#171: the credential-present judgment keys on the claude-config
-// settings.json env block set/unset first (the single authority layer)
-// plus the daemon env; its pairing warnings render as reported.
+// the steps with a `claude:` candidate, from the facts the daemon
+// reports (binary, `claude --version`, set/unset only). The credential
+// judgment keys on the claude-config settings.json env block, the single
+// authority layer; its pairing warnings render as reported.
 func claudeHarnessCheck(steps []workspace.StepResolution, workflowsDir string, daemonUp bool, hs map[string]HarnessStatus) (string, string) {
 	if len(steps) == 0 {
 		if workflowsDir == "" {
@@ -565,13 +519,11 @@ func claudeHarnessCheck(steps []workspace.StepResolution, workflowsDir string, d
 		}
 		warn(fmt.Sprintf("version %s is older than %s or unparsable (the adapter's argv/stream contract is verified from that version on)", h.Version, min))
 	}
-	// env hygiene: claude steps strip every inherited ANTHROPIC_*
-	// (runtime/claudespawn.go), so only the claude-config settings.json
-	// env block can carry the step's credential; the daemon's own
-	// variables are reported, never counted.
-	// (an older daemon reports no ANTHROPIC_API_KEY fact: unset)
+	// claude steps strip every inherited ANTHROPIC_*, so only the
+	// settings.json env block can carry the step's credential; the
+	// daemon's own variables are reported, never counted.
 	if h.SettingsEnv["ANTHROPIC_AUTH_TOKEN"] != "set" && h.SettingsEnv["ANTHROPIC_API_KEY"] != "set" {
-		warn("no credential (ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY) in the claude-config settings.json env block — the steps' only credential source (claude steps do not inherit the daemon's ANTHROPIC_*); the settings.json env pair (ANTHROPIC_AUTH_TOKEN + optional ANTHROPIC_BASE_URL) must live under the claude-config dir" + harnessShapeNotes())
+		warn("no credential (ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY) in the claude-config settings.json env block — the steps' only credential source (claude steps do not inherit the daemon's ANTHROPIC_*); the settings.json env pair (ANTHROPIC_AUTH_TOKEN + optional ANTHROPIC_BASE_URL) must live under the claude-config dir (env block: ANTHROPIC_AUTH_TOKEN required, ANTHROPIC_BASE_URL optional — paired, never a project-level settings file)")
 	}
 	if h.SettingsWarning != "" {
 		warn(h.SettingsWarning)
@@ -584,33 +536,25 @@ func claudeHarnessCheck(steps []workspace.StepResolution, workflowsDir string, d
 	return status, detail
 }
 
-// settingsFacts renders the polyforge#171 claude status facts: the dir
-// layout and the settings.json env key facts (set|unset, never values).
+// settingsFacts renders the claude status facts: the harness dirs and
+// the settings.json env key facts (set|unset, never values).
 func settingsFacts(h HarnessStatus) string {
 	var parts []string
 	if len(h.HarnessDirs) > 0 {
-		labels := map[string]string{
-			"step_agent":          "step agent dir",
-			"step_agent_sessions": "step agent sessions",
-			"claude_config":       "claude config dir",
-		}
-		order := []string{"step_agent", "step_agent_sessions", "claude_config"}
 		var rows []string
-		for _, name := range order {
-			d, ok := h.HarnessDirs[name]
-			if !ok {
-				continue
+		for _, d := range [][2]string{{"step_agent", "step agent dir"}, {"step_agent_sessions", "step agent sessions"}, {"claude_config", "claude config dir"}} {
+			if dir, ok := h.HarnessDirs[d[0]]; ok {
+				state := " present"
+				if !dir.Exists {
+					state = " missing"
+				}
+				rows = append(rows, d[1]+state)
 			}
-			state := "present"
-			if !d.Exists {
-				state = "missing"
-			}
-			rows = append(rows, fmt.Sprintf("%s %s", labels[name], state))
 		}
 		parts = append(parts, "harness dirs: "+strings.Join(rows, ", "))
 	}
 	if len(h.SettingsEnv) > 0 {
-		rows := make([]string, 0, len(h.SettingsEnv))
+		var rows []string
 		for _, k := range []string{"ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR"} {
 			if v, ok := h.SettingsEnv[k]; ok {
 				rows = append(rows, k+" "+v)
@@ -622,10 +566,4 @@ func settingsFacts(h HarnessStatus) string {
 		return ""
 	}
 	return "; " + strings.Join(parts, "; ")
-}
-
-// harnessShapeNotes is the settings.json authority shape note from the
-// doctor's unconfigured credential case.
-func harnessShapeNotes() string {
-	return " (env block: ANTHROPIC_AUTH_TOKEN required, ANTHROPIC_BASE_URL optional — paired, never a project-level settings file)"
 }

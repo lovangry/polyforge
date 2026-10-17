@@ -15,13 +15,9 @@ package workspace
 //	  .polyforge/       polyforge-generated files only (no documents)
 //	  scratch/          disposable output; entries older than 14 days are stale
 //
-// `pf init` creates scratch/, writes the convention into CLAUDE.md and
-// appends the default memory_policy to .polyforge.yaml when it has none
-// (Init); `pf doctor` warns about entries outside it (StrayEntries) and
-// about a CLAUDE.md without the layout section (LayoutSection), and
-// reports — or, with --prune-scratch, removes — stale scratch entries
-// (StaleScratch / PruneScratch). Nothing here moves or deletes anything
-// except PruneScratch, and that only inside scratch/.
+// `pf init` applies it (Init); `pf doctor` lints it (StrayEntries,
+// LayoutSection, Scratch). Nothing here moves or deletes anything except
+// Scratch with prune, and that only inside scratch/.
 
 import (
 	"errors"
@@ -33,6 +29,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
 )
 
 // The local layout's names.
@@ -44,9 +42,7 @@ const (
 	NotesFile    = "CLAUDE.md"
 )
 
-// ScratchMaxAge is the age past which a scratch entry is stale: its
-// newest change (mtime or ctime, of the entry and everything under it)
-// is older.
+// ScratchMaxAge is the age past which a scratch entry is stale.
 const ScratchMaxAge = 14 * 24 * time.Hour
 
 // rootAllowed are the non-dot root entries of the convention. Every
@@ -64,10 +60,9 @@ var rootAllowed = map[string]bool{
 	"go.work.sum": true,
 }
 
-// generatedAllowed are the entries tolerated under .polyforge/. Both are
-// legacy v1 artifacts — nothing in v2 generates them any more (the v1
-// repo-map generator and watcher logs are gone); they stay allowed so
-// existing workspaces do not warn, and may be removed by hand.
+// generatedAllowed are the entries tolerated under .polyforge/: legacy v1
+// artifacts nothing generates any more, allowed so existing workspaces do
+// not warn; they may be removed by hand.
 var generatedAllowed = map[string]bool{
 	"repo-map": true,
 	"watchers": true,
@@ -141,7 +136,7 @@ func destFor(path string, e fs.DirEntry) string {
 
 // ScratchReport is the outcome of a scratch/ scan or prune.
 type ScratchReport struct {
-	Stale   []string // stale entry names, sorted (PruneScratch: the ones it removed)
+	Stale   []string // stale entry names, sorted (with prune: the ones removed)
 	Skipped []string // "name: reason" for entries that could not be judged or removed
 }
 
@@ -166,14 +161,18 @@ func scratchRoot(root string) (string, error) {
 	return filepath.EvalSymlinks(p)
 }
 
-// StaleScratch answers the scratch/ entries whose newest change — the
-// later of mtime and ctime, of the entry and, for a directory, of every
-// path under it (symlinks are not followed) — is older than maxAge at
-// now. ctime counts because a download or an extracted archive keeps
-// its old mtimes yet arrived just now. An entry that cannot be read (or
-// vanished meanwhile) is skipped and reported, never fatal. A workspace
-// without scratch/ has none.
-func StaleScratch(root string, now time.Time, maxAge time.Duration) (ScratchReport, error) {
+// Scratch answers — and, with prune, removes — the scratch/ entries
+// whose newest change is older than maxAge at now. The newest change is
+// the later of mtime and ctime, of the entry and, for a directory, of
+// every path under it (symlinks are not followed); ctime counts because
+// a download or an extracted archive keeps its old mtimes yet arrived
+// just now. Each entry is judged immediately before its removal; a file
+// written into a stale directory between that judgment and RemoveAll is
+// removed with it (scratch/ is disposable by convention). Every target
+// sits directly under the resolved scratch dir: nothing outside it is
+// ever touched. An entry that cannot be judged or removed is skipped and
+// reported, never fatal. A workspace without scratch/ has none.
+func Scratch(root string, now time.Time, maxAge time.Duration, prune bool) (ScratchReport, error) {
 	var rep ScratchReport
 	dir, err := scratchRoot(root)
 	if err != nil || dir == "" {
@@ -185,13 +184,16 @@ func StaleScratch(root string, now time.Time, maxAge time.Duration) (ScratchRepo
 	}
 	cutoff := now.Add(-maxAge)
 	for _, e := range entries {
-		newest, err := newestChange(filepath.Join(dir, e.Name()))
-		if err != nil {
-			rep.Skipped = append(rep.Skipped, fmt.Sprintf("%s: %v", e.Name(), err))
-			continue
+		name := e.Name()
+		newest, err := newestChange(filepath.Join(dir, name))
+		if err == nil && newest.Before(cutoff) && prune {
+			err = os.RemoveAll(filepath.Join(dir, name))
 		}
-		if newest.Before(cutoff) {
-			rep.Stale = append(rep.Stale, e.Name())
+		switch {
+		case err != nil:
+			rep.Skipped = append(rep.Skipped, fmt.Sprintf("%s: %v", name, err))
+		case newest.Before(cutoff):
+			rep.Stale = append(rep.Stale, name)
 		}
 	}
 	sort.Strings(rep.Stale)
@@ -223,49 +225,6 @@ func newestChange(path string) (time.Time, error) {
 		return nil
 	})
 	return newest, err
-}
-
-// PruneScratch removes the stale scratch/ entries and reports the ones
-// it removed. Each entry is re-judged immediately before its removal, so
-// one that got fresh content since a preceding StaleScratch report is
-// kept. A race remains between that re-check and RemoveAll (a file
-// written into a stale directory in that window is removed with it);
-// scratch/ is disposable by convention, so that window is accepted.
-// Every target is verified to sit directly under the resolved scratch
-// dir; nothing outside it is ever touched.
-func PruneScratch(root string, now time.Time, maxAge time.Duration) (ScratchReport, error) {
-	var rep ScratchReport
-	dir, err := scratchRoot(root)
-	if err != nil || dir == "" {
-		return rep, err
-	}
-	found, err := StaleScratch(root, now, maxAge)
-	if err != nil {
-		return rep, err
-	}
-	rep.Skipped = found.Skipped
-	cutoff := now.Add(-maxAge)
-	for _, name := range found.Stale {
-		target := filepath.Join(dir, name)
-		if rel, err := filepath.Rel(dir, target); err != nil || rel != name || name == "." || name == ".." || strings.ContainsRune(name, filepath.Separator) {
-			rep.Skipped = append(rep.Skipped, fmt.Sprintf("%s: not an entry directly under %s", name, dir))
-			continue
-		}
-		newest, err := newestChange(target)
-		if err != nil {
-			rep.Skipped = append(rep.Skipped, fmt.Sprintf("%s: %v", name, err))
-			continue
-		}
-		if !newest.Before(cutoff) {
-			continue // changed since the scan: no longer stale
-		}
-		if err := os.RemoveAll(target); err != nil {
-			rep.Skipped = append(rep.Skipped, fmt.Sprintf("%s: %v", name, err))
-			continue
-		}
-		rep.Stale = append(rep.Stale, name)
-	}
-	return rep, nil
 }
 
 // The CLAUDE.md markers: the polyforge-managed block (shared with the
@@ -320,15 +279,12 @@ type InitResult struct {
 	YamlWarning string `json:"polyforge_yaml_warning,omitempty"`
 }
 
-// Init gives an existing workspace directory its local layout: scratch/
-// and the layout section of CLAUDE.md. It is idempotent and never
-// touches CLAUDE.md outside the layout section: a file without one gets
-// it inside its polyforge-managed block (or a new managed block on top);
-// a file with one gets that section replaced. CLAUDE.md is written
-// atomically (temp file + rename, mode kept); a symlinked CLAUDE.md has
-// its target written, the link stays. .polyforge.yaml gains the default
-// memory_policy section (planMemoryPolicy, planned first); a yaml that
-// does not load is left untouched and reported in YamlWarning.
+// Init gives an existing workspace directory its local layout: scratch/,
+// the layout section of CLAUDE.md (upsertLayout; written atomically with
+// its mode kept, through a symlink to its target) and the default
+// memory_policy of .polyforge.yaml (planMemoryPolicy, planned first; a
+// yaml that does not load is left untouched and reported in
+// YamlWarning). Idempotent.
 func Init(root string) (InitResult, error) {
 	res := InitResult{Workspace: root}
 	st, err := os.Stat(root)
@@ -380,7 +336,7 @@ func Init(root string) (InitResult, error) {
 	}
 	res.NotesFile = how
 	if how != "unchanged" {
-		if err := writeAtomic(notes, []byte(text), mode); err != nil {
+		if err := atomicfile.Write(notes, []byte(text), mode); err != nil {
 			return res, err
 		}
 	}
@@ -389,45 +345,9 @@ func Init(root string) (InitResult, error) {
 		return res, nil
 	}
 	if res.Yaml = yhow; ydata != nil {
-		return res, writeAtomic(ypath, ydata, ymode)
+		return res, atomicfile.Write(ypath, ydata, ymode)
 	}
 	return res, nil
-}
-
-// writeAtomic replaces path with data through a temp file in the same
-// directory (fsync, chmod, rename).
-func writeAtomic(path string, data []byte, mode fs.FileMode) error {
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	ok := false
-	defer func() {
-		if !ok {
-			os.Remove(tmp)
-		}
-	}()
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Chmod(mode); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return err
-	}
-	ok = true
-	return nil
 }
 
 // LayoutSection reports whether the workspace's CLAUDE.md exists and,
@@ -445,16 +365,26 @@ func LayoutSection(root string) (exists, has bool, err error) {
 		return false, false, err
 	}
 	text := string(raw)
+	i, at, err := managedBlock(text)
+	if i < 0 || err != nil {
+		return true, false, err
+	}
+	return true, strings.Contains(text[i:at], layoutOpen), nil
+}
+
+// managedBlock locates the polyforge-managed block: its opening marker's
+// index and its closing marker's (-1, -1 when there is none). An unclosed
+// block is an error — the same refusal pf init answers.
+func managedBlock(text string) (int, int, error) {
 	i := strings.Index(text, managedOpenP)
 	if i < 0 {
-		return true, false, nil
+		return -1, -1, nil
 	}
 	j := strings.Index(text[i:], managedClose)
 	if j < 0 {
-		// the same refusal pf init answers: suggesting it would not help
-		return true, false, fmt.Errorf("the polyforge-managed block has no closing %s — fix the file by hand", managedClose)
+		return i, -1, fmt.Errorf("the polyforge-managed block has no closing %s — fix the file by hand", managedClose)
 	}
-	return true, strings.Contains(text[i:i+j], layoutOpen), nil
+	return i, i + j, nil
 }
 
 // upsertLayout answers the CLAUDE.md text with the layout section in
@@ -471,7 +401,10 @@ func upsertLayout(text string, absent bool) (string, string, error) {
 	if absent {
 		return managedOpen + nl + block + managedClose + nl, "created", nil
 	}
-	i := strings.Index(text, managedOpenP)
+	i, at, err := managedBlock(text)
+	if err != nil {
+		return "", "", fmt.Errorf("%w, then re-run", err)
+	}
 	if i < 0 {
 		sep := nl
 		if text == "" {
@@ -479,11 +412,6 @@ func upsertLayout(text string, absent bool) (string, string, error) {
 		}
 		return managedOpen + nl + block + managedClose + nl + sep + text, "inserted", nil
 	}
-	j := strings.Index(text[i:], managedClose)
-	if j < 0 {
-		return "", "", fmt.Errorf("the polyforge-managed block has no closing %s — fix the file by hand, then re-run", managedClose)
-	}
-	at := i + j // the managed block's closing marker
 	inner := text[i:at]
 	switch n := strings.Count(inner, layoutOpen); {
 	case n > 1:

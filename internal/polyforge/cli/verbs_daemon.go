@@ -541,13 +541,10 @@ func onOff(b bool) string {
 // Run is unreachable in a correct build and merely reprints the help.
 // ---------------------------------------------------------------------------
 
-// daemonUsage is the STATIC help text for `pf help daemon`. It documents
-// the daemon launch surface (flags, env vars, defaults) as defined in
-// internal/polyforge/daemon/main.go. It is NOT generated from the daemon
-// flag set — keep it in sync manually. The retired selection flags and
-// env mirrors are NOT listed anywhere on this face (polyforge#113): the
-// config's [workspace] mapping is the only workspace source.
-const daemonUsage = `pf daemon ensure [--config PATH] [--workflows-dir DIR] [--timeout D]
+// daemonUsage is the help text for `pf help daemon`: the ensure and
+// mapping semantics, then the launch flags rendered from
+// DefineDaemonFlags — the flag set daemon.Main parses.
+var daemonUsage = `pf daemon ensure [--config PATH] [--workflows-dir DIR] [--timeout D]
 pf daemon [--flag value] ...
 
 pf daemon ensure (polyforge#174) is how the daemon is started on a work
@@ -607,97 +604,7 @@ pf doctor checks the mapping and the connectivity faces.
 Launch flags. Production sets only what pf daemon ensure passes (the
 fixed launch flags) plus the [daemon] table above; a flag marked
 test/dev-only is never set in production. The daemon reads no
-POLYFORGE_* variable except POLYFORGE_DATA_DIR (the --data-dir default).
-
-  --config PATH
-      shared config file: its [workspace] mapping is the capsule
-      placement source (default ~/.config/polyforge/cli.toml)
-  --socket PATH
-      unix socket path to listen on (env PF_DAEMON_SOCKET;
-      default /run/polyforge.sock)
-  --server URL
-      aihub base URL (env PF_SERVER)
-  --api-key KEY
-      machine aihub api key (env PF_API_KEY)
-  --machine-id ID
-      daemon id (default m-<hostname>). The id is recorded in
-      <data-dir>/daemon-id on first start and that file wins
-      afterwards; a differing flag value refuses to start.
-  --display-name NAME
-      test/dev-only: daemon display name shown by pf ops status
-      (default hostname)
-  --data-dir PATH
-      daemon data dir (env POLYFORGE_DATA_DIR)
-  --workflows-dir PATH
-      workflows/ checkout dir (default ./workflows)
-  --pi-bin PATH
-      test/dev-only: harness binary (default pi)
-  --claude-bin PATH
-      Claude Code binary for the steps whose harness is claude
-      (config claude_bin; default claude). A claude step runs
-      claude -p --bare; the daemon never manages its credentials —
-      the claude-config settings.json env block is the authority layer
-      (polyforge#171: the former config anthropic_auth_token was hard-
-      deleted, a residual key fails the startup parse)
-  --harness-root PATH
-      parent root of the step harness state dirs
-      ([daemon] harness_root; default <data-dir>):
-      <harness-root>/step-agent — the dedicated step agent dir,
-      /step-agent-sessions — the pi steps' session store the daemon
-      also passes them, /claude-config — claude's config dir (its
-      settings.json env section is the single credential authority
-      layer). polyforge#171 unified the three dirs under one root; the
-      former --harness-sessions-root (the pi sessions dir itself) was
-      renamed, so old deployments fail loudly at startup
-  --operator-agent-dir PATH
-      SOURCE of the dedicated step agent directory: the daemon copies
-      the minimal set (auth.json, models.json, agents/,
-      extensions/subagent/ — the subagent tool) from here into
-      <harness-root>/step-agent and every step agent runs against THAT
-      directory, so the operator's own harness settings — user-level
-      packages included — never reach a step agent
-      ([daemon] operator_agent_dir; default ~/.pi/agent). A
-      configured source without a readable auth.json refuses the start.
-  --git-remote-base URL
-      test/dev-only: aihub bare-repo base URL (default <server>/git)
-  --max-concurrent-jobs N
-      configured max concurrent jobs on this machine ([daemon]
-      max_concurrent_jobs; default 4). An explicit pf ops max N is
-      persisted and wins over it until pf ops max --reset
-  --recall-topk N
-      test/dev-only: claim-time memory snapshot hit count
-      (default 10, max 50)
-  --auto
-      test/dev-only (production: pf ops auto on|off): auto-pull: the daemon claims ready-queue work itself (default
-      off; unset keeps the persisted switch; --auto=false forces off)
-  --heartbeat-every D
-      test/dev-only: machines heartbeat cadence (default 60s; 0 disables)
-
-Supervision flags (v2-converge 2.4; Go duration strings; omitted or 0 keeps
-the default; production sets only T and N, via the [daemon] table
-(step_timeout, stall_window) — the other four are test/dev-only; the only
-per-step override is workflow.md budget.wall_minutes, an estimate:
-T = max(3 x wall_minutes, --step-timeout); X and Y are global):
-
-  --silence-window D
-      X: no real work signal after dispatch, or no model output while
-      waiting for the model, before the step is judged dead
-      (10m token-level harnesses, 30m message-level)
-  --tool-window D
-      Y: one tool running longer than this is judged hung (30m)
-  --step-timeout D
-      T: cumulative step runtime across its dispatches (90m)
-  --stall-window D
-      N: the driver between steps, not waiting on a human, for longer
-      than this is judged stalled (10m; negative disables)
-  --model-error-grace D
-      grace after a turn ends on a model error before the step is
-      judged dead (1m)
-  --revalidate-every D
-      periodic session revalidation cadence for RUNNING jobs
-      (5m; negative disables)
-
-The full ` + "`pf daemon --help`" + ` flag surface is documented in the README.`
+POLYFORGE_* variable except POLYFORGE_DATA_DIR (the --data-dir default).` + "\n" + daemonFlagsHelp()
 
 var cmdDaemon = &Command{
 	Name:    "daemon",

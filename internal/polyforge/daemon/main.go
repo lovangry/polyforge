@@ -11,7 +11,7 @@ package daemon
 // (step timeout, stall window, harness root, operator agent dir, job cap)
 // come from the --config file's [daemon] table (decision 2026-10-16 G2):
 // an explicit command-line flag (tests/dev) > the table > the built-in
-// default (applyDaemonTable). Every other flag below is test/dev-only:
+// default (applyDaemonTable). Every other flag (cli.DefineDaemonFlags) is test/dev-only:
 // nothing in production sets it.
 //
 // polyforge#113: there is NO launch-time workspace and NO project scope
@@ -58,33 +58,12 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	fs := flag.NewFlagSet("pf daemon", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	cfgPath := fs.String("config", "", "shared config file: its [workspace] mapping is the capsule-placement source (default ~/.config/polyforge/cli.toml)")
-	socket := fs.String("socket", "", "unix socket path (env PF_DAEMON_SOCKET; default /run/polyforge.sock)")
-	server := fs.String("server", "", "aihub base URL (env PF_SERVER)")
-	apiKey := fs.String("api-key", "", "machine aihub api key (env PF_API_KEY)")
-	machineID := fs.String("machine-id", "", "daemon id (default m-<hostname>); recorded in <data-dir>/daemon-id on first start, which then wins — a differing value refuses to start")
-	displayName := fs.String("display-name", "", "test/dev-only: daemon display name shown by pf ops status (default hostname)")
-	dataDir := fs.String("data-dir", "", "daemon data dir (env POLYFORGE_DATA_DIR)")
-	workflowsDir := fs.String("workflows-dir", "", "workflows/ checkout dir (default ./workflows)")
-	piBin := fs.String("pi-bin", "", "test/dev-only: harness binary (default pi)")
-	claudeBin := fs.String("claude-bin", "", "Claude Code binary for steps whose harness is claude (config claude_bin; default claude)")
-	harnessRoot := fs.String("harness-root", "", "parent root of the step harness state dirs: <harness-root>/step-agent (dedicated step agent dir), /step-agent-sessions (pi sessions) and /claude-config (claude config dir: settings.json, projects/, debug/) (cli.toml [daemon] harness_root; default <data-dir>). polyforge#171 unified the three dirs under one root; the former --harness-sessions-root (the pi sessions dir itself) was renamed so an old deployment fails loudly instead of silently moving its harness state")
-	operatorAgentDir := fs.String("operator-agent-dir", "", "SOURCE of the dedicated step agent directory's minimal set — model service credentials, model configuration and subagent definitions are copied from here into <harness-root>/step-agent (cli.toml [daemon] operator_agent_dir; default ~/.pi/agent). A configured source without a readable auth.json refuses the start")
-	gitRemoteBase := fs.String("git-remote-base", "", "test/dev-only: aihub bare-repo base URL (default <server>/git)")
-	maxConcurrent := fs.Int("max-concurrent-jobs", 0, "configured job cap (cli.toml [daemon] max_concurrent_jobs; default 4); an explicit pf ops max N wins until pf ops max --reset")
-	recallTopK := fs.Int("recall-topk", 0, "test/dev-only: claim-time memory snapshot hit count (default 10, max 50)")
-	auto := fs.Bool("auto", false, "test/dev-only (production: pf ops auto on|off): auto-pull: the daemon claims ready-queue work itself (default off; unset keeps the persisted switch)")
-	// Supervision bounds (v2-converge 2.4): Go duration strings, no env
-	// fallbacks. Omitted or zero keeps the documented default. Production
-	// sets T and N through cli.toml [daemon]; X, Y, the model-error grace
-	// and the revalidation cadence are test/dev-only.
-	silenceWindow := fs.Duration("silence-window", 0, "test/dev-only: X: no real work signal after dispatch, or no model output while waiting for the model, before the step is judged dead (default 10m for token-level harnesses, 30m for message-level)")
-	toolWindow := fs.Duration("tool-window", 0, "test/dev-only: Y: one tool running longer than this is judged hung (default 30m)")
-	stepTimeout := fs.Duration("step-timeout", 0, "T: cumulative step runtime bound across its dispatches (cli.toml [daemon] step_timeout; default 90m; a step's budget.wall_minutes is an estimate, not an override: that step's T = max(3 x wall_minutes, this value))")
-	stallWindow := fs.Duration("stall-window", 0, "N: the driver between steps (not waiting on a human) for longer than this is judged stalled (cli.toml [daemon] stall_window; default 10m; negative disables)")
-	modelErrorGrace := fs.Duration("model-error-grace", 0, "test/dev-only: grace after a turn ends on a model error before the step is judged dead (default 1m)")
-	revalidateEvery := fs.Duration("revalidate-every", 0, "test/dev-only: M4 periodic session revalidation cadence (0 = default 5m; negative disables)")
-	heartbeatEvery := fs.Duration("heartbeat-every", 60*time.Second, "test/dev-only: machines heartbeat cadence (0 = disabled)")
+	f := cli.DefineDaemonFlags(fs)
+	cfgPath, socket, server, apiKey, machineID, displayName, dataDir := f.Config, f.Socket, f.Server, f.APIKey, f.MachineID, f.DisplayName, f.DataDir
+	workflowsDir, piBin, claudeBin, harnessRoot, operatorAgentDir, gitRemoteBase := f.WorkflowsDir, f.PiBin, f.ClaudeBin, f.HarnessRoot, f.OperatorAgentDir, f.GitRemoteBase
+	maxConcurrent, recallTopK, auto := f.MaxConcurrent, f.RecallTopK, f.Auto
+	silenceWindow, toolWindow, stepTimeout, stallWindow := f.SilenceWindow, f.ToolWindow, f.StepTimeout, f.StallWindow
+	modelErrorGrace, revalidateEvery, heartbeatEvery := f.ModelErrorGrace, f.RevalidateEvery, f.HeartbeatEvery
 	if err := fs.Parse(argv); err != nil {
 		return 2
 	}

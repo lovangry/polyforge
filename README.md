@@ -519,8 +519,9 @@ logs once at boot when a persisted cap overrides a different configured
 one, and `pf ops max` shows `(persisted cap — pf ops max --reset …)`
 while one is in force.
 
-Every other flag is test/dev-only: nothing in production sets it, and it
-is listed for running `pf daemon` by hand. The only environment variable
+Every other flag is test/dev-only: nothing in production sets it. The
+table lists the production flags; `pf help daemon` lists every flag,
+rendered from the flag set the daemon parses. The only environment variable
 the daemon reads besides the `PF_*` CLI ones is `POLYFORGE_DATA_DIR` (the
 `--data-dir` default; ensure reads it too) — and an ensure-started daemon
 sees no `PF_*` at all (its environment is the allow-list above). The former
@@ -545,12 +546,6 @@ resolved (stderr, a `retired_env_ignored` event, `env_warnings` in
 | `--operator-agent-dir DIR` | `[daemon] operator_agent_dir` | `~/.pi/agent` | SOURCE of the dedicated step agent dir — a credential surface: the daemon copies the minimal set (`auth.json`, `models.json`, `agents/`, `extensions/subagent/`) from here into `<harness-root>/step-agent`, and every pi step runs against that copy — the operator's own packages and settings never reach a step. A configured source without a readable `auth.json` refuses the start. |
 | `--harness-root DIR` | `[daemon] harness_root` | `<data-dir>` | Parent root of the step harness dirs: `<DIR>/step-agent` (dedicated agent dir), `/step-agent-sessions` (pi sessions) and `/claude-config` (claude config dir; its settings.json env block is the credential authority layer). The former `--harness-sessions-root` was renamed — old deployments fail loudly at startup. |
 | `--max-concurrent-jobs N` | `[daemon] max_concurrent_jobs` | `4` | Configured cap on concurrently running jobs; an explicit `pf ops max N` wins until `pf ops max --reset` (see above). |
-| `--display-name NAME` | test/dev-only | hostname | Daemon display name shown by `pf ops status`. |
-| `--pi-bin PATH` | test/dev-only | `pi` | Harness binary the agent processes are derived from. |
-| `--git-remote-base URL` | test/dev-only | `<server>/git` | aihub bare-repo base URL for the capsule revision chain. |
-| `--recall-topk N` | test/dev-only | `10` (max 50) | Claim-time memory snapshot hit count. |
-| `--auto` | test/dev-only (`pf ops auto on\|off`) | off | Auto-pull: the daemon also claims ready-queue work itself; an explicit `--auto` / `--auto=false` overrides the persisted switch. |
-| `--heartbeat-every D` | test/dev-only | `60s` | Machines heartbeat cadence (`0` disables). |
 
 The workspace mapping (polyforge#113) replaces the retired workspace and
 project launch surfaces: the `[workspace."<path>"]` sections of the

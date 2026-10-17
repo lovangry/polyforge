@@ -3,29 +3,22 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 )
 
-// doctor_display.go: the harness progress-display checks of `pf doctor`
-// (polyforge#142). The watcher produces progress whether or not anyone
-// sees it; these checks tell whether the user's harness is wired to show
-// it — Claude Code through its statusLine, pi through the pf-chat
-// extension of the polyforge pi package — and, when it is not, print a
-// copyable snippet. tools/install.sh prints the same verdicts through
-// `pf doctor --harness`.
-//
-// The judgement is static: the statusLine command and the absolute
-// files it names are read, never executed (a user's command may have
-// side effects or hang), and no user file is ever written. Verdicts:
-// pass = will show; warn = will not show, or cannot tell (the detail
-// says which); skip = the harness is not set up here. Never fail — a
-// display gap does not change the doctor exit code.
+// doctor_display.go: the harness progress-display checks of `pf doctor`.
+// The watcher produces progress whether or not anyone sees it; these
+// checks tell whether the user's harness is wired to show it — Claude
+// Code through its statusLine, pi through the pf-chat extension — and,
+// when it is not, print a copyable snippet. The judgement is static: the
+// statusLine command and the absolute files it names are read, never
+// executed (a user's command may have side effects or hang), and no user
+// file is written. pass = will show; warn = will not show, or cannot
+// tell (the detail says which); skip = the harness is not set up here.
 
 const (
 	docChClaudeDisplay = "claude progress display"
@@ -89,26 +82,20 @@ func statusLineJSON(sl map[string]any) string {
 func claudeDisplayCheck(home string) doctorCheck {
 	c := doctorCheck{Name: docChClaudeDisplay}
 	dir := filepath.Join(home, ".claude")
-	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
-		c.Status, c.Detail = "skip", "no "+dir+": Claude Code is not set up here"
+	if skip, ok := notSetUp(dir, "Claude Code"); ok {
+		c.Status, c.Detail = "skip", skip
 		return c
 	}
 	path := filepath.Join(dir, "settings.json")
 	full := statusLineJSON(map[string]any{"type": "command", "command": statuslineCommand})
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		c.Status, c.Detail = "warn", "will not show: "+path+" does not exist — create it with {"+full+"}"
-		return c
-	}
-	if err != nil {
-		c.Status, c.Detail = "warn", "cannot tell: "+err.Error()
-		return c
-	}
 	var cfg struct {
 		StatusLine map[string]any `json:"statusLine"`
 	}
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		c.Status, c.Detail = "warn", "cannot tell: "+path+" does not parse as a settings object: "+err.Error()
+	if exists, err := readJSONFile(path, &cfg); err != nil {
+		c.Status, c.Detail = "warn", "cannot tell: "+err.Error()
+		return c
+	} else if !exists {
+		c.Status, c.Detail = "warn", "will not show: "+path+" does not exist — create it with {"+full+"}"
 		return c
 	}
 	cmd, _ := cfg.StatusLine["command"].(string)
@@ -193,38 +180,22 @@ func claudeDisplayCheck(home string) doctorCheck {
 // settings.
 func piDisplayCheck(agentDir, home string) doctorCheck {
 	c := doctorCheck{Name: docChPiDisplay}
-	if st, err := os.Stat(agentDir); err != nil || !st.IsDir() {
-		c.Status, c.Detail = "skip", "no "+agentDir+": pi is not set up here"
+	if skip, ok := notSetUp(agentDir, "pi"); ok {
+		c.Status, c.Detail = "skip", skip
 		return c
 	}
 	hint := "will not show: the polyforge pi package (pf-chat extension) is not installed — re-run tools/install.sh, or add the local release \"" + releaseCurrent(home) + "\" to packages in " + filepath.Join(agentDir, "settings.json")
-	path := filepath.Join(agentDir, "settings.json")
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		c.Status, c.Detail = "warn", hint
-		return c
-	}
+	cfg, exists, err := readPiSettings(agentDir)
 	if err != nil {
 		c.Status, c.Detail = "warn", "cannot tell: "+err.Error()
 		return c
 	}
-	var cfg struct {
-		Packages   []json.RawMessage `json:"packages"`
-		Extensions []any             `json:"extensions"`
-	}
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		c.Status, c.Detail = "warn", "cannot tell: "+path+" does not parse as a settings object: "+err.Error()
+	if !exists {
+		c.Status, c.Detail = "warn", hint
 		return c
 	}
 	for _, p := range cfg.Packages {
-		var s string
-		if json.Unmarshal(p, &s) != nil {
-			var o struct {
-				Source string `json:"source"`
-			}
-			_ = json.Unmarshal(p, &o)
-			s = o.Source
-		}
+		s := pkgSource(p)
 		if polyforgePkgRe.MatchString(s) {
 			c.Status, c.Detail = "pass", fmt.Sprintf("pi package %s carries the pf-chat extension", s)
 			return c
