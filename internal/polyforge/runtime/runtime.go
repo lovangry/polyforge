@@ -1631,6 +1631,7 @@ func quarantineCapsule(capsuleDir, gitDir string) error {
 		}
 		return fmt.Errorf("quarantine of the capsule failed, git-dir restored: %w", err)
 	}
+	crashpoint.At("quarantine.between")
 	if err := renameFn(capsuleDir, capsuleDir+".quarantined."+ts); err != nil {
 		if movedGit != "" {
 			if rerr := renameFn(movedGit, gitDir); rerr != nil {
@@ -2272,6 +2273,7 @@ func (r *Runtime) sealNetwork(ctx context.Context, j *job, reason, note string, 
 		// push degrades the terminal reason to blocked — the local commit
 		// keeps the bytes, but the server never heard the final state.
 		r.syncLiveTranscript(j.capsuleDir)
+		crashpoint.At("seal.committing")
 		_, _, _, perr := gitops.CommitPush(j.git, "seal: "+reason)
 		for i := 0; i < 2 && perr != nil; i++ {
 			_, perr = gitops.Push(j.git)

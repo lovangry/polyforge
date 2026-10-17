@@ -8,10 +8,12 @@ package test
 // submit lost.
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -24,15 +26,24 @@ func armed(d *v1Daemon, point string) *v1Daemon {
 	return d
 }
 
-// waitCrashed waits until the daemon died at its armed crash point.
+// waitCrashed waits until the daemon died at its armed crash point: by
+// SIGKILL, so a panic or a startup error never counts as reaching it.
 func (d *v1Daemon) waitCrashed(bound time.Duration) {
 	d.t.Helper()
+	var err error
 	select {
-	case <-d.waitedExit:
+	case err = <-d.waitedExit:
 	case <-time.After(bound):
 		d.t.Fatalf("the daemon never reached its crash point (log tail: %s)", d.logTail())
 	}
 	d.cmd = nil
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		d.t.Fatalf("the daemon exited without a signal (%v), not at its crash point (log tail: %s)", err, d.logTail())
+	}
+	if ws, ok := ee.Sys().(syscall.WaitStatus); !ok || !ws.Signaled() || ws.Signal() != syscall.SIGKILL {
+		d.t.Fatalf("the daemon died of %v, not the crash point's SIGKILL (log tail: %s)", err, d.logTail())
+	}
 }
 
 // restarted prepares the same daemon (socket, data dir, workspace,
@@ -209,6 +220,96 @@ func TestV5Kill9ChaosMatrix(t *testing.T) {
 		d3.start()
 		for _, wi := range queued {
 			inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
+		}
+	})
+
+	// kill -9 inside the seal's git commit: the dead commit's index.lock
+	// stays behind next to unflushed capsule state
+	t.Run("git commit killed", func(t *testing.T) {
+		inst := newV1Install(t)
+		wi := inst.newWI(t, "v5 chaos: commit killed", envelopeAutopilot(), nil)
+		t.Cleanup(func() { killOrphans(wi) })
+		d := armed(newV1Daemon(t, inst), "seal.committing")
+		d.start()
+		d.pf(t, "submit", wi)
+		d.waitCrashed(90 * time.Second)
+		if err := os.WriteFile(filepath.Join(d.capsuleDir(wi), "chaos-marker.txt"), []byte("unflushed\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		lock := filepath.Join(d.dataDir, "git", wi+".git", "index.lock")
+		if err := os.WriteFile(lock, []byte("torn"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		d2 := d.restarted()
+		d2.start()
+		assertConverged(t, inst, d2, wi, 3)
+		if !inst.bareHasPath(t, wi, "chaos-marker.txt") {
+			t.Fatal("the seal must commit the capsule's last state despite the dead commit's lock")
+		}
+	})
+
+	// kill -9 between the two renames of a re-claim's quarantine
+	t.Run("quarantine split", func(t *testing.T) {
+		inst := newV1Install(t)
+		wi := inst.newWI(t, "v5 chaos: quarantine split", []map[string]any{
+			{"do": "envelope", "id": "grill", "outcome": "incomplete", "output": map[string]any{"partial": true}},
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "verification", "outcome": "completed"},
+		}, nil)
+		t.Cleanup(func() { killOrphans(wi) })
+		d := armed(newV1Daemon(t, inst), "quarantine.between")
+		d.start()
+		d.pf(t, "submit", wi)
+		inst.waitWIStatus(t, wi, "blocked", 90*time.Second)
+		d.pfAnyExit("resume", wi)
+		d.waitCrashed(60 * time.Second)
+
+		d2 := d.restarted()
+		d2.start()
+		inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)
+		capDir := d2.capsuleDir(wi)
+		trees, _ := filepath.Glob(capDir + ".quarantined.*")
+		live, _ := filepath.EvalSymlinks(filepath.Join(d2.dataDir, "git", wi+".git"))
+		if len(trees) == 0 {
+			t.Fatal("the re-claim quarantined no capsule")
+		}
+		for _, tree := range trees {
+			cmd := exec.Command("git", "rev-parse", "--absolute-git-dir")
+			cmd.Dir = tree
+			cmd.Env = append(os.Environ(), "GIT_CEILING_DIRECTORIES="+filepath.Dir(tree))
+			out, _ := cmd.Output()
+			got, _ := filepath.EvalSymlinks(strings.TrimSpace(string(out)))
+			if got == live {
+				t.Fatalf("the quarantined tree %s works on the LIVE git-dir %s", tree, live)
+			}
+		}
+	})
+
+	// kill -9 inside a bounded-fail's blocked close
+	t.Run("bounded-fail close", func(t *testing.T) {
+		inst := newV1Install(t)
+		crash := map[string]any{"do": "envelope", "id": "verification", "outcome": "completed", "crash": "before"}
+		wi := inst.newWI(t, "v5 chaos: bounded-fail close", []map[string]any{
+			{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
+			{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
+			crash, crash, crash, crash, crash, crash,
+		}, nil)
+		t.Cleanup(func() { killOrphans(wi) })
+		d := armed(newV1Daemon(t, inst), "bounded.closing")
+		d.start()
+		d.pf(t, "submit", wi)
+		d.waitCrashed(180 * time.Second)
+		if st := inst.wiStatus(t, wi); st != "running" {
+			t.Fatalf("the close must not have reached the hub yet: %s", st)
+		}
+
+		d2 := d.restarted()
+		d2.start()
+		inst.waitWIStatus(t, wi, "blocked", 180*time.Second)
+		if s := inst.sessionOf(t, wi); s.Fingerprint != "" {
+			t.Fatalf("a blocked work item must carry no session: %+v", s)
 		}
 	})
 }

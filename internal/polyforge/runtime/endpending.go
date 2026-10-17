@@ -19,6 +19,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/crashpoint"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
@@ -159,6 +160,7 @@ func (r *Runtime) closeBlocked(ctx context.Context, j *job, push bool) bool {
 			}
 		}
 	}
+	crashpoint.At("bounded.closing")
 	return r.endBlockedAtHub(ctx, j.wi, secret, note, head)
 }
 
