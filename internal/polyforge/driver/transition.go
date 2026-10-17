@@ -1,30 +1,22 @@
 package driver
 
 // transition.go: the SINGLE write entry point for every execution.json
-// mutation (the driver spec's R5 single-write rule). The daemon-side
-// driver replaces the WI Agent as the one writer of the capsule's
-// runtime-state/execution.json (reference.md §7.3 keeps the
-// tmp+fsync+rename contract; the v2 driver additionally fsyncs the
-// parent directory so the rename itself survives a crash). Every state
-// change — init, step start, step result, gate fail, rewind, budget,
-// answer, terminal — rides Driver.transition:
+// mutation (the driver spec's R5 single-write rule; reference.md §7.3's
+// tmp+fsync+rename contract, plus a parent-directory fsync so the rename
+// itself survives a crash). Every state change rides Driver.transition:
 //
 //	1. serialize (mutex)
 //	2. fence (the spawn counter must match; step_start carries the NEW
 //	   derivation's ordinal, every other kind the current one)
 //	3. validate + apply to the in-memory execution state
-//	4. marshal + persist atomically (tmp, fsync, rename, dir fsync)
-//	5. emit one event (news, never state — same contract as the observe
-//	   lane's own event log)
+//	4. marshal + persist atomically
+//	5. emit one event (news, never state)
 //
-// A failure at any pre-persist step leaves both the in-memory state and
-// the file untouched (the working copy is restored from a snapshot); a
-// persist failure BLOCKS the dependent next action (R5). Event emission
-// is deliberately the one best-effort step: once the rename lands the
-// transition is committed, and reverting in-memory state over a logging
-// failure would desynchronize the driver from its own durable file —
-// the failure is loud on stderr instead, matching how the runtime's
-// EventTap and the observe lane treat their event surfaces.
+// A failure before the persist leaves memory and file untouched (the
+// working copy is restored from a snapshot); a persist failure BLOCKS
+// the dependent next action. Event emission is the one best-effort step:
+// once the rename lands the transition is committed, and a logging
+// failure is loud on stderr instead of reverting state.
 
 import (
 	"encoding/json"
@@ -79,12 +71,9 @@ const (
 	// needs a kind to ride. Every other kind follows the driver spec.
 	TransInit   TransitionKind = "init"
 	TransAnswer TransitionKind = "answer"
-	// TransInterrupted is the recovery integration's write: ONE
-	// infra_failure attempt for the derivation that died without a
-	// result, archived by the single execution.json writer when the
-	// recovery lane re-derives. The candidate pointer is a pure
-	// recomputation over the attempts archive (candidates.go), so this
-	// archive is the only state an interruption leaves behind.
+	// TransInterrupted is the recovery integration's write: ONE audit-only
+	// infra_failure attempt for the derivation that died without a result
+	// (applyInterruptedLocked).
 	TransInterrupted TransitionKind = "interrupted"
 	// TransUnblock is the §6.4 owner resume verdict for a workflow parked
 	// blocked on an honest incomplete result (polyforge#116): flip
@@ -95,10 +84,8 @@ const (
 	// verdict and the re-dispatch it names.
 	TransUnblock TransitionKind = "unblock"
 	// TransStepFailed is the supervision write (v2-converge 2.3): ONE
-	// failed dispatch — the attempt with its cause sub-class, the per-step
-	// failure counter, relaxed thresholds, the next dispatch's shape and,
-	// when the death-cause table says so, the blocked status — in one
-	// atomic execution.json write.
+	// failed dispatch and its death-cause disposal in one atomic write
+	// (applyStepFailedLocked).
 	TransStepFailed TransitionKind = "step_failed"
 )
 
@@ -405,11 +392,9 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest, info *appliedInfo)
 	}
 	st.Dispatch = 0
 	if req.WallMs > 0 {
-		// the finished dispatch's wall time joins the step's cumulative
-		// runtime (the T accumulator, human-wait time excluded by
-		// construction: no process runs while a question is open)
-		st.BudgetConsumed.WallMs += req.WallMs
-		d.exec.BudgetConsumed.WallMs += req.WallMs
+		// human-wait time is excluded by construction: no process runs
+		// while a question is open
+		d.addWallLocked(st, req.WallMs)
 	}
 
 	switch res.Outcome {
@@ -641,9 +626,15 @@ func (d *Driver) applyBudgetLocked(req TransitionRequest) error {
 	if st == nil {
 		return fmt.Errorf("driver: budget_update for unknown step %q", stepID)
 	}
-	st.BudgetConsumed.WallMs += req.Budget.WallMs
-	d.exec.BudgetConsumed.WallMs += req.Budget.WallMs
+	d.addWallLocked(st, req.Budget.WallMs)
 	return nil
+}
+
+// addWallLocked adds wall time to the step's cumulative runtime (the T
+// accumulator, the step-level authority) and the workflow aggregate.
+func (d *Driver) addWallLocked(st *capsule.Step, ms int64) {
+	st.BudgetConsumed.WallMs += ms
+	d.exec.BudgetConsumed.WallMs += ms
 }
 
 // applyAnswerLocked is the D9 answer-consumption write: archive the
@@ -748,9 +739,6 @@ func (d *Driver) requireRunningStep(stepID string) error {
 	}
 	return nil
 }
-
-// ---------------------------------------------------------------------------
-// Atomic persistence: tmp + fsync + rename + parent-dir fsync.
 
 // emitLocked emits one progress event for a committed transition. The
 // bodies carry the fence identity (spawn_n) so events line up with the
