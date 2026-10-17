@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -41,7 +40,7 @@ func TestStartStopEndToEnd(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := r.Start(ctx, wi); err != nil {
+	if err := r.Start(ctx, wi, StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 
@@ -62,7 +61,7 @@ func TestStartStopEndToEnd(t *testing.T) {
 	capDir := testCapsuleDir(r, wi)
 	// capsule layout materialized
 	for _, rel := range []string{
-		capsule.CapsuleJSON, capsule.SessionJSON, ".gitignore",
+		capsule.CapsuleJSON, ".gitignore",
 		capsule.DirWorkflows, capsule.DirRuntimeState, capsule.DirSession,
 	} {
 		if _, err := os.Stat(filepath.Join(capDir, filepath.FromSlash(rel))); err != nil {
@@ -81,21 +80,9 @@ func TestStartStopEndToEnd(t *testing.T) {
 	if err := json.Unmarshal(raw, &idn); err != nil || idn.WorkItemID != wi {
 		t.Fatalf("capsule.json wrong: %v %+v", err, idn)
 	}
-	// session.json carries the PUBLIC fingerprint, never the secret
-	sraw, err := os.ReadFile(filepath.Join(capDir, capsule.SessionJSON))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(sraw), started.SessionID) {
-		t.Fatalf("session.json must never carry the session secret:\n%s", sraw)
-	}
-	var sess capsule.Session
-	if err := json.Unmarshal(sraw, &sess); err != nil || sess.SessionID != api.SessionFingerprint(started.SessionID) {
-		t.Fatalf("session.json must carry the public fingerprint: %v %+v", err, sess)
-	}
 	// git-dir is EXTERNAL: .git is a one-line pointer, not a directory
 	pointer := filepath.Join(capDir, ".git")
-	if !isRegularFile(pointer) {
+	if st, err := os.Stat(pointer); err != nil || !st.Mode().IsRegular() {
 		t.Fatalf("capsule .git must be a pointer file (external git-dir ruling)")
 	}
 	if !dirExists(r.gitDirFor(wi)) {

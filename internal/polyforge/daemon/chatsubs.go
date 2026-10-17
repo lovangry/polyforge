@@ -386,10 +386,22 @@ func (d *Daemon) watchSnapshotRoute(w http.ResponseWriter, r *http.Request) {
 		}
 		after = n
 	}
-	writeJSON(w, http.StatusOK, d.watchSnapshot(d.canonWI(r.PathValue("wi")), after))
+	wi := r.PathValue("wi")
+	canonical, item := d.resolveWI(wi)
+	// the resolution already read aihub (record or failure): the snapshot
+	// does not read it again
+	hubRead := item != nil || canonical == ""
+	if canonical == "" {
+		canonical = wi
+	}
+	writeJSON(w, http.StatusOK, d.watchSnapshot(canonical, item, hubRead, after))
 }
 
-func (d *Daemon) watchSnapshot(wi string, after int64) protocol.WatchSnapshot {
+// watchSnapshot answers one work item's snapshot by its canonical id.
+// item is its aihub record when the caller already read it; hubRead
+// says the caller already asked aihub (so a nil item is a failed read,
+// not one still to make).
+func (d *Daemon) watchSnapshot(wi string, item *api.WorkItem, hubRead bool, after int64) protocol.WatchSnapshot {
 	snap := protocol.WatchSnapshot{WorkItem: wi, Events: []protocol.EventEntry{}}
 	snap.Queued = d.q != nil && d.q.IsPending(wi)
 	jobs, _ := d.statusJobs()
@@ -401,20 +413,19 @@ func (d *Daemon) watchSnapshot(wi string, after int64) protocol.WatchSnapshot {
 		snap.Known, held = true, true
 		snap.Slug = j.Slug
 		localLive = j.Status != string(runtime.StatePaused)
-		wj := &protocol.WatchJob{Status: j.Status,
+		wj := &protocol.WatchJob{Status: j.Status, Origin: j.Origin,
 			QuestionID: j.QuestionID, LastProgressAgoSec: j.LastWorkAgoSec}
-		if j.Origin != nil {
-			wj.Origin = &protocol.Origin{Kind: j.Origin.Kind, ChatID: j.Origin.ChatID, Owner: j.Origin.Owner}
-		}
 		snap.Job = wj
 	}
-	// The hub record is read once, only when no live local job answers:
-	// it names a closed WI's capsule (project + slug), its display name,
+	// The hub record (read at most once per snapshot, by the resolution
+	// or here) serves only when no live local job answers: it names a
+	// closed WI's capsule (project + slug), its display name,
 	// and — a manual close (wrap / wrap --fail / cancel / pause) leaves
 	// execution.json at `running` — its status, the authority for how
 	// the WI ended.
-	var item *api.WorkItem
-	if !localLive && (!snap.Queued || !held) && d.hub != nil {
+	if localLive || (snap.Queued && held) {
+		item = nil
+	} else if !hubRead && d.hub != nil {
 		if it, err := d.hub.GetWorkItem(wi); err == nil && it != nil {
 			item = it
 		}

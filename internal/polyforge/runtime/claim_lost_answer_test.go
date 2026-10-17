@@ -31,7 +31,7 @@ func TestClaimAnswerLostAfterCommitKeepsJournalAndRetryAdopts(t *testing.T) {
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	const wi = "wi_b1lost"
 
-	err := r.Start(context.Background(), wi)
+	err := r.Start(context.Background(), wi, StartOpts{})
 	if !isHubUnavailable(err) {
 		t.Fatalf("a lost claim answer must answer the typed transient (requeue), got %v", err)
 	}
@@ -44,7 +44,7 @@ func TestClaimAnswerLostAfterCommitKeepsJournalAndRetryAdopts(t *testing.T) {
 	}
 
 	// The dispatcher's retry: the same claim is replayed and adopted.
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("retry Start: %v", err)
 	}
 	t.Cleanup(func() { terminateJobAgent(r, wi) })
@@ -75,13 +75,13 @@ func TestClaimLostBeforeCommitRetryClaimsFresh(t *testing.T) {
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	const wi = "wi_b1before"
 
-	if err := r.Start(context.Background(), wi); !isHubUnavailable(err) {
+	if err := r.Start(context.Background(), wi, StartOpts{}); !isHubUnavailable(err) {
 		t.Fatalf("a hub 5xx on the claim must answer the typed transient, got %v", err)
 	}
 	if r.loadClaiming()[wi] == nil {
 		t.Fatal("a 5xx claim answer must keep the journal entry")
 	}
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("retry Start: %v", err)
 	}
 	t.Cleanup(func() { terminateJobAgent(r, wi) })
@@ -105,7 +105,7 @@ func TestClaimTypedRefusalClearsJournal(t *testing.T) {
 	hub.claimFaults = []claimFault{{err: refusal}}
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 
-	err := r.Start(context.Background(), "wi_b1refused")
+	err := r.Start(context.Background(), "wi_b1refused", StartOpts{})
 	if err == nil || isHubUnavailable(err) || !errors.Is(err, refusal) {
 		t.Fatalf("a typed 4xx refusal must surface as is, got %v", err)
 	}
@@ -155,7 +155,7 @@ func TestClaimBodyCarriesOnlyTheReplayKey(t *testing.T) {
 	hub := newFakeHub()
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	const wi = "wi_claimbody"
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { terminateJobAgent(r, wi) })

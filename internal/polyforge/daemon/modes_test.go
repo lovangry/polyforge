@@ -188,7 +188,7 @@ func TestMaxConcurrentCountsJobsStartedOutsideTheQueue(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) { c.MaxConcurrent = 2 })
 	for _, wi := range []string{"wi_rec1", "wi_rec2"} {
 		mkBare(t, td.cfg.GitRemoteBase, wi)
-		if err := td.rt.Start(td.runCtx, wi); err != nil {
+		if err := td.rt.Start(td.runCtx, wi, runtime.StartOpts{}); err != nil {
 			t.Fatalf("start %s directly: %v", wi, err)
 		}
 	}

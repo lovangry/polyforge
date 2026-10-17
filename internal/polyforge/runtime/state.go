@@ -15,6 +15,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
@@ -101,33 +102,14 @@ func (j *job) snapshot() (state JobState, spawn int) {
 	return j.state, j.spawnN
 }
 
-// fingerprint answers the job's PUBLIC session handle (the NEW-1 fence
-// payload OBSuperseded is compared against).
-func (j *job) fingerprint() string {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	return j.sessionFingerprint
-}
-
-// liveAgent reports whether this job currently has a live agent handle
-// under supervision (the Restart skip condition for records already
-// running under this daemon).
-func (j *job) liveAgent() bool {
-	j.mu.Lock()
-	h := j.agent
-	j.mu.Unlock()
-	return h != nil && h.Alive()
-}
-
 // ---------------------------------------------------------------------------
 // state.json — the Runtime's persisted bookkeeping (restart input).
 
 const stateFilePerm = 0o600
 
 type stateFile struct {
-	Version   int          `json:"version"`
-	MachineID string       `json:"machine_id"`
-	Jobs      []*jobRecord `json:"jobs"`
+	Version int          `json:"version"`
+	Jobs    []*jobRecord `json:"jobs"`
 }
 
 // jobRecord is one persisted job (reference.md §3.5): the session
@@ -209,13 +191,10 @@ const (
 	OriginAuto = "auto" // auto-claim (pf ops auto on)
 )
 
-// Origin is the daemon-side record of where a job came from. ChatID is a
-// notification label, not a credential. Owner may be empty (unknown).
-type Origin struct {
-	Kind   string `json:"kind"`
-	ChatID string `json:"chat_id,omitempty"`
-	Owner  string `json:"owner,omitempty"`
-}
+// Origin is the record of where a job came from (the one wire shape,
+// protocol.Origin). ChatID is a notification label, not a credential.
+// Owner may be empty (unknown).
+type Origin = protocol.Origin
 
 func (j *job) record() *jobRecord {
 	j.mu.Lock()
@@ -310,25 +289,8 @@ func nowStamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 // event sink and the job's in-memory carrier alert state) a bare record
 // cannot carry.
 func (r *Runtime) restoredJob(rec *jobRecord) *job {
-	normalizeOrigin(rec)
 	j := jobFromRecord(rec)
 	j.git.EventSink = r.gitEventSink(rec.WorkItemID)
 	j.git.CarrierAlerts = &gitops.CarrierAlerts{}
 	return j
-}
-
-// normalizeOrigin applies the decode default for a persisted origin: a
-// kind the current code does not recognize (a record written by an
-// older build) is read as a chat-less manual submit — kind chat, an
-// empty ChatID, the owner as recorded. The default is a plain
-// unknown-kind default (never a branch keyed on a historical kind).
-func normalizeOrigin(rec *jobRecord) {
-	if rec.Origin == nil {
-		return
-	}
-	switch rec.Origin.Kind {
-	case OriginChat, OriginAuto:
-	default:
-		rec.Origin = &Origin{Kind: OriginChat, Owner: rec.Origin.Owner}
-	}
 }

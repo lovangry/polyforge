@@ -349,6 +349,7 @@ func New(cfg Config) (*Daemon, error) {
 				WI:             in.WI,
 				CapsuleDir:     in.CapsuleDir,
 				BundleName:     in.BundleName,
+				SessionHandle:  in.SessionHandle,
 				SpawnN:         in.SpawnN,
 				Spawner:        in.Spawner,
 				StepCandidates: in.StepCandidates,
@@ -409,13 +410,10 @@ func New(cfg Config) (*Daemon, error) {
 		PollInterval: cfg.ObservePoll,
 		PushFunc:     cfg.PushFunc,
 		// F3: the live-transcript locator the monitor's per-dispatch
-		// commit-boundary sync calls; the F2 slug
-		// resolver lets CLI-side route calls by the operator's spelling
-		// (a "<project>#<seq>") find the canonically-keyed monitor.
+		// commit-boundary sync calls.
 		LocateLive: func(capsuleDir string, spawnAt time.Time, harness, session string) string {
 			return runtime.LocateTranscript(rtCfg.StepAgentSessionsDir(), rtCfg.ClaudeConfigDir(), capsuleDir, spawnAt, harness, session)
 		},
-		Resolve: d.resolveWI,
 		// M4 wiring: the periodic session revalidation rides the monitor
 		// tick against the shared aihub client (fencing-on-use discovery —
 		// a superseded daemon learns within ~30s even with zero push
@@ -678,24 +676,27 @@ func (d *Daemon) tapRuntimeEvent(wi, kind string, body map[string]any) {
 // resolveWI maps any work-item id form to the canonical id the runtime
 // and observe key everything by (F2): the runtime's alias table first
 // (live jobs), aihub's id-or-slug endpoint otherwise (sealed or unknown
-// work items). "" only when both paths fail — callers degrade to the
-// input spelling, which is the pre-F2 behavior.
-func (d *Daemon) resolveWI(wi string) string {
+// work items). item is the aihub record when aihub answered, so a caller
+// that needs the record does not read it again; it is nil when the
+// alias table answered. "" only when both paths fail — callers degrade
+// to the input spelling. Hence aihub was read iff item != nil or the id
+// is "".
+func (d *Daemon) resolveWI(wi string) (string, *api.WorkItem) {
 	if c := d.rt.Resolve(wi); c != "" {
-		return c
+		return c, nil
 	}
 	item, err := d.hub.GetWorkItem(wi)
 	if err != nil || item == nil || item.ID == "" {
-		return ""
+		return "", nil
 	}
-	return item.ID
+	return item.ID, item
 }
 
 // canonWI is resolveWI with the pass-through fallback: an unresolvable
-// spelling keeps flowing exactly as it did before F2 (the claim path
-// resolves it server-side).
+// spelling keeps its input form (the claim path resolves it
+// server-side).
 func (d *Daemon) canonWI(wi string) string {
-	if c := d.resolveWI(wi); c != "" {
+	if c, _ := d.resolveWI(wi); c != "" {
 		return c
 	}
 	return wi
@@ -754,9 +755,7 @@ func (d *Daemon) dispatch() {
 // startEntry runs one Take()n queue entry's claim to its verdict and
 // settles the entry.
 func (d *Daemon) startEntry(e qEntry) {
-	d.rt.NoteOrigin(e.WorkItemID, e.Origin)
-	d.rt.NoteModels(e.WorkItemID, e.Models)
-	err := d.rt.Start(d.runCtx, e.WorkItemID)
+	err := d.rt.Start(d.runCtx, e.WorkItemID, runtime.StartOpts{Origin: &e.Origin, Models: e.Models})
 	if runtime.IsClaimDeferred(err) {
 		// the shutdown stopped the claim: the entry stays in flight on
 		// disk (the queue file keeps it) and a claim that landed stays

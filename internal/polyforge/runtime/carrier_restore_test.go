@@ -66,7 +66,7 @@ func newCarrierRig(t *testing.T, wi string, publishCarrier bool) *carrierRig {
 	}
 	r.cfg.GitRemoteBase = hubRoot
 
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
 	capDir := testCapsuleDir(r, wi)
@@ -114,7 +114,7 @@ func TestReclaimRestoresCarrierFromDetachedHeadSource(t *testing.T) {
 		t.Fatal("test setup: the source checkout must be detached")
 	}
 
-	if err := g.r.Start(context.Background(), g.wi); err != nil {
+	if err := g.r.Start(context.Background(), g.wi, StartOpts{}); err != nil {
 		t.Fatalf("re-claim Start: %v", err)
 	}
 	if got := g.repoHead(t); got != g.workHead {
@@ -146,7 +146,7 @@ func TestReclaimRefusesWhenCarrierCannotBeRestored(t *testing.T) {
 	}
 	endsBefore := len(g.hub.ends)
 
-	err := g.r.Start(context.Background(), g.wi)
+	err := g.r.Start(context.Background(), g.wi, StartOpts{})
 	if err == nil {
 		t.Fatal("a WI whose carrier cannot be restored must not start")
 	}
@@ -173,7 +173,7 @@ func TestReclaimRefusesWhenCarrierCannotBeRestored(t *testing.T) {
 func TestFreshClaimWithoutCarrierClonesNormally(t *testing.T) {
 	g := newCarrierRig(t, "wi_nocarrier", false)
 	carrierGit(t, g.source, "checkout", "--detach", "HEAD") // the detached source alone changes nothing
-	if err := g.r.Start(context.Background(), g.wi); err != nil {
+	if err := g.r.Start(context.Background(), g.wi, StartOpts{}); err != nil {
 		t.Fatalf("re-claim Start without a carrier: %v", err)
 	}
 	if got := g.repoHead(t); got != g.srcHead {
@@ -184,40 +184,10 @@ func TestFreshClaimWithoutCarrierClonesNormally(t *testing.T) {
 	}
 }
 
-// (d) M8a: the crash window between the task-repo clone and the
-// capsule.json baseline write leaves an untouched fresh clone with NO
-// recorded baseline. The replay must run the carrier restore on it, not
-// adopt the origin's HEAD as the baseline.
-func TestHuskWithoutRecordedBaselineIsRestoredFromCarrier(t *testing.T) {
-	g := newCarrierRig(t, "wi_husk", true)
-	r := g.r
-	capDir := testCapsuleDir(r, g.wi)
-	repoDir := filepath.Join(capDir, capsule.DirRepos, "app")
-	// The husk: the repo stands on the origin HEAD (no work commit) and no
-	// baseline was ever recorded.
-	carrierGit(t, repoDir, "reset", "--hard", "--quiet", g.srcHead)
-	if err := os.Remove(filepath.Join(capDir, capsule.CapsuleJSON)); err != nil {
-		t.Fatal(err)
-	}
-	j := &job{wi: g.wi, capsuleDir: capDir, repos: []api.ProjectRepo{{Name: "app", URL: g.source}}}
-	j.git = r.gitOptsForTest(t, g)
-	shas, err := r.cloneTaskRepos(context.Background(), j)
-	if err != nil {
-		t.Fatalf("cloneTaskRepos on the husk: %v", err)
-	}
-	if shas["app"] != g.workHead {
-		t.Fatalf("baseline = %q, want the carrier tip %q (origin HEAD %q must not win)", shas["app"], g.workHead, g.srcHead)
-	}
-	if got := carrierGit(t, repoDir, "rev-parse", "HEAD"); got != g.workHead {
-		t.Fatalf("husk HEAD = %q, want the carrier tip %q", got, g.workHead)
-	}
-}
-
-// (e) M8b: the required task-repo set is the claim inventory UNION the
+// (d) M8b: the required task-repo set is the claim inventory UNION the
 // prior capsule.json Repos. An empty inventory must not drop a recorded
-// repo: an existing worktree is carried forward with its baseline, and a
-// recorded repo that is missing on disk with no URL to re-clone is a
-// typed refusal, not a silent continue.
+// repo: a recorded repo with no URL to clone from is a typed refusal,
+// not a silent continue.
 func TestRecordedReposSurviveAnEmptyInventory(t *testing.T) {
 	g := newCarrierRig(t, "wi_union", true)
 	r := g.r
@@ -233,14 +203,6 @@ func TestRecordedReposSurviveAnEmptyInventory(t *testing.T) {
 	j := &job{wi: g.wi, capsuleDir: capDir} // empty inventory
 	j.git = r.gitOptsForTest(t, g)
 
-	shas, err := r.cloneTaskRepos(context.Background(), j)
-	if err != nil {
-		t.Fatalf("cloneTaskRepos: %v", err)
-	}
-	if shas["app"] != g.workHead {
-		t.Fatalf("recorded repo dropped or rebaselined: %v", shas)
-	}
-
 	if err := os.RemoveAll(repoDir); err != nil {
 		t.Fatal(err)
 	}
@@ -248,44 +210,6 @@ func TestRecordedReposSurviveAnEmptyInventory(t *testing.T) {
 	ae, ok := err.(*api.Error)
 	if !ok || ae.Code != api.ErrDaemonSpawnFail || !strings.Contains(ae.Detail, "app") {
 		t.Fatalf("a recorded repo missing with no inventory URL must be a typed DAEMON-507, got %v", err)
-	}
-}
-
-// An empty-at-claim repo records baseline "" (key present). Its worktree
-// may hold agent edits: it takes the carried-forward path, and a restore
-// that would fail (unreachable hub) must neither run nor delete the dir.
-func TestEmptyBaselineRepoKeepsAgentEdits(t *testing.T) {
-	g := newCarrierRig(t, "wi_emptybase", true)
-	r := g.r
-	capDir := testCapsuleDir(r, g.wi)
-	repoDir := filepath.Join(capDir, capsule.DirRepos, "app")
-	if err := os.MkdirAll(repoDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	edit := filepath.Join(repoDir, "agent.txt")
-	if err := os.WriteFile(edit, []byte("agent work"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := json.Marshal(capsule.Identity{WorkItemID: g.wi, Repos: map[string]string{"app": ""}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(capDir, capsule.CapsuleJSON), raw, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	j := &job{wi: g.wi, capsuleDir: capDir, repos: []api.ProjectRepo{{Name: "app", URL: g.source}}}
-	j.git = r.gitOptsForTest(t, g)
-	j.git.RemoteURL = filepath.Join(t.TempDir(), "no-such-hub.git") // any restore fails
-
-	shas, err := r.cloneTaskRepos(context.Background(), j)
-	if err != nil {
-		t.Fatalf("cloneTaskRepos: %v", err)
-	}
-	if sha, ok := shas["app"]; !ok || sha != "" {
-		t.Fatalf("empty baseline must carry forward as \"\": %v", shas)
-	}
-	if b, err := os.ReadFile(edit); err != nil || string(b) != "agent work" {
-		t.Fatalf("agent edits lost: %q, %v", b, err)
 	}
 }
 

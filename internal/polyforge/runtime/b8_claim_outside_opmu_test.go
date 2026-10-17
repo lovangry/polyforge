@@ -117,10 +117,10 @@ func TestB8HungCloneLeavesOtherWorkItemsResponsive(t *testing.T) {
 	ctx := context.Background()
 
 	slowErr := make(chan error, 1)
-	go func() { slowErr <- r.Start(ctx, slow) }()
+	go func() { slowErr <- r.Start(ctx, slow, StartOpts{}) }()
 	waitClaiming(t, r, slow)
 
-	if err := r.Start(ctx, slow); err == nil {
+	if err := r.Start(ctx, slow, StartOpts{}); err == nil {
 		t.Fatal("a second start of a CLAIMING work item must be refused")
 	}
 	if n := hub.claimCount(); n != 1 {
@@ -137,7 +137,7 @@ func TestB8HungCloneLeavesOtherWorkItemsResponsive(t *testing.T) {
 	}
 
 	within(t, 20*time.Second, "Start of another work item", func() {
-		if err := r.Start(ctx, fast); err != nil {
+		if err := r.Start(ctx, fast, StartOpts{}); err != nil {
 			t.Errorf("Start(%s): %v", fast, err)
 		}
 	})
@@ -198,7 +198,7 @@ func TestB8PauseDuringClaimingEndsBlocked(t *testing.T) {
 	hub.reposFor = map[string][]api.ProjectRepo{wi: {{Name: "app", URL: hangingRemote(t)}}}
 	ctx := context.Background()
 	startErr := make(chan error, 1)
-	go func() { startErr <- r.Start(ctx, wi) }()
+	go func() { startErr <- r.Start(ctx, wi, StartOpts{}) }()
 	waitClaiming(t, r, wi)
 	sess := journaled(r, wi).SessionID
 	within(t, 20*time.Second, "pause of the CLAIMING work item", func() {
@@ -235,7 +235,7 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 	const wi = "wi_b8_shutdown"
 	hub.reposFor = map[string][]api.ProjectRepo{wi: {{Name: "app", URL: hangingRemote(t)}}}
 	startErr := make(chan error, 1)
-	go func() { startErr <- r.Start(context.Background(), wi) }()
+	go func() { startErr <- r.Start(context.Background(), wi, StartOpts{}) }()
 	waitClaiming(t, r, wi)
 	rec := journaled(r, wi)
 
@@ -252,7 +252,7 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 	if r.jobOf(wi) != nil {
 		t.Fatal("the deferred claim left its placeholder in the table")
 	}
-	if err := r.Start(context.Background(), "wi_b8_other"); !IsClaimDeferred(err) {
+	if err := r.Start(context.Background(), "wi_b8_other", StartOpts{}); !IsClaimDeferred(err) {
 		t.Fatalf("a start after the shutdown answered %v, want the deferral", err)
 	}
 
@@ -306,7 +306,7 @@ func TestB8ShutdownDoesNotWaitOnALongClose(t *testing.T) {
 	g.waitEntered(t, "the long close's session end")
 	claims := hub.claimCount()
 	r.Close()
-	if err := r.Start(context.Background(), queued); !IsClaimDeferred(err) {
+	if err := r.Start(context.Background(), queued, StartOpts{}); !IsClaimDeferred(err) {
 		t.Fatalf("a Start after the shutdown answered %v, want the deferral", err)
 	}
 	if n := hub.claimCount() - claims; n != 0 {
@@ -326,7 +326,7 @@ func TestB8ClosedClaimQuarantinesCapsuleAndOBIgnoresPlaceholder(t *testing.T) {
 	const wi = "wi_b8_quar"
 	hub.reposFor = map[string][]api.ProjectRepo{wi: {{Name: "app", URL: hangingRemote(t)}}}
 	startErr := make(chan error, 1)
-	go func() { startErr <- r.Start(context.Background(), wi) }()
+	go func() { startErr <- r.Start(context.Background(), wi, StartOpts{}) }()
 	waitClaiming(t, r, wi)
 	j := r.jobOf(wi)
 	// the fence itself (the message would otherwise queue behind the claim)

@@ -49,7 +49,7 @@ func TestMaterializeNeverVerifiesContent(t *testing.T) {
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.WorkflowsDir = wfDir
 
-	if err := r.Start(context.Background(), "wi_dig2"); err != nil {
+	if err := r.Start(context.Background(), "wi_dig2", StartOpts{}); err != nil {
 		t.Fatalf("Start must materialize without any verification: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(testCapsuleDir(r, "wi_dig2"), capsule.DirWorkflows, "demo-bundle", "workflow.md")); err != nil {

@@ -50,12 +50,6 @@ type Config struct {
 	// dispatch's step_started names). nil disables the sync entirely
 	// (unit tests that never exercise it).
 	LocateLive func(capsuleDir string, spawnAt time.Time, harness, session string) string
-	// Resolve maps a non-canonical work-item id form (a "<project>#<seq>"
-	// slug) to the canonical id the monitors are keyed by; "" = unknown.
-	// The daemon binds it to its own canonicalizer so CLI-side route
-	// calls by the operator's submitted spelling find the monitor.
-	// nil = no resolution (the route id must already be canonical).
-	Resolve func(wi string) string
 	// SessionVerify is the v1.5 M4 revalidation seam: the periodic
 	// per-RUNNING-job session-verify the monitor tick piggybacks
 	// (session.go). The daemon binds the shared aihub client; nil — the
@@ -222,26 +216,13 @@ func (o *Observe) stopAll() {
 	}
 }
 
+// lookup answers the monitor of a work item by its canonical id (the
+// key the runtime announced); callers canonicalize a slug spelling
+// first.
 func (o *Observe) lookup(wi string) *Monitor {
 	o.mu.Lock()
-	m := o.monitors[wi]
-	o.mu.Unlock()
-	if m != nil {
-		return m
-	}
-	// a non-canonical spelling (the operator's slug): resolve and retry.
-	// The monitors are keyed by the canonical id the runtime announced.
-	if o.cfg.Resolve == nil {
-		return nil
-	}
-	canonical := o.cfg.Resolve(wi)
-	if canonical == "" || canonical == wi {
-		return nil
-	}
-	o.mu.Lock()
-	m = o.monitors[canonical]
-	o.mu.Unlock()
-	return m
+	defer o.mu.Unlock()
+	return o.monitors[wi]
 }
 
 func (o *Observe) setMonitor(wi string, m *Monitor) {

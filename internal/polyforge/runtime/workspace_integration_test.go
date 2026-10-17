@@ -78,10 +78,10 @@ func TestTwoWorkspacesTwoYamlsOneDaemon(t *testing.T) {
 	writeWorkspaceYaml(t, wsA, "steps:\n  proj-a:\n    default: { models: [pi:w079a-flow, pi:w079a-flow2] }\n")
 	writeWorkspaceYaml(t, wsB, "steps:\n  proj-b:\n    fix: { models: [pi:w079b-code] }\n")
 
-	if err := r.Start(context.Background(), "wi_w079intA"); err != nil {
+	if err := r.Start(context.Background(), "wi_w079intA", StartOpts{}); err != nil {
 		t.Fatalf("Start A: %v", err)
 	}
-	if err := r.Start(context.Background(), "wi_w079intB"); err != nil {
+	if err := r.Start(context.Background(), "wi_w079intB", StartOpts{}); err != nil {
 		t.Fatalf("Start B: %v", err)
 	}
 	capA := filepath.Join(wsA, "capsules", "wi_w079intA")
@@ -102,7 +102,7 @@ func TestTwoWorkspacesTwoYamlsOneDaemon(t *testing.T) {
 	// Per-claim freshness: an edit between claims governs the NEXT claim
 	// (neither capsule carries the effective_candidates key).
 	writeWorkspaceYaml(t, wsA, "steps:\n  proj-a:\n    default: { models: [pi:w079-edit-v2] }\n")
-	if err := r.Start(context.Background(), "wi_w079intA2"); err != nil {
+	if err := r.Start(context.Background(), "wi_w079intA2", StartOpts{}); err != nil {
 		t.Fatalf("Start A2: %v", err)
 	}
 	rawA2, rerr := os.ReadFile(filepath.Join(wsA, "capsules", "wi_w079intA2", "capsule.json"))
@@ -149,10 +149,10 @@ func TestSiblingProjectUnaffectedAndSharedYamlRefusesBoth(t *testing.T) {
 	r.cfg.WorkflowsDir = wfDir
 
 	writeWorkspaceYaml(t, ws, "steps:\n  p1:\n    default: { models: [pi:w79/p1] }\n")
-	if err := r.Start(context.Background(), "wi_w079s1"); err != nil {
+	if err := r.Start(context.Background(), "wi_w079s1", StartOpts{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Start(context.Background(), "wi_w079s2"); err != nil {
+	if err := r.Start(context.Background(), "wi_w079s2", StartOpts{}); err != nil {
 		t.Fatal(err)
 	}
 	i1raw, rerr := os.ReadFile(filepath.Join(ws, "capsules", "wi_w079s1", "capsule.json"))
@@ -179,7 +179,7 @@ func TestSiblingProjectUnaffectedAndSharedYamlRefusesBoth(t *testing.T) {
 	claims := hub.claimCount()
 	writeWorkspaceYaml(t, ws, "steps:\n  p1:\n    fix: [\n")
 	for _, wi := range []string{"wi_w079s3", "wi_w079s4"} {
-		err := r.Start(context.Background(), wi)
+		err := r.Start(context.Background(), wi, StartOpts{})
 		ae, ok := err.(*api.Error)
 		if !ok || ae.Code != api.ErrDaemonWorkspaceYaml {
 			t.Fatalf("Start %s over a broken shared yaml = %v, want DAEMON-414", wi, err)

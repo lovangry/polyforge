@@ -1,8 +1,7 @@
 package runtime
 
 // scene.go: the capsule scene on disk — the clone into the external
-// git-dir layout, the session-ownership marker, the quarantine of a
-// foreign scene, the materialized layout and work-item file, and the
+// git-dir layout, the quarantine of a previous scene, the materialized layout and work-item file, and the
 // read-only seal of a closed scene.
 
 import (
@@ -28,28 +27,15 @@ import (
 // o.GitDir, a one-line .git pointer file in the worktree; an
 // empty-history clone succeeds with a warning).
 //
-// v1.5 capsule ownership: generations no longer discriminate a reusable
-// husk from a foreign scene — the session does. materialize stamps the
-// owning session's FINGERPRINT into sync/session-handle (daemon-private,
-// gitignored: it deliberately does NOT travel with a re-claim clone), so:
-//
-//	amarker == this session's fingerprint → this session's own
-//	  crashed-Start husk (or attach-resume scene): reuse in place;
-//	anything else (another session's scene, a sealed close, a pre-v1.5
-//	  capsule with no marker) → quarantine, never reuse.
+// A claim always starts from a fresh clone: any scene already at the
+// capsule path (another session's, a closed one, the husk of a start
+// that crashed before its record landed) is quarantined, never reused.
+// The worktree and the external git-dir move aside as ONE unit, so the
+// fresh clone can never meet a previous scene's HEAD/index (a stale
+// git-dir reused under a fresh worktree made every later push
+// non-fast-forward).
 func (r *Runtime) prepareCapsule(ctx context.Context, j *job) error {
 	o := j.git
-	pointer := filepath.Join(o.CapsuleDir, ".git")
-	if isRegularFile(pointer) && dirExists(o.GitDir) &&
-		readSessionMarker(o.CapsuleDir) == j.sessionFingerprint {
-		return nil // this session's own crashed-Start husk: reuse
-	}
-	// Anything else (another session's scene, an unprepared husk, a
-	// pointer without a git-dir, an orphan git-dir with no worktree) is
-	// quarantined as ONE unit: worktree AND external git-dir move aside
-	// together, so the fresh clone can never meet a previous session's
-	// HEAD/index (a stale git-dir reused under a fresh worktree made
-	// every later push non-fast-forward).
 	if err := quarantineCapsule(o.CapsuleDir, o.GitDir); err != nil {
 		return err
 	}
@@ -72,40 +58,9 @@ func (r *Runtime) prepareCapsule(ctx context.Context, j *job) error {
 	return nil
 }
 
-func isRegularFile(p string) bool {
-	st, err := os.Stat(p)
-	return err == nil && st.Mode().IsRegular()
-}
-
 func dirExists(p string) bool {
 	st, err := os.Stat(p)
 	return err == nil && st.IsDir()
-}
-
-// relSessionMarker is the capsule-local session ownership tag: the
-// fingerprint of the session that owns this worktree, under sync/ —
-// daemon-private, gitignored, so it never travels with a clone
-// and never reaches the revision chain.
-const relSessionMarker = "sync/session-handle"
-
-// writeSessionMarker stamps the owning session's fingerprint (B3 public
-// handle; the secret itself never lands in the capsule).
-func writeSessionMarker(capsuleDir, fingerprint string) error {
-	path := filepath.Join(capsuleDir, filepath.FromSlash(relSessionMarker))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(fingerprint+"\n"), 0o644)
-}
-
-// readSessionMarker answers the owning session's fingerprint ("" when
-// absent or unreadable).
-func readSessionMarker(capsuleDir string) string {
-	raw, err := os.ReadFile(filepath.Join(capsuleDir, filepath.FromSlash(relSessionMarker)))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(raw))
 }
 
 // quarantineCapsule moves a stale/foreign/superseded capsule aside, never
@@ -190,9 +145,9 @@ func repointWorktree(worktree, from, to string) error {
 // injected-failure test).
 var renameFn = os.Rename
 
-// materialize lays out the capsule: workflows/, capsule.json, session.json,
-// .gitignore and the runtime-state/ tree. The bundle is materialized as ONE
-// atomic set with a completion marker (F7, materialize.go; no digest
+// materialize lays out the freshly cloned capsule: workflows/,
+// capsule.json, .gitignore and the runtime-state/ tree. The bundle copy
+// ends with a completion marker (F7, materialize.go; no digest
 // verification — there is no digest chain, polyforge#149 B9). The claim's
 // task-repo inventory is cloned into repos/<name> BEFORE the capsule
 // identity is written, so the recorded baselines are the true claim-time
@@ -219,8 +174,6 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	if err != nil {
 		return err
 	}
-	// Session ownership lives in the daemon-private sync/session-handle
-	// marker, not in the identity.
 	idn := capsule.Identity{
 		WorkItemID: j.wi,
 		CapsuleID:  "cap_" + j.wi,
@@ -238,24 +191,6 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	if err := atomicfile.Write(filepath.Join(j.capsuleDir, capsule.CapsuleJSON), blob, 0o644); err != nil {
 		return err
 	}
-	// v1.5: the session ownership marker — this session's fingerprint,
-	// under gitignored sync/ so a re-claim clone re-stamps its own.
-	if err := writeSessionMarker(j.capsuleDir, j.sessionFingerprint); err != nil {
-		return err
-	}
-	// SessionID carries the PUBLIC fingerprint (B3): session.json is a
-	// capsule-committed file, so the secret must never ride it.
-	// No harness here: it is per step (polyforge#159), named by each
-	// dispatch's spawn-journal line.
-	sess := capsule.Session{
-		SessionID:      j.sessionFingerprint,
-		TranscriptPath: j.transcript,
-		UpdatedAt:      nowStamp(),
-	}
-	sblob, _ := json.MarshalIndent(sess, "", "  ")
-	if err := atomicfile.Write(filepath.Join(j.capsuleDir, capsule.SessionJSON), sblob, 0o644); err != nil {
-		return err
-	}
 	// Task-repo inventory and the F1 task-definition file land before
 	// the bundle copy; the materialized work-item.json is the ONE
 	// authoritative statement of the ask inside the capsule (v1 has no
@@ -270,9 +205,8 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	// plus a notice, never a failed spawn (see recall.go).
 	r.writeRecalledMemories(j)
 	r.writeMemoryPolicy(j)
-	// F7: the bundle copy is ONE atomic set with a completion marker
-	// (materialize.go): the bundle lands under workflows/<bundle>, and
-	// sync/materialized.json gates every later consumer.
+	// F7: the bundle lands under workflows/<bundle> and
+	// sync/materialized.json is written last (materialize.go).
 	return r.materializeBundle(j)
 }
 

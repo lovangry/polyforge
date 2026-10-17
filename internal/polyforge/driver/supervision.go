@@ -731,23 +731,24 @@ func (d *Driver) takeUnbooked(stepID string) int64 {
 // failDispatch records one failed dispatch (the dispatch's single failure
 // record): the step_ended fact, then the TransStepFailed write that
 // applies the death-cause table, then the D7 backoff the decision imposed
-// (already booked into T). blocked reports that the decision parked the
-// workflow (Run then exits cleanly: the owner holds the next move).
-func (d *Driver) failDispatch(ctx context.Context, stepID string, n int64, since time.Time, cause string, exitCode int, detail string) (blocked bool, err error) {
+// (already booked into T). stop reports that Run must return err: the
+// write failed, or the decision parked the workflow (err nil — Run exits
+// cleanly, the owner holds the next move).
+func (d *Driver) failDispatch(ctx context.Context, stepID string, n int64, since time.Time, cause string, exitCode int, detail string) (stop bool, err error) {
 	d.addUnbooked(stepID, since)
 	f := &StepFailure{Cause: cause, Detail: detail, ExitCode: exitCode, WallMs: d.takeUnbooked(stepID)}
 	last := detail[:min(len(detail), 500)]
 	d.announceEnd(stepID, n, supervise.OutcomeExitedWithoutResult, exitCode, last)
 	if err := d.transition(TransitionRequest{Kind: TransStepFailed, StepID: stepID, SpawnN: n, Failure: f}); err != nil {
-		return false, fmt.Errorf("driver: step %s dispatch %d failure record failed: %w", stepID, n, err)
+		return true, fmt.Errorf("driver: step %s dispatch %d failure record failed: %w", stepID, n, err)
 	}
 	d.mu.Lock()
-	blocked = d.exec.WorkflowStatus == StatusBlocked
+	stop = d.exec.WorkflowStatus == StatusBlocked
 	d.mu.Unlock()
-	if !blocked {
+	if !stop {
 		d.sleep(ctx, f.Backoff)
 	}
-	return blocked, nil
+	return stop, nil
 }
 
 // sleep waits for d (tests inject Config.Sleep), cut short by ctx.

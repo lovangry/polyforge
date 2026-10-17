@@ -794,3 +794,32 @@ func TestTransitionRefusalMutatesNothing(t *testing.T) {
 		t.Fatalf("a refused result mutated memory: before=%+v after=%+v", before.Steps["a"], after.Steps["a"])
 	}
 }
+
+// A question carried only in the output object names the same question
+// everywhere: the persisted pending question, the needs_input event, and
+// the park that follows (which must not re-announce it as a restart).
+func TestTransitionNeedsInputEmbeddedQuestionEventMatchesPersisted(t *testing.T) {
+	d, log, _, _ := testEnv(t, spec("a"))
+	mustInit(t, d)
+	mustStart(t, d, "a", 1)
+	if err := d.transition(TransitionRequest{
+		Kind: TransStepResult, StepID: "a", SpawnN: 1,
+		Result: &StepResult{StepID: "a", SpawnN: 1, Outcome: OutcomeNeedsInput,
+			Output: json.RawMessage(`{"question_id":"q_emb","question":"which one?"}`)},
+	}); err != nil {
+		t.Fatalf("needs_input: %v", err)
+	}
+	if q := d.Snapshot().Steps["a"].PendingQuestion; q == nil || q.ID != "q_emb" || q.Question != "which one?" {
+		t.Fatalf("persisted question: %+v", q)
+	}
+	d.announceWaiting()
+	var asked []map[string]any
+	for _, e := range log.entries {
+		if e.kind == "needs_input" {
+			asked = append(asked, e.body)
+		}
+	}
+	if len(asked) != 1 || asked[0]["question_id"] != "q_emb" || asked[0]["question"] != "which one?" {
+		t.Fatalf("one needs_input event naming the persisted question, got %v", asked)
+	}
+}

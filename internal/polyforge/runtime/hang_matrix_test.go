@@ -73,7 +73,7 @@ func (m *matrixRig) othersResponsive(t *testing.T, hung, other string, live bool
 	ctx := context.Background()
 	if !live {
 		within(t, doorBound, "Start of "+other, func() {
-			if err := m.r.Start(ctx, other); err != nil {
+			if err := m.r.Start(ctx, other, StartOpts{}); err != nil {
 				t.Errorf("Start(%s): %v", other, err)
 				return
 			}
@@ -124,37 +124,37 @@ func TestHangMatrixOtherWorkItemsStayResponsive(t *testing.T) {
 	}{
 		{"probe", false, false, func(t *testing.T, m *matrixRig) (func(), <-chan error) {
 			g := m.hub.hangCall(t, "probe", a)
-			done := goErr(func() error { return m.r.Start(ctx, a) })
+			done := goErr(func() error { return m.r.Start(ctx, a, StartOpts{}) })
 			g.waitEntered(t, "the probe")
 			return g.open, done
 		}},
 		{"journal-verify", false, false, func(t *testing.T, m *matrixRig) (func(), <-chan error) {
 			m.hub.claimFaults = []claimFault{{err: errors.New("connection reset (scripted)"), afterCommit: true}}
-			if err := m.r.Start(ctx, a); !isTransient(err) {
+			if err := m.r.Start(ctx, a, StartOpts{}); !isTransient(err) {
 				t.Fatalf("lost-answer Start = %v", err)
 			}
 			g := m.hub.hangCall(t, "verify", a)
-			done := goErr(func() error { return m.r.Start(ctx, a) })
+			done := goErr(func() error { return m.r.Start(ctx, a, StartOpts{}) })
 			g.waitEntered(t, "the journal verify")
 			return g.open, done
 		}},
 		{"claim", false, false, func(t *testing.T, m *matrixRig) (func(), <-chan error) {
 			g := m.hub.hangCall(t, "claim", a)
-			done := goErr(func() error { return m.r.Start(ctx, a) })
+			done := goErr(func() error { return m.r.Start(ctx, a, StartOpts{}) })
 			g.waitEntered(t, "the claim")
 			return g.open, done
 		}},
 		{"capsule-clone", false, false, func(t *testing.T, m *matrixRig) (func(), <-chan error) {
 			base := m.r.cfg.GitRemoteBase
 			m.r.cfg.GitRemoteBase = strings.TrimSuffix(hangingRemote(t), "/app.git")
-			done := goErr(func() error { return m.r.Start(ctx, a) })
+			done := goErr(func() error { return m.r.Start(ctx, a, StartOpts{}) })
 			waitClaiming(t, m.r, a)
 			m.r.cfg.GitRemoteBase = base // the other work item clones from the hub
 			return func() { _ = m.r.Stop(ctx, a, protocol.FinishWrapped) }, done
 		}},
 		{"task-repo-clone", false, false, func(t *testing.T, m *matrixRig) (func(), <-chan error) {
 			m.hub.reposFor = map[string][]api.ProjectRepo{a: {{Name: "app", URL: hangingRemote(t)}}}
-			done := goErr(func() error { return m.r.Start(ctx, a) })
+			done := goErr(func() error { return m.r.Start(ctx, a, StartOpts{}) })
 			waitClaiming(t, m.r, a)
 			return func() { _ = m.r.Stop(ctx, a, protocol.FinishWrapped) }, done
 		}},
@@ -190,7 +190,7 @@ func TestHangMatrixOtherWorkItemsStayResponsive(t *testing.T) {
 		{"compensation-session-end", false, false, func(t *testing.T, m *matrixRig) (func(), <-chan error) {
 			m.hub.reposFor = map[string][]api.ProjectRepo{a: {{Name: "app", URL: "/nonexistent/app.git"}}}
 			g := m.hub.hangCall(t, "end", a)
-			done := goErr(func() error { _ = m.r.Start(ctx, a); return nil })
+			done := goErr(func() error { _ = m.r.Start(ctx, a, StartOpts{}); return nil })
 			g.waitEntered(t, "the compensation's session end")
 			return g.open, done
 		}},
@@ -316,7 +316,7 @@ func TestHangMatrixOtherWorkItemsStayResponsive(t *testing.T) {
 				}
 				return inner(sctx, in)
 			}
-			done := goErr(func() error { return m.r.Start(ctx, a) })
+			done := goErr(func() error { return m.r.Start(ctx, a, StartOpts{}) })
 			<-entered
 			return func() { close(release) }, done
 		}},

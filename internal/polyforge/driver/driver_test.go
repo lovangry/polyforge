@@ -212,6 +212,10 @@ func TestRunHappyPathSequencesAndCompletes(t *testing.T) {
 	if d.SpawnN() != 2 {
 		t.Fatalf("spawn counter: %d", d.SpawnN())
 	}
+	// the spawn carries the done set the handoff producer check reads
+	if d0, d1 := sp.spawnAt(0).Done, sp.spawnAt(1).Done; len(d0) != 0 || len(d1) != 1 || !d1["a"] {
+		t.Fatalf("done sets: first %v, second %v", d0, d1)
+	}
 }
 
 func TestRunTerminalFileStopsImmediately(t *testing.T) {

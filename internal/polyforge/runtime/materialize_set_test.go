@@ -1,12 +1,9 @@
 package runtime
 
-// materialize_set_test.go: the F7 lane — the bundle materialization as
-// one atomic set with a completion marker (reference.md §7.1 semantics): the full
-// materialization shape (workflows/<bundle> + marker targets), the trust gate's reuse rule (marker present
-// and targets whole → untouched), the torn-snapshot rebuild (marker
-// gone → re-materialize + marker rewritten), and the adoption of the
-// pilot's hand-compensated scene (a manual marker that predates the
-// product fix).
+// materialize_set_test.go: the F7 lane — the bundle copy with its
+// completion marker: the full materialization shape (workflows/<bundle>
+// + marker targets), the recovery trust gate (marker present, its
+// bundle, every target on disk) and a rebuild over a torn snapshot.
 
 import (
 	"context"
@@ -27,7 +24,7 @@ func startedWithBundle(t *testing.T, wi string) (*Runtime, string, *job) {
 	hub := newFakeHub()
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.WorkflowsDir = wfDir
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() {
@@ -100,14 +97,10 @@ func TestMaterializeSetCompleteShape(t *testing.T) {
 			t.Fatalf("marker target missing from the list: %s", rel)
 		}
 	}
-	// sync/ is daemon-private: the capsule .gitignore excludes it, and
-	// no staging residue survives a complete materialization.
+	// sync/ is daemon-private: the capsule .gitignore excludes it.
 	gi, err := os.ReadFile(filepath.Join(capDir, ".gitignore"))
 	if err != nil || !containsLine(string(gi), "/sync/") {
 		t.Fatalf(".gitignore must exclude /sync/: %v (%q)", err, gi)
-	}
-	if _, err := os.Stat(filepath.Join(capDir, "sync", "materialize-staging")); !os.IsNotExist(err) {
-		t.Fatalf("staging husk survived: %v", err)
 	}
 }
 
@@ -135,34 +128,10 @@ func splitLines(s string) []string {
 	return out
 }
 
-// A trusted snapshot is left untouched: the gate (marker present and
-// every recorded target whole) short-circuits the re-materialization, so
-// neither the staged copies nor the marker churn.
-func TestMaterializeSetTrustedSnapshotUntouched(t *testing.T) {
-	r, capDir, j := startedWithBundle(t, "wi_f7b")
-	before := readMarker(t, capDir)
-
-	if err := r.materializeBundle(j); err != nil {
-		t.Fatal(err)
-	} // a trusted set is a no-op
-
-	after := readMarker(t, capDir)
-	if after.CompletedAt != before.CompletedAt {
-		t.Fatalf("marker was rewritten on a trusted snapshot (%s → %s)",
-			before.CompletedAt, after.CompletedAt)
-	}
-	if len(after.Targets) != len(before.Targets) {
-		t.Fatalf("marker target set changed on a trusted snapshot")
-	}
-	if !r.materializationComplete(j) {
-		t.Fatal("gate must validate its own materialization")
-	}
-}
-
-// A torn snapshot (the marker removed — a crash between the marker drop
-// and its rewrite) is re-materialized and the marker rewritten; a target
-// lost after the marker (the gate's missing-file hole) triggers the same
-// rebuild.
+// A torn snapshot (the marker removed, a target gone) fails the gate
+// and a materialization rebuilds it and rewrites the marker; a target
+// lost after the marker (the gate's missing-file hole) fails the gate
+// too.
 func TestMaterializeSetTornSnapshotRebuilt(t *testing.T) {
 	r, capDir, j := startedWithBundle(t, "wi_f7c")
 
@@ -202,10 +171,10 @@ func TestMaterializeSetTornSnapshotRebuilt(t *testing.T) {
 	}
 }
 
-// A capsule recovered from an older daemon is adopted untouched: its
+// A capsule recovered from an older daemon passes the recovery gate: its
 // marker still carries the retired "adapters" key and lists the retired
-// agents/ copy as a target, and its live agents/ dir is inert. The gate
-// validates it (identity + targets on disk) without a rebuild.
+// agents/ copy as a target, and the gate validates it (identity +
+// targets on disk). A marker for another bundle fails it.
 func TestMaterializeSetAdoptsPreG4Capsule(t *testing.T) {
 	r, capDir, j := startedWithBundle(t, "wi_f7d")
 
@@ -229,14 +198,9 @@ func TestMaterializeSetAdoptsPreG4Capsule(t *testing.T) {
 	if !r.materializationComplete(j) {
 		t.Fatal("a pre-G4 marker with its targets on disk must validate")
 	}
-	if err := r.materializeBundle(j); err != nil {
-		t.Fatal(err)
-	}
-	if m := readMarker(t, capDir); m.CompletedAt != "2026-10-01T00:00:00Z" {
-		t.Fatalf("trusted pre-G4 snapshot was churned: %+v", m)
-	}
 
-	// A marker for a different bundle still fails the gate and rebuilds.
+	// A marker for a different bundle fails the gate; a materialization
+	// rewrites it for the job's bundle.
 	os.Remove(markerPath)
 	other, _ := json.Marshal(map[string]any{
 		"bundle_name": "other-bundle", "targets": []string{"agents/step.md"},
@@ -252,52 +216,6 @@ func TestMaterializeSetAdoptsPreG4Capsule(t *testing.T) {
 	}
 	if m := readMarker(t, capDir); m.BundleName != "demo-bundle" || !r.materializationComplete(j) {
 		t.Fatalf("foreign marker not rebuilt: %+v", m)
-	}
-}
-
-// The claim path re-materializes only what is missing: a journal-replayed
-// start of the SAME session (the crashed-Start husk shape — B1 replay,
-// same secret, so the capsule marker matches and the husk is reused)
-// reuses the trusted snapshot instead of churning it.
-func TestMaterializeSetClaimReplayReusesTrustedSnapshot(t *testing.T) {
-	setGitIdentity(t)
-	wfDir := pristineBundle(t)
-	hub := newFakeHub()
-	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
-	r.cfg.WorkflowsDir = wfDir
-
-	if err := r.Start(context.Background(), "wi_f7e"); err != nil {
-		t.Fatalf("first Start: %v", err)
-	}
-	capDir := testCapsuleDir(r, "wi_f7e")
-	before := readMarker(t, capDir)
-	j := r.jobOf("wi_f7e")
-	j.mu.Lock()
-	session := j.sessionID
-	j.mu.Unlock()
-
-	// the crash shape: the tree dies, the job leaves the map, the
-	// bookkeeping is wiped (the crash predates registration), and the
-	// journal still names the unsettled start.
-	r.killAgentTree(j)
-	r.mu.Lock()
-	delete(r.jobs, "wi_f7e")
-	r.mu.Unlock()
-	writeStateFile(t, r, nil)
-	if err := r.noteClaiming("wi_f7e", session, nil); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := restartSettled(t, r); err != nil {
-		t.Fatalf("Restart (journal replay): %v", err)
-	}
-	t.Cleanup(func() {
-		_ = r.Stop(context.Background(), "wi_f7e", protocol.FinishWrapped)
-	})
-	after := readMarker(t, capDir)
-	if after.CompletedAt != before.CompletedAt {
-		t.Fatalf("claim replay churned a trusted snapshot (%s → %s)",
-			before.CompletedAt, after.CompletedAt)
 	}
 }
 
@@ -317,7 +235,7 @@ func TestMaterializeBundleWithoutStepsStillCopiesWorkflowTree(t *testing.T) {
 	hub := newFakeHub()
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.WorkflowsDir = dir
-	if err := r.Start(context.Background(), "wi_f7nos"); err != nil {
+	if err := r.Start(context.Background(), "wi_f7nos", StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = r.Stop(context.Background(), "wi_f7nos", protocol.FinishWrapped) })

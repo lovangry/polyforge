@@ -31,7 +31,7 @@ func startForPolicy(t *testing.T, wi, yaml string) workspace.MemoryPolicy {
 			t.Fatal(err)
 		}
 	}
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = r.Stop(context.Background(), wi, protocol.FinishWrapped) })

@@ -72,7 +72,7 @@ func TestShutdownLateBoundClaimIsDeferred(t *testing.T) {
 		return h, err
 	}
 	started := make(chan error, 1)
-	go func() { started <- r.Start(context.Background(), a) }()
+	go func() { started <- r.Start(context.Background(), a, StartOpts{}) }()
 	<-entered
 	within(t, promptly, "the shutdown during an agent start", r.Close)
 	close(proceed)
@@ -98,7 +98,7 @@ func TestShutdownLateBoundClaimIsDeferred(t *testing.T) {
 		}
 	}
 	claims := hub.claimCount()
-	if err := r.Start(context.Background(), "wi_sl_after"); !IsClaimDeferred(err) {
+	if err := r.Start(context.Background(), "wi_sl_after", StartOpts{}); !IsClaimDeferred(err) {
 		t.Fatalf("a Start after the shutdown = %v, want the deferral", err)
 	}
 	if hub.claimCount() != claims {

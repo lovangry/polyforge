@@ -51,7 +51,7 @@ func TestStartSlugClaimRunsUnderCanonicalID(t *testing.T) {
 
 	ctx := context.Background()
 	slug := "proj#7"
-	if err := r.Start(ctx, slug); err != nil {
+	if err := r.Start(ctx, slug, StartOpts{}); err != nil {
 		t.Fatalf("Start by slug: %v", err)
 	}
 	defer func() { _ = r.Stop(ctx, "wi_canon7", protocol.FinishWrapped) }()
@@ -127,7 +127,7 @@ func TestWorkItemFileMaterializedAtStart(t *testing.T) {
 	r, _, _ := newTestRuntime(t, hub, sp)
 
 	ctx := context.Background()
-	if err := r.Start(ctx, "proj#9"); err != nil {
+	if err := r.Start(ctx, "proj#9", StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	defer func() { _ = r.Stop(ctx, "wi_goal9", protocol.FinishWrapped) }()
@@ -223,7 +223,7 @@ func TestRestartDropsPreSessionRecord(t *testing.T) {
 		RemoteURL:  "http://hub/git/" + slug + ".git",
 		SpawnN:     1,
 	}
-	blob, _ := json.MarshalIndent(&stateFile{Version: 1, MachineID: r.cfg.MachineID, Jobs: []*jobRecord{rec}}, "", "  ")
+	blob, _ := json.MarshalIndent(&stateFile{Version: 1, Jobs: []*jobRecord{rec}}, "", "  ")
 	if err := atomicfile.Write(r.statePath, blob, stateFilePerm); err != nil {
 		t.Fatal(err)
 	}

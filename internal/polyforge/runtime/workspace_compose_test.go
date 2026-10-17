@@ -75,7 +75,7 @@ func TestClaimComposeRidesTheJob(t *testing.T) {
 	r.cfg.WorkflowsDir = wfDir
 
 	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [pi:w79/code-a, pi:w79/code-b] }\n")
-	if err := r.Start(context.Background(), "wi_w079comp"); err != nil {
+	if err := r.Start(context.Background(), "wi_w079comp", StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	j := r.jobOf("wi_w079comp")
@@ -127,7 +127,7 @@ func TestClaimComposeWithoutYamlIsBundleOnly(t *testing.T) {
 	r.cfg.GitRemoteBase = hub.capsuleRepoBase
 	r.cfg.WorkflowsDir = wfDir
 
-	if err := r.Start(context.Background(), "wi_w079comp2"); err != nil {
+	if err := r.Start(context.Background(), "wi_w079comp2", StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	j := r.jobOf("wi_w079comp2")

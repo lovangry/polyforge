@@ -36,7 +36,7 @@ func TestSlugAndIDStartsClaimOnce(t *testing.T) {
 				wantClaims := 1
 				if kind == "verify" {
 					hub.claimFaults = []claimFault{{err: errors.New("connection reset (scripted)"), afterCommit: true}}
-					if err := r.Start(ctx, a); !isTransient(err) {
+					if err := r.Start(ctx, a, StartOpts{}); !isTransient(err) {
 						t.Fatalf("lost-answer Start = %v, want the typed transient", err)
 					}
 					wantClaims = 2
@@ -48,11 +48,11 @@ func TestSlugAndIDStartsClaimOnce(t *testing.T) {
 					g = hub.hangCall(t, kind, a) // goes out under the canonical id
 				}
 				firstErr := make(chan error, 1)
-				go func() { firstErr <- r.Start(ctx, first) }()
+				go func() { firstErr <- r.Start(ctx, first, StartOpts{}) }()
 				g.waitEntered(t, kind+" of "+first)
 
 				secondCh := make(chan error, 1)
-				go func() { secondCh <- r.Start(ctx, second) }()
+				go func() { secondCh <- r.Start(ctx, second, StartOpts{}) }()
 				if kind != "probe" {
 					stillPending(t, "the second start", secondCh)
 				}
@@ -93,7 +93,7 @@ func TestSlugStartClaimsUnderCanonicalID(t *testing.T) {
 	hub.canonical = map[string]string{slug: a}
 	g := hub.hangCall(t, "claim", a)
 	done := make(chan error, 1)
-	go func() { done <- r.Start(context.Background(), slug) }()
+	go func() { done <- r.Start(context.Background(), slug, StartOpts{}) }()
 	g.waitEntered(t, "the claim")
 	if rec := journaled(r, a); rec == nil || rec.WorkItemID != a || journaled(r, slug) != nil {
 		t.Fatalf("journal during the claim = %+v (slug key %+v), want the entry under %s", rec, journaled(r, slug), a)
@@ -118,7 +118,7 @@ func TestStartRefusesProbeWithoutID(t *testing.T) {
 	hub := &noIDHub{fakeHub: newFakeHub()}
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	t.Cleanup(r.Close)
-	if err := r.Start(context.Background(), "wi_cl_noid"); err == nil {
+	if err := r.Start(context.Background(), "wi_cl_noid", StartOpts{}); err == nil {
 		t.Fatal("a start whose probe answered no id succeeded")
 	}
 	if n := hub.claimCount(); n != 0 || len(r.loadClaiming()) != 0 {
@@ -153,7 +153,7 @@ func TestClaimEndRetryRefusesStart(t *testing.T) {
 	hub.mu.Lock()
 	hub.end[bad] = errors.New("hub unreachable (scripted)")
 	hub.mu.Unlock()
-	if err := r.Start(context.Background(), bad); err == nil {
+	if err := r.Start(context.Background(), bad, StartOpts{}); err == nil {
 		t.Fatal("the start whose clone fails succeeded")
 	}
 	if journaled(r, bad) != nil {
@@ -168,7 +168,7 @@ func TestClaimEndRetryRefusesStart(t *testing.T) {
 	}
 	claims := hub.claimCount()
 	for i := 0; i < 3; i++ {
-		if err := r.Start(context.Background(), bad); err == nil {
+		if err := r.Start(context.Background(), bad, StartOpts{}); err == nil {
 			t.Fatal("a Start during the compensation retry succeeded")
 		}
 		time.Sleep(30 * time.Millisecond)
@@ -185,7 +185,7 @@ func TestClaimEndRetryRefusesStart(t *testing.T) {
 		t.Fatalf("the retried close = %+v, want blocked under the claim's session", last)
 	}
 	hub.forceEnd(bad) // the owner's resume of the blocked work item
-	if err := r.Start(context.Background(), bad); err != nil {
+	if err := r.Start(context.Background(), bad, StartOpts{}); err != nil {
 		t.Fatalf("Start after the compensation landed: %v", err)
 	}
 }
@@ -249,7 +249,7 @@ func TestStartLocalRefusalMakesNoHubCall(t *testing.T) {
 	startRunning(t, r, a)
 	g := hub.hangCall(t, "probe", a)
 	within(t, promptly, "a Start of the running work item", func() {
-		if err := r.Start(context.Background(), a); err == nil || isTransient(err) {
+		if err := r.Start(context.Background(), a, StartOpts{}); err == nil || isTransient(err) {
 			t.Errorf("Start of a running work item = %v, want the already-active refusal", err)
 		}
 	})

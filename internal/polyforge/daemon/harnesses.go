@@ -92,14 +92,6 @@ func setOrUnset(v string) string {
 	return "unset"
 }
 
-// harnessRoot is the parent of the step harness state dirs.
-func (d *Daemon) harnessRoot() string {
-	if d.cfg.HarnessRoot != "" {
-		return d.cfg.HarnessRoot
-	}
-	return d.cfg.DataDir
-}
-
 // harnessStatuses answers the /status harnesses section.
 func (d *Daemon) harnessStatuses() map[string]harnessStatus {
 	pi := harnessStatus{Bin: cmp.Or(d.cfg.PiBin, "pi")}
@@ -128,7 +120,7 @@ func (d *Daemon) harnessStatuses() map[string]harnessStatus {
 // configured is exactly the doctor's "carries nothing" verdict, and the
 // in-repo fake-cfg tests below pin the un-configured default shape).
 func (d *Daemon) claudeConfigFacts() (map[string]string, map[string]harnessDirStatus, string) {
-	root := d.harnessRoot()
+	root := d.cfg.HarnessRoot
 	ccDir := filepath.Join(root, "claude-config")
 	dirs := map[string]harnessDirStatus{
 		"step_agent":          {Path: filepath.Join(root, "step-agent")},
@@ -178,7 +170,7 @@ var modelsEnvRefRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za
 // Sorted, deduplicated; never a value (a literal key or a `!command`
 // value contributes nothing). Absent or unparsable file: none.
 func (d *Daemon) piModelsEnvRefs() []string {
-	raw, err := os.ReadFile(filepath.Join(d.harnessRoot(), "step-agent", "models.json"))
+	raw, err := os.ReadFile(filepath.Join(d.cfg.HarnessRoot, "step-agent", "models.json"))
 	if err != nil {
 		return nil
 	}

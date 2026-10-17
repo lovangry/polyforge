@@ -34,7 +34,7 @@ func startWithRecall(t *testing.T, wi string, seam func(query, project string, t
 	}}
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.MemoryRecall = seam
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = r.Stop(context.Background(), wi, protocol.FinishWrapped) })

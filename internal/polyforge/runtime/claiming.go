@@ -50,8 +50,6 @@ type claimingFile struct {
 type claimingRec struct {
 	WorkItemID string `json:"work_item_id"` // the claimed id (an older entry: the submitted spelling)
 	SessionID  string `json:"session_id"`   // the minted SECRET (replay anchor, D4)
-	MachineID  string `json:"machine_id"`
-	At         string `json:"at"`
 	// Models is the manual `pf submit --models` list of this start, so a
 	// crash-replayed claim keeps it.
 	Models []string `json:"models,omitempty"`
@@ -118,8 +116,6 @@ func (r *Runtime) noteClaiming(wi, sessionID string, models []string) error {
 	items[wi] = &claimingRec{
 		WorkItemID: wi,
 		SessionID:  sessionID,
-		MachineID:  r.cfg.MachineID,
-		At:         nowStamp(),
 		Models:     models,
 	}
 	return r.writeClaiming(items)

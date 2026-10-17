@@ -178,11 +178,6 @@ type Runtime struct {
 	// Resolve's unknown-input answer is "", and the daemon's resolver
 	// falls back to aihub for those.
 	aliases map[string]string
-	// origins: submit origins noted by the daemon, consumed at job creation.
-	origins map[string]Origin
-	// manualModels: `pf submit --models` lists noted by the daemon,
-	// consumed by the next Start of that work item (like origins).
-	manualModels map[string][]string
 	// manualMu guards the daemon-local manual-models.json (manualmodels.go).
 	manualMu sync.Mutex
 	// claimMu serializes the claiming journal's read-modify-writes: its
@@ -209,7 +204,10 @@ type AgentStartInput struct {
 	Project    string
 	CapsuleDir string
 	BundleName string
-	SpawnN     int64
+	// SessionHandle is the owning session's PUBLIC fingerprint (B3); it
+	// names the dispatches' spawn tokens and capsule transcripts.
+	SessionHandle string
+	SpawnN        int64
 	// StepCandidates is the polyforge#79 effective per-step candidate
 	// map this derivation dispatches under (nil = no yaml layer — the
 	// bundle's own resolution). The bridge forwards it to the driver.
@@ -339,19 +337,17 @@ func New(cfg Config, hub Aihub, spawner Spawner, toOB *supervise.Queue[protocol.
 	cfg.fill()
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Runtime{
-		cfg:          cfg,
-		hub:          hub,
-		spawner:      spawner,
-		toOB:         toOB,
-		fromOB:       fromOB,
-		ctx:          ctx,
-		cancel:       cancel,
-		jobs:         map[string]*job{},
-		boxes:        map[string]*mailbox{},
-		aliases:      map[string]string{},
-		origins:      map[string]Origin{},
-		manualModels: map[string][]string{},
-		statePath:    filepath.Join(cfg.DataDir, "runtime-state.json"),
+		cfg:       cfg,
+		hub:       hub,
+		spawner:   spawner,
+		toOB:      toOB,
+		fromOB:    fromOB,
+		ctx:       ctx,
+		cancel:    cancel,
+		jobs:      map[string]*job{},
+		boxes:     map[string]*mailbox{},
+		aliases:   map[string]string{},
+		statePath: filepath.Join(cfg.DataDir, "runtime-state.json"),
 	}
 }
 
@@ -455,7 +451,7 @@ func (r *Runtime) persist() error {
 		recs = append(recs, j.record())
 	}
 	r.mu.Unlock()
-	blob, err := json.MarshalIndent(&stateFile{Version: 1, MachineID: r.cfg.MachineID, Jobs: recs}, "", "  ")
+	blob, err := json.MarshalIndent(&stateFile{Version: 1, Jobs: recs}, "", "  ")
 	if persistSnapped != nil {
 		persistSnapped(gen)
 	}
@@ -471,11 +467,9 @@ func (r *Runtime) persist() error {
 	return err
 }
 
-// persistLog is persist whose failure is only logged.
-func (r *Runtime) persistLog(wi string) { r.persistLogged(wi) }
-
-// persistLogged is persistLog reporting whether the write landed.
-func (r *Runtime) persistLogged(wi string) bool {
+// persistLog is persist whose failure is only logged; it reports
+// whether the write landed.
+func (r *Runtime) persistLog(wi string) bool {
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", wi, err)
 		return false
@@ -524,49 +518,6 @@ func (r *Runtime) NoteAlias(alias, canonical string) {
 	r.mu.Lock()
 	r.aliases[alias] = canonical
 	r.mu.Unlock()
-}
-
-// NoteOrigin records the origin the NEXT job started for wi will carry.
-// The daemon calls it right before Start; claimPlaceholder consumes it.
-func (r *Runtime) NoteOrigin(wi string, o Origin) {
-	r.mu.Lock()
-	r.origins[wi] = o
-	r.mu.Unlock()
-}
-
-// NoteModels records the manual `pf submit --models` list the NEXT
-// Start of wi will compose as the top precedence level. A nil/empty list
-// notes nothing.
-func (r *Runtime) NoteModels(wi string, models []string) {
-	if len(models) == 0 {
-		return
-	}
-	r.mu.Lock()
-	r.manualModels[wi] = models
-	r.mu.Unlock()
-}
-
-func (r *Runtime) takeModels(wi string) []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	m := r.manualModels[wi]
-	delete(r.manualModels, wi)
-	return m
-}
-
-// takeOrigin pops the noted origin for any of the given id spellings.
-func (r *Runtime) takeOrigin(ids ...string) *Origin {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	var found *Origin
-	for _, id := range ids {
-		if o, ok := r.origins[id]; ok {
-			o := o
-			found = &o
-			delete(r.origins, id)
-		}
-	}
-	return found
 }
 
 // Resolve maps any id form this runtime knows — a live job key (already
@@ -641,6 +592,15 @@ func mintSessionID() (string, error) {
 // Start (§一 Runtime): claim → clone/init capsule → materialize → spawn →
 // RTStarted.
 
+// StartOpts is what the daemon's start carries beyond the id: the
+// origin the job records (nil: none) and the manual `pf submit --models`
+// list composed as the top precedence level (nil: the one recorded for
+// a re-claim, if any).
+type StartOpts struct {
+	Origin *Origin
+	Models []string
+}
+
 // Start claims wi and runs it to a live agent, returning once the claim
 // settled. The read-only work-item probe and the local pre-claim checks
 // (workspace yaml, bundle) run on the caller's goroutine — a refusal
@@ -649,8 +609,7 @@ func mintSessionID() (string, error) {
 // of the canonical id's actor (claim), so two starts of one work item
 // under different spellings meet in one mailbox and the second finds the
 // first's job.
-func (r *Runtime) Start(ctx context.Context, wi string) error {
-	manual := r.takeModels(wi) // always consumed: a refused start must not leak it
+func (r *Runtime) Start(ctx context.Context, wi string, opts StartOpts) error {
 	if r.stopped(ctx) {
 		return claimDeferredError(wi)
 	}
@@ -680,7 +639,7 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 			return err
 		}
 	}
-	err = r.call(ctx, probe.ID, func() error { return r.claim(ctx, wi, probe.ID, manual) })
+	err = r.call(ctx, probe.ID, func() error { return r.claim(ctx, wi, probe.ID, opts) })
 	if errors.Is(err, errAbandoned) {
 		return claimDeferredError(wi) // the shutdown came while it waited its turn
 	}
@@ -720,7 +679,7 @@ func (r *Runtime) probeWorkItem(wi string) (*api.WorkItem, error) {
 // reused when its session still holds the work item (the claim is then a
 // D4 replay that hands the same answer back), so a claim whose answer was
 // lost is adopted instead of orphaned.
-func (r *Runtime) claim(ctx context.Context, spelling, id string, manual []string) error {
+func (r *Runtime) claim(ctx context.Context, spelling, id string, opts StartOpts) error {
 	if ex := r.jobOf(id); ex != nil {
 		if st, _ := ex.snapshot(); st != StatePaused && st != StateClaiming {
 			return alreadyActive(id, st)
@@ -733,7 +692,7 @@ func (r *Runtime) claim(ctx context.Context, spelling, id string, manual []strin
 	if err != nil {
 		return err
 	}
-	if err := r.noteClaiming(id, sessionID, manual); err != nil {
+	if err := r.noteClaiming(id, sessionID, opts.Models); err != nil {
 		return fmt.Errorf("runtime: %s: claiming journal write failed (refusing to claim): %w", id, err)
 	}
 	crashpoint.At("claim.before-answer")
@@ -765,7 +724,7 @@ func (r *Runtime) claim(ctx context.Context, spelling, id string, manual []strin
 		return r.abandonClaim(bare, cerr, cerr.Error())
 	}
 	crashpoint.At("claim.after-answer")
-	j, cctx, err := r.claimPlaceholder(ctx, spelling, sessionID, resp, manual)
+	j, cctx, err := r.claimPlaceholder(ctx, spelling, sessionID, resp, opts)
 	if err != nil {
 		return err
 	}
@@ -827,7 +786,7 @@ func (r *Runtime) claimIntent(id string) (sessionID string, replay bool, err err
 // carries (F2); the capsule directory alone is named for humans, after the
 // answer's slug in its path-safe form "<project>-<seq>" (api.PathName). A
 // raw slug never reaches any path ("#" is the URL fragment separator).
-func (r *Runtime) claimPlaceholder(ctx context.Context, spelling, sessionID string, resp *api.SessionClaimResponse, manual []string) (*job, context.Context, error) {
+func (r *Runtime) claimPlaceholder(ctx context.Context, spelling, sessionID string, resp *api.SessionClaimResponse, opts StartOpts) (*job, context.Context, error) {
 	c := resp.Claim
 	id := claimAnswerID(resp)
 	fp := api.SessionFingerprint(sessionID)
@@ -839,8 +798,7 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, spelling, sessionID stri
 	}
 	if ex := r.jobOf(id); ex != nil {
 		// a retained paused record or a journal placeholder: the new
-		// session owns the WI (prepareCapsule quarantines the old scene on
-		// the session-marker mismatch)
+		// claim owns the WI (prepareCapsule quarantines the old scene)
 		r.dropJob(ex)
 		r.persistLog(id)
 	}
@@ -861,6 +819,7 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, spelling, sessionID stri
 	// carries one records it under the daemon's data dir; a re-claim
 	// (pf resume of a blocked WI) carries none and reads it back. Never
 	// from the capsule — the agent writes there.
+	manual := opts.Models
 	if len(manual) > 0 {
 		r.saveManualModels(id, manual)
 	} else {
@@ -888,7 +847,7 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, spelling, sessionID stri
 		bundleName:   c.BundleName,
 		repos:        c.Repos,
 		item:         &resp.WorkItem,
-		origin:       r.takeOrigin(spelling, id),
+		origin:       opts.Origin,
 		manualModels: manual,
 	}
 	// polyforge#113: the capsule routes by the claim answer's project
@@ -915,9 +874,9 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, spelling, sessionID stri
 	return j, cctx, nil
 }
 
-// claimScene lays the claimed capsule out: clone (or reuse this
-// session's own husk), the cross-daemon sealed-head guard, the spawn
-// counter seed and the materialize (task-repo clones included). A failure
+// claimScene lays the claimed capsule out: a fresh clone, the
+// cross-daemon sealed-head guard and the materialize (task-repo clones
+// included). A failure
 // answers the error and the close note.
 func (r *Runtime) claimScene(ctx context.Context, j *job, c api.SessionClaim) (note string, err error) {
 	if err := ctx.Err(); err != nil {
@@ -929,14 +888,6 @@ func (r *Runtime) claimScene(ctx context.Context, j *job, c api.SessionClaim) (n
 	if err := r.verifySealedHead(j, c); err != nil {
 		return err.Error(), err
 	}
-	// B2 spawn_n source: a FRESHLY CLAIMED capsule may carry another
-	// session's spawn journal (the re-claim clone path — the journal rides
-	// capsule git), so the derivation counter continues where the
-	// capsule's history left off; a brand-new capsule answers 0.
-	seed := spawnJournalMaxN(j.capsuleDir) // disk read: outside the job's mutex
-	j.mu.Lock()
-	j.spawnN = seed
-	j.mu.Unlock()
 	if err := r.materialize(ctx, j); err != nil {
 		// A typed task-repo clone failure (DAEMON-507) keeps its detail as
 		// the close note; every other materialization failure names itself.
@@ -977,68 +928,38 @@ func (r *Runtime) finishClaim(ctx context.Context, j *job, sceneErr error, note 
 		r.dropJob(j)
 		return r.abandonClaim(j, sceneErr, note)
 	}
-	starter := r.cfg.AgentStarter
-	if starter == nil {
+	if r.cfg.AgentStarter == nil {
 		err := fmt.Errorf("runtime misassembly: no execution engine bound (Config.AgentStarter is nil) — the legacy in-package WI-Agent engine was deleted (polyforge#106); the daemon binds the driver bridge starter unconditionally at assembly")
 		r.dropJob(j)
 		return r.abandonClaim(j, err, err.Error())
 	}
-	// The derivation IS a derivation (B2): advance the counter so the
-	// RTStarted emission carries SpawnN ≥ 1 (observe refuses to monitor
-	// SpawnN ≤ 0, and the driver's step ordinals seed from it).
-	j.mu.Lock()
-	j.spawnN++
-	spawnN := j.spawnN
-	j.mu.Unlock()
-	h, err := starter(ctx, AgentStartInput{
-		WI:         j.wi,
-		Project:    j.project,
-		CapsuleDir: j.capsuleDir,
-		BundleName: j.bundleName,
-		SpawnN:     int64(spawnN),
-		Spawner:    r.spawner,
-		StepEnded:  r.stepEnded(j.wi),
-		// polyforge#79: the claim-time compose rides to the driver
-		StepCandidates: j.stepCandidates,
-	})
+	// polyforge#79: the claim-time compose rides to the driver; the
+	// derivation advances the counter so RTStarted carries SpawnN ≥ 1
+	// (observe refuses to monitor SpawnN ≤ 0).
+	_, err := r.startEngine(ctx, j, j.stepCandidates, "")
+	if errors.Is(err, errEngineStopped) {
+		// nothing runs behind the shutdown: the claim is deferred like
+		// any the shutdown caught
+		r.dropJob(j)
+		return claimDeferredError(j.wi)
+	}
 	if err != nil {
 		r.dropJob(j)
 		return r.abandonClaim(j, err, "driver start: "+err.Error())
 	}
-	pid := r.bindAgent(j, h)
-	if r.stopped(ctx) {
-		// the shutdown came while the engine started: nothing runs behind
-		// it — the claim is deferred like any the shutdown caught
-		r.killAgentTree(j)
-		r.dropJob(j)
-		return claimDeferredError(j.wi)
-	}
 	if err := j.transition(StateRunning); err != nil {
 		return err // unreachable: only the claim leaves CLAIMING
 	}
-	if r.persistLogged(j.wi) {
+	if r.persistLog(j.wi) {
 		r.clearClaiming(j.wi) // the start settled: the journal entry has done its job
 	}
 	// the secret rides in-process to the observe lane only (its M4
 	// session revalidation needs it); never a log, never the capsule
+	j.mu.Lock()
+	spawnN, pid := j.spawnN, j.agentPID
+	j.mu.Unlock()
 	r.send(protocol.RTMsg{Kind: protocol.RTStarted, SpawnN: spawnN, WorkItem: j.wi, AgentPID: pid, SessionID: j.sessionID})
 	return nil
-}
-
-// bindAgent makes h the job's agent and answers the pid recorded for it.
-// A bridge handle fronts no child process group (its PID() answers the
-// hosting daemon's own pid — never signalable), so its pid is recorded as
-// 0; a scripted test engine's real child pid is recorded verbatim for the
-// tree killer.
-func (r *Runtime) bindAgent(j *job, h AgentHandle) int {
-	pid := h.PID()
-	if pid == os.Getpid() {
-		pid = 0
-	}
-	j.mu.Lock()
-	j.agent, j.agentPID, j.agentStartedAt = h, pid, h.StartedAt()
-	j.mu.Unlock()
-	return pid
 }
 
 // unmappedProjectError is the typed DAEMON-412 placement refusal.
@@ -1159,7 +1080,7 @@ func (r *Runtime) pendingClose(j *job, note string) bool {
 	j.mu.Unlock()
 	r.putJob(j)
 	r.retry(j)
-	return r.persistLogged(j.wi)
+	return r.persistLog(j.wi)
 }
 
 // verifySealedHead is the cross-daemon continue guard (v2-converge §7): a
@@ -1281,26 +1202,21 @@ func (r *Runtime) tap(wi, kind string, body map[string]any) {
 
 // claimDeferredError is the typed answer of a start the shutdown stopped
 // (DAEMON-410): nothing turned blocked; a claim that landed stays in the
-// claiming journal and the next daemon start replays it. It unwraps to
-// that *api.Error, so the faces answer it as such.
+// claiming journal and the next daemon start replays it.
 func claimDeferredError(wi string) error {
-	return &claimDeferred{&api.Error{Code: api.ErrDaemonGone,
-		Detail: fmt.Sprintf("%s: the daemon is shutting down; the start is deferred (a landed claim stays in the claiming journal and resumes at the next start)", wi)}}
+	return &api.Error{Code: api.ErrDaemonGone,
+		Detail: fmt.Sprintf("%s: the daemon is shutting down; the start is deferred (a landed claim stays in the claiming journal and resumes at the next start)", wi)}
 }
-
-type claimDeferred struct{ ae *api.Error }
-
-func (e *claimDeferred) Error() string { return e.ae.Error() }
-func (e *claimDeferred) Unwrap() error { return e.ae }
 
 // ErrClaimClosed is the Start answer of a claim an operator close (Stop
 // during CLAIMING) settled: the start is over and must not be retried.
 var ErrClaimClosed = errors.New("runtime: the claim was closed by the operator before its agent started")
 
-// IsClaimDeferred reports whether a Start error is the shutdown deferral.
+// IsClaimDeferred reports whether a Start error is the shutdown deferral
+// (Start's only DAEMON-410 answer).
 func IsClaimDeferred(err error) bool {
-	var cd *claimDeferred
-	return errors.As(err, &cd)
+	var ae *api.Error
+	return errors.As(err, &ae) && ae.Code == api.ErrDaemonGone
 }
 
 // supersede releases a work item another session holds (v1.5 M4 + m3:

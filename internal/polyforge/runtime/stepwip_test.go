@@ -40,7 +40,7 @@ func TestStepEndWIPSurvivesACrashAndReclaim(t *testing.T) {
 	}
 	g.hub.forceEnd(g.wi)
 
-	if err := g.r.Start(context.Background(), g.wi); err != nil {
+	if err := g.r.Start(context.Background(), g.wi, StartOpts{}); err != nil {
 		t.Fatalf("re-claim Start: %v", err)
 	}
 	t.Cleanup(func() { terminateJobAgent(g.r, g.wi) })
@@ -68,7 +68,7 @@ func TestAgentStartCarriesTheStepEndHook(t *testing.T) {
 		got = in.StepEnded
 		return inner(ctx, in)
 	}
-	if err := g.r.Start(context.Background(), g.wi); err != nil {
+	if err := g.r.Start(context.Background(), g.wi, StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { terminateJobAgent(g.r, g.wi) })

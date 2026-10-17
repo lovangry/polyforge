@@ -35,7 +35,7 @@ func sealRetryRuntime(t *testing.T, wi string) (*Runtime, *fakeHub, func() []str
 		mu.Unlock()
 	}
 	t.Cleanup(func() { r.Close(); terminateJobAgent(r, wi) })
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	if m := recvRT(t, toOB); m.Kind != protocol.RTStarted {

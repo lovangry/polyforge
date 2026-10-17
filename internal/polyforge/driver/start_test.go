@@ -113,19 +113,17 @@ func TestStartForwardsStepCandidates(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bundle, "steps", "fix.md"), []byte("do the fix\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "session.json"), []byte(`{"harness":"pi","session_id":"fp123"}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
 	sp := &startSpawner{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	h, err := Start(ctx, StartConfig{
-		WI:         "wi_pass",
-		CapsuleDir: dir,
-		BundleName: "wf",
-		SpawnN:     1,
-		Spawner:    sp,
+		WI:            "wi_pass",
+		CapsuleDir:    dir,
+		BundleName:    "wf",
+		SessionHandle: "fp123",
+		SpawnN:        1,
+		Spawner:       sp,
 		StepCandidates: map[string][]string{
 			"fix": {"pi:eff-a", "pi:eff-b"},
 		},
@@ -141,6 +139,11 @@ func TestStartForwardsStepCandidates(t *testing.T) {
 	})
 	if got := sp.last().Model; got != "eff-a" {
 		t.Fatalf("first dispatch model %q, want the effective head eff-a", got)
+	}
+	// the Start's session handle names the dispatch (spawn token and
+	// capsule transcript)
+	if p := sp.last(); p.SessionHandle != "fp123" || filepath.Base(p.TranscriptPath) != "session-fp123.jsonl" {
+		t.Fatalf("dispatch handle %q / transcript %q, want the Start's fp123", p.SessionHandle, p.TranscriptPath)
 	}
 }
 
@@ -183,9 +186,6 @@ func TestStartWiresDriverEventsAndSupervisionLink(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(bundle, "steps", "fix.md"), []byte("do the fix\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "session.json"), []byte(`{"harness":"pi","session_id":"fp123"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	sp := &startSpawner{}

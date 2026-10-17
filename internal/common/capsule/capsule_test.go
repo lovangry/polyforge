@@ -16,7 +16,6 @@ func TestNoCapsuleStructCarriesLineageKeys(t *testing.T) {
 		blob []byte
 	}{
 		{"Identity", mustJSON(t, Identity{})},
-		{"Session", mustJSON(t, Session{})},
 		{"Execution", mustJSON(t, Execution{})},
 		{"WorkItemDoc", mustJSON(t, WorkItemDoc{})},
 	} {

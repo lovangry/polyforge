@@ -84,7 +84,7 @@ func TestMaterializeFailureBlocksGeneration(t *testing.T) {
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.WorkflowsDir = wfDir
 
-	err := r.Start(context.Background(), "wi_cap405")
+	err := r.Start(context.Background(), "wi_cap405", StartOpts{})
 	if err == nil {
 		t.Fatal("Start must refuse an unmaterializable inventory")
 	}
@@ -128,7 +128,7 @@ func TestSpawnFailureBlocksGeneration(t *testing.T) {
 	sp.failFresh = 1
 	r, _, _ := newTestRuntime(t, hub, sp)
 
-	if err := r.Start(context.Background(), "wi_spawnfail"); err == nil {
+	if err := r.Start(context.Background(), "wi_spawnfail", StartOpts{}); err == nil {
 		t.Fatal("Start must fail when the derivation cannot spawn")
 	}
 	if n := hub.endCount(); n != 1 || hub.lastEnd().Status != api.StatusBlocked {
@@ -286,7 +286,7 @@ func TestAbandonedClaimKeepsSessionWhenCloseFails(t *testing.T) {
 	r.cfg.WorkflowsDir = wfDir
 	r.cfg.EndRetryBase = time.Hour // the retry stays out of the way
 
-	if err := r.Start(context.Background(), "wi_closefail"); err == nil {
+	if err := r.Start(context.Background(), "wi_closefail", StartOpts{}); err == nil {
 		t.Fatal("Start must fail on the unmaterializable inventory")
 	}
 	recs := loadRecords(t, r)

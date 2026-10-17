@@ -73,7 +73,7 @@ func TestStartClonesTaskRepos(t *testing.T) {
 	hub.repos = []api.ProjectRepo{{Name: "app", URL: url}}
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 
-	if err := r.Start(context.Background(), "wi_repo1"); err != nil {
+	if err := r.Start(context.Background(), "wi_repo1", StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	capDir := testCapsuleDir(r, "wi_repo1")
@@ -112,29 +112,27 @@ func TestStartClonesTaskRepos(t *testing.T) {
 	unseal(t, repoDir)
 }
 
-// A re-materialize of the SAME session's capsule (the crashed-Start
-// journal-replay shape — same secret, so the sync/session-handle marker
-// matches and the husk is reused) must not touch the existing task-repo
-// worktree: the agent's uncommitted edits survive, no fetch/reset happens
-// (the remote moving forward changes nothing), and the recorded
-// claim-time baseline is carried forward verbatim.
-func TestRematerializePreservesRepoScene(t *testing.T) {
+// A journal replay of the SAME session's crashed start (the claim
+// answered, the record never landed) still starts from a fresh clone:
+// the husk — with whatever the reaped step left uncommitted in a task
+// repo — is quarantined beside the capsule, bytes intact, and the
+// replayed claim clones the task repo afresh.
+func TestClaimReplayQuarantinesHusk(t *testing.T) {
 	setGitIdentity(t)
-	remoteDir, url, head := fakeTaskRemote(t)
+	_, url, _ := fakeTaskRemote(t)
 	hub := newFakeHub()
 	hub.repos = []api.ProjectRepo{{Name: "app", URL: url}}
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 
-	if err := r.Start(context.Background(), "wi_repo2"); err != nil {
+	if err := r.Start(context.Background(), "wi_repo2", StartOpts{}); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
 	capDir := testCapsuleDir(r, "wi_repo2")
 	repoDir := filepath.Join(capDir, capsule.DirRepos, "app")
 
-	// Simulate a daemon crash between spawn and any further step: the
+	// Simulate a daemon crash between spawn and the record's persist: the
 	// agent tree dies, the job leaves the map, the bookkeeping is wiped
-	// (the crash predates registration) and the journal still names the
-	// unsettled start of the SAME session.
+	// and the journal still names the unsettled start of the SAME session.
 	j := r.jobOf("wi_repo2")
 	j.mu.Lock()
 	session := j.sessionID
@@ -147,37 +145,26 @@ func TestRematerializePreservesRepoScene(t *testing.T) {
 	if err := r.noteClaiming("wi_repo2", session, nil); err != nil {
 		t.Fatal(err)
 	}
-
-	// The agent's uncommitted scene in the task repo.
 	if err := os.WriteFile(filepath.Join(repoDir, "dirty.txt"), []byte("uncommitted\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// The remote moves forward AFTER the claim: the recovery contract
-	// forbids fetching/resetting it into the worktree.
-	if out, err := exec.Command("git", "-C", remoteDir, "commit", "--allow-empty", "-m", "remote moved").CombinedOutput(); err != nil {
-		t.Fatalf("remote commit: %v: %s", err, out)
-	}
 
-	// The journal replay (Restart) re-runs the start of the SAME session:
-	// the capsule husk is reused and materialize re-runs without
-	// touching repos/app.
 	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart (journal replay): %v", err)
 	}
-	if b, err := os.ReadFile(filepath.Join(repoDir, "dirty.txt")); err != nil || string(b) != "uncommitted\n" {
-		t.Fatalf("uncommitted scene lost: %q, %v", b, err)
+	if r.jobOf("wi_repo2") == nil {
+		t.Fatal("the replayed claim must start the work item")
 	}
-	got, err := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
-	if err != nil || strings.TrimSpace(string(got)) != head {
-		t.Fatalf("worktree HEAD moved: %q, want %q, %v", got, head, err)
+	if _, err := os.Stat(filepath.Join(repoDir, "dirty.txt")); !os.IsNotExist(err) {
+		t.Fatalf("the replayed claim reused the husk's task repo (stat err %v)", err)
 	}
-	if b := capsuleReposOf(t, capDir)["app"]; b != head {
-		t.Fatalf("baseline not carried forward: %q, want %q", b, head)
+	husks, _ := filepath.Glob(capDir + ".quarantined.*")
+	if len(husks) != 1 {
+		t.Fatalf("the husk must be quarantined beside the capsule, got %v", husks)
 	}
-	// The dirty file is still uncommitted (nothing staged or committed it).
-	st, err := exec.Command("git", "-C", repoDir, "status", "--porcelain").CombinedOutput()
-	if err != nil || !strings.Contains(string(st), "dirty.txt") {
-		t.Fatalf("dirty file not uncommitted anymore: %s, %v", st, err)
+	kept := filepath.Join(husks[0], capsule.DirRepos, "app", "dirty.txt")
+	if b, err := os.ReadFile(kept); err != nil || string(b) != "uncommitted\n" {
+		t.Fatalf("the husk's uncommitted bytes must survive the quarantine: %q, %v", b, err)
 	}
 	if err := r.Stop(context.Background(), "wi_repo2", protocol.FinishWrapped); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -195,7 +182,7 @@ func TestCloneFailureBlocksTicket(t *testing.T) {
 	hub.repos = []api.ProjectRepo{{Name: "app", URL: "file:///nonexistent/nope.git"}}
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 
-	err := r.Start(context.Background(), "wi_repo3")
+	err := r.Start(context.Background(), "wi_repo3", StartOpts{})
 	ae, ok := err.(*api.Error)
 	if !ok || ae.Code != api.ErrDaemonSpawnFail {
 		t.Fatalf("expected typed %s, got %v", api.ErrDaemonSpawnFail, err)
@@ -221,7 +208,7 @@ func TestCloneFailureBlocksTicket(t *testing.T) {
 	hub2 := newFakeHub()
 	hub2.repos = []api.ProjectRepo{{Name: "../escape", URL: "file:///nonexistent/x.git"}}
 	r2, _, _ := newTestRuntime(t, hub2, &scriptedSpawner{})
-	if err := r2.Start(context.Background(), "wi_repo4"); err == nil {
+	if err := r2.Start(context.Background(), "wi_repo4", StartOpts{}); err == nil {
 		t.Fatal("unsafe repo name must fail Start")
 	} else if ae, ok := err.(*api.Error); !ok || ae.Code != api.ErrDaemonSpawnFail {
 		t.Fatalf("unsafe name must be typed %s, got %v", api.ErrDaemonSpawnFail, err)
@@ -266,7 +253,7 @@ func TestReclaimRestoresTaskRepoFromCarrier(t *testing.T) {
 	r.cfg.GitRemoteBase = hubRoot
 
 	wi := "wi_durab"
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
 	capDir := testCapsuleDir(r, wi)
@@ -309,7 +296,7 @@ func TestReclaimRestoresTaskRepoFromCarrier(t *testing.T) {
 	r.dropJob(j)
 	writeStateFile(t, r, nil)
 	hub.forceEnd(wi)
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("re-claim Start: %v", err)
 	}
 
@@ -401,7 +388,7 @@ func TestCarrierPushFailedAlertStateIsPerJob(t *testing.T) {
 			t.Fatalf("CommitPush(%s): %v", label, err)
 		}
 	}
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
 	publish("a1")
@@ -416,7 +403,7 @@ func TestCarrierPushFailedAlertStateIsPerJob(t *testing.T) {
 	r.dropJob(j)
 	writeStateFile(t, r, nil)
 	hub.forceEnd(wi)
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("re-claim Start: %v", err)
 	}
 	publish("b1")

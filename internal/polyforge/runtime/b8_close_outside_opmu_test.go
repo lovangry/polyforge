@@ -71,7 +71,7 @@ func stallingRemote(t *testing.T) (url string, release func()) {
 func startRunning(t *testing.T, r *Runtime, wi string) {
 	t.Helper()
 	t.Cleanup(func() { terminateJobAgent(r, wi) })
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Errorf("Start(%s): %v", wi, err)
 	}
 }
@@ -259,7 +259,7 @@ func TestB8HungRecoveryPushLeavesOtherWorkItemsResponsive(t *testing.T) {
 	// scene under the push, and applies once the recovery settled
 	superseded := make(chan error, 1)
 	go func() {
-		r.handleOB(ctx, protocol.OBMsg{Kind: protocol.OBSuperseded, WorkItem: a, SessionFP: ja.fingerprint()})
+		r.handleOB(ctx, protocol.OBMsg{Kind: protocol.OBSuperseded, WorkItem: a, SessionFP: ja.sessionFingerprint})
 		superseded <- nil
 	}()
 	stillPending(t, "the supersession", superseded)
@@ -365,7 +365,7 @@ func TestB8AbandonClaimEndOutsideOpMu(t *testing.T) {
 	// the claim's task-repo clone fails: an unclonable remote
 	hub.reposFor = map[string][]api.ProjectRepo{bad: {{Name: "app", URL: "/nonexistent/app.git"}}}
 	startBad := make(chan error, 1)
-	go func() { startBad <- r.Start(bg(), bad) }()
+	go func() { startBad <- r.Start(bg(), bad, StartOpts{}) }()
 	g.waitEntered(t, "the compensation")
 
 	within(t, 20*time.Second, "Start of another work item", func() {
@@ -378,7 +378,7 @@ func TestB8AbandonClaimEndOutsideOpMu(t *testing.T) {
 	})
 	claims := hub.claimCount()
 	second := make(chan error, 1)
-	go func() { second <- r.Start(bg(), bad) }()
+	go func() { second <- r.Start(bg(), bad, StartOpts{}) }()
 	stillPending(t, "a second start of the ending work item", startBad, second)
 	if n := hub.claimCount() - claims; n != 0 {
 		t.Fatalf("a start during the compensation claimed %d time(s)", n)

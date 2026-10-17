@@ -47,6 +47,10 @@ type WIInfo struct {
 	ID         string
 	CapsuleDir string
 	BundleName string
+	// SessionHandle is the owning session's PUBLIC fingerprint (B3,
+	// never the secret): it names each dispatch's spawn token and
+	// capsule transcript.
+	SessionHandle string
 }
 
 // EventLogger is the driver's event emission face — the shape of
@@ -379,10 +383,8 @@ func (d *Driver) Run(ctx context.Context) error {
 			// a failed dispatch like any other — classified, counted,
 			// retried or blocked.
 			cause, code, detail := classifyWaitFailure(fmt.Errorf("driver: step %s spawn %d failed: %w", stepID, n, err))
-			if blocked, ferr := d.failDispatch(ctx, stepID, n, dispatchedAt, cause, code, detail); ferr != nil {
-				return ferr
-			} else if blocked {
-				return nil
+			if stop, err := d.failDispatch(ctx, stepID, n, dispatchedAt, cause, code, detail); stop {
+				return err
 			}
 			continue
 		}
@@ -405,10 +407,8 @@ func (d *Driver) Run(ctx context.Context) error {
 			d.emit("step_dead", map[string]any{
 				"step": stepID, "spawn_n": n, "cause": verdict.Cause, "evidence": verdict.Evidence,
 			})
-			if blocked, ferr := d.failDispatch(ctx, stepID, n, dispatchedAt, verdictCause(*verdict), -1, verdict.Evidence); ferr != nil {
-				return ferr
-			} else if blocked {
-				return nil
+			if stop, err := d.failDispatch(ctx, stepID, n, dispatchedAt, verdictCause(*verdict), -1, verdict.Evidence); stop {
+				return err
 			}
 			continue
 		}
@@ -425,10 +425,8 @@ func (d *Driver) Run(ctx context.Context) error {
 				return fmt.Errorf("driver: step %s dispatch %d ended without a result: %w", stepID, n, werr)
 			}
 			cause, code, detail := classifyWaitFailure(werr)
-			if blocked, ferr := d.failDispatch(ctx, stepID, n, dispatchedAt, cause, code, detail); ferr != nil {
-				return ferr
-			} else if blocked {
-				return nil
+			if stop, err := d.failDispatch(ctx, stepID, n, dispatchedAt, cause, code, detail); stop {
+				return err
 			}
 			continue
 		}
@@ -502,10 +500,7 @@ func (d *Driver) settle(stepID string, n int64, res *StepResult, run StepRun) (s
 			// Keep the pending-question context across the retry: the
 			// rejected envelope was a question, and the rewrite must
 			// still be one.
-			q := strings.TrimSpace(res.Question)
-			if q == "" {
-				_, q, _ = needsInputQuestion(res)
-			}
+			_, q, _ := needsInputQuestion(res)
 			feedback += "\nThe rejected envelope was a needs_input (question) report"
 			if q != "" {
 				feedback += fmt.Sprintf(" asking: %q", q)
@@ -523,20 +518,15 @@ func (d *Driver) settle(stepID string, n int64, res *StepResult, run StepRun) (s
 			// with the result_invalid cause code — no driver relaunch
 			// through the recovery lane, no on_fail routing (rewind stays
 			// reserved for review FAIL verdicts).
+			// The death-cause table always blocks result_invalid, so a
+			// landed write is a clean stop: not relaunchable.
 			if err := d.transition(TransitionRequest{
 				Kind: TransStepFailed, StepID: stepID, SpawnN: n,
 				Failure: &StepFailure{Cause: FailResultInvalid, Detail: verr.Error()},
 			}); err != nil {
 				return true, fmt.Errorf("driver: step %s result-invalid block failed: %w", stepID, err)
 			}
-			d.mu.Lock()
-			blocked := d.exec.WorkflowStatus == StatusBlocked
-			d.mu.Unlock()
-			if blocked {
-				return true, nil // blocked, not relaunchable: a clean stop
-			}
-			return true, fmt.Errorf("driver: step %s dispatch %d result rejected (%d consecutive rejections, limit %d) but the block did not land: %w",
-				stepID, n, count, maxEnvelopeRejects, verr)
+			return true, nil
 		}
 		return false, nil // in-process re-dispatch: the step is still in_progress
 	}
@@ -684,6 +674,12 @@ func (d *Driver) prepareDispatch(stepID string) (*StepSpawn, int64, error) {
 	if spec := d.workflow.step(stepID); spec != nil {
 		if c, err := harness.ParseCandidate(d.modelForLocked(stepID)); err == nil {
 			sp.Harness, sp.Model, sp.Effort = c.Harness, c.Model, c.Effort
+		}
+	}
+	sp.Done = map[string]bool{}
+	for id, s := range d.exec.Steps {
+		if s != nil && s.Status == capsule.StepDone {
+			sp.Done[id] = true
 		}
 	}
 	sp.SpawnN = d.spawnN + 1
@@ -875,6 +871,9 @@ type StepSpawn struct {
 	// turn ENDED without the agent writing the result envelope (cause
 	// ended_without_result).
 	PriorEndedWithoutResult bool
+	// Done is the set of steps whose execution record is done (an
+	// inherit step's handoff producer must be one).
+	Done map[string]bool
 }
 
 // StepRun is one spawned step execution awaiting its result envelope.

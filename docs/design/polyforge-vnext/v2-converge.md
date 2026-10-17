@@ -648,7 +648,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 
 | 路径 | 内容 |
 |---|---|
-| `capsule.json`、`session.json`、`.gitignore` | capsule 身份（含各仓库领取时 SHA）/ 公开 session 指纹 / 只忽略 `repos/`、`artifacts/release-*/` 与 `sync/` |
+| `capsule.json`、`.gitignore` | capsule 身份（含各仓库领取时 SHA）/ 只忽略 `repos/`、`artifacts/release-*/` 与 `sync/` |
 | `runtime-state/work-item.json` | daemon 写入的 WI 快照 |
 | `runtime-state/execution.json` | 执行态唯一权威（结构：`capsule.Execution`） |
 | `runtime-state/spawn-journal.jsonl` | 每次 step 派生一行（harness、会话、transcript 路径） |
@@ -658,6 +658,6 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `artifacts/steps/<step>/s<spawn_n>/result.json` | 已接受信封的归档 |
 | `artifacts/handoff-<step>.md` | 声明 `handoff` 的步骤按路径约定写出，后续 inherit 步读取 |
 | `session/session-<token>.jsonl` | harness 会话文件，在提交边界同步进来 |
-| `sync/session-handle`、`sync/materialized.json`、`sync/materialize-staging/` | daemon 私有（不进链）：所属 session 指纹 / bundle 物化完成标记 / 物化暂存区 |
+| `sync/materialized.json` | daemon 私有（不进链）：bundle 物化完成标记（恢复前的信任门） |
 | `workflows/<bundle>/`、`agents/` | 物化的 workflow bundle / step 定义副本（`agents/` 是 decision 2026-10-16 G4 的删除对象） |
 | `repos/<name>/`、`logs/`、`artifacts/` | 任务仓库 clone（各有自己的 git 历史）/ 日志 / step 产出 |

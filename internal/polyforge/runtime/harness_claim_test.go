@@ -23,7 +23,7 @@ func TestClaimMixedHarnessChainRidesTheJob(t *testing.T) {
 	r, ws, _ := newWorkspaceTestRuntime(t, hub, "proj")
 	r.cfg.WorkflowsDir = frontmatterBundle(t, w079Frontmatter)
 	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [claude:claude-opus-5-5, pi:prov/flash] }\n")
-	if err := r.Start(context.Background(), "wi_h175comp"); err != nil {
+	if err := r.Start(context.Background(), "wi_h175comp", StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	j := r.jobOf("wi_h175comp")
@@ -69,7 +69,7 @@ func TestCandidateFormatRefusesBeforeClaim(t *testing.T) {
 			r, ws, sp := newWorkspaceTestRuntime(t, hub, "proj")
 			r.cfg.WorkflowsDir = frontmatterBundle(t, w079Frontmatter)
 			writeWorkspaceYaml(t, ws, c.yaml)
-			err := r.Start(context.Background(), "wi_h175bad")
+			err := r.Start(context.Background(), "wi_h175bad", StartOpts{})
 			ae, ok := err.(*api.Error)
 			if !ok || ae.Code != api.ErrDaemonWorkspaceYaml || !strings.Contains(ae.Detail, c.want) {
 				t.Fatalf("expected DAEMON-414 naming %q, got %v", c.want, err)
@@ -93,7 +93,7 @@ func TestBundleUnprefixedCandidateRefusesBeforeClaim(t *testing.T) {
 	r.cfg.WorkflowsDir = frontmatterBundle(t, strings.Replace(w079Frontmatter, "[pi:prov/flash, pi:prov/glm]", "[pi:prov/flash, prov/glm]", 1))
 	bundle := "demo-bundle"
 	hub.items = map[string]*api.WorkItem{"wi_h175pre": {ID: "wi_h175pre", ProjectName: "proj", BundleName: &bundle}}
-	err := r.Start(context.Background(), "wi_h175pre")
+	err := r.Start(context.Background(), "wi_h175pre", StartOpts{})
 	ae, ok := err.(*api.Error)
 	if !ok || ae.Code != api.ErrDaemonWorkspaceYaml || !strings.Contains(ae.Detail, `step fix: model_candidates[1]: "prov/glm" needs a harness prefix`) || !strings.Contains(ae.Detail, "stays queued") {
 		t.Fatalf("expected a pre-claim refusal naming the bundle step, got %v", err)
@@ -109,7 +109,7 @@ func TestBundleUnprefixedCandidateBlocksClaim(t *testing.T) {
 	hub := newFakeHub()
 	r, _, sp := newWorkspaceTestRuntime(t, hub, "proj")
 	r.cfg.WorkflowsDir = frontmatterBundle(t, strings.Replace(w079Frontmatter, "[pi:prov/flash, pi:prov/glm]", "[pi:prov/flash, prov/glm]", 1))
-	if err := r.Start(context.Background(), "wi_h175bundle"); err == nil {
+	if err := r.Start(context.Background(), "wi_h175bundle", StartOpts{}); err == nil {
 		t.Fatal("a bundle with an unprefixed candidate was claimed and started")
 	}
 	note := hub.lastEnd().Note
@@ -135,7 +135,7 @@ func TestClaimEffortChainRidesTheJob(t *testing.T) {
 	r, ws, _ := newWorkspaceTestRuntime(t, hub, "proj")
 	r.cfg.WorkflowsDir = frontmatterBundle(t, w079Frontmatter)
 	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [\"claude:claude-opus-5-5 : high\", pi:ollama/llama3:8b, pi:ollama/llama3:8b:low] }\n")
-	if err := r.Start(context.Background(), "wi_h176comp"); err != nil {
+	if err := r.Start(context.Background(), "wi_h176comp", StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	j := r.jobOf("wi_h176comp")
@@ -175,7 +175,7 @@ func TestEffortRefusesBeforeClaim(t *testing.T) {
 			if c.yaml != "" {
 				writeWorkspaceYaml(t, ws, c.yaml)
 			}
-			err := r.Start(context.Background(), "wi_h176bad")
+			err := r.Start(context.Background(), "wi_h176bad", StartOpts{})
 			ae, ok := err.(*api.Error)
 			if !ok || ae.Code != api.ErrDaemonWorkspaceYaml || !strings.Contains(ae.Detail, c.want) {
 				t.Fatalf("expected DAEMON-414 naming %q, got %v", c.want, err)
@@ -209,7 +209,7 @@ func TestPre175ShapesReachTheDriverVerbatim(t *testing.T) {
 	r, ws := newManualRuntime(t, hub)
 	writeWorkspaceYaml(t, ws, w079ValidYaml)
 	r.saveManualModels("wi_bare", []string{"m/one"})
-	if err := r.Start(context.Background(), "wi_bare"); err != nil {
+	if err := r.Start(context.Background(), "wi_bare", StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = r.Stop(context.Background(), "wi_bare", protocol.FinishWrapped) })
