@@ -444,7 +444,8 @@ func (c *Client) ListMachinesRaw() (json.RawMessage, error) {
 // v1.5 session model client (reference.md §3).
 
 // SessionClaim performs the CAS claim: set the session only if the WI is
-// queued and unheld (M1 joint gate). Idempotent on idempotency_key.
+// queued and unheld (M1 joint gate). A repeat with the same session
+// secret answers the same claim while that session holds the WI (D4).
 func (c *Client) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimResponse, error) {
 	var out api.SessionClaimResponse
 	if err := c.Do("POST", "/api/v1/work-items/"+url.PathEscape(req.WorkItemID)+"/claim", req, &out); err != nil {

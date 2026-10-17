@@ -509,18 +509,15 @@ func (u *v1Install) sessionOf(t *testing.T, wi string) wiSession {
 }
 
 // sessionClaimReq builds a well-formed claim request for wire-level
-// gate assertions (a fresh random 64-hex secret + idempotency key; the
+// gate assertions (a fresh random 64-hex secret; the
 // caller only ever inspects the typed refusal, never a success).
 func sessionClaimReq(wi string) api.SessionClaimRequest {
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)
-	k := make([]byte, 12)
-	_, _ = rand.Read(k)
 	return api.SessionClaimRequest{
-		WorkItemID:     wi,
-		SessionID:      hex.EncodeToString(b),
-		MachineID:      "m-e2e-probe",
-		IdempotencyKey: hex.EncodeToString(k),
+		WorkItemID: wi,
+		SessionID:  hex.EncodeToString(b),
+		MachineID:  "m-e2e-probe",
 	}
 }
 

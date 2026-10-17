@@ -127,7 +127,7 @@ func TestUpgradeV2140RoundTrip(t *testing.T) {
 	}
 	id := mustCreateExecWI(t, env, "v2.14.0 smoke ticket", nil, "")
 	if _, err := NewSessionManager(env.DB).Claim(id, api.SessionClaimRequest{
-		SessionID: strings.Repeat("9", 32), MachineID: "m1", IdempotencyKey: "up-2140",
+		SessionID: strings.Repeat("9", 32), MachineID: "m1",
 	}, env.UserID); err != nil {
 		t.Fatalf("post-upgrade claim: %v", err)
 	}

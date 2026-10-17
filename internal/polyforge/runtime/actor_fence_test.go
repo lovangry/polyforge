@@ -80,7 +80,7 @@ func TestStartBehindAStaleJournalReplayClaims(t *testing.T) {
 	t.Cleanup(r.Close)
 	const wi = "wi_stale_replay"
 	stale := fakeSession("never-landed:" + wi)
-	if err := r.noteClaiming(wi, stale, randomKey(), nil); err != nil {
+	if err := r.noteClaiming(wi, stale, nil); err != nil {
 		t.Fatal(err)
 	}
 	hub.status[wi] = api.StatusQueued

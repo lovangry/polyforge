@@ -92,7 +92,7 @@ func (e *gitEnv) claimWI(t *testing.T) (wiID, secret string) {
 	}
 	secret = "git-session-secret-" + wi.ID
 	if _, err := e.sessions.Claim(wi.ID, api.SessionClaimRequest{
-		SessionID: secret, MachineID: "m1", IdempotencyKey: "idem-" + wi.ID,
+		SessionID: secret, MachineID: "m1",
 	}, e.userID); err != nil {
 		t.Fatalf("session claim: %v", err)
 	}
@@ -164,7 +164,7 @@ func (e *gitEnv) claimSessionWI(t *testing.T, secret string) (wiID, fingerprint 
 		t.Fatalf("create wi: %v", err)
 	}
 	claim, err := e.sessions.Claim(wi.ID, api.SessionClaimRequest{
-		SessionID: secret, MachineID: "m1", IdempotencyKey: "idem-" + wi.ID,
+		SessionID: secret, MachineID: "m1",
 	}, e.userID)
 	if err != nil {
 		t.Fatalf("session claim: %v", err)
@@ -395,7 +395,7 @@ func TestOldSecretRejectedAfterForceEnd(t *testing.T) {
 		t.Fatalf("force-end: %v", err)
 	}
 	if _, err := e.sessions.Claim(wiID, api.SessionClaimRequest{
-		SessionID: secret2, MachineID: "machine-2", IdempotencyKey: "idem2-" + wiID,
+		SessionID: secret2, MachineID: "machine-2",
 	}, e.userID); err != nil {
 		t.Fatalf("re-claim after force-end: %v", err)
 	}
@@ -453,7 +453,7 @@ func TestSlugClaimedTicketPushesToCanonicalBareRepo(t *testing.T) {
 	}
 	secret := "git-session-secret-" + wi.ID
 	claim, err := e.sessions.Claim(resolved, api.SessionClaimRequest{
-		SessionID: secret, MachineID: "m1", IdempotencyKey: "idem-" + wi.ID,
+		SessionID: secret, MachineID: "m1",
 	}, e.userID)
 	if err != nil {
 		t.Fatalf("claim %s: %v", resolved, err)
@@ -553,7 +553,7 @@ func TestSessionPushAuthFencing(t *testing.T) {
 		t.Fatalf("force-end: %v", err)
 	}
 	if _, err := e.sessions.Claim(wiID, api.SessionClaimRequest{
-		SessionID: newSecret, MachineID: "m2", IdempotencyKey: "idem2-" + wiID,
+		SessionID: newSecret, MachineID: "m2",
 	}, e.userID); err != nil {
 		t.Fatalf("re-claim after force-end: %v", err)
 	}

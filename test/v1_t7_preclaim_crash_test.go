@@ -23,7 +23,7 @@ import (
 // BEFORE the claim call, and the startup replay:
 //
 //   - journal entry exists + hub session matches → adopt and finish the
-//     start (the SAME idempotency key replays the SAME claim answer, D4);
+//     start (the SAME session secret replays the SAME claim answer, D4);
 //   - anything else → drop.
 //
 // The window is deterministic here through a claim-hold proxy (the s17
@@ -184,8 +184,7 @@ func TestV1T7PreClaimCrashJournalReplay(t *testing.T) {
 	proxy.waitForLanded(t, 60*time.Second)
 
 	// B1: the journal entry was written BEFORE the call and survived the
-	// crash — it names the minted SECRET (the replay anchor) and the D4
-	// idempotency key.
+	// crash — it names the minted SECRET (the replay anchor, D4).
 	entries := claimingEntries(t, d.dataDir)
 	if len(entries) == 0 {
 		t.Fatalf("no claiming.json entry survived the pre-claim crash")
@@ -195,8 +194,7 @@ func TestV1T7PreClaimCrashJournalReplay(t *testing.T) {
 		t.Fatalf("claiming.json has no entry for %s: %+v", wi, entries)
 	}
 	secret, _ := rec["session_id"].(string)
-	key, _ := rec["idempotency_key"].(string)
-	if secret == "" || key == "" {
+	if secret == "" {
 		t.Fatalf("claiming entry incomplete: %+v", rec)
 	}
 
@@ -214,7 +212,7 @@ func TestV1T7PreClaimCrashJournalReplay(t *testing.T) {
 
 	// Restart the SAME daemon (same socket/dataDir/workspace), direct to
 	// aihub: the startup replay must verify the journaled session
-	// (matches), re-claim with the SAME key (D4: the same answer comes
+	// (matches), re-claim with the SAME secret (D4: the same answer comes
 	// back — no second session, no ALREADY_HELD refusal) and finish the
 	// start: the adopted driver dispatches its first step process, then
 	// the workflow runs to its terminal wrap.

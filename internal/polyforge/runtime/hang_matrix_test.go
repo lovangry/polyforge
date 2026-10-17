@@ -271,7 +271,7 @@ func TestHangMatrixOtherWorkItemsStayResponsive(t *testing.T) {
 			recB, _ := restartRecord(t, m.r, m.hub, b)
 			writeStateFile(t, m.r, []*jobRecord{recB})
 			sess := fakeSession(a)
-			if err := m.r.noteClaiming(a, sess, randomKey(), nil); err != nil {
+			if err := m.r.noteClaiming(a, sess, nil); err != nil {
 				t.Fatal(err)
 			}
 			m.hub.hold(a, sess, api.StatusRunning)
