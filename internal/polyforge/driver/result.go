@@ -127,12 +127,12 @@ type StepResult struct {
 	Output     json.RawMessage `json:"output"`                // step-specific output JSON, schema-checked
 	QuestionID string          `json:"question_id,omitempty"` // set when Outcome == needs_input
 	Question   string          `json:"question,omitempty"`    // the question text for needs_input
-	// CommandEvidence is the V4 command-evidence list, kept verbatim item
-	// by item: every item must decode as a CommandEvidence object
+	// CommandEvidence is the V4 command-evidence list, kept verbatim: it
+	// must be a list whose every item decodes as a CommandEvidence object
 	// (decodeCommandEvidence, any step), and a step that owes evidence
 	// (ResultSpec.RequireCommandEvidence) must carry well-formed entries.
-	CommandEvidence []json.RawMessage `json:"command_evidence,omitempty"`
-	SubmittedAt     time.Time         `json:"submitted_at,omitempty"`
+	CommandEvidence json.RawMessage `json:"command_evidence,omitempty"`
+	SubmittedAt     time.Time       `json:"submitted_at,omitempty"`
 
 	// rebaseline is set by ValidateStepResult when the step changed
 	// authored test files with a human's approval (the authored-tests
@@ -371,6 +371,9 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 	if err != nil {
 		return fmt.Errorf("driver: step %q envelope carries unreadable command evidence: %w", spec.StepID, err)
 	}
+	if len(evidence) == 0 {
+		res.CommandEvidence = nil // null or [] records no commands
+	}
 	if res.Outcome == OutcomeCompleted && spec.RequireCommandEvidence {
 		if err := checkCommandEvidence(evidence); err != nil {
 			return fmt.Errorf("driver: step %q completed without verification evidence: %w", spec.StepID, err)
@@ -431,11 +434,19 @@ func checkCommandEvidence(ev []CommandEvidence) error {
 	return nil
 }
 
-// decodeCommandEvidence decodes the envelope's command_evidence items. An
-// item that is not a JSON object, or does not decode as a
-// CommandEvidence, is an error naming it: the rejection feeds back into
-// the retry prompt, so the rewrite knows what to fix.
-func decodeCommandEvidence(items []json.RawMessage) ([]CommandEvidence, error) {
+// decodeCommandEvidence decodes the envelope's command_evidence (absent
+// or null = none). A value that is not a list, or an item that is not a
+// JSON object or does not decode as a CommandEvidence, is an error naming
+// it: the rejection feeds back into the retry prompt, so the rewrite
+// knows what to fix.
+func decodeCommandEvidence(raw json.RawMessage) ([]CommandEvidence, error) {
+	if t := bytes.TrimSpace(raw); len(t) == 0 || bytes.Equal(t, []byte("null")) {
+		return nil, nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, errors.New("command_evidence is not a LIST — it is [{\"argv\": [...], \"exit_code\": N, \"duration_ms\": N}, ...]")
+	}
 	ev := make([]CommandEvidence, 0, len(items))
 	for i, el := range items {
 		if !bytes.HasPrefix(bytes.TrimSpace(el), []byte("{")) {

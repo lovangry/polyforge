@@ -21,16 +21,15 @@ func goodEvidence() []CommandEvidence {
 }
 
 // rawEvidence encodes evidence entries as the envelope carries them.
-func rawEvidence(ev []CommandEvidence) []json.RawMessage {
-	var out []json.RawMessage
-	for _, e := range ev {
-		b, err := json.Marshal(e)
-		if err != nil {
-			panic(err)
-		}
-		out = append(out, b)
+func rawEvidence(ev []CommandEvidence) json.RawMessage {
+	if len(ev) == 0 {
+		return nil
 	}
-	return out
+	b, err := json.Marshal(ev)
+	if err != nil {
+		panic(err)
+	}
+	return b
 }
 
 func TestNeedsInputEnvelopeValidation(t *testing.T) {
@@ -260,8 +259,8 @@ func TestNonObjectEvidenceCollectsThenIsRejected(t *testing.T) {
 	if err != nil || res == nil {
 		t.Fatalf("collect: %v %v", res, err)
 	}
-	if len(res.CommandEvidence) != 2 {
-		t.Fatalf("every item is kept verbatim: %s", res.CommandEvidence)
+	if !strings.Contains(string(res.CommandEvidence), `"ran go test"`) {
+		t.Fatalf("the list is kept verbatim: %s", res.CommandEvidence)
 	}
 	for _, owes := range []bool{true, false} {
 		spec := ResultSpec{WIID: "wi", StepID: "verification", SpawnN: 1, RequireCommandEvidence: owes}
@@ -277,7 +276,7 @@ func TestNonObjectEvidenceCollectsThenIsRejected(t *testing.T) {
 func TestRunStringEvidenceRejectedThenRewritten(t *testing.T) {
 	stringEv := func() fakeEntry {
 		e := done(`{}`)
-		e.res.CommandEvidence = []json.RawMessage{json.RawMessage(`"ran go test"`)}
+		e.res.CommandEvidence = json.RawMessage(`["ran go test"]`)
 		return e
 	}
 	good := done(`{}`)
@@ -325,6 +324,63 @@ func TestDeliveryContractStatesGuaranteesOnlyWhenTheyApply(t *testing.T) {
 	hu := deliveryContract(promptParts{WIID: "wi", StepID: "g", SpawnN: 1, RequiresHumanAnswer: true})
 	if !strings.Contains(hu, humanLine) || strings.Contains(hu, evLine) {
 		t.Fatalf("human-gate step must state only the human-answer rule:\n%s", hu)
+	}
+}
+
+// command_evidence that is not a list (a string, an object) is an
+// envelope problem, not a dispatch defect: the envelope collects and the
+// gate rejects it into the retry lane; null means none.
+func TestNonListEvidenceCollectsThenIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	drop := filepath.Join(dir, "1.json")
+	r := &stepRun{dropPath: drop, sp: StepSpawn{StepID: "a", SpawnN: 1}, wiID: "wi"}
+	spec := ResultSpec{WIID: "wi", StepID: "a", SpawnN: 1}
+	for _, ev := range []string{`"ran go test"`, `{"argv":["go","test"],"duration_ms":4}`, `7`} {
+		if err := os.WriteFile(drop, []byte(`{"outcome":"completed","output":{},"command_evidence":`+ev+`}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		res, err := r.collect()
+		if err != nil || res == nil {
+			t.Fatalf("%s: a non-list command_evidence must still collect: %v %v", ev, res, err)
+		}
+		if err := ValidateStepResult(res, spec); err == nil || !strings.Contains(err.Error(), "command_evidence is not a LIST") {
+			t.Fatalf("%s: want the not-a-list rejection, got %v", ev, err)
+		}
+	}
+	if err := os.WriteFile(drop, []byte(`{"outcome":"completed","output":{},"command_evidence":null}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := r.collect()
+	if err != nil || res == nil {
+		t.Fatalf("collect: %v %v", res, err)
+	}
+	if err := ValidateStepResult(res, spec); err != nil || res.CommandEvidence != nil {
+		t.Fatalf("null evidence means none: %v %s", err, res.CommandEvidence)
+	}
+}
+
+// Through Run: a non-list command_evidence is an envelope rejection (the
+// retry carries the reason; the failure counter is untouched) and the
+// well-formed rewrite is accepted.
+func TestRunNonListEvidenceRejectedThenRewritten(t *testing.T) {
+	bad := done(`{}`)
+	bad.res.CommandEvidence = json.RawMessage(`"ran go test"`)
+	good := done(`{}`)
+	good.res.CommandEvidence = rawEvidence(goodEvidence())
+	d, sp, _ := runEnv(t, StepSpec{ID: "verification", ContextPolicy: "fresh", RequiresCommandEvidence: true})
+	sp.script = []fakeEntry{bad, good}
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if fb := sp.spawnAt(1).PriorRejection; !strings.Contains(fb, "is not a LIST") {
+		t.Fatalf("the retry must carry the rejection: %q", fb)
+	}
+	x := d.Snapshot()
+	if x.WorkflowStatus != StatusCompleted {
+		t.Fatalf("the well-formed rewrite must be accepted: %s", x.WorkflowStatus)
+	}
+	if sup := x.Steps["verification"].Supervision; sup != nil && sup.FailureCount != 0 {
+		t.Fatalf("an envelope rejection is not a dispatch failure: %+v", sup)
 	}
 }
 
