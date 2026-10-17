@@ -584,3 +584,47 @@ func TestDeployRefusesNonPlainPaths(t *testing.T) {
 		}
 	}
 }
+
+// dbOnlyMemories gives the world's server database the memories.content
+// column with one filled row, plus the given number of rows without
+// content.
+func (d *deployWorld) dbOnlyMemories(nulls int) {
+	d.t.Helper()
+	py := `import sqlite3,sys
+c=sqlite3.connect(sys.argv[1])
+c.execute("alter table memories add column content text")
+c.execute("insert into memories(id, content) values (1, 'doc')")
+for i in range(int(sys.argv[2])): c.execute("insert into memories(id) values (?)", (i + 2,))
+c.commit()`
+	db := filepath.Join(d.w, "srv", "data", "aihub", "aihub.db")
+	if out, err := exec.Command("python3", "-I", "-c", py, db, fmt.Sprint(nulls)).CombinedOutput(); err != nil {
+		d.t.Fatalf("memories fixture: %v\n%s", err, out)
+	}
+}
+
+// TestDeployConsistencyDBOnlyMemories: on a database with
+// memories.content, step 4 checks that every row carries its content —
+// memory files are no longer counted (a stray file does not block) — and
+// a row without content stops the deploy before anything changed.
+func TestDeployConsistencyDBOnlyMemories(t *testing.T) {
+	d := newReadyWorld(t)
+	d.dbOnlyMemories(0)
+	wf(t, filepath.Join(d.w, "srv", "data", "aihub", "memory", "p", "mem_x", "memory.md"), "left over\n", 0o644)
+	out, err := d.run("", "v2.3.0", "--confirm", "v2.3.0")
+	if err != nil {
+		t.Fatalf("deploy failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "snapshot memories rows without content: 0") || strings.Contains(out, "memory.md files in the backup") {
+		t.Errorf("step 4 did not check the content column:\n%s", out)
+	}
+
+	d = newReadyWorld(t)
+	d.dbOnlyMemories(2)
+	out, err = d.run("", "v2.3.0", "--confirm", "v2.3.0")
+	if exitCode(err) != 1 || !strings.Contains(out, "2 memories rows carry no content") {
+		t.Fatalf("want exit 1 at step 4, got %v\n%s", err, out)
+	}
+	if strings.Contains(d.logOf("log-docker"), "stop -t") {
+		t.Errorf("the service was stopped although step 4 refused:\n%s", d.logOf("log-docker"))
+	}
+}

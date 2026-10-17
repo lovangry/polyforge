@@ -161,7 +161,7 @@ health route. All paths under `/api/v1` except `/git/`.
 | POST, GET / DELETE | `/api-keys`, `/api-keys/{id}` | admin | |
 | POST, GET / GET | `/projects`, `/projects/{id}` | admin | |
 | PATCH | `/projects/{id}` | key + in-handler role gate | repos, membership, description, visible |
-| POST | `/admin/backup` | admin | `VACUUM INTO <data-dir>/backups/aihub-<ts>.db` — **SQLite only**, no memory files, no git repos (`core/admin.go`) |
+| POST | `/admin/backup` | admin | `VACUUM INTO <data-dir>/backups/aihub-<ts>.db` — the SQLite database, every memory included (memories live in it); no git repos (`core/admin.go`) |
 | ANY | `/git/` | session Basic auth (§3.4) | git smart-HTTP via `git http-backend` |
 
 ### 4.2 Process and data dir <!-- §4.2 -->
@@ -172,9 +172,11 @@ health route. All paths under `/api/v1` except `/git/`.
 (`bootstrapAdmin`). A second process on the same data dir exits `CORE-508` (`service.lock`). SIGTERM
 drains for 10s. SQLite (`core/store.go` `Open`): WAL, `foreign_keys(1)`, `busy_timeout(5000)`,
 `synchronous(FULL)`, one open connection (single writer). No startup schema migration: SQL moves only through `.polyforge/deploy.sh` with
-`deploy/sql/<tag>/` (`docs/upgrade.md`). Data dir: `aihub.db`, `memory/<project>/<mem>/memory.md`
-(+ `_redacted/`), `git/<wi>.git` (bare chain repos with the pre-receive hook, `git/repo.go`), `backups/`.
-Startup runs the memory reconcile in the background (§9). In production aihub runs as a docker
+`deploy/sql/<tag>/` (`docs/upgrade.md`) — except `memories.content`, which the one-time memory content
+migration adds (§9). Data dir: `aihub.db`, `git/<wi>.git` (bare chain repos with the pre-receive hook,
+`git/repo.go`), `backups/`, and on databases older than `memories.content` the former memory files
+`memory/<project>/[_redacted/]<mem>/memory.md` (kept, read once by the migration).
+Startup runs the memory content migration after listening and before serving (§9). In production aihub runs as a docker
 compose service (`deploy/docker-compose.yml`, `restart: unless-stopped`).
 
 ### 4.3 Machines <!-- §4.3 -->
@@ -206,8 +208,6 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 | `MEM-404` | Memory missing or read-denied |
 | `MEM-409` | Idempotency key reused; redact of a non-active memory |
 | `MEM-413` | Content over 1 MiB |
-| `MEM-500` | Memory fs/transaction failure |
-| `MEM-502` | Startup reconcile failure (walk, sweep, row scan, per-entry, FTS, commit; the name says "upstream", nothing is) |
 | `MEM-503` | FTS query/scan failure |
 | `AUTH-401` | Missing/invalid API key |
 | `AUTH-403` | Not admin; key scoped to another project; not a writer |
@@ -399,10 +399,12 @@ grace 1m; per-step failure bound 3 (`DefaultMaxStepFailures`). Timeouts relax (d
 
 ## 9. Memory and recall <!-- §9 -->
 
-Detail: `06-memory-search.md#§1`. Summary (`internal/aihub/memory`): the Markdown file
-`<data-dir>/memory/<project>/<mem>/memory.md` is the authority; SQLite holds metadata + an FTS5 trigram
-index (`memory_fts`). Write = temp file + fsync → one transaction (row + FTS) → rename. A startup
-background reconcile (`RebuildIndex`) makes rows/index match files (file wins). Search needs `q`;
+Detail: `06-memory-search.md#§1`. Summary (`internal/aihub/memory`): a memory is one `memories` row whose
+`content` column holds the document (frontmatter + body; `content_sha`/`content_len` describe it) plus an
+FTS5 trigram row (`memory_fts`). Create = one transaction (row + FTS); redact = one transaction (status +
+FTS removal; the document stays, never served). On start, `MigrateContent` fills `content` from the
+former memory files for rows that lack it (file bytes verbatim; a file differing from `content_sha` wins;
+a missing file leaves the row unserved and is retried next start; the files are not deleted). Search needs `q`;
 `match=all` (default) ANDs every token (≥3 runes as FTS phrases, shorter ones as substrings);
 `match=any` ORs up to 32 filtered terms (words, plus 3-rune shingles of CJK runs) ranked by bm25 and
 examines at most max(100, 10×limit) candidates (rules in `06-memory-search.md#§5.1`); filters, limit
@@ -411,12 +413,12 @@ Both modes order by bm25 weighted by per-type freshness: `rank × (1 + 0.5 × ex
 age from `updated_at`, stability rule.*/doc.design/doc.decision none, other doc.* (review, audit) 180d,
 experience.* 90d, fact.*/methodology.* 180d, else 90d
 (`memory/freshness.go`). A memory written without a title gets one derived from its body's first line
-(row only; a startup backfill fills older rows). CLI (`cli/verbs_aihub.go`): `pf recall --project P <query> [--any]` (project must
+(row only, at create time). CLI (`cli/verbs_aihub.go`): `pf recall --project P <query> [--any]` (project must
 be mapped; `--any` = `match=any`), `pf remember --project P --type T <content|-|@file>`, `pf memory show <id>`. At claim the
 daemon writes `runtime-state/recalled-memories.json` (query = goal + the first 1500 runes of content, `match=any`, project-scoped, top 10,
 1200-rune excerpts; empty list + notice on error or no hits; never fails the claim — `runtime/recall.go`,
 `daemon/memface.go`). Deploy aihub before daemons: an older aihub ignores `match` and ANDs, which
-leaves the snapshot empty. `pf backup` is a SQLite-only snapshot (§4.1).
+leaves the snapshot empty. `pf backup` is a SQLite snapshot holding every memory, without git repos (§4.1).
 
 ## 10. Install, release, deploy <!-- §10 -->
 

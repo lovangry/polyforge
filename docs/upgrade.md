@@ -194,7 +194,9 @@ WHERE waiting_on = 'gate' OR waiting_on LIKE 'runtime:%';
 
 `core.Open` never rewrites an existing database: the DDL is
 `CREATE TABLE/INDEX IF NOT EXISTS` — a missing table or index is created,
-nothing existing is altered (no column is added or changed). An old-schema
+nothing existing is altered (no column is added or changed; the one
+exception is `memories.content`, added by the memory content migration at
+aihub start — see "Memories move into the database" below). An old-schema
 database is not repaired at boot, and the new server cannot create
 projects on it (the dead `projects.identifier_hash NOT NULL` column has
 no default). The upgrade is always the deploy.sh window SQL described
@@ -1175,3 +1177,44 @@ it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
 - The claim-time recall section of the step prompt is now `[type] title`
   lines only (at most 10, id-only noise titles dropped); ids and excerpts
   stay in `runtime-state/recalled-memories.json`.
+
+## Memories move into the database (polyforge#186)
+
+- Each memory's document (frontmatter + body) now lives in the new
+  `memories.content` column; create and redact are one transaction each
+  and no memory file is written or read while serving. `pf recall`,
+  `pf remember`, `pf memory show` and the search / read / redact faces
+  answer exactly as before (`content_sha` / `content_len` still describe
+  the same document bytes).
+- **One-time migration at aihub start**, after the listener binds and
+  before it serves (clients wait in the listen backlog): the column is
+  added when missing, and every row without content gets the bytes of its
+  former file `memory/<project>/[_redacted/]<id>/memory.md`. A file whose
+  digest differs from `content_sha` wins (the old rule) and the row's
+  digest, length and index follow it; an active row whose file sits only
+  under `_redacted/` (an interrupted redact) is redacted; a row without a
+  file keeps no content, is not served (MEM-404), and is retried on every
+  start. One log line counts copied / adopted / redact-completed / missing
+  rows, followed by the ids of every row that needed more than a copy. The
+  migration is idempotent: once done, a start runs one query and reads no
+  file. Measured: 3,800 documents of ~55 KB (~210 MB) take ~3.3 s on a
+  development machine — the switch window's HTTP poll allows
+  `UP_WAIT_SECS` (default 30 s) from the stop, the drain included, so on a
+  slow disk deploy the first DB-only release with `UP_WAIT_SECS=120`.
+- **The memory files are not deleted** in this release: they stay as a
+  fallback and are still copied by the deploy backup's rsync. A later
+  release removes them together with the `authority_path` column and the
+  unused `fs_mtime_ns` / `fs_size` columns.
+- **Deploy gate (step 4)**: on a database with `memories.content` the
+  snapshot must hold no memories row without content (such a row has no
+  file to come from: restore its `memory.md` under the data dir's
+  `memory/` and restart aihub, or delete the row). A snapshot that
+  predates the column — the deploy that brings this release — is still
+  checked the old way (rows == `memory.md` files in the backup).
+- `pf backup` (`VACUUM INTO`) now holds every memory; it still does not
+  include the git repos.
+- **Rollback hazard:** an older aihub treats the memory files as the
+  truth and deletes, at its startup reconcile, every row without a file —
+  i.e. every memory written by this release. Before rolling back past it,
+  export those memories (`SELECT id, content FROM memories WHERE
+  authority_path = ''`) if they matter.

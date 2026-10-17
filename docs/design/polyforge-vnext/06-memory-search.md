@@ -1,51 +1,48 @@
-# 06 — Memory / Search：Markdown 权威、FTS 索引、启动期对账
+# 06 — Memory / Search：数据库存储、FTS 索引、一次性内容迁移
 
 > 现行文档（2026-10-16 repo review wave 4 重写为只描述代码现状）。原文描述的 HTML 派生链、`backupBarrier`
 > 与一致性快照、`PATCH /memories`、分享链接、wrap 摘要条目、`MEM-501` 等**从未建成或已删除**，原文见 git 历史
-> （本文件 2026-10-16 之前的版本）。代码权威：`internal/aihub/memory`（`store.go`、`authority.go`、`reconcile.go`）、
+> （本文件 2026-10-16 之前的版本）。代码权威：`internal/aihub/memory`（`store.go`、`authority.go`、`migrate.go`）、
 > `internal/aihub/server/server.go` 的 memory 路由、`internal/polyforge/cli/verbs_aihub.go`、`internal/polyforge/runtime/recall.go`。
 > 一页式摘要见 `reference.md#§9`。
 
 ## 1. 范围 <!-- §1 -->
 
-Memory 是 Core 域数据（项目知识沉淀）：一条 memory = 一个权威 Markdown 文件 + 一行元数据 + 一行 FTS 索引。
-写入只有创建与 redact（软删除）两种；**没有更新路径**（改内容 = 新建一条，必要时 redact 旧的）。检索只有
-FTS5 trigram 文本检索，没有向量/语义层。
+Memory 是 Core 域数据（项目知识沉淀）：一条 memory = `memories` 表的一行（`content` 列存文档）+ 一行 FTS 索引，
+全部在 Core 数据库里，没有权威文件。写入只有创建与 redact（软删除）两种；**没有更新路径**（改内容 = 新建一条，
+必要时 redact 旧的）。检索只有 FTS5 trigram 文本检索，没有向量/语义层。
 
 ## 2. 不变量 <!-- §2 -->
 
-- INV-7a 写序：① 新内容写同目录临时文件 `memory.md.tmp` 并 fsync → ② 一个事务提交元数据行 + FTS 行
-  （FTS 先删后插）→ ③ rename 覆盖权威 `memory.md`（`Store.Create`）。redact：① 目录 rename 进 `_redacted/` →
-  ② 同一事务提交 `status='redacted'` + 删除 FTS 行。
-- INV-7c 文件为准：元数据行与权威文件不一致时，以文件纠正行（`reconcile.go`）。
-- INV-7f 服务前校验：读取在该条目的锁下（`memLock`，与写路径同一把）校验行的 `content_sha` 与现读的权威
-  文件一致，不一致不以该状态服务并就地对账——持锁保证在飞的 ②→③ 窗口不会被误判为崩溃残留。
+- 创建：一个事务插入行（含 `content`）+ FTS 行（FTS 先删后插）（`Store.Create`）。redact：一个事务置
+  `status='redacted'` + 删除 FTS 行；文档留在行里，此后永不服务（`Store.Redact`）。
+- `content_sha` = `content` 的 SHA-256，`content_len` = 其字节数（`pf memory show` 显示的 `content_len`）。
+- `content` 为 NULL 的行（只可能来自迁移时找不到文件，§4）对一切读写路径等同不存在（`MEM-404`）。
 
-## 3. 文件布局与 frontmatter <!-- §3 -->
+## 3. 文档格式 <!-- §3 -->
 
-```
-<aihub-data-dir>/memory/<project_id>/<mem_id>/memory.md            # 权威内容：frontmatter + 正文
-<aihub-data-dir>/memory/<project_id>/_redacted/<mem_id>/memory.md  # redact 归位
-```
-
-frontmatter 与 `memories` 表列一一镜像，按固定顺序序列化（`authority.go` `frontmatter`）：`id`、`type`、
-`owner_user_id`、`title?`、`tags?`、`visibility`、`work_item_id?`、`project_id`、`idempotency_key?`、`related?`、
-`created_at`、`updated_at`。`id` 由服务端分配（`mem_` 前缀，与目录名一致）。行的 `title` 是文件的投影
-（`memory/title.go` `rowTitle`）：frontmatter 有非空白 `title` 时原样使用，否则从正文派生——第一个非空行，
+`content` 存完整文档：YAML frontmatter + 正文原样。frontmatter 与 `memories` 表列一一镜像，按固定顺序序列化
+（`authority.go` `frontmatter`）：`id`、`type`、`owner_user_id`、`title?`、`tags?`、`visibility`、`work_item_id?`、
+`project_id`、`idempotency_key?`、`related?`、`created_at`、`updated_at`。`id` 由服务端分配（`mem_` 前缀）。
+`?format=content` 与检索摘录只返回正文（`memory.Body` 去掉 frontmatter）。行的 `title` 在创建时确定
+（`memory/title.go` `rowTitle`）：请求有非空白 `title` 时原样使用，否则从正文派生——第一个非空行，
 去掉行首 markdown 标记（`#`、`>`、`-`/`*`/`+`、`[ ]`、`1.`/`1)`），跳过代码围栏行与分隔线，按字符边界截到
-80 字符（截断时末尾为 `…`）。派生标题只写入行，不回写 frontmatter。`visibility` ∈
+80 字符（截断时末尾为 `…`）。派生标题只写入行，不写进 frontmatter。`visibility` ∈
 `private|project|team|public|admin`。正文上限 1 MiB（`MEM-413`）。
 
-## 4. 对账（启动期，后台） <!-- §4 -->
+## 4. 一次性内容迁移（启动期） <!-- §4 -->
 
-aihub 启动后在后台运行 `Store.RebuildIndex`（`cmd/aihub/main.go`；先开始服务，完成时记一行日志）：清扫
-`memory.md.tmp` 残留；文件有、行缺 → 从 frontmatter 回填；行有、文件无 → 删行（创建在 ② 与 ③ 之间崩溃）；
-已移入 `_redacted/` 但未提交的 redact → 向前补完。按新鲜度戳增量执行（polyforge#129）：每行记录写入时
-权威文件的 mtime+size，戳一致即跳过该条目（不读、不哈希、不写索引）；戳不一致或缺失才按内容 sha 校验。
-对账开始时先做标题回填（`backfillTitles`）：`title` 为空/空白的 active 行，文件内容 sha 与行一致时按
-`rowTitle` 补上标题，分批小事务写入；已补的行不再被选中，不会重复读写。仍会在每次启动被重新选中并读文件的
-只有补不上的行：权威文件缺失、内容 sha 与行不一致（交给随后的对账按文件修正，修正时同样派生标题），或正文没有
-可用的行。没有在线重建端点。
+此前的版本把文档存为 `<data-dir>/memory/<project_id>/<mem_id>/memory.md`（redact 后在
+`<project_id>/_redacted/<mem_id>/`），行里没有 `content`。aihub 启动时、开始服务之前运行
+`Store.MigrateContent`（`cmd/aihub/main.go`；先 listen，迁移完成后才 serve，连接在 backlog 里等待）：表缺
+`content` 列时 `ALTER TABLE ADD COLUMN`；对每个 `content IS NULL` 的行，按 `authority_path` 读文件（先按行状态
+找 active / `_redacted` 位置，再找另一个），文件字节原样写入 `content`，按 16 MiB 一批小事务提交。文件 sha 与
+`content_sha` 一致 → 复制；不一致 → 以文件为准（旧版本的规则），重算 `content_sha`/`content_len`，active 行重写
+FTS；active 行的文件只在 `_redacted/` 下（redact 在挪文件后、提交前中断）→ 补完 redact；找不到文件 → 留 NULL、
+不服务，下次启动重试。每次启动记一行计数日志，非简单复制的行逐个列出 id。已填的行不再被选中：迁移过的库上
+只有一次查询，不读文件、不写。文件一律保留不删（本版本作为后备；删除留给后续版本，届时一并删除
+`authority_path` 列与旧库遗留的 `fs_mtime_ns`/`fs_size` 列）。耗时：3,800 条约 55 KB 的文档（≈210 MB）在开发机上约
+3.3 s。
 
 ## 5. API 与错误码 <!-- §5 -->
 
@@ -68,7 +65,7 @@ aihub 启动后在后台运行 `Store.RebuildIndex`（`cmd/aihub/main.go`；先�
   - 各项加引号以 OR 连接，按 bm25 × 新鲜度排序（见下）；只检查该顺序的前 max(100, 10×limit) 个候选，不再翻页（AND 模式翻页到底）。过滤后没有可用项 → 无命中（不报错）。用于长的描述性查询（领取时 recall）。
 
 两种模式的排序相同（`memory/freshness.go`）：`w = exp(-age_days / stability_days)`，`age_days` 按
-`memories.updated_at`（权威文档最后修订时间；没有更新端点，API 写入的条目等于 `created_at`）到查询时刻计算；
+`memories.updated_at`（没有更新端点，等于 `created_at`）到查询时刻计算；
 `score = rank × (1 + 0.5 × w)`（rank 为 FTS5 bm25，越负越好），升序，平分时按 `updated_at` 降序（按解析后的时刻比较——整秒与带小数秒的 RFC3339 并存；解析不了的视为最旧）、再按 id。
 stability：`rule.*`、`doc.design`、`doc.decision` 不衰减（w = 1）；`doc.review`、`doc.audit` 及其他 `doc.*`
 （时点快照）180 天；`experience.*` 90 天；`fact.*` 与 `methodology.*` 180 天；其他类型 90 天。`updated_at`
@@ -81,7 +78,7 @@ rowid 与 rank，再沿 rank 顺序分批读取条目元数据，直到下界 (1
 
 `MEM-400` 输入不合法（缺 `q`/`type`/`content`、可见性越界、frontmatter 不合法）；`MEM-403` 无写权限 / 能读但非 owner
 的 redact；`MEM-404` 不存在或无权读（含 redact 时无读权限）；`MEM-409` 幂等键复用、redact 非 active 条目；`MEM-413` 正文超 1 MiB；
-`MEM-500` 文件系统/事务失败；`MEM-502` 对账遍历/清扫失败；`MEM-503` FTS 查询/扫描失败（常量见 `internal/common/api/errors.go` `ErrMem*`）。另：key 限定在其他项目 → `AUTH-403`；
+`MEM-503` FTS 查询/扫描失败；数据库事务失败 → `CORE-500`（常量见 `internal/common/api/errors.go` `ErrMem*`）。另：key 限定在其他项目 → `AUTH-403`；
 创建时项目不存在 → `CORE-404`。
 
 ## 6. 可见性 <!-- §6 -->
@@ -91,9 +88,9 @@ rowid 与 rank，再沿 rank 顺序分批读取条目元数据，直到下界 (1
 
 ## 7. 备份 <!-- §7 -->
 
-`pf backup` → `POST /api/v1/admin/backup`（admin）只对 SQLite 做 `VACUUM INTO <data-dir>/backups/aihub-<ts>.db`
-（`core/admin.go`）：**不含** memory 文件与 git 仓库，也不与写路径互斥。memory 文件可由对账从 Markdown 重建
-索引，但 Markdown 本身只在完整备份里：生产完整备份由 `.polyforge/deploy.sh` 的在线备份完成（`docs/upgrade.md`）。
+`pf backup` → `POST /api/v1/admin/backup`（admin）对 SQLite 做 `VACUUM INTO <data-dir>/backups/aihub-<ts>.db`
+（`core/admin.go`）：memory 全部在库里，快照即包含全部 memory（含已 redact 的文档）；**不含** git 仓库（`git/`），
+落在同一块盘上。生产完整备份由 `.polyforge/deploy.sh` 的在线备份完成（`docs/upgrade.md`）。
 
 ## 8. CLI 与领取时快照 <!-- §8 -->
 

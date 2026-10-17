@@ -47,7 +47,8 @@
 #                       server from the saved old binary
 #   3 online backup     rsync memory/ git/ (pass 1) -> sqlite backup-API snapshot
 #                       of aihub.db -> rsync catch-up; snapshot integrity + counts
-#   4 consistency       memories rows in the snapshot == memory.md files in the backup
+#   4 consistency       every memories row in the snapshot carries its content (a
+#                       snapshot predating memories.content: rows == memory.md files)
 #   5 off-host          rsync backup to BACKUP_ROOT, manifests equal, integrity + counts
 #                       then mark it .verified (both sides) and keep the newest 3 verified
 #                       aihub-backup-<ver>-<TS> dirs (this one included) on the server and
@@ -644,7 +645,9 @@ sql_rollback_phase() {
 #   ro   : open the live db read-only (file:...?mode=ro).
 #   copy : copy aihub.db(+wal/shm) to a scratch dir and open THAT (a stopped
 #          db with a leftover -wal cannot be opened read-only in place).
-# prints:  "integrity <result>"  and  "count <table> <n>" per table.
+# prints:  "integrity <result>", "count <table> <n>" per table and
+#          "memcontent <n>" - memories rows without content ("none" when the
+#          db predates memories.content).
 PYCHK='
 import os, shutil, sqlite3, sys, tempfile
 db, mode = sys.argv[1], sys.argv[2]
@@ -671,6 +674,10 @@ try:
         if n.startswith("sqlite_") or n.startswith("memory_fts"):
             continue
         print("count", n, c.execute("select count(*) from \"%s\"" % n.replace("\"", "")).fetchone()[0])
+    if "content" in [r[1] for r in c.execute("pragma table_info(memories)")]:
+        print("memcontent", c.execute("select count(*) from memories where content is null").fetchone()[0])
+    else:
+        print("memcontent none")
 finally:
     if tmp:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -1106,7 +1113,8 @@ cat <<EOF
                      rsync -a $AIHUB_DATA/ -> $SRV_BACKUP/   (pass 1, excluding aihub.db, -wal, -shm, service.lock, bootstrap-admin.key, .verified)
                      python3 sqlite3 backup API: $AIHUB_DATA/aihub.db (ro) -> $SRV_BACKUP/aihub.db ; integrity_check + counts >= baseline
                      rsync -a again (catch-up, files at least as new as the DB)
-4. consistency       rows in the snapshot's memories == memory.md files under $SRV_BACKUP/memory (retry up to 2x; still different -> stop, nothing changed)
+4. consistency       every memories row in the snapshot carries its content (none missing -> continue; otherwise stop, nothing changed);
+                     a snapshot predating memories.content: its memories rows == memory.md files under $SRV_BACKUP/memory (retry up to 2x; still different -> stop)
 5. off-host copy     rsync $AIHUB_HOST:$SRV_BACKUP/ -> $LOCAL_BACKUP/
                      server manifest == local manifest; integrity_check ok + row counts == frozen baseline on the local aihub.db
    retention         then mark this backup .verified on both sides and keep the newest $KEEP_BACKUPS verified aihub-backup-* dirs (this one included) on each side; would prune:
@@ -1213,20 +1221,31 @@ note "snapshot row counts (frozen baseline from here):"
 show_counts "$WORK/frozen.counts"
 
 # ---------------------------------------------------------------- step 4
-step 4 "consistency: memories rows vs memory files"
-# Each memories row is exactly one <data>/memory/<project>/<id>/memory.md (or the
-# same under _redacted/ for redacted rows): internal/aihub/memory/store.go.
-tries=0
-while :; do
-  rows="$(awk '$1 == "memories" {print $2}' "$WORK/frozen.counts")"
-  files="$(rssh "find '$SRV_BACKUP/memory' -type f -name memory.md | wc -l" | tr -d ' ')"
-  note "snapshot memories rows: $rows ; memory.md files in the backup: $files"
-  [ "$rows" = "$files" ] && break
-  tries=$((tries + 1))
-  [ "$tries" -le 2 ] || die "memories rows ($rows) != memory files ($files) after 2 retries - memory is being written during the backup or files are missing; re-run (nothing was changed)"
-  note "mismatch: re-snapshot + catch-up (retry $tries)"
-  snapshot; rsync_pass
-done
+step 4 "consistency: memory content in the snapshot"
+# Each memory's document lives in its memories row (memories.content,
+# internal/aihub/memory), so the snapshot alone holds every memory: each
+# row must carry its content. A NULL is a row aihub's startup content
+# migration found no memory file for (aihub logs its id; it is not
+# served). A snapshot that predates the column keeps the documents in
+# <data>/memory/<project>/[_redacted/]<id>/memory.md files instead: then
+# each row must have its file in the backup.
+nocontent="$(sed -n 's/^memcontent //p' "$WORK/frozen.counts.raw")"
+if [ "$nocontent" != "none" ]; then
+  note "snapshot memories rows without content: $nocontent"
+  [ "$nocontent" = 0 ] || die "$nocontent memories rows carry no content (no memory file at aihub's startup content migration; the aihub log names them and they are not served) - restore their memory.md under $AIHUB_DATA/memory and restart aihub, or delete the rows; nothing was changed"
+else
+  tries=0
+  while :; do
+    rows="$(awk '$1 == "memories" {print $2}' "$WORK/frozen.counts")"
+    files="$(rssh "find '$SRV_BACKUP/memory' -type f -name memory.md | wc -l" | tr -d ' ')"
+    note "snapshot predates memories.content - memories rows: $rows ; memory.md files in the backup: $files"
+    [ "$rows" = "$files" ] && break
+    tries=$((tries + 1))
+    [ "$tries" -le 2 ] || die "memories rows ($rows) != memory files ($files) after 2 retries - memory is being written during the backup or files are missing; re-run (nothing was changed)"
+    note "mismatch: re-snapshot + catch-up (retry $tries)"
+    snapshot; rsync_pass
+  done
+fi
 note "consistent"
 
 # ---------------------------------------------------------------- step 5
