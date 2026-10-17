@@ -679,6 +679,12 @@ func (d *Driver) prepareDispatch(stepID string) (*StepSpawn, int64, error) {
 			sp.Harness, sp.Model, sp.Effort = c.Harness, c.Model, c.Effort
 		}
 	}
+	sp.Done = map[string]bool{}
+	for id, s := range d.exec.Steps {
+		if s != nil && s.Status == capsule.StepDone {
+			sp.Done[id] = true
+		}
+	}
 	sp.SpawnN = d.spawnN + 1
 	return sp, sp.SpawnN, nil
 }
@@ -868,6 +874,9 @@ type StepSpawn struct {
 	// turn ENDED without the agent writing the result envelope (cause
 	// ended_without_result).
 	PriorEndedWithoutResult bool
+	// Done is the set of steps whose execution record is done (an
+	// inherit step's handoff producer must be one).
+	Done map[string]bool
 }
 
 // StepRun is one spawned step execution awaiting its result envelope.

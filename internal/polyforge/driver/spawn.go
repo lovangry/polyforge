@@ -164,7 +164,7 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		parts.OutputSchema = schema.Text
 	}
 	if policy == ContextInherit {
-		h, err := a.resolveHandoff(sp.StepID)
+		h, err := a.resolveHandoff(sp.StepID, sp.Done)
 		if err != nil {
 			return nil, err
 		}
@@ -736,7 +736,7 @@ func readCapsuleFile(root, rel string) ([]byte, error) {
 // Handoff resolution.
 
 // resolveHandoff finds the handoff an inherit step continues from: the
-// NEAREST earlier step declaring handoff whose execution.json record is
+// NEAREST earlier step declaring handoff whose execution record is
 // done — its handoff artifact is read from the CONVENTION PATH
 // artifacts/handoff-<step>.md (polyforge#147: path convention, no
 // manifest, no digest verification). No earlier handoff-declaring step
@@ -744,7 +744,7 @@ func readCapsuleFile(root, rel string) ([]byte, error) {
 // nothing), and so does a done producer that left no file at the
 // convention path: the handoff section is simply omitted, never a
 // dispatch failure (01-workflow-skills.md §4.4a).
-func (a *StepSpawnAdapter) resolveHandoff(stepID string) (*handoffSection, error) {
+func (a *StepSpawnAdapter) resolveHandoff(stepID string, done map[string]bool) (*handoffSection, error) {
 	idx, _ := a.Workflow.indexOf(stepID) // -1 when absent
 	if idx <= 0 {
 		return nil, nil // no earlier step declares anything
@@ -754,11 +754,7 @@ func (a *StepSpawnAdapter) resolveHandoff(stepID string) (*handoffSection, error
 		if !prod.Handoff {
 			continue
 		}
-		done, err := a.producerDone(prod.ID)
-		if err != nil {
-			return nil, err
-		}
-		if !done {
+		if !done[prod.ID] {
 			return nil, fmt.Errorf("driver: step %q declares handoff but is not done (execution.json), needed by inherit step %q",
 				prod.ID, stepID)
 		}
@@ -773,28 +769,6 @@ func (a *StepSpawnAdapter) resolveHandoff(stepID string) (*handoffSection, error
 		return &handoffSection{FromStep: prod.ID, Path: rel, Content: content}, nil
 	}
 	return nil, nil
-}
-
-// producerDone reads execution.json and answers whether the step's
-// record is done. No execution.json (a fresh capsule) or an absent
-// record answers false.
-func (a *StepSpawnAdapter) producerDone(stepID string) (bool, error) {
-	data, err := os.ReadFile(filepath.Join(a.WI.CapsuleDir, capsule.ExecutionJSON))
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil // no execution.json: nothing is done
-	}
-	if err != nil {
-		return false, fmt.Errorf("driver: read execution.json for handoff-producer check: %w", err)
-	}
-	var exec struct {
-		Steps map[string]struct {
-			Status string `json:"status"`
-		} `json:"steps"`
-	}
-	if err := json.Unmarshal(data, &exec); err != nil {
-		return false, fmt.Errorf("driver: parse execution.json: %w", err)
-	}
-	return exec.Steps[stepID].Status == capsule.StepDone, nil
 }
 
 // spawnTokenDir is the archive token directory for spawn ordinal n.

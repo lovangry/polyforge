@@ -145,10 +145,11 @@ func grillDone(t *testing.T, capDir string) {
 		Outcome: OutcomeCompleted,
 		Output:  json.RawMessage(`{}`),
 	})
-	// the acceptance gate: execution.json records the step done
-	writeCapsuleFile(t, capDir, "runtime-state/execution.json",
-		`{"steps":{"grill":{"status":"done"}}}`)
 }
+
+// grillDoneSet is the driver's done set after grill: the inherit fix
+// step's handoff producer check reads it from the spawn.
+var grillDoneSet = map[string]bool{"grill": true}
 
 // ---------------------------------------------------------------------------
 // Prompt assembly.
@@ -160,6 +161,7 @@ func TestSpawnStepInheritPromptAssembly(t *testing.T) {
 	_, err := ad.SpawnStep(context.Background(), StepSpawn{
 		StepID: "fix",
 		SpawnN: 2,
+		Done:   grillDoneSet,
 		Model:  "prov/glm",
 		RewindInput: &capsule.RewindInput{
 			ToStep: "fix",
@@ -343,7 +345,7 @@ func TestSpawnStepInputFormErrors(t *testing.T) {
 	if err := os.Remove(filepath.Join(capDir, "artifacts", "grill-qa.md")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 2}); err != nil {
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 2, Done: grillDoneSet}); err != nil {
 		t.Fatalf("a missing artifact must not break dispatch: %v", err)
 	}
 
@@ -351,7 +353,7 @@ func TestSpawnStepInputFormErrors(t *testing.T) {
 	if err := os.Remove(filepath.Join(capDir, "workflows", "autopilot-x", "steps", "fix.md")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 2}); err == nil ||
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 2, Done: grillDoneSet}); err == nil ||
 		!strings.Contains(err.Error(), "step definition") {
 		t.Fatalf("missing step definition must fail, got %v", err)
 	}
@@ -393,7 +395,7 @@ func TestSpawnStepInheritMissingHandoffFileOmitsSection(t *testing.T) {
 	if err := os.Remove(filepath.Join(capDir, "artifacts", "handoff-grill.md")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 2}); err != nil {
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 2, Done: grillDoneSet}); err != nil {
 		t.Fatalf("a missing handoff file must not fail the dispatch: %v", err)
 	}
 	p, _ := sp.last()
@@ -1013,7 +1015,7 @@ func TestSpawnStepPromptCarriesMemoryDuty(t *testing.T) {
 	ad, sp, capDir := spawnEnv(t)
 	grillDone(t, capDir)
 	writeCapsuleFile(t, capDir, capsule.WorkItemJSON, `{"id":"wi_sp","slug":"e2e#7","project":"e2e","goal":"g"}`)
-	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 2}); err != nil {
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 2, Done: grillDoneSet}); err != nil {
 		t.Fatalf("SpawnStep: %v", err)
 	}
 	if p, _ := sp.last(); strings.Contains(p.InitialPrompt, "# Project memory") {
@@ -1021,7 +1023,7 @@ func TestSpawnStepPromptCarriesMemoryDuty(t *testing.T) {
 	}
 	copySharedMemoryTemplates(t, capDir)
 	writeCapsuleFile(t, capDir, capsule.MemoryPolicyJSON, `{"project":"e2e","record":["sqlite pitfalls","owner rulings"],"skip":["step logs"],"source":"workspace"}`)
-	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 3}); err != nil {
+	if _, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "fix", SpawnN: 3, Done: grillDoneSet}); err != nil {
 		t.Fatalf("SpawnStep: %v", err)
 	}
 	p, _ := sp.last()
