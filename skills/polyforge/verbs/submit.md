@@ -49,7 +49,7 @@ raw answer `{accepted, work_item_id}`.
 | `CORE-404` | Unknown or invisible id (CLI precheck) | No such work item — check the `wi_` id. |
 | (no code) `submit: <slug> is terminal (<status>)` | The work item is already wrapped/failed/canceled (CLI precheck) | It is finished and can never be claimed again — file a new work item instead. |
 | `DAEMON-409` | The work item is already active or queued on this daemon | Wait for the running attempt. |
-| `DAEMON-410` (`SHUTTING_DOWN`) | The daemon is in graceful shutdown | Wait for the shutdown to finish and the daemon to restart, then submit again. |
+| `DAEMON-410` (`SHUTTING_DOWN`) | The daemon is shutting down | Wait for the shutdown to finish and the daemon to restart, then submit again. |
 | (accepted, then deferred) | The hub could not be reached when the dispatcher went to claim (transient). The submit itself already answered `accepted`; the deferral shows only in the daemon log (and, if the claim is later refused, as a `submit_rejected` event) | Nothing was claimed yet; the entry stays queued in the daemon and is retried with backoff (1s doubling to 30s). Check aihub reachability; `pf watch <id> --once` shows it once claimed. |
 | `DAEMON-400` | Malformed request body | Fix the invocation. |
 | `DAEMON-412` | The work item's project is not in the `[workspace]` mapping of this machine (refused before any capsule or claim state exists) | Add the project to a `[workspace."<path>"]` section; `pf doctor` checks the mapping. |

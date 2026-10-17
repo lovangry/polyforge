@@ -104,11 +104,11 @@ func TestObserveAnswerPending(t *testing.T) {
 		AnswerText: "mint", AnsweredBy: "u_1",
 	})
 	if aerr == nil {
-		t.Fatalf("answer with no live bridge handle was accepted: %s", araw)
+		t.Fatalf("answer with no live driver was accepted: %s", araw)
 	}
 	var ae *api.Error
-	if !errors.As(aerr, &ae) || ae.Code != api.ErrDaemonConflict || !strings.Contains(ae.Detail, "bridge") {
-		t.Fatalf("answer error = %v, want the typed no-bridge-handle 409", aerr)
+	if !errors.As(aerr, &ae) || ae.Code != api.ErrDaemonConflict || !strings.Contains(ae.Detail, "no live driver") {
+		t.Fatalf("answer error = %v, want the typed no-live-driver 409", aerr)
 	}
 }
 

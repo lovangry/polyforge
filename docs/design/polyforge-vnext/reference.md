@@ -1,6 +1,6 @@
 # Polyforge reference — the current system
 
-> What exists in this tree (v2.10.0 line), derived from the code; every claim names its source file.
+> What exists in this tree (v2.14.0 line), derived from the code; every claim names its source file.
 > **The code is the authority**; where this file and the code disagree, fix this file. Decisions and
 > their rationale live in [v2-converge.md](v2-converge.md) (decision authority, Chinese); the
 > parent/child/bundle contract in [wi-kind-contract.md](wi-kind-contract.md); bundle authoring in
@@ -240,13 +240,13 @@ non-read request whose peer (or its ancestors / process-group leader) carries th
 | Method | Path | Does | Caller |
 |---|---|---|---|
 | POST | `/jobs/{wi}/claim` | enqueue + claim + start (priority, models, origin); `{"resume":true}`: claim + start now — the continue of a blocked WI after the CLI landed the hub door (DAEMON-503 → queued, answered `deferred`) | `pf submit`, `pf resume` |
-| POST | `/jobs/{wi}/answer` | deliver an answer to the driver bridge (no `question_id` → the single pending one) | `pf answer` |
+| POST | `/jobs/{wi}/answer` | deliver an answer to the work item's driver (no `question_id` → the single pending one) | `pf answer` |
 | POST | `/jobs/{wi}/resume-paused` | live holder re-attaches a paused WI in place (`attached`/`already_live`/`closed`) | `pf resume` |
 | POST | `/jobs/{wi}/pause` | operator pause (clean_pause) | `pf pause` |
 | POST | `/jobs/{wi}/wrap` | terminal close with verdict | `pf wrap [--fail]` |
 | GET | `/status[?harnesses=1]` | machine id, auto, max, workspaces, jobs, queue; harness probe | `pf ops status`, `pf doctor`, `pf daemon ensure` |
 | POST | `/ops/config` | auto-pull switch, max concurrent jobs | `pf ops auto on|off`, `pf ops max N` |
-| POST | `/shutdown` | async graceful shutdown | `pf ops shutdown` |
+| POST | `/shutdown` | async shutdown (§6.2) | `pf ops shutdown` |
 | POST | `/chat/init` | harness session → chat id | `pf chat init` |
 | GET | `/jobs/{wi}/watch?after=N` | per-WI snapshot + events | `pf watch <wi> --once` |
 | GET | `/chats/{id}/subscriptions` | list | `pf watch` |
@@ -329,7 +329,7 @@ verdict contract), record-only on every other step (event `output_schema_violati
 - One harness process per dispatch, cwd = capsule. The step writes **one** JSON envelope to `runtime-state/pending-results/<spawn_n>.json`: `{wi_id, step_id, spawn_n, outcome, output, question_id, question, command_evidence, submitted_at}`; outcomes `completed | gate_failed | needs_input | incomplete` (`driver/result.go`). The driver archives it to `artifacts/steps/<step>/s<spawn_n>/result.json`.
 - Validation order (`ValidateStepResult`): shape; identity + spawn_n fence; needs_input question shape; gate verdict binding (completed with `verdict: fail` → `gate_failed`); `requires_human_answer`; `defer` verdict only on `deploy`; output schema (enforced on `release`/`deploy`, record-only elsewhere); command evidence (a list of objects on any step, else rejected; on evidence-owing steps argv non-empty, `duration_ms>0`); committed test files; pre-existing-failure boundary; authored tests unchanged; deliver binding. A rejection is retried in-process with the reason; the 4th consecutive rejection (`maxEnvelopeRejects`=3 retries) blocks the step `result_invalid`. Details: `v2-converge.md#§2.6`.
 - `gate_failed` → bounded rewind (`driver/transition.go` `applyGateFailLocked`): no `on_fail` → `failed_gate`; a bound hit → `failed_rewind_exhausted`; else `[target, gate)` archived as `gate_fail_rewind` and reset, the verdict text delivered to the target as `pending_rewind_input`, candidate pointers reset.
-- `needs_input` → question stored in `execution.json`; a human answers with `pf answer` → daemon `/jobs/{wi}/answer` → driver bridge (`applyAnswerLocked`). Never answered by an agent (UDS step-origin refusal).
+- `needs_input` → question stored in `execution.json`; a human answers with `pf answer` → daemon `/jobs/{wi}/answer` → the driver (`applyAnswerLocked`). Never answered by an agent (UDS step-origin refusal).
 - `incomplete` → workflow `blocked`. Workflow statuses: `running completed failed_gate failed_rewind_exhausted blocked`; step statuses `pending in_progress done` (`common/capsule/capsule.go`). A terminal workflow closes the WI (completed → `wrapped`, failed → `failed`, blocked → hub `blocked`) after a final seal push; if that push fails the close degrades to blocked (`v2-converge.md#§D`).
 - `execution.json` (`capsule.Execution`, the driver is its single writer): `capsule_id`, `work_item_id`, `current_step`, `workflow_status`, `steps` (per id: `status`, `model`, `effort`, `output`, `step_started_at`, `budget_consumed`, `attempts[]` with `cause` `accepted`/`gate_fail_rewind`/`infra_failure` and `failure_cause`, `pending_question`, `answers`, `answer_base`, `pending_rewind_input`, `supervision` counters and relaxed bounds, `next_dispatch`), `review_rounds`, `rewind_stats`, `budget_consumed`, `updated_at`, `version` (bumped on every write; the push loop keys on it), `blocked_reason` (set when the driver blocks on its own authority: host-class fault, failure bound, `result_invalid`).
 
@@ -367,7 +367,7 @@ later retries start fresh with the old transcript as read-only reference (`v2-co
 | | pi (`runtime/spawn.go`) | Claude Code (`runtime/claudespawn.go`) |
 |---|---|---|
 | argv | `pi --mode rpc --no-skills --no-context-files --no-prompt-templates [--session <transcript>] [--model] [--thinking]` | `claude -p --bare --output-format stream-json --verbose --include-partial-messages --session-id <uuid>`/`--resume <uuid> [--model] [--effort] --tools/--allowedTools Bash,Read,Edit,Write,Glob,Grep,TodoWrite,Agent --permission-mode dontAsk --strict-mcp-config --disable-slash-commands …`; prompt on stdin |
-| env | `PF_WI_ID`, `PF_DAEMON_ID`, `PI_CODING_AGENT_DIR=<harness-root>/step-agent`, `PI_CODING_AGENT_SESSION_DIR=<harness-root>/step-agent-sessions`; all other `PF_*` stripped | `CLAUDE_CONFIG_DIR=<harness-root>/claude-config`, `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, `DISABLE_AUTOUPDATER=1`, …; no credential injected; every inherited `ANTHROPIC_*`, `CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_CONFIG_DIR` stripped (the settings.json `env` block is the only credential/endpoint source) |
+| env | `PF_WI_ID`, `PF_DAEMON_ID`, `PF_DAEMON_SOCKET` (the daemon's own socket, so a step's `pf` reaches it), `PI_CODING_AGENT_DIR=<harness-root>/step-agent`, `PI_CODING_AGENT_SESSION_DIR=<harness-root>/step-agent-sessions`; all other `PF_*` stripped | the same `PF_*` markers and socket; `CLAUDE_CONFIG_DIR=<harness-root>/claude-config`, `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, `DISABLE_AUTOUPDATER=1`, …; no credential injected; every inherited `ANTHROPIC_*`, `CLAUDECODE`, `CLAUDE_CODE_*`, `CLAUDE_CONFIG_DIR` stripped (the settings.json `env` block is the only credential/endpoint source) |
 | transcript | live file located in the session store, copied verbatim to `session/session-<token>.jsonl` at commit boundaries (`runtime/pitranscript.go`) | `<claude-config>/projects/<dashed cwd>/<uuid>.jsonl`; resume only if it exists |
 
 Provider errors (pi, `supervise/pi.go`): a `message_end`/`turn_end` whose message has `stopReason=="error"` is an error signal; an `agent_end` whose last assistant message ended in error and `willRetry=false` ends the turn as failed (rule ① / D7 classification in `v2-converge.md#§2.3`); `willRetry=true` means pi retries itself and the turn is not judged.
@@ -383,13 +383,13 @@ Rules and causes: `v2-converge.md#§2.3`, bounds `v2-converge.md#§2.4` (code `i
 `driver/supervision.go`). Defaults: X silence 10m token-level / 30m message-level; Y tool 30m; T step
 90m cumulative (`[daemon] step_timeout`); N driver stall 10m (`[daemon] stall_window`); model-error
 grace 1m; per-step failure bound 3 (`DefaultMaxStepFailures`). Timeouts relax (double) and persist in
-`execution.json`. The 10s / 5-steps / 30-min / same-error-5 numbers are the **push** loop (§8), not step bounds.
+`execution.json`. The 10s → 5 min backoff is the **push** loop's (§8), not a step bound.
 
 ## 8. Capsule and git chain <!-- §8 -->
 
-- Layout: `v2-converge.md#§E` (E.5), constants `internal/common/capsule/capsule.go`; `pending-results/` and `sync/` are defined in `driver/spawn.go` and `runtime/materialize.go`. `.gitignore`: `/repos/`, `/artifacts/release-*/`, `/sync/`. The capsule's git-dir is external (`<data-dir>/git/<wi>.git`, a `gitdir:` pointer file in the capsule): it is outside the capsule tree, but a step's own `git commit` in the capsule root still reaches it — hence the trailer fold below.
+- Layout: `v2-converge.md#§E` (E.5), constants `internal/common/capsule/capsule.go`; `pending-results/` and `sync/` are defined in `driver/spawn.go` and `runtime/materialize.go`. `.gitignore`: `/repos/`, `/artifacts/release-*/`, `/sync/`. The capsule's git-dir is external (`<data-dir>/git/<wi>.git`, a `gitdir:` pointer file in the capsule): it is outside the capsule tree, but a step's own `git commit` in the capsule root still reaches it and is published as-is.
 - Chain rules (FF-only, no ref deletion, blob ≤16 MiB, no gitlinks), push fencing, push retry schedule, re-claim = clone + task-repo restore, `DAEMON-516/518`: `v2-converge.md#§14.1`. Carrier refs `refs/pf-task/<name>`: `v2-converge.md#§14.2`. Uncommitted-work snapshots `refs/pf-wip/<name>`: `v2-converge.md#§14.3`.
-- Local invariants (`internal/polyforge/gitops/gitops.go`): one per-WI git mutex shared by runtime and observe; the chain push is bounded by its caller's context (on its end the push's git process group is killed and the lock released); `index.lock` older than 10m removed at acquisition; local gitlink precheck (`GIT-412`); a commit a step made on the chain branch is pushed as an ordinary fast-forward commit; an amended already-pushed commit is non-fast-forward and needs a human.
+- Local invariants (`internal/polyforge/gitops/gitops.go`): one per-WI git mutex shared by runtime and observe; the chain push is bounded by its caller's context (on its end the push's git process group is killed and the lock released); `index.lock` older than 10m removed at acquisition; local gitlink precheck (`GIT-412`) before the commit and over every commit about to be pushed (an agent's own commit included); a commit a step made on the chain branch is pushed as an ordinary fast-forward commit; an amended already-pushed commit is non-fast-forward and needs a human.
 - Push loop (`observe/observe.go`, `observe/monitor.go`): event-triggered on each `execution.json` commit; a failed Version is retried with exponential backoff (10s doubling to 5 min; one `push_failed` per attempt, one `push_backpressure` when the delay reaches its cap); a new Version is pushed at once (only a success resets the delay); 60s per push.
 
 ## 9. Memory and recall <!-- §9 -->
@@ -411,7 +411,7 @@ experience.* 90d, fact.*/methodology.* 180d, else 90d
 (`memory/freshness.go`). A memory written without a title gets one derived from its body's first line
 (row only, at create time). CLI (`cli/verbs_aihub.go`): `pf recall --project P <query> [--any]` (project must
 be mapped; `--any` = `match=any`), `pf remember --project P --type T <content|-|@file>`, `pf memory show <id>`. At claim the
-daemon writes `runtime-state/recalled-memories.json` (query = goal + the first 1500 runes of content, `match=any`, project-scoped, top 10,
+daemon writes `runtime-state/recalled-memories.json` (query = goal + labels, `match=any`, project-scoped, top 10,
 1200-rune excerpts; empty list + notice on error or no hits; never fails the claim — `runtime/recall.go`,
 `daemon/memface.go`). Deploy aihub before daemons: an older aihub ignores `match` and ANDs, which
 leaves the snapshot empty. `pf backup` is a SQLite snapshot holding every memory, without git repos (§4.1).

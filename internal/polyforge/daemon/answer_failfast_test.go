@@ -38,19 +38,19 @@ func TestAnswerWithoutLiveBridgeHandleFailsFast(t *testing.T) {
 
 	// (2) Monitored, but the scripted engine carries no bridge Handle
 	// (the between-derivations shape): typed 409 naming the missing
-	// bridge handle — and no relay path executes anywhere.
+	// live driver — and no relay path executes anywhere.
 	td.submitClaim(t, "wi_ff")
 	td.waitMonitored(t, "wi_ff")
 	raw, err := td.client.Answer("wi_ff", payload)
 	if err == nil {
-		t.Fatalf("answer with no live bridge handle was accepted: %s", raw)
+		t.Fatalf("answer with no live driver was accepted: %s", raw)
 	}
 	var ae *api.Error
 	if !errors.As(err, &ae) || ae.Code != api.ErrDaemonConflict {
-		t.Fatalf("no-bridge answer error = %v, want DAEMON-409", err)
+		t.Fatalf("no-driver answer error = %v, want DAEMON-409", err)
 	}
-	if !strings.Contains(ae.Detail, "bridge") {
-		t.Fatalf("the refusal must name the missing bridge handle: %q", ae.Detail)
+	if !strings.Contains(ae.Detail, "no live driver") {
+		t.Fatalf("the refusal must name the missing live driver: %q", ae.Detail)
 	}
 }
 

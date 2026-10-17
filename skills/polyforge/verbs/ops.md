@@ -111,16 +111,16 @@ end), `CORE-410` (terminal).
 - `auto` / `max` bare: `auto: on|off` / `max: N`; a change answers with
   the effective `{"auto":..,"max":..}`.
 - `shutdown`: `graceful shutdown requested; the daemon quiesces and exits`
-  — the sequence terminates the live agent trees, persists the
-  bookkeeping and exits within its five-minute budget. Interrupted work
-  items stay running server-side; the next daemon start recovers them and
-  commits any uncommitted working-tree state.
+  — the daemon terminates the live agent trees, saves each job's
+  uncommitted task-repo work to aihub (`refs/pf-wip/<name>`) and exits
+  within 30s. Interrupted work items stay running server-side; the next
+  daemon start attaches and continues them.
 
 ## Failure branches
 
 | Code | When | What to tell the user |
 |---|---|---|
-| `DAEMON-410` (`SHUTTING_DOWN`) | Any external submit while a graceful shutdown is in flight | Wait for the shutdown to complete and the daemon to restart. |
+| `DAEMON-410` (`SHUTTING_DOWN`) | Any external submit while the daemon is shutting down | Wait for the shutdown to complete and the daemon to restart. |
 | `DAEMON-400` | Malformed ops-config request (`max < 1`, empty body) — the CLI's own argument validation usually catches this first with a usage error | Fix the invocation; read the detail. |
 | `dial unix …` | The daemon is not running on this machine | Run `pf daemon ensure` (starts it under its tmux restart loop; a no-op when one answers), then retry the verb once; if ensure fails, relay its message and run `pf doctor`. Check `--socket` / `PF_DAEMON_SOCKET` if you expect it elsewhere. |
 

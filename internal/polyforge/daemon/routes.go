@@ -46,11 +46,11 @@ type statusJob struct {
 	SpawnN             int    `json:"spawn_n,omitempty"`
 	SessionFingerprint string `json:"session_fingerprint,omitempty"`
 	AgentPID           int    `json:"agent_pid,omitempty"`
-	// NeedsInput/QuestionID carry the D6 owner face: the monitor's
-	// pending-question projection merged over the runtime state machine
-	// (a job the runtime calls running but the monitor holds a pending
-	// question for is presented as needs_input — an agent blocked on a
-	// human must never read as merely busy).
+	// NeedsInput/QuestionID carry the D6 owner face: the pending question
+	// read from a live driver's execution.json, merged over the runtime
+	// state (a job the runtime calls running but whose step waits on a
+	// human is presented as needs_input — an agent blocked on a human must
+	// never read as merely busy).
 	NeedsInput bool   `json:"needs_input,omitempty"`
 	QuestionID string `json:"question_id,omitempty"`
 	// StepAgeSec / LastWorkAgoSec are the owner liveness face (the ops
@@ -196,9 +196,8 @@ func (d *Daemon) handler() http.Handler {
 // routes is the bare route table.
 func (d *Daemon) routes() *http.ServeMux {
 	mux := http.NewServeMux()
-	// v2 (polyforge#106): answer routes through the driver bridge when
-	// the WI's job carries a bridge Handle; otherwise it refuses. A step
-	// process never gets here (refuseStepOrigin, polyforge#122).
+	// answer is delivered to the WI's live driver; with no live driver it
+	// refuses. A step process never gets here (refuseStepOrigin).
 	mux.HandleFunc("POST /jobs/{wi}/answer", func(w http.ResponseWriter, r *http.Request) {
 		wi := r.PathValue("wi")
 		if h := d.rt.DriverAnswerHandle(wi); h != nil {
@@ -249,7 +248,7 @@ func (d *Daemon) routes() *http.ServeMux {
 			return
 		}
 		writeErr(w, api.ErrDaemonConflict,
-			"no live bridge handle for work item "+wi+": the workflow is between derivations — retry after the daemon re-derives it")
+			"no live driver for work item "+wi+": the workflow is between derivations — retry after the daemon re-derives it")
 	})
 	mux.HandleFunc("POST /jobs/{wi}/claim", d.submitRoute())
 	// wi_seWTgHeKtaa8 (v2-converge §7): the live-holder half of the

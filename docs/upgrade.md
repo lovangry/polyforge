@@ -155,7 +155,20 @@ the v2.4.x DDL. `deploy/sql/v2.5.0/probe.sql` answers 0 when the table is
 gone and the column exists (a database created by v2.5.0 is already in
 that shape).
 
-## v2.14.0 (polyforge#194, memory and claim-cache cleanup)
+## v2.14.0
+
+**Deploy aihub first, then upgrade the work machines** (`tools/install.sh`
+re-run; it upgrades `pf` and restarts the daemon together). A new hub
+accepts what older daemons still send (the `Polyforge-Seq` trailer, the
+session-fingerprint push option, a claim's `idempotency_key`) and ignores
+it; a new daemon against an older hub fails: the old hook demands the
+trailer the new daemon no longer writes, and a lost claim answer ends
+blocked instead of being replayed. Upgrade `pf` and the daemon together:
+the daemon's `POST /jobs/{wi}/resume-blocked` route is gone (`pf resume`
+on a blocked work item now uses `POST /jobs/{wi}/claim` with
+`{"resume":true}`), so an older `pf resume` fails against a new daemon.
+
+### Upgrade SQL (polyforge#194)
 
 aihub stops writing memory files: create and redact touch only the
 database (see "Memories move into the database" below). The memories
@@ -187,6 +200,67 @@ are gone (a database created by v2.14.0 is already in that shape).
 - The files under `memory/` are left in place and still copied by the
   deploy backup's rsync; aihub reads them only to fill a row without
   content (a database last served before v2.13.0).
+
+### Other visible changes
+
+- **aihub API** (polyforge#194, #192): the work-item detail no longer
+  carries the `derived` epic block and the ready queue no longer has the
+  `pending_bundles` segment (`{project, items, running, paused}`);
+  `GET /work-items/{id}?include=deps` is `CORE-400` (use
+  `GET /work-items/{id}/dependencies`, i.e. `pf file dep list`; only
+  `include=events` remains). A create body with `repo_inventory_base` is
+  `CORE-400 INVENTORY_BASE_UNSUPPORTED` (`pf file create --stdin` refuses
+  it locally). Claim replay is keyed by the session secret: the holder's
+  repeat answers the same claim, a secret that no longer holds the work
+  item gets `CORE-403 STALE_SESSION`, and `IDEMPOTENCY_KEY_REUSED` is never
+  answered on a claim. `MEM-500` is gone. A first heartbeat registers the
+  machine without minting an API key.
+- **Job cap** (polyforge#183): `pf ops max N` lasts until the daemon
+  restarts and is never persisted; `pf ops max --reset` is refused, naming
+  the change. Details, the socket default and the machine id: "Work
+  machines: job cap, socket default and daemon id" below.
+- **Events and watching** (polyforge#181): one events file per work item;
+  the old `events.log*` / `events.seq` are not read; a resident watcher's
+  start subscribes its chat to its owner's work items. Details: "Work
+  machines: per-work-item events and owner subscriptions" below.
+- **One actor per work item** (polyforge#182): a daemon restart serves at
+  once and verifies each work item's session in the background (no
+  `(awaiting aihub)` in `pf ops status`); concurrent `pf wrap` / `pf pause`
+  / `pf resume` of one work item queue and get the final answer instead of
+  `DAEMON-409` / `DAEMON-503`.
+- **Capsule chain** (polyforge#188): commits carry no `Polyforge-Seq`
+  trailer; a step's own `git commit` in the capsule root is published as
+  an ordinary commit; a gitlink in any commit about to be pushed is refused
+  locally (`GIT-412`, naming commit and path).
+- **Release and deploy steps** (polyforge#193): their output schemas are
+  enforced (a violation, a missing verdict or an unloadable schema rejects
+  the result); a `command_evidence` that is not a list of objects rejects
+  the result on any step.
+- **Step time budget** (polyforge#192, `v2-converge.md` §2.4): time spent
+  paused by an operator never counts toward a step's budget T; a dispatch
+  the daemon relaunches after a hang, stall or death does.
+- **Claim-time recall**: the memory snapshot's query is the work item's
+  goal plus its labels (the content is no longer sent).
+- Step processes get `PF_DAEMON_SOCKET` (the daemon's own socket), so a
+  step's `pf recall` / `pf remember` reach a daemon on a non-default data
+  dir.
+
+## v2.13.0 (work machines)
+
+- **Crash-only shutdown** (polyforge#180): `pf ops shutdown` / SIGTERM
+  stops every agent tree (10s), pushes each job's uncommitted task-repo
+  work to `refs/pf-wip/<name>` and exits within 30s; running work items
+  stay running at aihub and continue at the next start. `last-shutdown.json`
+  is no longer written (delete a leftover) and `GET /status` carries no
+  `previous_shutdown`; `tools/install.sh` waits 30s for the daemon to stop.
+- **WIP at every step end**: the same task-repo WIP push runs after each
+  step's process exits, before its result is recorded (bounded by 30s, so
+  a hung hub can delay a step's result by up to 30s; a failure never fails
+  the step). A `kill -9` loses at most the current step's uncommitted work.
+- **Blocked-seal override** (polyforge#187): `pf resume <wi>
+  --accept-lost-work` clears a blocked seal (`DAEMON-518`) with a
+  `blocked_seal_abandoned` event; deploy aihub before upgrading the CLI
+  (the CLI fails when an older hub leaves the seal in place).
 
 ## Work item dependencies (polyforge#161)
 
@@ -901,7 +975,7 @@ migrates it in place; a second run changes nothing.
 - **running jobs refuse the upgrade**: a binary upgrade needs the
   graceful shutdown, which terminates every live agent tree. While
   `pf ops status` lists a job that is running, recovering or sealing
-  (`paused` and `end_pending` have no agent tree and do not count), or
+  (`paused` and `end_pending` have no agent tree and do not count; `claiming` does), or
   while the daemon's job list cannot be read, install.sh lists the
   jobs, changes nothing (the fetched `release/<VER>` checkout is kept for
   the next run) and exits non-zero. Wait for them, pause them
@@ -1118,16 +1192,8 @@ max_concurrent_jobs = 6               # integer >= 1
   exits 78), and `pf doctor`'s `config` row shows it.
 - A change applies at the next daemon start: `pf ops shutdown`, wait
   until `pf ops status` fails, `pf daemon ensure`.
-- **Job cap.** `pf ops max N` is now an explicit cap: persisted in
-  `<data-dir>/daemon-state.json`, it wins over `max_concurrent_jobs` until
-  `pf ops max --reset` returns to the configured cap. Nothing else
-  persists the cap any more (older daemons wrote it on every graceful
-  shutdown). **Migration:** a `max_concurrent_jobs` already in an existing
-  `daemon-state.json` is read as explicit, so the cap stays what it was;
-  run `pf ops max --reset` once to let the table (or the default 4)
-  govern. Since practically every machine carries such a cap, the daemon
-  logs one line at boot when the persisted cap differs from the
-  configured one, naming `pf ops max --reset`.
+- **Job cap.** `max_concurrent_jobs` is the configured cap; `pf ops max N`
+  overrides it until the daemon restarts (polyforge#183, below).
 - **Downgrade:** binaries older than this version refuse a `[daemon]`
   table (`unknown section`) — every `pf` command and the daemon fail to
   load the config. Remove the `[daemon]` table from `cli.toml` **before**
