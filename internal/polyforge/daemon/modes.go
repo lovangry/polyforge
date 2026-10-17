@@ -16,12 +16,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/crashpoint"
+	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
@@ -609,4 +613,71 @@ func (d *Daemon) loadPersistedQueue() []qEntry {
 		return nil
 	}
 	return st.Entries
+}
+
+func (d *Daemon) dropReplay(e qEntry, reason string) {
+	fmt.Fprintf(os.Stderr, "daemon: submit replay: %s dropped: %s\n", e.WorkItemID, reason)
+	if d.obs == nil {
+		return
+	}
+	body := map[string]any{
+		"reason":       reason,
+		"submitted_at": e.SubmittedAt.UTC().Format(time.RFC3339Nano),
+	}
+	if e.Origin.Kind != "" {
+		body["origin"] = e.Origin
+	}
+	_ = d.obs.Events().Append(e.WorkItemID, observe.EvSubmitDropped, body)
+}
+
+// replaySubmitQueue re-enqueues the submits the previous process accepted
+// but never started (v2 §5). It runs strictly after rt.Restart (which
+// replayed the B1 claiming journal), before the face serves:
+//   - the WI is read from aihub first: anything but queued (claimed
+//     elsewhere, terminal, paused, blocked) is dropped;
+//   - a WI the runtime already holds (the journal replay adopted it, or a
+//     parked record) is dropped — never claimed twice;
+//   - aihub unreachable: the entry stays queued (the claim CAS is the
+//     authority and a refused start lands a submit_rejected event).
+func (d *Daemon) replaySubmitQueue() {
+	entries := d.loadPersistedQueue()
+	// The restart reconciliation's wait ran out (aihub hung): the per-entry
+	// "still queued?" probe would hold the socket on the same hub. Skip it —
+	// the entries are enqueued, their Starts answer DAEMON-503 until the
+	// reconciliation finished, and the claim's own probe and the hub's CAS
+	// decide them then.
+	probe := !d.rt.Reconciling()
+	var keep []qEntry
+	for i, e := range entries {
+		if e.WorkItemID == "" {
+			continue
+		}
+		if e.Origin.Kind == runtime.OriginAuto && !d.modes.Auto() {
+			// v2-converge §5 at replay (audit B3b): the previous process's
+			// auto entries must not re-enter a machine the operator turned
+			// auto off on — the same rule the live auto-off purge applies;
+			// explicit (cli/chat) entries replay as before.
+			d.dropReplay(e, "auto is off on this machine (only explicit pf submit replays)")
+			continue
+		}
+		if _, live := d.rt.Info(e.WorkItemID); live {
+			d.dropReplay(e, "the work item is already held by this daemon (claiming-journal replay or kept record)")
+			continue
+		}
+		if probe {
+			if item, err := d.hub.GetWorkItem(e.WorkItemID); err == nil && item != nil && item.Status != api.StatusQueued {
+				d.dropReplay(e, fmt.Sprintf("aihub shows the work item %s, no longer queued", item.Status))
+				continue
+			}
+		}
+		crashpoint.At("queue.replay:" + strconv.Itoa(i))
+		keep = append(keep, e)
+	}
+	// ONE write, after the filter: the file keeps the previous process's
+	// entries until then, so a crash mid-replay loses none of them; it is
+	// rewritten even when nothing survived, so dropped entries do not
+	// replay again on the next start.
+	if err := d.q.Restore(keep); err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: submit replay: queue persist failed: %v\n", err)
+	}
 }

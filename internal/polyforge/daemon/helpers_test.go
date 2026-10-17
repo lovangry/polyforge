@@ -739,12 +739,9 @@ func (td *testDaemon) waitMonitored(t *testing.T, wi string) {
 	}
 }
 
-// DirectShutdownCause attributes the shutdown to a direct in-process
-// Shutdown call — test harnesses and embedders only; no production
-// call site uses it (production triggers name their real cause).
-func DirectShutdownCause() ShutdownCause {
-	return ShutdownCause{Kind: CauseDirect, Detail: "in-process Shutdown call"}
-}
+// DirectShutdownCause is the shutdown cause of a direct in-process
+// Shutdown call (the tests).
+func DirectShutdownCause() string { return "direct: in-process Shutdown call" }
 
 // capsuleSessionHandle answers the session handle the capsule's
 // session.json carries — where the real driver reads it ("" when absent).

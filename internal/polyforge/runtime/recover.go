@@ -256,6 +256,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 			BundleName: j.bundleName,
 			SpawnN:     ordinal,
 			Spawner:    r.spawner,
+			StepEnded:  r.stepEnded(j.wi),
 			// polyforge#79: the effective lists this re-derivation
 			// dispatches under, and the archive signal for the dispatch
 			// the recovery cause interrupted.
@@ -452,32 +453,44 @@ func (r *Runtime) saveTaskWIP(j *job, keep, chainOK bool) {
 // hung-call tests).
 var pushTaskWIPFn = gitops.PushTaskWIP
 
-// SaveTaskWIP is the graceful-shutdown face of the WIP lane: called after
-// the shutdown terminated wi's agent tree, it snapshots the task repos'
-// uncommitted work (the session stays alive at the hub, so a re-claim
-// after the restart can still restore it). The snapshot gets its own
-// bound — at most `bound`, never past ctx's deadline (the shutdown
-// budget) — as the gitops Deadline: every git call of the lane is cut to
-// it and its process group killed on expiry, so no push outlives the
-// daemon. The caller is released at ctx's end at the latest.
-func (r *Runtime) SaveTaskWIP(ctx context.Context, wi string, bound time.Duration) {
+// SaveTaskWIP snapshots wi's task-repo uncommitted work to refs/pf-wip
+// once its step process is gone (the shutdown, after terminating the
+// agent tree; the driver, at each step end), so a re-claim restores it.
+// ctx bounds the lane (gitops.Opts.Ctx): when it ends — its deadline or
+// a cancellation — the running git call's process group is killed and
+// the rest skipped, so the per-WI git lock is released promptly. The
+// caller is released at ctx's end at the latest. No runtime lock is held across
+// the push; a failure is logged and never fails the caller.
+func (r *Runtime) SaveTaskWIP(ctx context.Context, wi string) {
 	j := r.jobOf(wi)
 	if j == nil || !dirExists(j.capsuleDir) {
 		return
 	}
 	o := j.git
-	o.Deadline = time.Now().Add(bound)
-	if dl, ok := ctx.Deadline(); ok && dl.Before(o.Deadline) {
-		o.Deadline = dl
-	}
+	o.Ctx = ctx
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		gitops.PushTaskWIP(o, true, true)
+		pushTaskWIPFn(o, true, true)
 	}()
 	select {
 	case <-done:
 	case <-ctx.Done():
+	}
+}
+
+// stepWIPBound bounds the step-end WIP push: it holds the step's result
+// write and the next dispatch.
+const stepWIPBound = 30 * time.Second
+
+// stepEnded is wi's driver step-end hook: the WIP push of the task-repo
+// work the step left uncommitted, so a kill -9 after a step end loses
+// none of it on a re-claim.
+func (r *Runtime) stepEnded(wi string) func(context.Context) {
+	return func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, stepWIPBound)
+		defer cancel()
+		r.SaveTaskWIP(ctx, wi)
 	}
 }
 

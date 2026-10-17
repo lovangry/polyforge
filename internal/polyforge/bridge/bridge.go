@@ -94,6 +94,8 @@ type Config struct {
 	// start is a re-derivation ("" on a fresh claim). Operator-shaped
 	// causes archive nothing — a deliberate stop is not a model verdict.
 	InterruptedCause string
+	// StepEnded is forwarded to the driver (driver.Config.StepEnded).
+	StepEnded func(context.Context)
 	// ClaudeConfigDir is the step claude processes' CLAUDE_CONFIG_DIR
 	// (polyforge#171: <harness-root>/claude-config, hard-set by the
 	// spawner) — the claude resume decision locates a previous dispatch's
@@ -190,6 +192,7 @@ func Start(ctx context.Context, cfg Config) (*Handle, error) {
 		Limits:         cfg.Limits,
 		StepCandidates: cfg.StepCandidates,
 		Interrupted:    interruptedFromCause(cfg.InterruptedCause),
+		StepEnded:      cfg.StepEnded,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("bridge: driver.New: %w", err)

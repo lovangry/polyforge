@@ -224,9 +224,8 @@ if [ -n "$STAGED" ]; then
   # gone: the binary is never swapped under a live daemon, and no loop is
   # left to start the old binary again. A loop left without a daemon
   # (between two restarts after a failure, or an older loop) is killed.
-  # The wait must exceed the daemon's graceful ShutdownBudget (5
-  # minutes), hence 330s. Step 4 starts the new daemon through
-  # `pf daemon ensure`.
+  # The daemon's shutdown waits at most 30s (its WIP pushes), hence the
+  # 30s wait. Step 4 starts the new daemon through `pf daemon ensure`.
   if daemon_running || loop_running; then
     # A graceful shutdown terminates every live agent tree: never behind
     # the back of a running job unless the operator says so.
@@ -264,8 +263,8 @@ if [ -n "$STAGED" ]; then
         tmux_q kill-session -t "=$LOOP_SESSION" 2>/dev/null || true
         echo "   stopped a leftover restart loop (tmux session $LOOP_SESSION)"
       fi
-      if [ "$WAITED" -ge 330 ]; then
-        echo "ERROR: daemon did not stop within 330s (graceful shutdown budget is 300s); binary NOT replaced. Its restart loop ended with the shutdown request."
+      if [ "$WAITED" -ge 30 ]; then
+        echo "ERROR: daemon did not stop within 30s; binary NOT replaced. Its restart loop ended with the shutdown request."
         exit 1
       fi
       sleep 1

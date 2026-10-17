@@ -4,7 +4,7 @@
 // (lifecycle) and Observe (supervision) modules wired over the five
 // protocol messages, and the machine-level operations — the three
 // admission modes, the pending-job dispatcher, the auto-claim loop and the
-// graceful shutdown sequence.
+// shutdown.
 //
 // Current behavior: docs/design/polyforge-vnext/reference.md §6 (routes,
 // lifecycle, shutdown, configuration); decisions: v2-converge.md §5–§6.
@@ -130,11 +130,10 @@ type Config struct {
 	// assembly (X silence, Y tool, T step timeout, N driver stall, the
 	// model-error grace; zero fields keep the documented defaults) and
 	// the M4 revalidation cadence. Step overrides live in workflow.md.
-	Supervision    SupervisionConfig
-	DrainInterval  time.Duration // drain wave-fetch period (5s)
-	DispatchTick   time.Duration // dispatcher/backfill period (200ms)
-	ShutdownBudget time.Duration // whole-shutdown ceiling (5min)
-	ExitPoll       time.Duration // adapter exit-poll period (200ms)
+	Supervision   SupervisionConfig
+	DrainInterval time.Duration // drain wave-fetch period (5s)
+	DispatchTick  time.Duration // dispatcher/backfill period (200ms)
+	ExitPoll      time.Duration // adapter exit-poll period (200ms)
 	// RestartHubWait is how long one hub call of the restart
 	// reconciliation may go unanswered before the socket serves anyway
 	// (0 = the runtime's default, 5s; see runtime.Config.RestartHubWait).
@@ -192,9 +191,6 @@ func (c *Config) fill() {
 	if c.DispatchTick == 0 {
 		c.DispatchTick = 200 * time.Millisecond
 	}
-	if c.ShutdownBudget == 0 {
-		c.ShutdownBudget = 5 * time.Minute
-	}
 	if c.ExitPoll == 0 {
 		c.ExitPoll = 200 * time.Millisecond
 	}
@@ -229,17 +225,11 @@ type Daemon struct {
 	sealMu   sync.Mutex
 	sealedWI map[string]bool
 
-	obsCtx    context.Context
-	cancelObs context.CancelFunc
-	obsDone   chan struct{} // closed when observe.Run (and every monitor) exited
-	runCtx    context.Context
+	runCtx    context.Context // the loops' context; the shutdown cancels it
 	cancelRun context.CancelFunc
-	rtDone    chan struct{} // closed when the runtime message loop exited
 
-	shutOnce    sync.Once
-	shutDone    chan struct{} // closed when the FIRST shutdown sequence finished
-	shutMu      sync.Mutex
-	shutdownErr error
+	shutOnce sync.Once
+	shutDone chan struct{} // closed when the shutdown finished
 
 	// queueFetchDenied is the denial episode flag: set when the first
 	// queue_fetch_denied event of a healthy→denied transition has been
@@ -271,21 +261,12 @@ type Daemon struct {
 	lst net.Listener
 	srv *http.Server
 
-	// faceMu guards srv and the faceClosed latch: Run assembles and
-	// starts serving the face only after restart reconciliation, so an
-	// external Shutdown arriving inside that window runs concurrently
-	// with Run's face setup — the latch lets whichever side loses the
-	// race tear the listener down instead of serving on a face the
-	// shutdown sequence already closed.
+	// faceMu guards lst, srv, dataLock and the faceClosed latch: a
+	// Shutdown can run concurrently with Run's startup, and the latch lets
+	// whichever side loses the race tear the listener down instead of
+	// serving on a face the shutdown already closed.
 	faceMu     sync.Mutex
 	faceClosed bool
-
-	// faceOwned latches once this process bound the UDS face (the
-	// single-instance guard passed): only a daemon that owns the socket
-	// may rewrite the shared on-disk bookkeeping — a startup abort must
-	// never persist its (never-seeded) view over the running daemon's
-	// state.
-	faceOwned bool
 
 	// dataLock is the M5 flock on the daemon data dir (held for the
 	// process's lifetime, released by the kernel at exit): the
@@ -389,6 +370,7 @@ func New(cfg Config) (*Daemon, error) {
 				Spawner:          in.Spawner,
 				StepCandidates:   in.StepCandidates,
 				InterruptedCause: in.InterruptedCause,
+				StepEnded:        in.StepEnded,
 				// polyforge#171: the resume decision for claude dispatches
 				// locates the native session under the claude-config dir
 				// the spawner hard-set (never the daemon's process env).
@@ -422,6 +404,7 @@ func New(cfg Config) (*Daemon, error) {
 		shutDone: make(chan struct{}),
 		sup:      supervise.NewRegistry(),
 	}
+	d.runCtx, d.cancelRun = context.WithCancel(context.Background())
 	rtCfg.EventTap = d.tapRuntimeEvent
 
 	// F6-A: the claim-time memory snapshot seam — the daemon binds it to
@@ -486,10 +469,7 @@ func New(cfg Config) (*Daemon, error) {
 		if err := d.modes.SetAuto(*cfg.Auto); err != nil {
 			return nil, fmt.Errorf("daemon: initial auto: %w", err)
 		}
-		// The flag override must survive the restart it rode in on:
-		// without this persist, `-auto=false` over a persisted auto-on
-		// would be undone by the NEXT boot (the fx3 gap).
-		d.persistModeQuietly()
+		// Run persists the override once it holds daemon.lock.
 	}
 	return d, nil
 }
@@ -525,14 +505,28 @@ func validateWorkspace(ws string) error {
 	return nil
 }
 
-// Run drives the daemon until a graceful shutdown completes (or the
-// caller's context ends, which triggers the same shutdown sequence).
+// Run drives the daemon until a shutdown completes (or the caller's
+// context ends, which triggers the same shutdown).
 // It returns when the process should exit.
 func (d *Daemon) Run(ctx context.Context) error {
+	// M5: flock the daemon data dir BEFORE the socket probe — the two
+	// together are the single-instance guard. The dial probe alone is a
+	// TOCTOU: two daemons started in the same window can both observe a
+	// dead socket and both bind it; the flock is the kernel-serialized
+	// half (LOCK_EX|LOCK_NB on DataDir/daemon.lock), held for Run's
+	// lifetime and released when Run returns. Both come before any lane
+	// starts: a refused start has nothing to unwind, and only the lock
+	// holder ever writes the data dir (see ownsDataDir).
+	lock, err := acquireDataDirLock(d.cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	defer d.releaseDataLock()
 	// Startup askpass sweep (crash residue): a previous daemon killed
 	// mid-push leaves one-shot credential scripts — they hold push
-	// secrets — under <DataDir>/git/askpass. Nothing can be live this
-	// early, so every entry there is residue. Best-effort, non-fatal.
+	// secrets — under <DataDir>/git/askpass. Only the data-dir lock holder
+	// sweeps, so nothing of another daemon can be live there: every entry
+	// is residue. Best-effort, non-fatal.
 	if err := gitops.SweepAskpass(filepath.Join(d.cfg.DataDir, "git")); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon: askpass sweep: %v\n", err)
 	}
@@ -540,87 +534,48 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := gitops.SweepCarrierTemps(filepath.Join(d.cfg.DataDir, "git")); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon: carrier temp sweep: %v\n", err)
 	}
-	d.runCtx, d.cancelRun = context.WithCancel(ctx)
-	d.obsCtx, d.cancelObs = context.WithCancel(d.runCtx)
-
-	d.rtDone = make(chan struct{})
-	go func() { d.rt.Run(d.runCtx); close(d.rtDone) }()
-	d.obsDone = make(chan struct{})
-	go func() { d.obs.Run(d.obsCtx); close(d.obsDone) }()
-	go d.bridge()
-
-	// M5: flock the daemon data dir BEFORE the socket probe — the two
-	// together are the single-instance guard. The dial probe alone is a
-	// TOCTOU: two daemons started in the same window can both observe a
-	// dead socket and both bind it; the flock is the kernel-serialized
-	// half (LOCK_EX|LOCK_NB on DataDir/daemon.lock), held for Run's
-	// lifetime and released when Run returns.
-	lock, lerr := acquireDataDirLock(d.cfg.DataDir)
-	if lerr != nil {
-		d.abortStartup()
-		return lerr
+	// An explicit -auto must survive the restart it rode in on: without
+	// this persist, `-auto=false` over a persisted auto-on would be undone
+	// by the NEXT boot (the fx3 gap). Only the lock holder writes it.
+	if d.cfg.Auto != nil {
+		d.persistModeQuietly()
 	}
-	d.dataLock = lock
-	defer d.releaseDataLock()
-
-	// Single-instance guard FIRST — before ANY push lane can open. The
-	// UDS face is the one cross-process serialization point this data-dir
-	// has: an old daemon mid-graceful-shutdown keeps its listener (it
-	// closes only at step 5 of the sequence) while its in-flight
-	// recovery pushes are still running, so dialing the socket here is
-	// the only reliable "is the old process gone yet?" check. Were restart
-	// reconciliation to run BEFORE this guard, a daemon started in that
-	// window could push the same work items from a second process — the
-	// per-WI git mutex is process-local, so nothing would serialize the
-	// two lanes and the server's ref compare-and-swap would reject the
-	// duplicate pushes. Guarding first makes the new process abort
-	// before it can open a push lane at all.
 	lst, err := d.listenUDS()
 	if err != nil {
-		// Startup abort: unwind the lanes this process already started,
-		// but persist NOTHING — this process never owned the socket, so
-		// the shared on-disk bookkeeping (state.json) belongs to the
-		// daemon that still holds it.
-		d.abortStartup()
+		_ = lock.Close()
 		return err
 	}
-	d.faceOwned = true
-	// d.lst is read by closeFace under faceMu; publish it under the
-	// same lock so a shutdown arriving in the next instant cannot race
-	// the assignment.
+	// closeFace and ownsDataDir read both under faceMu: a shutdown
+	// arriving in the next instant cannot race the assignment.
 	d.faceMu.Lock()
-	d.lst = lst
+	d.dataLock, d.lst = lock, lst
 	d.faceMu.Unlock()
+
+	stop := context.AfterFunc(ctx, d.cancelRun) // the caller giving up stops the loops too
+	defer stop()
+	go d.rt.Run(d.runCtx)
+	go d.obs.Run(d.runCtx)
+	go d.bridge()
 
 	// Restart reconciliation (§十一): every recorded job is re-derived
 	// against aihub's own verdict — strictly after this process owns
-	// the socket (see the guard note above), and before the face serves
-	// a single request: a client that reaches the daemon must see a
-	// reconciled runtime, never a seeded record's pre-reconciliation
-	// snapshot (stale agent pids, superseded lineages). Only a hung hub
-	// cuts the wait short (one reconciliation hub call unanswered for
+	// the data dir and the socket (no second process may push the same
+	// work items), and before the face serves a single request: a client
+	// that reaches the daemon must see a reconciled runtime. Only a hung
+	// hub cuts the wait short (one reconciliation hub call unanswered for
 	// RestartHubWait): the records still unverified are then shown waiting
 	// for aihub, refuse their closes meanwhile, and the runtime finishes
 	// them (announcing what it brings back) once the hub answers.
-	// The previous run's shutdown record is consumed only once the
-	// reconciliation succeeded: an aborted start must not make every
-	// later start report "the previous process crashed".
-	prevShutdown := d.peekLastShutdown()
 	if err := d.rt.Restart(d.runCtx); err != nil {
-		// Startup abort: the runtime could not be reconciled as a whole
-		// (a missing capsule or an unmapped project is NOT such a case —
-		// v2-converge §6 blocks only that work item at aihub and
-		// Restart returns nil), so serving would present clients an
-		// unreconciled runtime. Unwind as a startup
-		// abort: close the face this process bound but never served, stop
-		// the lanes, collect any agent the reconciliation already
-		// recovered, and persist NOTHING — state.json stays the
-		// pre-reconciliation truth, so the next start (after the manual
-		// remediation the error names) reconciles afresh. Run returns the
-		// error (it identifies the affected work item): the process exits
-		// non-zero.
+		// The runtime could not be reconciled as a whole (a missing
+		// capsule or an unmapped project is NOT such a case — v2-converge
+		// §6 blocks only that work item at aihub and Restart returns nil).
+		// Stop without serving or persisting: state.json stays the
+		// pre-reconciliation truth for the next start, after the manual
+		// remediation the error names; the process exits non-zero.
 		d.closeFace()
-		d.abortStartup()
+		d.cancelRun()
+		d.rt.Close()
 		for _, ji := range d.rt.List() {
 			if ji.Agent != nil {
 				_ = ji.Agent.Terminate(10 * time.Second)
@@ -628,19 +583,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}
 		return &needsOperatorError{fmt.Errorf("restart reconciliation failed: %w", err)}
 	}
-	d.consumeLastShutdown()
 	d.reattachRecovered()
 	// v2 §5/§6: replay the persisted submit queue (after the B1 claiming
 	// journal replay inside Restart, so a WI is never claimed twice) and
 	// tell every recovered/parked WI the daemon restarted.
 	d.replaySubmitQueue()
-	d.announceRestart(prevShutdown)
+	d.announceRestart()
 
 	serveErr, serving := d.startFace(lst)
 	if !serving {
-		// A shutdown sequence closed the face while this process was
-		// reconciling: the listener is already gone, so there is nothing
-		// left to drive — Run exits exactly like the shutDone case.
+		// A shutdown closed the face while this process was reconciling:
+		// nothing is left to drive.
 		return nil
 	}
 
@@ -648,26 +601,24 @@ func (d *Daemon) Run(ctx context.Context) error {
 	defer dispatch.Stop()
 	drain := time.NewTicker(d.cfg.DrainInterval)
 	defer drain.Stop()
-	// M3 heartbeat: its own goroutine on runCtx (canceled by the shutdown
-	// sequence's cancelRun) so liveness can never block or be blocked by
-	// the dispatch/drain loop. Log-only failures inside; never fatal.
+	// M3 heartbeat: its own goroutine on runCtx (the shutdown cancels it)
+	// so liveness never blocks or is blocked by the dispatch/drain loop.
+	// Log-only failures inside; never fatal.
 	go d.heartbeatLoop(d.runCtx)
 	for {
 		select {
 		case <-ctx.Done():
-			// The caller gave up: run the same bounded graceful sequence.
-			return d.Shutdown(context.Background(), CallerContextShutdownCause())
+			// The caller gave up: run the same shutdown.
+			return d.Shutdown(context.Background(), "caller-context: the Run caller's context is done")
 		case <-d.shutDone:
 			return nil
 		case err := <-serveErr:
 			if err != nil && err != http.ErrServerClosed {
-				_ = d.Shutdown(context.Background(), ServeErrorShutdownCause(err))
+				_ = d.Shutdown(context.Background(), fmt.Sprintf("serve-error: %v", err))
 				return err
 			}
-			// Only the shutdown sequence closes the face (its step 5),
-			// and it still has the runtime drain and the final agent
-			// sweep to run: returning here would let the process exit
-			// mid-sequence.
+			// Only the shutdown closes the face, and it still has the
+			// runtime's Close to run: wait for it.
 			<-d.shutDone
 			return nil
 		case <-dispatch.C:
@@ -679,7 +630,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 }
 
 // startFace begins serving the UDS face on lst. It reports false
-// when a shutdown sequence already closed the face (the shutdown-
+// when a shutdown already closed the face (the shutdown-
 // during-reconciliation window): the listener is then dead and Run
 // must not serve on it. The srv assignment happens under faceMu so a
 // concurrent closeFace either sees this server (and closes it, making
@@ -696,7 +647,7 @@ func (d *Daemon) startFace(lst net.Listener) (chan error, bool) {
 	return serveErr, true
 }
 
-// closeFace tears the UDS face down (runShutdown step 5): the serving
+// closeFace tears the UDS face down (the shutdown's last step): the serving
 // server if Run started it, otherwise the bare listener (a shutdown
 // that raced the startup reconciliation window, before Serve began).
 // Idempotent under the mutex; a second close is a no-op.
@@ -714,26 +665,6 @@ func (d *Daemon) closeFace() {
 	if d.lst != nil {
 		_ = d.lst.Close()
 	}
-}
-
-// abortStartup unwinds a daemon whose single-instance guard refused
-// the UDS face: stop the already-started lanes and wait for them, but
-// persist nothing (see faceOwned). Run returns the guard error right
-// after; the process exits without ever having touched a push lane.
-func (d *Daemon) abortStartup() {
-	if d.cancelObs != nil {
-		d.cancelObs()
-	}
-	if d.obsDone != nil {
-		<-d.obsDone
-	}
-	if d.cancelRun != nil {
-		d.cancelRun()
-	}
-	if d.rtDone != nil {
-		<-d.rtDone
-	}
-	d.rt.Close()
 }
 
 // reattachRecovered synthesizes the observe attachments for jobs the
@@ -1276,6 +1207,15 @@ func (d *Daemon) mapCloseErr(err error) (graceful bool, ae *api.Error) {
 
 // releaseDataLock drops the data-dir flock (Run returning is the
 // daemon's end; the next process may take over the data dir).
+// ownsDataDir reports whether this process holds daemon.lock: only the
+// holder writes the data dir's state (a start the lock refused never
+// seeded its runtime and must not overwrite the running daemon's).
+func (d *Daemon) ownsDataDir() bool {
+	d.faceMu.Lock()
+	defer d.faceMu.Unlock()
+	return d.dataLock != nil
+}
+
 func (d *Daemon) releaseDataLock() {
 	d.faceMu.Lock()
 	defer d.faceMu.Unlock()

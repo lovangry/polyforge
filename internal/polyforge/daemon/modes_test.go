@@ -4,6 +4,7 @@ package daemon
 // auto pull.
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -77,7 +78,8 @@ func bootCfg(t *testing.T, data string, auto *bool) (*Daemon, error) {
 }
 
 // TestNewKeepsPersistedAutoAcrossRestart (#18): an unset -auto keeps the
-// persisted switch; an explicit flag overrides it AND is persisted.
+// persisted switch; an explicit flag overrides it AND is persisted (by
+// Run, once it holds daemon.lock).
 func TestNewKeepsPersistedAutoAcrossRestart(t *testing.T) {
 	data := filepath.Join(t.TempDir(), "data")
 	on, off := true, false
@@ -106,6 +108,13 @@ func TestNewKeepsPersistedAutoAcrossRestart(t *testing.T) {
 	if d4.modes.Auto() {
 		t.Fatal("explicit auto off must override the persisted on")
 	}
+	// the override is persisted by Run once it holds daemon.lock
+	d4.cfg.SocketPath = filepath.Join(t.TempDir(), "d4.sock")
+	runDone := make(chan error, 1)
+	go func() { runDone <- d4.Run(context.Background()) }()
+	waitFor(t, "d4 to hold the data dir", 10*time.Second, d4.ownsDataDir)
+	_ = d4.Shutdown(context.Background(), DirectShutdownCause())
+	<-runDone
 	d4b, _ := bootCfg(t, data, nil)
 	if d4b.modes.Auto() {
 		t.Fatal("the flag override must land in daemon-state.json (fx3 gap)")

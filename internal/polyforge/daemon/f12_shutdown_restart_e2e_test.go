@@ -174,12 +174,11 @@ func e2eConfig(sock, ws, data, hubBase string, hub *fakeHub, sp runtime.Spawner)
 		// polyforge#106: the engine seam is bound like every other
 		// in-process test (the driver is the only engine; the fake starter
 		// scripts it through the test's spawner).
-		AgentStarter:   fakeEngineStarter(),
-		ObservePoll:    10 * time.Millisecond,
-		DrainInterval:  10 * time.Millisecond,
-		DispatchTick:   10 * time.Millisecond,
-		ShutdownBudget: 30 * time.Second,
-		ExitPoll:       10 * time.Millisecond,
+		AgentStarter:  fakeEngineStarter(),
+		ObservePoll:   10 * time.Millisecond,
+		DrainInterval: 10 * time.Millisecond,
+		DispatchTick:  10 * time.Millisecond,
+		ExitPoll:      10 * time.Millisecond,
 	}
 }
 

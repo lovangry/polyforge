@@ -174,11 +174,10 @@ func TestB8DispatchSlotLimitAndShutdownDuringClone(t *testing.T) {
 
 // review nit of B-8: a claim dispatched while a long close of another
 // work item (here a wrap whose SessionEnd hangs) holds that work item's
-// lock must not eat the shutdown budget — the shutdown waits only for
-// claims already CLAIMING and agent starts under way, so the sequence (and
-// its WIP step) proceeds at once.
+// lock must not delay the shutdown — it waits for no claim, so the
+// sequence (and its WIP step) proceeds at once.
 func TestB8ShutdownNotDelayedByClaimQueuedOnLock(t *testing.T) {
-	td := newTestDaemon(t, func(c *Config) { c.ShutdownBudget = 60 * time.Second })
+	td := newTestDaemon(t, nil)
 	td.submitClaim(t, "wi_b8_live")
 	release := make(chan struct{})
 	td.hub.mu.Lock()
@@ -212,7 +211,7 @@ func TestB8ShutdownNotDelayedByClaimQueuedOnLock(t *testing.T) {
 		t.Fatalf("shutdown: %v", err)
 	}
 	if d := time.Since(t0); d > 10*time.Second {
-		t.Fatalf("shutdown took %s behind a claim queued on the lock (budget 60s)", d)
+		t.Fatalf("shutdown took %s behind a claim queued on the lock", d)
 	}
 	unblock()
 	<-wrapDone

@@ -826,17 +826,14 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 	// the UDS peer credential — the kernel's SO_PEERCRED record of who
 	// is on the other end, never anything from the request body
 	// (caller-supplied; the CLI sends an empty object).
-	cred, ok := requestPeerCred(r.Context())
-	cause := RouteShutdownCause(cred, ok)
-	// Answer immediately; the bounded sequence runs to completion in the
-	// background and Run returns when it finishes (reference.md §6.2).
+	cause := "route: POST /shutdown uds peer credential unavailable"
+	if cred, ok := requestPeerCred(r.Context()); ok {
+		cause = fmt.Sprintf("route: POST /shutdown uds peer pid=%d uid=%d", cred.pid, cred.uid)
+	}
+	// Answer immediately; the shutdown runs in the background and Run
+	// returns when it finishes (reference.md §6.2).
 	writeJSON(w, http.StatusOK, map[string]any{"shutting_down": true})
-	go func() {
-		if err := d.Shutdown(context.Background(), cause); err != nil {
-			// already surfaced on stderr by the sequence; nothing else to do
-			_ = err
-		}
-	}()
+	go func() { _ = d.Shutdown(context.Background(), cause) }()
 }
 
 // refuseStepOrigin is the step-origin guard on the whole UDS face
