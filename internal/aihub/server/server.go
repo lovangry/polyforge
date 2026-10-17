@@ -384,16 +384,11 @@ func (s *Server) visibleWI(idn *identity, ref string) (string, error) {
 	return id, nil
 }
 
-// writeWI wraps a WorkItem with its public session audit block (m4:
-// session_fingerprint / session_machine / session_started_at /
-// clean_pause; NEVER session_hash, never the secret) and writes it.
-func (s *Server) writeWI(w http.ResponseWriter, status int, wi *api.WorkItem) {
-	view, err := s.WIs.View(wi)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, status, view)
+// writeWI writes a work item view: the WorkItem with its public session
+// audit block (m4: session_fingerprint / session_machine /
+// session_started_at / clean_pause; NEVER session_hash, never the secret).
+func (s *Server) writeWI(w http.ResponseWriter, status int, wi *core.WIView) {
+	writeJSON(w, status, wi)
 }
 
 func (s *Server) hListWIs(w http.ResponseWriter, r *http.Request, idn *identity) {
@@ -412,17 +407,11 @@ func (s *Server) hListWIs(w http.ResponseWriter, r *http.Request, idn *identity)
 		return
 	}
 	// Permission trim: non-admins see only their projects.
-	trimmed := make([]api.WorkItem, 0, len(items))
+	views := make([]core.WIView, 0, len(items))
 	for i := range items {
 		if ok, err := s.canRead(idn, items[i].ProjectID); err == nil && ok {
-			trimmed = append(trimmed, items[i])
+			views = append(views, items[i])
 		}
-	}
-	// m4: each row carries the public session audit block.
-	views, err := s.WIs.Views(trimmed)
-	if err != nil {
-		writeErr(w, err)
-		return
 	}
 	writeJSON(w, http.StatusOK, struct {
 		Items []core.WIView `json:"items"`
@@ -558,12 +547,7 @@ func (s *Server) sessionClaimResponse(w http.ResponseWriter, id string, claim *a
 		writeErr(w, err)
 		return
 	}
-	view, err := s.WIs.View(wi)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, sessionClaimEnvelope{Claim: *claim, WorkItem: *view})
+	writeJSON(w, http.StatusOK, sessionClaimEnvelope{Claim: *claim, WorkItem: *wi})
 }
 
 // hSessionClaim serves POST /api/v1/work-items/{id}/claim (the v1.5 CAS
@@ -671,12 +655,7 @@ func (s *Server) hForceEndSession(w http.ResponseWriter, r *http.Request, idn *i
 		writeErr(w, err)
 		return
 	}
-	view, err := s.WIs.View(wi)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, view)
+	s.writeWI(w, http.StatusOK, wi)
 }
 
 // adminOrMaintainer is the human recovery gate (no reporter admission).
@@ -716,12 +695,7 @@ func (s *Server) hSessionEnd(w http.ResponseWriter, r *http.Request, idn *identi
 		writeErr(w, err)
 		return
 	}
-	view, err := s.WIs.View(wi)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, view)
+	s.writeWI(w, http.StatusOK, wi)
 }
 
 // hResumeBlockedWI serves the §6.4 owner resume verdict's hub door
@@ -755,12 +729,7 @@ func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *i
 		writeErr(w, err)
 		return
 	}
-	view, err := s.WIs.View(wi)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, view)
+	s.writeWI(w, http.StatusOK, wi)
 }
 
 // ---------------------------------------------------------------------------

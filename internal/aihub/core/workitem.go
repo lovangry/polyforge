@@ -93,7 +93,7 @@ func checkAttrs(attrs map[string]any) error {
 }
 
 // Create inserts a new queued work item and returns it.
-func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
+func (m *WIManager) Create(req CreateRequest) (*WIView, error) {
 	req.Goal = strings.TrimSpace(req.Goal)
 	if req.Goal == "" {
 		return nil, Fail(api.ErrCoreBadInput, "", "goal required")
@@ -325,8 +325,10 @@ type GetOptions struct {
 	IncludeEvents bool
 }
 
-// Get loads one work item (id or slug), with slug/assignee/project filled.
-func (m *WIManager) Get(idOrSlug string, opts GetOptions) (*api.WorkItem, error) {
+// Get loads one work item view (id or slug): the work item, its public
+// session audit block, its frozen repo inventory (§4.6) and its derived
+// waiting_for list (polyforge#161).
+func (m *WIManager) Get(idOrSlug string, opts GetOptions) (*WIView, error) {
 	id, err := m.Resolve(idOrSlug)
 	if err != nil {
 		return nil, err
@@ -345,21 +347,26 @@ func (m *WIManager) Get(idOrSlug string, opts GetOptions) (*api.WorkItem, error)
 	return wi, nil
 }
 
-// wiSelect reads the api.WorkItem columns; scanWorkItem decodes one row
-// of it (any extra columns appended after w.closed_at land in extra).
+// wiSelect reads one work item view row: the api.WorkItem columns, the
+// public session block and the raw frozen inventory; scanWorkItem decodes
+// it (any extra columns appended after w.repo_inventory land in extra).
 const wiSelect = `SELECT w.id, w.seq, w.project_id, p.name, w.goal, w.content, w.parent_id,
 	w.status, w.priority, w.milestone, w.labels, w.attrs, w.reporter, w.assignee, w.waiting_on,
-	w.bundle_name, w.created_at, w.updated_at, w.closed_at`
+	w.bundle_name, w.created_at, w.updated_at, w.closed_at,
+	w.session_fingerprint, w.session_machine, w.session_started_at, w.clean_pause, w.repo_inventory`
 
 const wiFrom = ` FROM work_items w JOIN projects p ON p.id=w.project_id`
 
-func scanWorkItem(scan func(dest ...any) error, extra ...any) (*api.WorkItem, error) {
-	var wi api.WorkItem
+func scanWorkItem(scan func(dest ...any) error, extra ...any) (*WIView, error) {
+	var v WIView
+	wi := &v.WorkItem
 	var content, parent, milestone, assignee, waitingOn, bundle, closed sql.NullString
+	var fp, machine, started, inv sql.NullString
 	var labels, attrs string
 	dest := append([]any{&wi.ID, &wi.Seq, &wi.ProjectID, &wi.ProjectName, &wi.Goal, &content, &parent,
 		&wi.Status, &wi.Priority, &milestone, &labels, &attrs, &wi.Reporter, &assignee, &waitingOn,
-		&bundle, &wi.CreatedAt, &wi.UpdatedAt, &closed}, extra...)
+		&bundle, &wi.CreatedAt, &wi.UpdatedAt, &closed,
+		&fp, &machine, &started, &v.CleanPause, &inv}, extra...)
 	if err := scan(dest...); err != nil {
 		return nil, err
 	}
@@ -379,7 +386,9 @@ func scanWorkItem(scan func(dest ...any) error, extra ...any) (*api.WorkItem, er
 	if wi.Attrs == nil {
 		wi.Attrs = map[string]any{}
 	}
-	return &wi, nil
+	v.SessionFingerprint, v.SessionMachine, v.SessionStartedAt = fp.String, machine.String, started.String
+	v.inv = inv.String
+	return &v, nil
 }
 
 func nullStringPtr(v sql.NullString) *string {
@@ -390,12 +399,25 @@ func nullStringPtr(v sql.NullString) *string {
 	return &s
 }
 
-func (m *WIManager) load(id string) (*api.WorkItem, error) {
-	wi, err := scanWorkItem(m.db.QueryRow(wiSelect+wiFrom+` WHERE w.id=?1`, id).Scan)
+// load reads one work item view: the row (work item, session block and
+// inventory in one read) plus its waiting_for list.
+func (m *WIManager) load(id string) (*WIView, error) {
+	v, err := scanWorkItem(m.db.QueryRow(wiSelect+wiFrom+` WHERE w.id=?1`, id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, Fail(api.ErrCoreNotFound, "", "work item %s", id)
 	}
-	return wi, err
+	if err != nil {
+		return nil, err
+	}
+	if v.RepoInventory, err = parseInventory(v.inv); err != nil {
+		return nil, err
+	}
+	waiting, err := m.db.waitingForBatch([]string{id})
+	if err != nil {
+		return nil, err
+	}
+	v.WaitingFor = waiting[id]
+	return v, nil
 }
 
 // Event is one wi_events row.
@@ -593,7 +615,7 @@ func refuseUnbindWhileBlockingTx(tx *sql.Tx, wiID string) error {
 }
 
 // Patch updates the mutable field set. fields maps field name → raw JSON.
-func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*api.WorkItem, error) {
+func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*WIView, error) {
 	// Bundle fields (w140): parsed up front (pure — no DB access); the R2
 	// window gate and the CAS write run inside the transaction later on.
 	// Concurrency with Claim needs no extra arbitration: the single-writer
@@ -754,7 +776,7 @@ func validWaitingOn(wo string) bool {
 
 // Cancel terminates a non-active WI (queued/paused/blocked); a running WI
 // must first end its session.
-func (m *WIManager) Cancel(idOrSlug string, actor string) (*api.WorkItem, error) {
+func (m *WIManager) Cancel(idOrSlug string, actor string) (*WIView, error) {
 	id, err := m.Resolve(idOrSlug)
 	if err != nil {
 		return nil, err
@@ -814,7 +836,7 @@ func (m *WIManager) Cancel(idOrSlug string, actor string) (*api.WorkItem, error)
 // ticket. Authorization (server layer, v2-converge §7): the WI's reporter,
 // a project maintainer, or an admin — the same gate as cancel. This is the
 // plain door: ResumeBlockedWith takes the door's options.
-func (m *WIManager) ResumeBlocked(idOrSlug string, actor string) (*api.WorkItem, error) {
+func (m *WIManager) ResumeBlocked(idOrSlug string, actor string) (*WIView, error) {
 	return m.ResumeBlockedWith(idOrSlug, actor, api.ResumeBlockedRequest{})
 }
 
@@ -826,7 +848,7 @@ func (m *WIManager) ResumeBlocked(idOrSlug string, actor string) (*api.WorkItem,
 // different machine continues from the chain aihub holds. Without it the
 // seal stands and a different machine's continue still refuses
 // (DAEMON-518).
-func (m *WIManager) ResumeBlockedWith(idOrSlug string, actor string, opts api.ResumeBlockedRequest) (*api.WorkItem, error) {
+func (m *WIManager) ResumeBlockedWith(idOrSlug string, actor string, opts api.ResumeBlockedRequest) (*WIView, error) {
 	id, err := m.Resolve(idOrSlug)
 	if err != nil {
 		return nil, err
@@ -908,7 +930,7 @@ const maxListLimit = 1000
 const defaultListLimit = 500
 
 // List returns work items matching the filters, newest first.
-func (m *WIManager) List(f ListFilters) ([]api.WorkItem, error) {
+func (m *WIManager) List(f ListFilters) ([]WIView, error) {
 	q := wiSelect + wiFrom + ` WHERE 1=1`
 	var args []any
 	if f.Project != "" {
@@ -945,15 +967,28 @@ func (m *WIManager) List(f ListFilters) ([]api.WorkItem, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []api.WorkItem{}
+	out := []WIView{}
+	ids := []string{}
 	for rows.Next() {
-		wi, err := scanWorkItem(rows.Scan)
+		v, err := scanWorkItem(rows.Scan)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, *wi)
+		out = append(out, *v)
+		ids = append(ids, v.ID)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	waiting, err := m.db.waitingForBatch(ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].WaitingFor = waiting[out[i].ID]
+	}
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------
