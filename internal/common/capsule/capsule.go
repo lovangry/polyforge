@@ -155,6 +155,12 @@ type Step struct {
 	// thresholds (v2-converge 2.3/2.4): execution.json is the single
 	// authority for them, so a restart resumes the same counts.
 	Supervision *StepSupervision `json:"supervision,omitempty"`
+	// Dispatch is the derivation ordinal whose result the step awaits:
+	// written by the step_start of that dispatch, cleared by the write
+	// that settles it (an accepted result or a failed dispatch). A driver
+	// starting with it equal to the current ordinal settles the envelope
+	// a dead predecessor already collected instead of dispatching again.
+	Dispatch int64 `json:"dispatch,omitempty"`
 }
 
 // StepSupervision is one step's driver-owned supervision state.

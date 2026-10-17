@@ -70,7 +70,6 @@ type TransitionKind string
 const (
 	TransStepStart    TransitionKind = "step_start"
 	TransStepResult   TransitionKind = "step_result"
-	TransGateFail     TransitionKind = "gate_fail"
 	TransTerminal     TransitionKind = "terminal"
 	TransBudgetUpdate TransitionKind = "budget_update"
 	// TransInit and TransAnswer are additions the single-write rule
@@ -113,7 +112,7 @@ type TransitionRequest struct {
 	Kind       TransitionKind
 	StepID     string
 	Result     *StepResult     // step_result
-	Gate       *GateVerdict    // gate_fail
+	Gate       *GateVerdict    // step_result of a gate_failed outcome: the fail policy (nil = the workflow's on_fail)
 	Budget     *capsule.Budget // budget_update: the ADDITIVE delta
 	Model      string          // step_start: the pinned candidate this dispatch runs under
 	Effort     string          // step_start: that candidate's thinking effort (polyforge#176)
@@ -244,9 +243,7 @@ func (d *Driver) applyLocked(req TransitionRequest, info *appliedInfo) error {
 	case TransUnblock:
 		return d.applyUnblockLocked()
 	case TransStepResult:
-		return d.applyStepResultLocked(req)
-	case TransGateFail:
-		return d.applyGateFailLocked(req, info)
+		return d.applyStepResultLocked(req, info)
 	case TransTerminal:
 		return d.applyTerminalLocked(req)
 	case TransBudgetUpdate:
@@ -317,6 +314,7 @@ func (d *Driver) applyStepStartLocked(req TransitionRequest, info *appliedInfo) 
 	}
 	st.Model = req.Model
 	st.Effort = req.Effort
+	st.Dispatch = req.SpawnN
 	st.StepStartedAt = d.stamp() // refreshes on every re-entry (reference.md §7.3)
 	d.exec.WorkflowStatus = StatusRunning
 	d.exec.CurrentStep = req.StepID
@@ -356,15 +354,15 @@ func (d *Driver) applyUnblockLocked() error {
 //     evidence) recorded — the only accept path; envelope/artifact
 //     validation happened in the Run loop before this write;
 //   - gate_failed: the FAIL verdict is recorded on the gate step (never
-//     done); the follow-up gate_fail transition applies the rewind or
-//     terminal policy;
+//     done) and the gate's fail policy — rewind or terminal — lands in
+//     the same write, so no crash can leave a verdict nobody consumes;
 //   - needs_input: the open question is persisted in the same write
 //     that parks the step (D8/D9: no "asked but unrecorded" window);
 //     the workflow stays running — pending_question IS the waiting
 //     marker, and the observe face derives needs_input from it;
 //   - incomplete: workflow_status=blocked, position frozen (01 §6.4);
 //     the owner holds every next move.
-func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
+func (d *Driver) applyStepResultLocked(req TransitionRequest, info *appliedInfo) error {
 	res := req.Result
 	if res == nil {
 		return fmt.Errorf("driver: step_result without a result envelope")
@@ -405,6 +403,7 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 	if st.Status != capsule.StepInProgress {
 		return fmt.Errorf("driver: step %q is %s; only an in_progress step accepts results", req.StepID, st.Status)
 	}
+	st.Dispatch = 0
 	if req.WallMs > 0 {
 		// the finished dispatch's wall time joins the step's cumulative
 		// runtime (the T accumulator, human-wait time excluded by
@@ -465,6 +464,11 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 			d.exec.ReviewRounds = map[string]int64{}
 		}
 		d.exec.ReviewRounds[req.StepID]++
+		v := req.Gate
+		if v == nil {
+			v = d.verdictFor(req.StepID, res)
+		}
+		return d.applyGateFailLocked(req.StepID, v, info)
 	case OutcomeNeedsInput:
 		// Shape was validated at staging (ValidateStepResult); the same
 		// helper re-derives the pair here and stays a backstop.
@@ -503,21 +507,10 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest) error {
 // AnswerBase advances, so a human gate needs a fresh answer on re-entry),
 // and its candidate pointer is untouched (INV-1g — rewind never switches
 // candidates).
-func (d *Driver) applyGateFailLocked(req TransitionRequest, info *appliedInfo) error {
-	v := req.Gate
-	if v == nil {
-		return fmt.Errorf("driver: gate_fail without a verdict")
-	}
-	gate := req.StepID
-	if gate == "" {
-		gate = v.GateStepID
-	}
-	if gate == "" {
-		return fmt.Errorf("driver: gate_fail without a gate step id")
-	}
-	if err := d.requireRunningStep(gate); err != nil {
-		return err
-	}
+//
+// It runs inside the gate's step_result write, after that write checked
+// the gate is the running current step.
+func (d *Driver) applyGateFailLocked(gate string, v *GateVerdict, info *appliedInfo) error {
 	target := v.TargetStep
 	if target == "" { // no rewind edge declared: the gate verdict is terminal
 		d.exec.WorkflowStatus = StatusFailedGate
@@ -733,7 +726,7 @@ func (d *Driver) applyInterruptedLocked(req TransitionRequest) error {
 	return nil
 }
 
-// requireRunningStep is the shared gate_fail precondition: a known,
+// requireRunningStep is the step_failed precondition: a known,
 // current, in_progress step under a running (not terminal, not blocked)
 // workflow.
 func (d *Driver) requireRunningStep(stepID string) error {
@@ -744,14 +737,14 @@ func (d *Driver) requireRunningStep(stepID string) error {
 		return fmt.Errorf("driver: workflow is terminal (%s)", d.exec.WorkflowStatus)
 	}
 	if d.exec.WorkflowStatus == StatusBlocked {
-		return fmt.Errorf("driver: workflow is blocked; gate verdicts need a running workflow")
+		return fmt.Errorf("driver: workflow is blocked; a dispatch verdict needs a running workflow")
 	}
 	if stepID != d.exec.CurrentStep {
-		return fmt.Errorf("driver: gate %q is not the current step (%q)", stepID, d.exec.CurrentStep)
+		return fmt.Errorf("driver: step %q is not the current step (%q)", stepID, d.exec.CurrentStep)
 	}
 	st := d.exec.Steps[stepID]
 	if st == nil || st.Status != capsule.StepInProgress {
-		return fmt.Errorf("driver: gate %q is not in_progress", stepID)
+		return fmt.Errorf("driver: step %q is not in_progress", stepID)
 	}
 	return nil
 }
@@ -795,6 +788,15 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 			kind = "step_done"
 		case OutcomeGateFailed:
 			kind = "gate_verdict"
+			if isTerminalStatus(d.exec.WorkflowStatus) {
+				info.extra = append(info.extra, appliedEvent{"terminal", map[string]any{
+					"spawn_n": d.spawnN, "status": d.exec.WorkflowStatus, "gate": req.StepID,
+				}})
+			} else {
+				info.extra = append(info.extra, appliedEvent{"rewind", map[string]any{
+					"spawn_n": d.spawnN, "gate": req.StepID, "target": info.target, "archived": info.archived,
+				}})
+			}
 		case OutcomeNeedsInput:
 			kind = "needs_input"
 			d.inputEventFor = req.Result.QuestionID
@@ -804,17 +806,6 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 			}
 		case OutcomeIncomplete:
 			kind = "incomplete"
-		}
-	case TransGateFail:
-		if isTerminalStatus(d.exec.WorkflowStatus) {
-			kind = "terminal"
-			body["status"] = d.exec.WorkflowStatus
-			body["gate"] = req.StepID
-		} else {
-			kind = "rewind"
-			body["gate"] = req.StepID
-			body["target"] = info.target
-			body["archived"] = info.archived
 		}
 	case TransTerminal:
 		kind = "terminal"

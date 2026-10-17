@@ -178,8 +178,9 @@ func TestD6RewindZeroesTheStepBudget(t *testing.T) {
 	}
 	mustStart(t, d, "g", 2)
 	if err := d.transition(TransitionRequest{
-		Kind: TransGateFail, StepID: "g", SpawnN: 2,
-		Gate: &GateVerdict{GateStepID: "g", TargetStep: "a", VerdictText: "FAIL: redo it"},
+		Kind: TransStepResult, StepID: "g", SpawnN: 2,
+		Result: &StepResult{StepID: "g", SpawnN: 2, Outcome: OutcomeGateFailed},
+		Gate:   &GateVerdict{GateStepID: "g", TargetStep: "a", VerdictText: "FAIL: redo it"},
 	}); err != nil {
 		t.Fatalf("gate fail: %v", err)
 	}
@@ -218,8 +219,9 @@ func TestD6GateFailRewindZeroesTheGateBudget(t *testing.T) {
 		t.Fatalf("budget: %v", err)
 	}
 	if err := d.transition(TransitionRequest{
-		Kind: TransGateFail, StepID: "g", SpawnN: 2,
-		Gate: &GateVerdict{GateStepID: "g", TargetStep: "a", VerdictText: "FAIL: redo it"},
+		Kind: TransStepResult, StepID: "g", SpawnN: 2,
+		Result: &StepResult{StepID: "g", SpawnN: 2, Outcome: OutcomeGateFailed},
+		Gate:   &GateVerdict{GateStepID: "g", TargetStep: "a", VerdictText: "FAIL: redo it"},
 	}); err != nil {
 		t.Fatalf("gate fail: %v", err)
 	}

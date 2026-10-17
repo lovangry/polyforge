@@ -357,12 +357,17 @@ func (q *jobQueue) Requeue(wi string) error {
 	return q.persistLocked()
 }
 
-// Flush persists the current state (used after a replay pass that only
-// dropped entries).
-func (q *jobQueue) Flush() error {
+// Restore appends the entries a restart replays and persists the queue
+// in one write. A persist failure rolls them back.
+func (q *jobQueue) Restore(es []qEntry) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.persistLocked()
+	q.pending = append(q.pending, es...)
+	if err := q.persistLocked(); err != nil {
+		q.pending = q.pending[:len(q.pending)-len(es)]
+		return err
+	}
+	return nil
 }
 
 // PurgeOrigin drops every not-yet-started (pending) entry of the given

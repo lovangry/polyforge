@@ -38,6 +38,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/harness"
+	"github.com/silgrid/polyforge/internal/polyforge/crashpoint"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
@@ -240,12 +241,21 @@ func New(cfg Config) (*Driver, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The step_start write lands before its process exists and the spawn
+	// journal line only after: a crash between the two leaves the
+	// dispatch's ordinal in execution.json alone. The seed never goes
+	// below it, so a re-dispatch never reuses the ordinal (and drop path)
+	// of a dispatch that ran.
+	spawnN := cfg.SpawnN
+	if st := exec.Steps[exec.CurrentStep]; st != nil && st.Dispatch > spawnN {
+		spawnN = st.Dispatch
+	}
 	return &Driver{
 		wi:             cfg.WI,
 		workflow:       wf,
 		exec:           exec,
 		execPath:       execPath,
-		spawnN:         cfg.SpawnN,
+		spawnN:         spawnN,
 		initialized:    existed,
 		cfg:            cfg,
 		log:            cfg.Log,
@@ -269,7 +279,10 @@ func New(cfg Config) (*Driver, error) {
 //
 // Crash safety: the step_start write lands BEFORE the process exists,
 // so a crash between them leaves an in_progress step that this loop's
-// resume path re-dispatches on the next Run. A crash while a question
+// resume path re-dispatches on the next Run. A crash after the
+// dispatch's envelope was collected but before its result write is
+// settled from the collected envelope (unconsumedResult): the step is
+// not run again. A crash while a question
 // is open is equally recoverable: the pending question is durable, the
 // re-invoked loop parks on it again, and Answer() delivers across the
 // restart.
@@ -286,7 +299,8 @@ func (d *Driver) Run(ctx context.Context) error {
 	// dispatches. It is not model-class, so it never moves the candidate
 	// pointer; an operator shutdown never reaches this hook (the bridge
 	// filters it).
-	if d.cfg.Interrupted != nil {
+	collected, collectedN := d.unconsumedResult()
+	if collected == nil && d.cfg.Interrupted != nil {
 		if err := d.transition(TransitionRequest{
 			Kind:   TransInterrupted,
 			Reason: d.cfg.Interrupted.Detail,
@@ -299,6 +313,14 @@ func (d *Driver) Run(ctx context.Context) error {
 		if v := d.takeStalled(); v != nil {
 			d.emit("driver_stalled", map[string]any{"duration_ms": v.Duration.Milliseconds(), "phase": v.Phase})
 			return ErrDriverStalled
+		}
+		if collected != nil {
+			res := collected
+			collected = nil
+			if stop, err := d.settle(res.StepID, collectedN, res, nil); stop {
+				return err
+			}
+			continue
 		}
 		stop, stepID, err := d.plan(ctx)
 		if err != nil {
@@ -387,119 +409,148 @@ func (d *Driver) Run(ctx context.Context) error {
 		}
 		d.announceEnd(stepID, n, supervise.OutcomeResult, 0, "")
 		d.addUnbooked(stepID, dispatchedAt)
-		delivered := res.Outcome
-		if verr := d.validateResultStrict(res, stepID, n); verr != nil {
-			// Envelope-authoring errors are STEP-CONTENT failures, not
-			// infrastructure (the #97/#107 lessons: a hand-transcribed digest
-			// typo, a missing handoff digest — each used to cost a whole driver
-			// restart through the recovery lane, and two rejections inside
-			// the storm window bounded-failed the WI outright). The driver
-			// re-dispatches the step in-process with the rejection as visible
-			// feedback, bounded by maxEnvelopeRejects; only a persistently
-			// broken author escalates to the recovery lane.
-			_ = run.Terminate(5 * time.Second)
-			if d.log != nil {
-				_ = d.log.Append(d.wi.ID, EvEnvelopeRejected, map[string]any{
-					"step": stepID, "spawn_n": n, "detail": verr.Error(),
-				})
-			}
-			d.mu.Lock()
-			d.rejects[stepID]++
-			count := d.rejects[stepID]
-			feedback := fmt.Sprintf("dispatch %d: %v", n, verr)
-			if delivered == OutcomeNeedsInput {
-				// Keep the pending-question context across the retry: the
-				// rejected envelope was a question, and the rewrite must
-				// still be one.
-				q := strings.TrimSpace(res.Question)
-				if q == "" {
-					_, q, _ = needsInputQuestion(res)
-				}
-				feedback += "\nThe rejected envelope was a needs_input (question) report"
-				if q != "" {
-					feedback += fmt.Sprintf(" asking: %q", q)
-				}
-				feedback += ". Rewrite it as a needs_input envelope carrying both question_id and question (envelope level or in the output object); do not turn it into a completed result."
-			}
-			d.priorRejection[stepID] = feedback
-			d.mu.Unlock()
-			if count > maxEnvelopeRejects {
-				d.emit("schema_fault", map[string]any{
-					"step": stepID, "spawn_n": n, "rejections": count,
-					"detail": "persistent envelope rejection: the result contract is broken, not the model; reported to the owner",
-				})
-				// the in-process retry bound is spent: the step goes BLOCKED
-				// with the result_invalid cause code — no driver relaunch
-				// through the recovery lane, no on_fail routing (rewind stays
-				// reserved for review FAIL verdicts).
-				if err := d.transition(TransitionRequest{
-					Kind: TransStepFailed, StepID: stepID, SpawnN: n,
-					Failure: &StepFailure{Cause: FailResultInvalid, Detail: verr.Error()},
-				}); err != nil {
-					return fmt.Errorf("driver: step %s result-invalid block failed: %w", stepID, err)
-				}
-				d.mu.Lock()
-				blocked := d.exec.WorkflowStatus == StatusBlocked
-				d.mu.Unlock()
-				if blocked {
-					return nil // blocked, not relaunchable: a clean stop
-				}
-				return fmt.Errorf("driver: step %s dispatch %d result rejected (%d consecutive rejections, limit %d) but the block did not land: %w",
-					stepID, n, count, maxEnvelopeRejects, verr)
-			}
-			continue // in-process re-dispatch: the step is still in_progress
+		crashpoint.At("driver.collected:" + stepID)
+		if stop, err := d.settle(stepID, n, res, run); stop {
+			return err
 		}
-		if res.Outcome != delivered && d.log != nil {
-			// The verdict binding re-classified the envelope (the #106
-			// lesson): a gate's completed envelope carrying a fail verdict
-			// routes as the gate-fail report it claims to be. News, not
-			// state — the delivered envelope stays archived verbatim, the
-			// rewind itself is written by the transitions that follow.
-			verdict, _ := failVerdictInOutput(res.Output)
-			_ = d.log.Append(d.wi.ID, EvGateVerdictBound, map[string]any{
-				"step": stepID, "spawn_n": n, "verdict": verdict,
-				"delivered_outcome": delivered, "bound_outcome": res.Outcome,
+	}
+}
+
+// unconsumedResult answers the envelope of the current dispatch that a
+// dead predecessor collected — archived under the step's s<n>/ or still
+// at the drop path — but never settled: the current step is in_progress
+// and awaits exactly the current ordinal (Step.Dispatch). Nil when there
+// is none; the loop then dispatches as usual.
+func (d *Driver) unconsumedResult() (*StepResult, int64) {
+	d.mu.Lock()
+	n := d.spawnN
+	stepID := d.exec.CurrentStep
+	st := d.exec.Steps[stepID]
+	awaiting := d.exec.WorkflowStatus == StatusRunning && st != nil && st.Status == capsule.StepInProgress &&
+		st.PendingQuestion == nil && n > 0 && st.Dispatch == n
+	d.mu.Unlock()
+	if !awaiting || d.wi.CapsuleDir == "" {
+		return nil, 0
+	}
+	r := &stepRun{capsuleRoot: d.wi.CapsuleDir, wiID: d.wi.ID, sp: StepSpawn{StepID: stepID, WIID: d.wi.ID, SpawnN: n}}
+	r.dropPath = r.archivePath()
+	if res, _ := r.collect(); res != nil {
+		return res, n
+	}
+	r.dropPath = pendingResultPath(d.wi.CapsuleDir, n)
+	res, _ := r.collect()
+	if res == nil || r.archive(res) != nil {
+		return nil, 0
+	}
+	_ = os.Remove(r.dropPath)
+	return res, n
+}
+
+// settle validates and accepts one collected result envelope of
+// dispatch n (run is nil for an envelope a dead predecessor collected:
+// there is no process to tear down). stop reports that Run must return
+// err; otherwise the loop plans again.
+func (d *Driver) settle(stepID string, n int64, res *StepResult, run StepRun) (stop bool, err error) {
+	delivered := res.Outcome
+	if verr := d.validateResultStrict(res, stepID, n); verr != nil {
+		// Envelope-authoring errors are STEP-CONTENT failures, not
+		// infrastructure (the #97/#107 lessons: a hand-transcribed digest
+		// typo, a missing handoff digest — each used to cost a whole driver
+		// restart through the recovery lane, and two rejections inside
+		// the storm window bounded-failed the WI outright). The driver
+		// re-dispatches the step in-process with the rejection as visible
+		// feedback, bounded by maxEnvelopeRejects; only a persistently
+		// broken author escalates to the recovery lane.
+		if run != nil {
+			_ = run.Terminate(5 * time.Second)
+		}
+		if d.log != nil {
+			_ = d.log.Append(d.wi.ID, EvEnvelopeRejected, map[string]any{
+				"step": stepID, "spawn_n": n, "detail": verr.Error(),
 			})
 		}
 		d.mu.Lock()
-		delete(d.rejects, stepID)
-		delete(d.priorRejection, stepID)
-		d.mu.Unlock()
-		if err := d.transition(TransitionRequest{
-			Kind:                    TransStepResult,
-			StepID:                  stepID,
-			Result:                  res,
-			SpawnN:                  n,
-			WallMs:                  d.takeUnbooked(stepID),
-			TestFilesCommit:         d.testFilesStamp(res),
-			RebaselineAuthoredTests: res.rebaseline,
-		}); err != nil {
-			return fmt.Errorf("driver: step %s result transition failed: %w", stepID, err)
-		}
-		d.noteUnaskedHumanGate(stepID, n, res)
-		d.noteAcceptedResultRecords(stepID, n, res)
-
-		switch res.Outcome {
-		case OutcomeCompleted:
-			continue // §6.5 step 2: next selection
-		case OutcomeGateFailed:
-			if err := d.transition(TransitionRequest{
-				Kind:   TransGateFail,
-				StepID: stepID,
-				Gate:   d.verdictFor(stepID, res),
-				SpawnN: n,
-			}); err != nil {
-				return fmt.Errorf("driver: gate %s fail policy failed: %w", stepID, err)
+		d.rejects[stepID]++
+		count := d.rejects[stepID]
+		feedback := fmt.Sprintf("dispatch %d: %v", n, verr)
+		if delivered == OutcomeNeedsInput {
+			// Keep the pending-question context across the retry: the
+			// rejected envelope was a question, and the rewrite must
+			// still be one.
+			q := strings.TrimSpace(res.Question)
+			if q == "" {
+				_, q, _ = needsInputQuestion(res)
 			}
-			continue // §6.5 step 3: terminal check or rewind target on the next plan
-		case OutcomeNeedsInput:
-			continue // the plan pass parks on the persisted question until answered
-		case OutcomeIncomplete:
-			return nil // §6.5 step 5: blocked is durable; the loop exits
-		default:
-			return fmt.Errorf("driver: step %s dispatch %d produced unknown outcome %q", stepID, n, res.Outcome)
+			feedback += "\nThe rejected envelope was a needs_input (question) report"
+			if q != "" {
+				feedback += fmt.Sprintf(" asking: %q", q)
+			}
+			feedback += ". Rewrite it as a needs_input envelope carrying both question_id and question (envelope level or in the output object); do not turn it into a completed result."
 		}
+		d.priorRejection[stepID] = feedback
+		d.mu.Unlock()
+		if count > maxEnvelopeRejects {
+			d.emit("schema_fault", map[string]any{
+				"step": stepID, "spawn_n": n, "rejections": count,
+				"detail": "persistent envelope rejection: the result contract is broken, not the model; reported to the owner",
+			})
+			// the in-process retry bound is spent: the step goes BLOCKED
+			// with the result_invalid cause code — no driver relaunch
+			// through the recovery lane, no on_fail routing (rewind stays
+			// reserved for review FAIL verdicts).
+			if err := d.transition(TransitionRequest{
+				Kind: TransStepFailed, StepID: stepID, SpawnN: n,
+				Failure: &StepFailure{Cause: FailResultInvalid, Detail: verr.Error()},
+			}); err != nil {
+				return true, fmt.Errorf("driver: step %s result-invalid block failed: %w", stepID, err)
+			}
+			d.mu.Lock()
+			blocked := d.exec.WorkflowStatus == StatusBlocked
+			d.mu.Unlock()
+			if blocked {
+				return true, nil // blocked, not relaunchable: a clean stop
+			}
+			return true, fmt.Errorf("driver: step %s dispatch %d result rejected (%d consecutive rejections, limit %d) but the block did not land: %w",
+				stepID, n, count, maxEnvelopeRejects, verr)
+		}
+		return false, nil // in-process re-dispatch: the step is still in_progress
 	}
+	if res.Outcome != delivered && d.log != nil {
+		// The verdict binding re-classified the envelope (the #106
+		// lesson): a gate's completed envelope carrying a fail verdict
+		// routes as the gate-fail report it claims to be. News, not
+		// state — the delivered envelope stays archived verbatim, the
+		// rewind itself is written by the result transition below.
+		verdict, _ := failVerdictInOutput(res.Output)
+		_ = d.log.Append(d.wi.ID, EvGateVerdictBound, map[string]any{
+			"step": stepID, "spawn_n": n, "verdict": verdict,
+			"delivered_outcome": delivered, "bound_outcome": res.Outcome,
+		})
+	}
+	d.mu.Lock()
+	delete(d.rejects, stepID)
+	delete(d.priorRejection, stepID)
+	d.mu.Unlock()
+	if err := d.transition(TransitionRequest{
+		Kind:                    TransStepResult,
+		StepID:                  stepID,
+		Result:                  res,
+		SpawnN:                  n,
+		WallMs:                  d.takeUnbooked(stepID),
+		TestFilesCommit:         d.testFilesStamp(res),
+		RebaselineAuthoredTests: res.rebaseline,
+	}); err != nil {
+		return true, fmt.Errorf("driver: step %s result transition failed: %w", stepID, err)
+	}
+	crashpoint.At("driver.settled:" + stepID)
+	d.noteUnaskedHumanGate(stepID, n, res)
+	d.noteAcceptedResultRecords(stepID, n, res)
+
+	// completed: §6.5 step 2, next selection; gate_failed: §6.5 step 3,
+	// the same write applied the rewind or terminal policy; needs_input:
+	// the plan pass parks on the persisted question until answered;
+	// incomplete: §6.5 step 5, blocked is durable and the loop exits.
+	return res.Outcome == OutcomeIncomplete, nil
 }
 
 // plan is one selection pass: terminal or blocked workflows stop the

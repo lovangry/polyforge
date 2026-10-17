@@ -524,15 +524,23 @@ type sessionClaimEnvelope struct {
 	WorkItem core.WIView      `json:"work_item"`
 }
 
-// sessionClaimResponse runs the claim half, ensures the bare repo (the
-// chain begins here, as in v1) and assembles the envelope.
+// ensureBare creates the work item's bare repo (the chain begins here)
+// BEFORE the session transaction: a claim or attach that commits always
+// finds its chain, so a failure here refuses the call with nothing
+// committed. False means the refusal is written.
+func (s *Server) ensureBare(w http.ResponseWriter, id string) bool {
+	if err := s.Git.EnsureBare(id); err != nil {
+		writeErr(w, core.Fail(api.ErrCoreInternal, "", "create bare repo: %v", err))
+		return false
+	}
+	return true
+}
+
+// sessionClaimResponse assembles the claim/attach envelope over the
+// committed claim half.
 func (s *Server) sessionClaimResponse(w http.ResponseWriter, id string, claim *api.SessionClaim, err error) {
 	if err != nil {
 		writeErr(w, err)
-		return
-	}
-	if err := s.Git.EnsureBare(id); err != nil {
-		writeErr(w, core.Fail(api.ErrCoreInternal, "", "create bare repo: %v", err))
 		return
 	}
 	wi, err := s.WIs.Get(id, core.GetOptions{})
@@ -566,6 +574,9 @@ func (s *Server) hSessionClaim(w http.ResponseWriter, r *http.Request, idn *iden
 		return
 	}
 	req.WorkItemID = id
+	if !s.ensureBare(w, id) {
+		return
+	}
 	claim, err := s.Sessions.Claim(id, req, idn.UserID)
 	s.sessionClaimResponse(w, id, claim, err)
 }
@@ -612,6 +623,9 @@ func (s *Server) hSessionAttach(w http.ResponseWriter, r *http.Request, idn *ide
 		return
 	}
 	req.WorkItemID = id
+	if !s.ensureBare(w, id) {
+		return
+	}
 	claim, err := s.Sessions.Attach(id, req, idn.UserID)
 	s.sessionClaimResponse(w, id, claim, err)
 }

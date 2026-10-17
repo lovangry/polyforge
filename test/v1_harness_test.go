@@ -683,6 +683,13 @@ func newV1Daemon(t *testing.T, inst *v1Install, opts ...daemonOpt) *v1Daemon {
 // start launches the daemon process and waits until its UDS face answers.
 func (d *v1Daemon) start() {
 	d.t.Helper()
+	d.launch()
+	d.waitUp()
+}
+
+// launch starts the daemon process without waiting for its UDS face.
+func (d *v1Daemon) launch() {
+	d.t.Helper()
 	// polyforge#106: no engine selection exists — the daemon argv carries
 	// no engine flag because the driver IS the engine; the legacy-lane
 	// hatch and its guard are retired with the lane they gated.
@@ -762,8 +769,11 @@ func (d *v1Daemon) start() {
 			t.Logf("daemon log tail (%s):\n%s", d.logPath, d.logTail())
 		}
 	})
+}
 
-	// Wait for the UDS face.
+// waitUp waits until the launched daemon's UDS face answers.
+func (d *v1Daemon) waitUp() {
+	d.t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		conn, err := net.Dial("unix", d.sock)

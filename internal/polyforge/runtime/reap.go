@@ -23,6 +23,7 @@ import (
 	"strconv"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
 type journalPID struct {
@@ -83,10 +84,12 @@ func journalPIDIsOurs(jp journalPID, wi, daemonID string) bool {
 
 // reapOrphans kills every leftover step process tree of one WI: the
 // journaled step pids (identity-verified) and then an env-marker sweep that
-// needs no recorded pid. Safe to call when nothing is left (a no-op) and
+// needs no recorded pid; then it removes the index locks the killed
+// processes may have left. Safe to call when nothing is left (a no-op) and
 // when the WI has no capsule yet. Failures are logged, never fatal: the
 // caller's re-dispatch proceeds either way.
 func (r *Runtime) reapOrphans(wi, capsuleDir string) {
+	reaped := true
 	for _, jp := range journalPIDs(capsuleDir) {
 		if !journalPIDIsOurs(jp, wi, r.cfg.MachineID) {
 			fmt.Fprintf(os.Stderr, "runtime: %s: journal pid %d no longer matches its recorded identity (pid reuse); not signaled\n", wi, jp.pid)
@@ -97,11 +100,23 @@ func (r *Runtime) reapOrphans(wi, capsuleDir string) {
 			PID: jp.pid, Pgid: jp.pid, StartedAt: jp.startedAt,
 			CapsuleDir: capsuleDir,
 		}, cleanupBound); err != nil {
+			reaped = false
 			fmt.Fprintf(os.Stderr, "runtime: %s: orphan step tree %d cleanup incomplete: %v (warnings: %v)\n", wi, jp.pid, err, rep.Warnings)
 		}
 	}
 	if rep, err := Cleanup(CleanupTarget{WIID: wi, DaemonID: r.cfg.MachineID, CapsuleDir: capsuleDir}, cleanupBound); err != nil {
+		reaped = false
 		fmt.Fprintf(os.Stderr, "runtime: %s: orphan env-marker sweep incomplete: %v (warnings: %v)\n", wi, err, rep.Warnings)
+	}
+	// A step or git process killed mid-command leaves its index.lock
+	// behind; with the WI's processes gone it guards nothing, and left in
+	// place it would fail every commit and push until the age bound. An
+	// incomplete reap leaves the locks to that bound.
+	if !reaped || r.cfg.DataDir == "" {
+		return
+	}
+	for _, p := range gitops.ClearIndexLocks(wi, r.gitDirFor(wi), capsuleDir) {
+		fmt.Fprintf(os.Stderr, "runtime: %s: removed index lock %s left by a dead process\n", wi, p)
 	}
 }
 
