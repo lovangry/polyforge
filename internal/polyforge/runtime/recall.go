@@ -6,9 +6,10 @@ package runtime
 // path existed at all); the F6 ruling answers it in two halves, and this
 // file is the STATIC half:
 //
-//   - at claim time the daemon recalls the project's memories — goal +
-//     the content's head as the query, the aihub memory search face's
-//     ranked any-term mode (match=any) as the index — and writes the
+//   - at claim time the daemon recalls the project's memories — the goal
+//     and labels as the query (recallQuery), the
+//     aihub memory search face's ranked any-term mode (match=any) as the
+//     index — and writes the
 //     top-K hits as a static snapshot into the capsule:
 //     runtime-state/recalled-memories.json, which the driver renders
 //     into every step prompt as non-binding history
@@ -66,29 +67,11 @@ type recalledSnapshot struct {
 	CreatedAt string `json:"created_at"`
 }
 
-// recallContentRunes bounds how much of the work item's content joins
-// the goal in the claim query. The search runs in aihub's ranked
-// any-term mode (match=any), which keeps at most 32 of the query's
-// longest distinct terms; the task's head (goal + opening content) is
-// where its subject lives, and a bounded prefix keeps a long content
-// body's tail from crowding the goal's terms out of that cap.
-const recallContentRunes = 1500
-
-// recallQuery builds the claim query: the goal, plus the first
-// recallContentRunes runes of the content when there is any.
-func recallQuery(goal string, content *string) string {
-	q := strings.TrimSpace(goal)
-	if content == nil {
-		return q
-	}
-	c := strings.TrimSpace(*content)
-	if c == "" {
-		return q
-	}
-	if r := []rune(c); len(r) > recallContentRunes {
-		c = string(r[:recallContentRunes])
-	}
-	return strings.TrimSpace(q + "\n" + c)
+// recallQuery builds the claim query: the goal and the labels, never
+// the content. aihub's any-term mode (match=any) extracts and caps the
+// terms itself (memory/search_any.go).
+func recallQuery(goal string, labels []string) string {
+	return strings.TrimSpace(strings.Join(append([]string{goal}, labels...), " "))
 }
 
 // recallTopK answers the effective K for the snapshot (configured,
@@ -118,8 +101,8 @@ func (r *Runtime) writeRecalledMemories(j *job) {
 		Items:      []RecalledMemory{},
 		CreatedAt:  nowStamp(),
 	}
-	// The query is the claim's own task definition: goal + content, the
-	// same pair the agent will be driving. j.item is the claim answer's
+	// The query is the claim's own task definition: goal and labels
+	// (recallQuery). j.item is the claim answer's
 	// snapshot; a missing one (never in the start path) falls back to an
 	// aihub lookup, and even THAT failing degrades to a noticed empty
 	// recall.
@@ -130,7 +113,7 @@ func (r *Runtime) writeRecalledMemories(j *job) {
 		}
 	}
 	if item != nil {
-		snap.Query = recallQuery(item.Goal, item.Content)
+		snap.Query = recallQuery(item.Goal, item.Labels)
 	}
 	switch {
 	case strings.TrimSpace(snap.Query) == "":

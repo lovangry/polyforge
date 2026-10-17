@@ -590,7 +590,7 @@ func TestClaimAnswerLostIsRequeuedAndAdopted(t *testing.T) {
 	if len(claims) != 2 {
 		t.Fatalf("claims = %d, want 2 (the lost one + the replay)", len(claims))
 	}
-	if claims[1].SessionID != claims[0].SessionID || claims[1].IdempotencyKey != claims[0].IdempotencyKey {
+	if claims[1].SessionID != claims[0].SessionID {
 		t.Fatalf("the requeued retry must replay the same claim: %+v vs %+v", claims[0], claims[1])
 	}
 	if ji, ok := td.rt.Info(wi); !ok || ji.SessionID != held {

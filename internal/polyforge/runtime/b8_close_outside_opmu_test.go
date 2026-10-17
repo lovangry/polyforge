@@ -326,10 +326,10 @@ func TestB8RestartReplayCloneOutsideOpMu(t *testing.T) {
 	hub.reposFor = map[string][]api.ProjectRepo{slow: {{Name: "app", URL: hangingRemote(t)}}}
 	// a claim that landed before a crash: journaled, never registered
 	sess := fakeSession(slow)
-	if err := r.noteClaiming(slow, sess, "key-"+slow, nil); err != nil {
+	if err := r.noteClaiming(slow, sess, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := hub.SessionClaim(api.SessionClaimRequest{WorkItemID: slow, SessionID: sess, MachineID: "m-test", IdempotencyKey: "key-" + slow}); err != nil {
+	if _, err := hub.SessionClaim(api.SessionClaimRequest{WorkItemID: slow, SessionID: sess, MachineID: "m-test"}); err != nil {
 		t.Fatal(err)
 	}
 	within(t, 20*time.Second, "Restart with a hung replay clone", func() {

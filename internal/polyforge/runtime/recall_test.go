@@ -54,8 +54,7 @@ func readSnapshot(t *testing.T, path string) recalledSnapshot {
 	return snap
 }
 
-// A populated recall writes the query (goal+content), the top_k, the
-// hits with bounded excerpts, and no notice.
+// A populated recall writes the query (the goal, never the content), the top_k, the hits with bounded excerpts, and no notice.
 func TestRecalledMemoriesSnapshotShape(t *testing.T) {
 	var gotQuery string
 	var gotProject string
@@ -71,9 +70,8 @@ func TestRecalledMemoriesSnapshotShape(t *testing.T) {
 	if snap.WorkItemID != "wi_rc1" {
 		t.Fatalf("work_item_id = %q", snap.WorkItemID)
 	}
-	if !strings.Contains(gotQuery, "fix the flaky retry ladder") ||
-		!strings.Contains(gotQuery, "background about the flaky provider retry ladder") {
-		t.Fatalf("recall query must carry goal+content: %q", gotQuery)
+	if gotQuery != "fix the flaky retry ladder" {
+		t.Fatalf("recall query = %q, want the goal (never the content)", gotQuery)
 	}
 	if snap.Query != gotQuery {
 		t.Fatalf("snapshot query %q != seam query %q", snap.Query, gotQuery)
@@ -134,27 +132,16 @@ func TestRecalledMemoriesNilSeamWritesNothing(t *testing.T) {
 	}
 }
 
-// The claim query is the goal plus the content's head: a content body
-// past recallContentRunes is cut (rune-safe), a missing or blank one
-// leaves the goal alone.
-func TestRecallQueryBoundsContent(t *testing.T) {
-	if got := recallQuery("  the goal ", nil); got != "the goal" {
-		t.Fatalf("nil content: %q", got)
+// The claim query is the goal plus the labels, never the content; the
+// hub extracts the terms.
+func TestRecallQuery(t *testing.T) {
+	if got := recallQuery("  fix the retry ladder ", nil); got != "fix the retry ladder" {
+		t.Fatalf("goal only: %q", got)
 	}
-	blank := "  \n "
-	if got := recallQuery("the goal", &blank); got != "the goal" {
-		t.Fatalf("blank content: %q", got)
+	if got := recallQuery("修复重试阶梯", []string{"runtime", "claim"}); got != "修复重试阶梯 runtime claim" {
+		t.Fatalf("goal + labels: %q", got)
 	}
-	short := "short body"
-	if got := recallQuery("the goal", &short); got != "the goal\nshort body" {
-		t.Fatalf("short content: %q", got)
-	}
-	long := strings.Repeat("检", recallContentRunes) + "TAILMARKER"
-	got := recallQuery("the goal", &long)
-	if strings.Contains(got, "TAILMARKER") || !strings.HasPrefix(got, "the goal\n检") {
-		t.Fatalf("long content not cut at %d runes: tail kept=%v", recallContentRunes, strings.Contains(got, "TAILMARKER"))
-	}
-	if n := len([]rune(got)); n != len([]rune("the goal\n"))+recallContentRunes {
-		t.Fatalf("query is %d runes, want goal + %d content runes", n, recallContentRunes)
+	if got := recallQuery("", nil); got != "" {
+		t.Fatalf("empty goal: %q", got)
 	}
 }

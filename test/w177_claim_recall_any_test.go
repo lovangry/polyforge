@@ -14,10 +14,8 @@ import (
 // w177: the claim-time recalled-memories snapshot actually recalls. A
 // real aihub, a real `pf daemon`: a work item whose goal + markdown
 // content is a realistic task description, and a project memory sharing
-// some of its words (never all of them). The snapshot used to be empty
-// on every real claim — the daemon sent the whole task description to
-// the every-token-must-match search — so this pins the any-term mode
-// (match=any) end to end: the relevant memory lands in
+// some of its words (never all of them). The daemon sends the goal (no
+// content) to the any-term search (match=any); this pins it end to end: the relevant memory lands in
 // runtime-state/recalled-memories.json, an unrelated one does not.
 func TestW177ClaimRecallHitsRelevantMemory(t *testing.T) {
 	inst := newV1Install(t)
@@ -80,8 +78,8 @@ func TestW177ClaimRecallHitsRelevantMemory(t *testing.T) {
 		b, err := os.ReadFile(snapPath)
 		return err == nil && json.Unmarshal(b, &snap) == nil
 	})
-	if !strings.Contains(snap.Query, "retry ladder") || !strings.Contains(snap.Query, "429") {
-		t.Fatalf("snapshot query is not the goal + content: %q", snap.Query)
+	if snap.Query != "w177: fix the flaky provider retry ladder in the daemon" {
+		t.Fatalf("snapshot query is not the goal: %q", snap.Query)
 	}
 	if len(snap.Items) != 1 || snap.Items[0].ID != relevant || !strings.Contains(snap.Items[0].Excerpt, "retry ladder") {
 		t.Fatalf("snapshot items = %+v (notice %q), want exactly the relevant memory %s (never the unrelated %s)",

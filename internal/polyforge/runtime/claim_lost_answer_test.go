@@ -9,6 +9,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -51,7 +52,7 @@ func TestClaimAnswerLostAfterCommitKeepsJournalAndRetryAdopts(t *testing.T) {
 		t.Fatalf("claims = %d, want 2", n)
 	}
 	first, second := hub.claims[0], hub.claims[1]
-	if second.SessionID != first.SessionID || second.IdempotencyKey != first.IdempotencyKey {
+	if second.SessionID != first.SessionID {
 		t.Fatalf("the retry must replay the same claim: first %+v, second %+v", first, second)
 	}
 	if ji, ok := r.Info(wi); !ok || ji.SessionID != first.SessionID {
@@ -123,8 +124,8 @@ func TestJournalReplayTransportErrorKeepsEntry(t *testing.T) {
 	r.cfg.EndRetryBase = 10 * time.Millisecond
 	r.cfg.EndRetryMax = 20 * time.Millisecond
 	const wi = "wi_b1replay"
-	session, key := fakeSession(wi), randomKey()
-	if err := r.noteClaiming(wi, session, key, nil); err != nil {
+	session := fakeSession(wi)
+	if err := r.noteClaiming(wi, session, nil); err != nil {
 		t.Fatal(err)
 	}
 	hub.hold(wi, session, api.StatusRunning)
@@ -138,10 +139,38 @@ func TestJournalReplayTransportErrorKeepsEntry(t *testing.T) {
 	hub.mu.Lock()
 	claims := append([]api.SessionClaimRequest(nil), hub.claims...)
 	hub.mu.Unlock()
-	if len(claims) != 2 || claims[0].IdempotencyKey != key || claims[1].IdempotencyKey != key {
-		t.Fatalf("claims = %+v, want the lost one and its replay, both under the journaled key", claims)
+	if len(claims) != 2 || claims[0].SessionID != session || claims[1].SessionID != session {
+		t.Fatalf("claims = %+v, want the lost one and its replay, both under the journaled session", claims)
 	}
 	if items := r.loadClaiming(); len(items) != 0 {
 		t.Fatalf("journal must be settled, got %+v", items)
+	}
+}
+
+// The claim body carries exactly the work item, the session secret (the
+// replay key, D4) and the machine: aihub reads nothing else, so nothing
+// else is minted or sent.
+func TestClaimBodyCarriesOnlyTheReplayKey(t *testing.T) {
+	setGitIdentity(t)
+	hub := newFakeHub()
+	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	const wi = "wi_claimbody"
+	if err := r.Start(context.Background(), wi); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { terminateJobAgent(r, wi) })
+	hub.mu.Lock()
+	req := hub.claims[0]
+	hub.mu.Unlock()
+	blob, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(blob, &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != 3 || body["work_item_id"] != wi || body["session_id"] == "" || body["machine_id"] == "" {
+		t.Fatalf("claim body = %v, want exactly work_item_id, session_id and machine_id", body)
 	}
 }

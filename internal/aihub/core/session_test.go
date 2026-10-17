@@ -23,11 +23,11 @@ func sessionEnv(t *testing.T) (*testEnv, *SessionManager) {
 	return env, NewSessionManager(env.DB)
 }
 
-// mustSessionClaim claims wiID with a fresh secret and a unique key.
-func mustSessionClaim(t *testing.T, m *SessionManager, env *testEnv, wiID, secret, key string) *api.SessionClaim {
+// mustSessionClaim claims wiID with a fresh secret.
+func mustSessionClaim(t *testing.T, m *SessionManager, env *testEnv, wiID, secret string) *api.SessionClaim {
 	t.Helper()
 	claim, err := m.Claim(wiID, api.SessionClaimRequest{
-		SessionID: secret, MachineID: "m1", IdempotencyKey: key,
+		SessionID: secret, MachineID: "m1",
 	}, env.UserID)
 	if err != nil {
 		t.Fatalf("session claim: %v", err)
@@ -78,7 +78,7 @@ func TestSessionClaimCASRace(t *testing.T) {
 			defer wg.Done()
 			results[i], errs[i] = m.Claim(id, api.SessionClaimRequest{
 				SessionID: api.SessionFingerprint("racer") + strings.Repeat(string(rune('a'+i)), 60),
-				MachineID: "m", IdempotencyKey: "race-" + string(rune('a'+i)),
+				MachineID: "m",
 			}, env.UserID)
 		}(i)
 	}
@@ -111,49 +111,46 @@ func TestSessionClaimCASRace(t *testing.T) {
 }
 
 // TestSessionClaimReplayBySecret (D4): the holding session's repeated
-// claim — whatever idempotency key it carries, or none — answers the same
-// claim and writes nothing; another secret is refused ALREADY_HELD
+// claim answers the same claim and writes nothing; another secret is refused ALREADY_HELD
 // (exclusivity).
 func TestSessionClaimReplayBySecret(t *testing.T) {
 	env, m := sessionEnv(t)
 	id := mustCreateExecWI(t, env, "idem goal", nil, "")
 	secret := "0123456789abcdef0123456789abcdef"
-	c1 := mustSessionClaim(t, m, env, id, secret, "key-1")
-	for _, key := range []string{"key-1", "key-2", ""} {
-		c2, err := m.Claim(id, api.SessionClaimRequest{SessionID: secret, MachineID: "m1", IdempotencyKey: key}, env.UserID)
+	c1 := mustSessionClaim(t, m, env, id, secret)
+	for i := 0; i < 2; i++ {
+		c2, err := m.Claim(id, api.SessionClaimRequest{SessionID: secret, MachineID: "m1"}, env.UserID)
 		if err != nil {
-			t.Fatalf("replay (key %q): %v", key, err)
+			t.Fatalf("replay %d: %v", i, err)
 		}
 		if !reflect.DeepEqual(c1, c2) {
-			t.Fatalf("replay (key %q) answered %+v, want the same claim %+v", key, c2, c1)
+			t.Fatalf("replay %d answered %+v, want the same claim %+v", i, c2, c1)
 		}
 	}
 	if n := countEvents(t, env, id, "session_claimed"); n != 1 {
 		t.Fatalf("a replay must write nothing: %d session_claimed events", n)
 	}
-	if _, err := m.Claim(id, api.SessionClaimRequest{SessionID: "ffffffffffffffffffffffffffffffff", IdempotencyKey: "key-1"}, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "ALREADY_HELD" {
+	if _, err := m.Claim(id, api.SessionClaimRequest{SessionID: "ffffffffffffffffffffffffffffffff"}, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "ALREADY_HELD" {
 		t.Fatalf("another secret must be refused ALREADY_HELD: %v", err)
 	}
 }
 
 // TestSessionReplayAfterForceEndIsRefused: a session that was force-ended,
-// superseded or ended never claims the work item again — with its old
-// idempotency key, a new one or none — and the refusal writes nothing.
+// superseded or ended never claims the work item again, and the refusal
+// writes nothing.
 func TestSessionReplayAfterForceEndIsRefused(t *testing.T) {
 	env, m := sessionEnv(t)
 	id := mustCreateExecWI(t, env, "stale goal", nil, "")
 	old := "0123456789abcdef0123456789abcdef"
-	mustSessionClaim(t, m, env, id, old, "key-1")
+	mustSessionClaim(t, m, env, id, old)
 	if err := m.ForceEnd(id, "machine lost", env.UserID); err != nil {
 		t.Fatalf("force-end: %v", err)
 	}
 	refused := func(when string) {
 		t.Helper()
-		for _, key := range []string{"key-1", "key-fresh", ""} {
-			_, err := m.Claim(id, api.SessionClaimRequest{SessionID: old, MachineID: "m1", IdempotencyKey: key}, env.UserID)
-			if !IsCode(err, api.ErrCoreForbidden) || ErrorReason(err) != "STALE_SESSION" {
-				t.Fatalf("%s: the old session's claim (key %q) must be refused STALE_SESSION: %v", when, key, err)
-			}
+		_, err := m.Claim(id, api.SessionClaimRequest{SessionID: old, MachineID: "m1"}, env.UserID)
+		if !IsCode(err, api.ErrCoreForbidden) || ErrorReason(err) != "STALE_SESSION" {
+			t.Fatalf("%s: the old session's claim must be refused STALE_SESSION: %v", when, err)
 		}
 	}
 	refused("after force-end")
@@ -162,7 +159,7 @@ func TestSessionReplayAfterForceEndIsRefused(t *testing.T) {
 	}
 	// Another daemon claims the freed work item; the old session stays out.
 	next := "fedcba9876543210fedcba9876543210"
-	mustSessionClaim(t, m, env, id, next, "key-next")
+	mustSessionClaim(t, m, env, id, next)
 	refused("after supersession")
 	// The new holder ends the work item: neither session claims it again.
 	if err := m.End(id, api.SessionEndRequest{SessionID: next, Status: api.StatusBlocked, Note: "stop"}, env.UserID); err != nil {
@@ -205,7 +202,7 @@ func TestSessionVerifyCompareOnly(t *testing.T) {
 		t.Fatalf("unheld verify wrong: %+v", resp)
 	}
 	// Held + matching secret.
-	mustSessionClaim(t, m, env, id, secret, "v-1")
+	mustSessionClaim(t, m, env, id, secret)
 	resp, err = m.Verify(id, secret)
 	if err != nil {
 		t.Fatalf("verify held: %v", err)
@@ -243,7 +240,7 @@ func TestSessionAttachGates(t *testing.T) {
 	env, m := sessionEnv(t)
 	secret := "12341234123412341234123412341234"
 	id := mustCreateExecWI(t, env, "attach goal", nil, "")
-	mustSessionClaim(t, m, env, id, secret, "a-1")
+	mustSessionClaim(t, m, env, id, secret)
 
 	// Running (not paused): NOT_ATTACHABLE.
 	if _, err := m.Attach(id, api.SessionAttachRequest{SessionID: secret}, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "NOT_ATTACHABLE" {
@@ -297,7 +294,7 @@ func TestSessionForceEnd(t *testing.T) {
 	env, m := sessionEnv(t)
 	id := mustCreateExecWI(t, env, "force-end goal", nil, "")
 	oldSecret := "01010101010101010101010101010101"
-	mustSessionClaim(t, m, env, id, oldSecret, "t-1")
+	mustSessionClaim(t, m, env, id, oldSecret)
 
 	if err := m.ForceEnd(id, "machine lost", env.UserID); err != nil {
 		t.Fatalf("force-end: %v", err)
@@ -339,12 +336,12 @@ func TestSessionForceEnd(t *testing.T) {
 		t.Fatalf("session_superseded event missing")
 	}
 	// The WI is claimable again by a fresh session.
-	mustSessionClaim(t, m, env, id, "02020202020202020202020202020202", "t-2")
+	mustSessionClaim(t, m, env, id, "02020202020202020202020202020202")
 
 	// A paused holder is force-ended too.
 	pid := mustCreateExecWI(t, env, "force-end paused", nil, "")
 	pSecret := "05050505050505050505050505050505"
-	mustSessionClaim(t, m, env, pid, pSecret, "t-3")
+	mustSessionClaim(t, m, env, pid, pSecret)
 	if err := m.Pause(pid, pSecret, true, "operator", env.UserID); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
@@ -370,7 +367,7 @@ func TestSessionForceEndRefusals(t *testing.T) {
 	}
 	id := mustCreateExecWI(t, env, "refusals", nil, "")
 	secret := "06060606060606060606060606060606"
-	mustSessionClaim(t, m, env, id, secret, "r-1")
+	mustSessionClaim(t, m, env, id, secret)
 	for _, reason := range []string{"", "   "} {
 		if err := m.ForceEnd(id, reason, env.UserID); !IsCode(err, api.ErrCoreBadInput) {
 			t.Fatalf("empty reason %q accepted: %v", reason, err)
@@ -392,7 +389,7 @@ func TestSessionEndFenceAndClear(t *testing.T) {
 	env, m := sessionEnv(t)
 	secret := "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
 	id := mustCreateExecWI(t, env, "end goal", nil, "")
-	mustSessionClaim(t, m, env, id, secret, "e-1")
+	mustSessionClaim(t, m, env, id, secret)
 
 	// Fence: a foreign secret cannot end the WI.
 	if err := m.End(id, api.SessionEndRequest{SessionID: "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b", Status: api.StatusWrapped}, env.UserID); !IsCode(err, api.ErrCoreForbidden) || ErrorReason(err) != "STALE_SESSION" {
@@ -452,7 +449,7 @@ func TestOwnerDoorsOnBlockedWI(t *testing.T) {
 	// Park blocked the way the runtime's bounded close does: session
 	// cleared, waiting_on=owner.
 	secret := "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
-	mustSessionClaim(t, m, env, id, secret, "e-1")
+	mustSessionClaim(t, m, env, id, secret)
 	if err := m.End(id, api.SessionEndRequest{SessionID: secret, Status: api.StatusBlocked, Note: "incomplete"}, env.UserID); err != nil {
 		t.Fatalf("session-end blocked: %v", err)
 	}
@@ -479,7 +476,7 @@ func TestOwnerDoorsOnBlockedWI(t *testing.T) {
 	}
 	// The owner's re-claim now goes through the unchanged claim gate.
 	reclaim := "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
-	mustSessionClaim(t, m, env, id, reclaim, "e-2")
+	mustSessionClaim(t, m, env, id, reclaim)
 
 	// Park blocked again; the abandon exit (cancel) lands canceled with
 	// closed_at and the session row cleared (M2 holds on every terminal
@@ -522,7 +519,7 @@ func TestSessionClaimGates(t *testing.T) {
 	env, m := sessionEnv(t)
 	// Terminal: a wrapped WI answers CORE-410 whatever else is true.
 	tid := mustCreateExecWI(t, env, "terminal gate", nil, "")
-	mustSessionClaim(t, m, env, tid, "12121212121212121212121212121212", "g-1")
+	mustSessionClaim(t, m, env, tid, "12121212121212121212121212121212")
 	if err := m.End(tid, api.SessionEndRequest{SessionID: "12121212121212121212121212121212", Status: api.StatusWrapped}, env.UserID); err != nil {
 		t.Fatalf("end: %v", err)
 	}
@@ -561,7 +558,7 @@ func TestCheckSessionCredentialSessionPath(t *testing.T) {
 	env, m := sessionEnv(t)
 	secret := "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
 	id := mustCreateExecWI(t, env, "push auth", nil, "")
-	mustSessionClaim(t, m, env, id, secret, "p-1")
+	mustSessionClaim(t, m, env, id, secret)
 
 	if err := env.Owners.CheckSessionCredential(id, id, secret); err != nil {
 		t.Fatalf("valid session secret rejected: %v", err)
@@ -605,7 +602,7 @@ func TestSessionPauseCleanFlagDistinction(t *testing.T) {
 	env, m := sessionEnv(t)
 	secret := "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d"
 	id := mustCreateExecWI(t, env, "pause flags", nil, "")
-	mustSessionClaim(t, m, env, id, secret, "pf-1")
+	mustSessionClaim(t, m, env, id, secret)
 
 	// Daemon shutdown pause: clean_pause stays 0, session kept.
 	if err := m.Pause(id, secret, false, "", env.UserID); err != nil {
@@ -651,7 +648,7 @@ func TestWorkItemCarriesPublicSessionBlockNeverHash(t *testing.T) {
 	env, m := sessionEnv(t)
 	secret := "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f"
 	id := mustCreateExecWI(t, env, "view goal", nil, "")
-	mustSessionClaim(t, m, env, id, secret, "vw-1")
+	mustSessionClaim(t, m, env, id, secret)
 
 	wi, err := env.WIs.Get(id, GetOptions{})
 	if err != nil {
@@ -794,7 +791,7 @@ func TestDependencyOnlyWrappedBlockerReleases(t *testing.T) {
 		t.Fatalf("waiting_for on a queued blocker = %+v", w)
 	}
 	secret := "21212121212121212121212121212121"
-	mustSessionClaim(t, m, env, failedBlocker, secret, "f-1")
+	mustSessionClaim(t, m, env, failedBlocker, secret)
 	if err := m.End(failedBlocker, api.SessionEndRequest{SessionID: secret, Status: api.StatusFailed}, env.UserID); err != nil {
 		t.Fatalf("end failed: %v", err)
 	}
@@ -838,7 +835,7 @@ func TestDependencyOnlyWrappedBlockerReleases(t *testing.T) {
 		t.Fatal(err)
 	}
 	secret = "23232323232323232323232323232323"
-	mustSessionClaim(t, m, env, wrappedBlocker, secret, "w-1")
+	mustSessionClaim(t, m, env, wrappedBlocker, secret)
 	if inItems(depW) {
 		t.Fatalf("a running blocker released its dependent")
 	}
@@ -848,7 +845,7 @@ func TestDependencyOnlyWrappedBlockerReleases(t *testing.T) {
 	if !inItems(depW) || len(waitingFor(depW)) != 0 {
 		t.Fatalf("a wrapped blocker did not release its dependent")
 	}
-	mustSessionClaim(t, m, env, depW, "24242424242424242424242424242424", "w-2")
+	mustSessionClaim(t, m, env, depW, "24242424242424242424242424242424")
 	// A claimed (non-queued) WI carries no waiting_for.
 	if w := waitingFor(depW); len(w) != 0 {
 		t.Fatalf("running WI carries waiting_for %+v", w)

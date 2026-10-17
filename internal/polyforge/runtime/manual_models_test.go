@@ -117,7 +117,7 @@ func TestManualModelsSurviveClaimingReplay(t *testing.T) {
 	r, ws := newManualRuntime(t, hub)
 	writeWorkspaceYaml(t, ws, w079ValidYaml)
 	session := fakeSession("wi_manrep")
-	if err := r.noteClaiming("wi_manrep", session, randomKey(), []string{"pi:m/one", "pi:m/two"}); err != nil {
+	if err := r.noteClaiming("wi_manrep", session, []string{"pi:m/one", "pi:m/two"}); err != nil {
 		t.Fatal(err)
 	}
 	hub.hold("wi_manrep", session, api.StatusRunning)

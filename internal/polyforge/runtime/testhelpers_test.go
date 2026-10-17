@@ -57,11 +57,6 @@ type fakeHub struct {
 	// input echoes itself (the pre-F2 behavior).
 	canonical map[string]string
 	items     map[string]*api.WorkItem // canonical id → claim answer record (F1 tests)
-	// keyClaims implements the aihub idempotency contract for tests (D4/
-	// B1): a repeated claim with the SAME IdempotencyKey hands back the
-	// SAME claim answer (same session, same bundle pin) instead of
-	// opening a new one.
-	keyClaims map[string]*api.SessionClaimResponse
 	// capsuleRepoBase, when set, makes SessionClaim materialize the EMPTY
 	// bare capsule repo aihub creates at claim (the production contract):
 	// the runtime's claim-time clone path has a remote to clone. The
@@ -163,7 +158,6 @@ func newFakeHub() *fakeHub {
 		cleanPause: map[string]bool{},
 		lookupErr:  map[string]error{},
 		end:        map[string]error{},
-		keyClaims:  map[string]*api.SessionClaimResponse{},
 	}
 }
 
@@ -236,24 +230,13 @@ func (h *fakeHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimRe
 			}
 		}
 	}
-	// idempotent replay (the aihub contract): same key → same answer,
-	// provided the cached session is still the live one (D4)
-	if req.IdempotencyKey != "" {
-		if prev, ok := h.keyClaims[req.IdempotencyKey]; ok {
-			if prev.Claim.SessionFingerprint == api.SessionFingerprint(req.SessionID) {
-				return prev, nil
-			}
-			return nil, &api.Error{Code: "CORE-403", Detail: "STALE_SESSION: idempotency cache holds another session"}
-		}
-	}
+	// the holder's replay (the aihub contract, D4): the session that
+	// holds the WI is answered the same claim again
 	id := h.canonicalID(req.WorkItemID)
 	if cur := h.held[id]; cur != "" && cur != req.SessionID {
 		return nil, &api.Error{Code: "CORE-409", Detail: "ALREADY_HELD"}
 	}
 	resp := h.claimResponse(id, req.SessionID)
-	if req.IdempotencyKey != "" {
-		h.keyClaims[req.IdempotencyKey] = resp
-	}
 	h.held[id] = req.SessionID
 	h.status[id] = api.StatusRunning
 	if fault != nil {
