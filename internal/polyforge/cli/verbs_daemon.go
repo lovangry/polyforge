@@ -317,12 +317,24 @@ var cmdResume = &Command{
 		// checks reporter / project maintainer / admin against the caller,
 		// and the daemon's machine key is not that caller. Only then does
 		// the local daemon claim and start the WI.
-		if _, err := ctx.aihub().ResumeBlockedWorkItemWith(args[0], api.ResumeBlockedRequest{AcceptLostWork: acceptLostWork}); err != nil {
+		door, err := ctx.aihub().ResumeBlockedWorkItemWith(args[0], api.ResumeBlockedRequest{AcceptLostWork: acceptLostWork})
+		if err != nil {
 			return err
 		}
-		seal, _ := wi.Attrs["blocked_seal"].(map[string]any)
-		if head, _ := seal["head"].(string); acceptLostWork && head != "" {
-			fmt.Fprintf(ctx.Stderr, "accepted lost work on %s: the blocked seal (capsule head %s on machine %v) is cleared; the work it never pushed is abandoned\n", name, head, seal["machine"])
+		if acceptLostWork {
+			// Judge the override by the hub's answer, not the earlier read:
+			// a hub that ignores accept_lost_work leaves the seal standing.
+			var after struct {
+				Attrs map[string]any `json:"attrs"`
+			}
+			_ = json.Unmarshal(door, &after)
+			if _, still := after.Attrs["blocked_seal"]; still {
+				return fmt.Errorf("resume: aihub did not clear the blocked seal of %s (the hub is too old for --accept-lost-work); the work item is queued again but a continue on another machine is still refused (DAEMON-518) — upgrade aihub, or continue on the sealing machine", name)
+			}
+			seal, _ := wi.Attrs["blocked_seal"].(map[string]any)
+			if head, _ := seal["head"].(string); head != "" {
+				fmt.Fprintf(ctx.Stderr, "accepted lost work on %s: the blocked seal (capsule head %s on machine %v) is cleared; the work it never pushed is abandoned\n", name, head, seal["machine"])
+			}
 		}
 		raw, err := ctx.daemon().ResumeBlocked(args[0])
 		if err != nil {

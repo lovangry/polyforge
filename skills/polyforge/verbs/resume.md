@@ -68,7 +68,10 @@ project maintainer or admin); in the same aihub transaction the seal is
 cleared and a `blocked_seal_abandoned` event records who, when, the
 abandoned capsule head and the machine. The claim that follows (on any
 machine) continues from the chain aihub holds; the CLI prints the
-abandoned head and machine on stderr. Only for a `blocked` work item — on
+abandoned head and machine on stderr; if aihub answers with the seal still
+in place (an aihub too old for the flag) the CLI fails instead of starting
+the claim. On a blocked work item that carries no seal the flag just
+resumes it (no event). Only for a `blocked` work item — on
 any other status the flag is refused before anything changes. Use it only
 when the user explicitly accepts the loss; otherwise continue on the
 sealing machine.
