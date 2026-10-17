@@ -144,11 +144,10 @@ type CreateWorkItemRequest struct {
 	Labels     []string       `json:"labels,omitempty"`
 	Attrs      map[string]any `json:"attrs,omitempty"`
 	BundleName *string        `json:"bundle_name,omitempty"`
-	// RepoInventory and RepoInventoryBase are passed through to aihub as
-	// given (reference.md §2.1: [{name}] of project repos), so aihub refuses what it
-	// does not accept (url, subdir, base) instead of the CLI dropping it.
-	RepoInventory     json.RawMessage `json:"repo_inventory,omitempty"`
-	RepoInventoryBase json.RawMessage `json:"repo_inventory_base,omitempty"`
+	// RepoInventory is passed through to aihub as given (reference.md §2.1:
+	// [{name}] of project repos), so aihub refuses what it does not accept
+	// (url, subdir, any other key) instead of the CLI dropping it.
+	RepoInventory json.RawMessage `json:"repo_inventory,omitempty"`
 	// After lists the work items (id or slug) this one runs after: aihub
 	// writes one `blocks` edge per entry inside the create transaction,
 	// or refuses the whole create (polyforge#161).

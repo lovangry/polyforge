@@ -74,16 +74,15 @@ func TestVerbFileCreateRepoInventory(t *testing.T) {
 		t.Errorf("body missing %s: %s", want, rec.last().Body)
 	}
 
-	// --stdin: repo_inventory and repo_inventory_base reach aihub as
-	// given (aihub refuses url/subdir/base — the CLI drops nothing).
-	stdinBody := `{"project":"polyforge","goal":"g","repo_inventory":[{"name":"app","url":"file:///etc"}],"repo_inventory_base":[{"name":"app","base":"abc"}]}`
+	// --stdin: repo_inventory reaches aihub as given (aihub refuses
+	// url/subdir/other keys — the CLI drops nothing).
+	stdinBody := `{"project":"polyforge","goal":"g","repo_inventory":[{"name":"app","url":"file:///etc"}]}`
 	var stdout, errb bytes.Buffer
 	if code := Run([]string{"file", "create", "--stdin"}, strings.NewReader(stdinBody), &stdout, &errb); code != 0 {
 		t.Fatalf("stdin create: code=%d stderr=%s", code, errb.String())
 	}
 	for _, want := range []string{
 		`"repo_inventory":[{"name":"app","url":"file:///etc"}]`,
-		`"repo_inventory_base":[{"name":"app","base":"abc"}]`,
 	} {
 		if !strings.Contains(rec.last().Body, want) {
 			t.Errorf("stdin body missing %s: %s", want, rec.last().Body)
