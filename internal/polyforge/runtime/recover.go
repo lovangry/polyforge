@@ -371,7 +371,7 @@ func capsuleWorkflowStatus(capsuleDir string) string {
 // (polyforge#116: the parked verdict must reach the chain; v2-converge §6
 // bug 4: every branch, not just the blocked one). A SessionEnd the hub does
 // not acknowledge keeps the record end_pending and retries (§6 bug 5,
-// endpending.go) — the WI is never orphaned running at aihub.
+// restart.go closeBlocked) — the WI is never orphaned running at aihub.
 func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 	// No writer may outlive the verdict, and the last local work must
 	// reach aihub before the WI is handed to its owner (v2-converge §6

@@ -593,7 +593,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `wi_agent_rederived` | observe `monitor.go` | 恢复后的后继 step 进程已起（spawn_n） |
 | `pending_invalid` | observe `monitor.go` | `execution.json` 的 `pending_question` 缺 `id`，被投影忽略（每次看到一条） |
 | `transcript_missing` | observe `monitor.go` | 提交边界找不到本次派生的 harness 会话文件（F3，仅告警，提交照常） |
-| `published` / `push_failed` / `push_backpressure` / `push_poisoned_local` | observe `monitor.go`；`push_failed` 另由 runtime 封存路径经 EventTap 发出（`runtime.go`、`endpending.go`） | capsule 链推送成功 / 失败 / 背压 / 本地 gitlink 预检拒绝（后者不计入 M8） |
+| `published` / `push_failed` / `push_backpressure` / `push_poisoned_local` | observe `monitor.go`；`push_failed` 另由 runtime 封存路径经 EventTap 发出（`runtime.go`、`restart.go`） | capsule 链推送成功 / 失败 / 背压 / 本地 gitlink 预检拒绝（后者不计入 M8） |
 | `session_superseded` | observe `session.go`；runtime `runtime.go` | 周期 session 校验发现另一 daemon 持有该 WI（载荷只有公开指纹） |
 | `session_verify_failed` | observe `session.go` | 周期 session 校验连不上 aihub（只记录，不采取行动） |
 | `queue_fetch_denied` | daemon `daemon.go`（`wi=""`） | auto-pull 的 ready 队列拉取被 401/403/404 拒绝；每个"健康→拒绝"周期一次 |
@@ -601,7 +601,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `daemon_restarted` | daemon `restartsignal.go` | 写入每个重启对账恢复或停放的 WI；body 带该 job 的状态 |
 | `capsule_missing` / `project_unmapped` / `session_verify_outage` | runtime `restart.go` | 重启对账把 WI 置 blocked 的原因（同时是 blocked 原因码） |
 | `session_released` | runtime `restart.go` | 重启时发现 WI 已被别的 session 持有：杀进程树、隔离 capsule、丢弃记录 |
-| `interrupted_seal` / `pending_close_replay` / `seal_finished_locally` | runtime `restart.go`、`endpending.go` | 中断的封存以 blocked 收尾 / 重放持久化的收尾意图 / hub 已不再持有 session，本地完成封存 |
+| `interrupted_seal` / `pending_close_replay` / `seal_finished_locally` | runtime `restart.go` | 中断的封存以 blocked 收尾 / 重放持久化的收尾意图 / hub 已不再持有 session，本地完成封存 |
 | `missing_midflight_capsule` | runtime `recover.go` | 运行中 capsule 消失，拒绝静默重建（#103） |
 | `manual_models_dropped` | runtime `runtime.go` | 重新领取时丢弃早于 `<harness>:<model>` 格式的 `--models` 记录（#175） |
 | `exec_init` / `step_started` / `step_done` / `gate_verdict` / `needs_input` / `incomplete` / `rewind` / `terminal` / `answered` / `interrupted` / `resumed` / `step_failed` / `blocked` / `candidate_switched` / `candidates_exhausted` | driver `transition.go`（`emitLocked` 按已提交的状态转移发出） | 状态转移的进度新闻；body 带 spawn_n 与 step |
