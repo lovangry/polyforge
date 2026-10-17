@@ -752,8 +752,8 @@ func sessionPathFor(capsuleDir, token string) string {
 	return filepath.Join(capsuleDir, capsule.DirSession, "session-"+token+".jsonl")
 }
 
-// randomKey mints an idempotency key (NOT a secret: it only needs
-// uniqueness for the server's D4 replay dedup).
+// randomKey mints the claim's idempotency key (NOT a secret; aihub does
+// not read it — the session secret is the D4 replay key).
 func randomKey() string {
 	b := make([]byte, 12)
 	if _, err := rand.Read(b); err != nil {
@@ -901,7 +901,7 @@ func (r *Runtime) claimLocked(ctx context.Context, wi, id string, probe *api.Wor
 	// crash anywhere between the claim and the spawn would otherwise
 	// orphan a running session nobody can name again — the journal lets
 	// Restart verify the journaled session, replay the SAME claim (same
-	// key → same response, D4) and either finish the start or compensate
+	// secret → same claim, D4) and either finish the start or compensate
 	// with SessionEnd(blocked).
 	//
 	// A journal entry left by an earlier attempt whose claim answer was
@@ -1022,9 +1022,9 @@ func claimRefused(err error) bool {
 // fresh pair. An entry left by an earlier attempt whose answer was lost is
 // checked first: SessionVerify says the journaled session holds the WI →
 // the claim landed, reuse the pair so the claim is a D4 replay that hands
-// the same answer back; verify says it does not → the earlier claim never
-// landed or was ended since (a replay could hand back a stale cached
-// answer) — drop the entry and mint fresh; verify unreachable → the typed
+// the same claim back; verify says it does not → the earlier claim never
+// landed or was ended since (aihub would refuse that secret
+// STALE_SESSION) — drop the entry and mint fresh; verify unreachable → the typed
 // transient, entry kept.
 func (r *Runtime) claimIntent(id string) (sessionID, key string, replay bool, err error) {
 	if rec := r.loadClaiming()[id]; rec != nil && rec.SessionID != "" && rec.IdempotencyKey != "" {
