@@ -1043,31 +1043,29 @@ func Clone(ctx context.Context, o Opts) error {
 	return nil
 }
 
+// HasCommit reports whether the git-dir gitDir holds sha as a commit
+// (read-only).
+func HasCommit(o Opts, gitDir, sha string) bool {
+	_, err := git(append(hubEnv(o, false, nil), "GIT_DIR="+gitDir), "", "cat-file", "-e", sha+"^{commit}")
+	return err == nil
+}
+
 // AdoptCommit moves a freshly cloned capsule's chain to sha, taking the
-// commit from the first local git-dir in sources that holds it (git
-// fetch from a path: nothing leaves the machine, the sources are only
-// read). It answers the source used, or "" when none holds sha — the
-// capsule is then untouched. The worktree is reset to sha, so the chain
-// continues from it and the next publish pushes the adopted commits.
-// Takes the per-WI lock; ctx bounds the fetch.
-func AdoptCommit(ctx context.Context, o Opts, sha string, sources []string) (string, error) {
+// commit from the local git-dir src (git fetch from a path: nothing
+// leaves the machine, src is only read). The worktree is reset to sha, so
+// the chain continues from it and the next publish pushes the adopted
+// commits. Takes the per-WI lock; ctx bounds the fetch.
+func AdoptCommit(ctx context.Context, o Opts, sha, src string) error {
 	release := Lock(o.WorkItemID)
 	defer release()
-	for _, src := range sources {
-		probe := append(hubEnv(o, false, nil), "GIT_DIR="+src)
-		if _, err := git(probe, "", "cat-file", "-e", sha+"^{commit}"); err != nil {
-			continue
-		}
-		env := hubEnv(o, true, nil)
-		if _, err := runGitCtx(ctx, chainRemoteTimeout, env, o.CapsuleDir, "fetch", "--no-tags", "--quiet", src, sha); err != nil {
-			return "", fmt.Errorf("gitops: fetching %s from %s: %w", sha, src, err)
-		}
-		if _, err := git(env, o.CapsuleDir, "reset", "--quiet", "--hard", sha); err != nil {
-			return "", fmt.Errorf("gitops: moving the chain to %s: %w", sha, err)
-		}
-		return src, nil
+	env := hubEnv(o, true, nil)
+	if _, err := runGitCtx(ctx, chainRemoteTimeout, env, o.CapsuleDir, "fetch", "--no-tags", "--quiet", src, sha); err != nil {
+		return fmt.Errorf("gitops: fetching %s from %s: %w", sha, src, err)
 	}
-	return "", nil
+	if _, err := git(env, o.CapsuleDir, "reset", "--quiet", "--hard", sha); err != nil {
+		return fmt.Errorf("gitops: moving the chain to %s: %w", sha, err)
+	}
+	return nil
 }
 
 func dirExists(p string) bool {

@@ -266,6 +266,11 @@ type job struct {
 	// materialize clones each entry into repos/<name> before the agent
 	// starts. In-memory only — recovery never re-materializes.
 	repos []api.ProjectRepo
+	// sealedScene is the quarantined capsule of the blocked seal this
+	// claim continues on the sealing machine (verifySealedHead): its
+	// task repos are restored from there, not from aihub's carriers.
+	// Claim lane only; "" otherwise.
+	sealedScene string
 
 	// stepCandidates is the polyforge#79 claim-time compose: the
 	// per-step post-precedence candidate lists (step id → list; a
@@ -1085,33 +1090,55 @@ func (r *Runtime) pendingClose(j *job, note string) bool {
 
 // verifySealedHead is the continue guard of a blocked seal (v2-converge §7):
 // a blocked WI never continues without the sealing daemon's recorded
-// capsule head. A clone already at that head proceeds. On the sealing
-// machine the unpushed commits live in a quarantined git-dir of the work
-// item (prepareCapsule moved the sealed scene aside), so the fresh clone
-// adopts the head from there and continues from it; the next publish
-// pushes it. Anywhere else — or when no quarantined git-dir holds the
-// head — the clone is pre-blocked state (the #116 lesson) and the start
-// is refused. A WI with no recorded seal is not gated.
+// capsule head. A clone already at that head proceeds. When aihub lacks it
+// on the sealing machine, the sealed scene is the newest quarantined
+// generation of the work item (prepareCapsule moved it aside) whose
+// git-dir holds the head — a materialized one first, so an adopted clone
+// that never laid its task repos out is passed over. The fresh clone
+// adopts the head from it (the next publish pushes it), and the task
+// repos are restored from the same generation (j.sealedScene,
+// cloneTaskRepos). Anywhere else a clone not at the head
+// is pre-blocked state (the #116 lesson) and the start is refused, as on
+// the sealing machine when no generation holds the head. A WI with no
+// recorded seal is not gated.
 func (r *Runtime) verifySealedHead(ctx context.Context, j *job, c api.SessionClaim) error {
 	if c.SealedHead == "" || c.SealedMachine == "" {
 		return nil
 	}
 	head, err := gitops.Head(j.git)
-	if err == nil && head == c.SealedHead {
-		return nil
-	}
+	atHead := err == nil && head == c.SealedHead
 	if c.SealedMachine == r.cfg.MachineID {
-		src, aerr := gitops.AdoptCommit(ctx, j.git, c.SealedHead, quarantinedGitDirs(j.git.GitDir))
-		if aerr != nil {
-			return aerr
+		if atHead {
+			return nil
 		}
-		if src != "" {
-			fmt.Fprintf(os.Stderr, "runtime: %s: continuing from the sealed head %s adopted from %s\n", j.wi, c.SealedHead, src)
+		gen, scene := "", ""
+		for _, q := range quarantinedGitDirs(j.git.GitDir) {
+			if !gitops.HasCommit(j.git, q, c.SealedHead) {
+				continue
+			}
+			s := j.capsuleDir + strings.TrimPrefix(q, j.git.GitDir)
+			if _, serr := os.Stat(filepath.Join(s, filepath.FromSlash(RelMaterializeMarker))); serr == nil {
+				gen, scene = q, s
+				break
+			}
+			if gen == "" {
+				gen = q
+			}
+		}
+		if gen != "" {
+			if aerr := gitops.AdoptCommit(ctx, j.git, c.SealedHead, gen); aerr != nil {
+				return aerr
+			}
+			j.sealedScene = scene
+			fmt.Fprintf(os.Stderr, "runtime: %s: continuing from the sealed head %s adopted from %s\n", j.wi, c.SealedHead, gen)
 			return nil
 		}
 		return &api.Error{Code: api.ErrDaemonSealedHeadMismatch,
 			Detail: fmt.Sprintf("continue refused: the work item was sealed blocked by this machine (%q) at capsule head %s, but neither the aihub capsule (at %q) nor any quarantined capsule of it on this machine holds that commit — accept losing that work with pf resume %s --accept-lost-work, or abandon (pf cancel)",
 				c.SealedMachine, c.SealedHead, head, j.wi)}
+	}
+	if atHead {
+		return nil
 	}
 	return &api.Error{Code: api.ErrDaemonSealedHeadMismatch,
 		Detail: fmt.Sprintf("continue refused: the work item was sealed blocked by machine %q at capsule head %s, but the aihub capsule this daemon cloned is at %q (%v) — the sealing daemon's last push did not land; continue it on %q, accept losing that work with pf resume %s --accept-lost-work, or abandon (pf cancel)",

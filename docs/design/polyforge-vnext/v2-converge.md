@@ -397,7 +397,7 @@ carrier ref 与 WIP ref 这三项**现行**机制的唯一设计记录。§14.2�
   一次成功推送结束本轮。每次推送上界 60s（`protocol.PushTimeout`）。
 - **再认领 = 重新 clone**：blocked→`pf resume` 等再认领从 aihub 链 clone capsule，再按 §14.2 的 carrier ref 与 §14.3 的 WIP ref 恢复任务仓库；
   已有发布进度的 WI clone 失败时拒绝本地初始化（`DAEMON-516`，否则会从第 1 步重跑）；aihub 链头不等于封存时记录的 head 时，封存机从该 WI
-  的隔离 git-dir（`<git-dir>.quarantined.<ts>`，新者优先）取回该 head 并把链移过去，由下一次发布推送；另一台 daemon，或封存机上找不到该 head，
+  的隔离 git-dir（`<git-dir>.quarantined.<ts>`，新者优先）取回该 head 并把链移过去，由下一次发布推送，任务仓库（carrier head 与未提交改动）也从同一代隔离 capsule 恢复；另一台 daemon，或封存机上找不到该 head，
   则拒绝（`DAEMON-518`）。
 
 ### 14.2 任务仓库 carrier ref（polyforge#108 / #158） <!-- §14.2 -->

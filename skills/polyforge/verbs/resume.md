@@ -55,7 +55,8 @@ capsule head the sealing daemon recorded at block time. On the sealing
 machine the resume continues from that head even when its last push did
 not land: the fresh capsule takes the unpushed commits from the
 quarantined previous scene (`capsules/<name>.quarantined.<ts>` and its
-git-dir), and the next publish pushes them. When a DIFFERENT daemon picks
+git-dir), its task repos come back from the same scene (unpushed commits
+and uncommitted work), and the next publish pushes them. When a DIFFERENT daemon picks
 it up, or the sealing machine no longer holds the head, the start is
 refused (`DAEMON-518`, the claim is abandoned back to blocked) unless the
 aihub capsule head equals the sealed head — continue it on the sealing

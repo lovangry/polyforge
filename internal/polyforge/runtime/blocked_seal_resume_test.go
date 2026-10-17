@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
@@ -153,5 +154,49 @@ func TestSameMachineBlockedResumeWithoutSealedCommitIsRefused(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(j.capsuleDir, "unpushed.txt")); !os.IsNotExist(err) {
 		t.Fatalf("the abandoned work must not be in the capsule: %v", err)
+	}
+}
+
+// A blocked resume on the sealing machine whose close reached aihub with
+// nothing (every push refused) restores the task repo from the sealed
+// scene: the unpushed task-repo commit and the uncommitted work both come
+// back, from the same quarantined generation the capsule chain is
+// adopted from.
+func TestSameMachineBlockedResumeRestoresTaskReposFromSealedScene(t *testing.T) {
+	g := newWIPRig(t, "wi_seal_task_repos")
+	g.dirty(t)
+	hook := filepath.Join(g.hubBare, "hooks", "pre-receive")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\necho refused >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	g.block(t)
+	if last := g.hub.lastEnd(); last.HeadSHA == "" {
+		t.Fatalf("setup: the blocked close must carry the sealed head, got %+v", last)
+	}
+	for _, ref := range []string{gitops.TaskRefName("app"), gitops.TaskWIPRefName("app")} {
+		if _, ok := g.hubRef(t, ref); ok {
+			t.Fatalf("setup: %s must not have reached aihub", ref)
+		}
+	}
+	if err := os.Remove(hook); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := g.r.Start(context.Background(), g.wi, StartOpts{}); err != nil {
+		t.Fatalf("resume on the sealing machine: %v", err)
+	}
+	t.Cleanup(func() { terminateJobAgent(g.r, g.wi) })
+	repoB := filepath.Join(testCapsuleDir(g.r, g.wi), capsule.DirRepos, "app")
+	if got := carrierGit(t, repoB, "rev-parse", "HEAD"); got != g.workHead {
+		t.Fatalf("resumed task repo HEAD = %q, want the unpushed commit %q", got, g.workHead)
+	}
+	if b, err := os.ReadFile(filepath.Join(repoB, "e2e_test.go")); err != nil || !strings.Contains(string(b), "never committed") {
+		t.Fatalf("the uncommitted file is missing: %q, %v", b, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(repoB, "work.txt")); err != nil || string(b) != "committed work\nplus uncommitted edit\n" {
+		t.Fatalf("the uncommitted edit is missing: %q, %v", b, err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(g.r.gitDirFor(g.wi)), "pf-carrier-*")); len(left) != 0 {
+		t.Fatalf("the sealed-scene store must be removed after the restore: %v", left)
 	}
 }
