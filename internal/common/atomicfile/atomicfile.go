@@ -3,17 +3,22 @@
 package atomicfile
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 )
 
+// ErrDirSync marks a post-rename failure: the file was replaced but the
+// parent-directory fsync could not confirm the rename is durable.
+var ErrDirSync = errors.New("atomicfile: rename committed but directory fsync failed")
+
 // Write lands data at path: the parent directory is created (0o755), data
 // is written to a uniquely named temp file in that directory, fsynced,
 // chmodded to perm, renamed over path, and the parent directory is then
 // fsynced. The temp file is removed on every failure before the rename.
-// After a directory-fsync failure the file may already be replaced: the
-// on-disk state is uncertain, not unchanged.
+// A directory-fsync failure is returned wrapping ErrDirSync: the file may
+// already be replaced, the on-disk state is uncertain, not unchanged.
 func Write(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -48,11 +53,11 @@ func Write(path string, data []byte, perm os.FileMode) error {
 	}
 	df, err := os.Open(dir)
 	if err != nil {
-		return fmt.Errorf("atomicfile: rename committed but directory open failed: %w", err)
+		return fmt.Errorf("%w: open dir: %v", ErrDirSync, err)
 	}
 	defer df.Close()
 	if err := df.Sync(); err != nil {
-		return fmt.Errorf("atomicfile: rename committed but directory fsync failed: %w", err)
+		return fmt.Errorf("%w: %v", ErrDirSync, err)
 	}
 	return nil
 }
