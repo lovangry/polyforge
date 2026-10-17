@@ -122,7 +122,11 @@ type TransitionRequest struct {
 	// approving step.
 	TestFilesCommit         map[string]any
 	RebaselineAuthoredTests bool
-	SpawnN                  int64
+	// VerifiedHeads is the task repos' HEADs a completed verification
+	// result records under verified_heads (deliver_facts.go), read
+	// before the transition takes the driver's lock.
+	VerifiedHeads map[string]any
+	SpawnN        int64
 }
 
 // GateVerdict is one business gate FAIL judgment (01 §6.2): the policy
@@ -422,10 +426,14 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest, info *appliedInfo)
 				}
 			}
 		}
-		if req.StepID == verificationStepID && d.wi.CapsuleDir != "" {
+		if req.StepID == verificationStepID {
 			// the commit verification passed on, per task repo — the
-			// deliver merge rule's anchor (deliver_facts.go)
-			recordVerifiedHeads(out, d.wi.CapsuleDir)
+			// deliver merge rule's anchor (deliver_facts.go); driver-
+			// written only, a step-supplied value is never kept
+			delete(out, verifiedHeadsKey)
+			if len(req.VerifiedHeads) > 0 {
+				out[verifiedHeadsKey] = req.VerifiedHeads
+			}
 		}
 		st.Status = capsule.StepDone
 		st.Output = out
