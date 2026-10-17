@@ -559,16 +559,7 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 	wi = d.canonWI(wi) // a slug spelling closes the canonical job (F2)
 	ji, ok := d.rt.Info(wi)
 	if !ok && !d.rt.Busy(wi) {
-		if d.parkedWIClose(w, wi) {
-			return
-		}
-		if st, terr := d.terminalOf(wi); terr == nil {
-			writeJSON(w, http.StatusOK, closeResponse{
-				WorkItemID: wi, Outcome: "already_terminal", Status: st,
-			})
-			return
-		}
-		writeErr(w, api.ErrDaemonNotFound, "no local job for "+wi+" on this daemon")
+		d.noJobClose(w, wi)
 		return
 	}
 	// (a start of the work item still on its claim's hub calls has no job
@@ -593,8 +584,8 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 	if err := d.rt.Stop(ctx, wi, reason); err != nil {
 		graceful, ae := d.mapCloseErr(err)
 		if graceful && !ok {
-			// the start it queued behind did not leave a job here
-			writeErr(w, api.ErrDaemonNotFound, "no local job for "+wi+" on this daemon (the start under way did not run it here)")
+			// the operation it queued behind left no job here
+			d.noJobClose(w, wi)
 			return
 		}
 		if graceful {
@@ -607,6 +598,21 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 	writeJSON(w, http.StatusOK, closeResponse{
 		WorkItemID: wi, Slug: ji.Slug, Outcome: "sealed", Reason: reason,
 	})
+}
+
+// noJobClose answers a close that finds no local job: a work item parked
+// blocked, one already terminal at the hub, or none held here (404).
+func (d *Daemon) noJobClose(w http.ResponseWriter, wi string) {
+	if d.parkedWIClose(w, wi) {
+		return
+	}
+	if st, terr := d.terminalOf(wi); terr == nil {
+		writeJSON(w, http.StatusOK, closeResponse{
+			WorkItemID: wi, Outcome: "already_terminal", Status: st,
+		})
+		return
+	}
+	writeErr(w, api.ErrDaemonNotFound, "no local job for "+wi+" on this daemon")
 }
 
 // terminalOf looks the work item up at aihub and reports its status when
