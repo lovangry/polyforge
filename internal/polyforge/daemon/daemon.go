@@ -832,7 +832,7 @@ func (l driverEventLog) Append(wi, kind string, body any) error {
 
 // occupiedSlots is the set of WIs holding a concurrency slot: the
 // runtime's live jobs, whoever started them (dispatch, restart recovery,
-// resume-blocked). Finding 2 (v1.5 review): a RETAINED paused job
+// a blocked resume). Finding 2 (v1.5 review): a RETAINED paused job
 // holds no agent and no writer — it must not pin a slot (four
 // operator-paused jobs would otherwise starve the whole daemon).
 func (d *Daemon) occupiedSlots() map[string]bool {

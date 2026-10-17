@@ -239,9 +239,8 @@ non-read request (including a `GET /chats/{id}/attention` with `mark=1` or `ack=
 
 | Method | Path | Does | Caller |
 |---|---|---|---|
-| POST | `/jobs/{wi}/claim` | enqueue + claim + start (priority, models, origin) | `pf submit` |
+| POST | `/jobs/{wi}/claim` | enqueue + claim + start (priority, models, origin); `{"resume":true}`: claim + start now — the continue of a blocked WI after the CLI landed the hub door (DAEMON-503 → queued, answered `deferred`) | `pf submit`, `pf resume` |
 | POST | `/jobs/{wi}/answer` | deliver an answer to the driver bridge (no `question_id` → the single pending one) | `pf answer` |
-| POST | `/jobs/{wi}/resume-blocked` | continue a blocked WI (hub door + re-claim) | `pf resume` |
 | POST | `/jobs/{wi}/resume-paused` | live holder re-attaches a paused WI in place (`attached`/`already_live`/`closed`) | `pf resume` |
 | POST | `/jobs/{wi}/pause` | operator pause (clean_pause) | `pf pause` |
 | POST | `/jobs/{wi}/wrap` | terminal close with verdict | `pf wrap [--fail]` |

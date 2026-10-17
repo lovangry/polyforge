@@ -265,8 +265,7 @@ credential is unavailable, with `DAEMON-403` (polyforge#122 accident guard).
 | Method | Path | Role | Face |
 | --- | --- | --- | --- |
 | POST | `/jobs/{wi}/answer` | Answer a pending agent question. | user |
-| POST | `/jobs/{wi}/claim` | Submit family: enqueue a claim of a queued work item (optional body `models`: the manual candidate list of `pf submit --models`). | user |
-| POST | `/jobs/{wi}/resume-blocked` | The claim/start half of `pf resume` on a blocked WI (the CLI lands aihub's resume-blocked door with the human's own key first). | user |
+| POST | `/jobs/{wi}/claim` | Start a queued work item: enqueue its claim (`pf submit`; optional body `models`: the manual candidate list of `--models`), or with `{"resume":true}` claim and start it now — the daemon half of `pf resume` on a blocked WI (the CLI lands aihub's resume-blocked door with the human's own key first). | user |
 | POST | `/jobs/{wi}/resume-paused` | The live-holder half of `pf resume` on a paused WI (the CLI clears `clean_pause` at aihub first; this makes the online holder re-attach). | user |
 | POST | `/jobs/{wi}/pause` | CLI close path: seal the job with reason `paused`. | user |
 | POST | `/jobs/{wi}/wrap` | CLI close path: seal the job with reason `wrap` or `fail`. | user |

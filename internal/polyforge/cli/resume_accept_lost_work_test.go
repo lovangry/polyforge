@@ -36,7 +36,7 @@ func runResumeDoor(t *testing.T, wiJSON, doorReply string, args ...string) (code
 		io.WriteString(w, doorReply)
 	})
 	d = newDaemonFixture(t)
-	d.answer("POST", "/jobs/wi_abc/resume-blocked", `{"resumed":true,"work_item_id":"wi_abc"}`)
+	d.answer("POST", "/jobs/wi_abc/claim", `{"resumed":true,"work_item_id":"wi_abc"}`)
 	code, stdout, stderr = runPf(t, map[string]string{
 		"PF_SERVER": aihub.URL, "PF_DAEMON_SOCKET": d.sock,
 	}, append([]string{"resume"}, args...)...)
@@ -62,7 +62,7 @@ func TestResumeAcceptLostWorkRidesTheDoor(t *testing.T) {
 	if !strings.Contains(stdout, "resumed pf-42") {
 		t.Errorf("stdout: %s", stdout)
 	}
-	if last := d.rec.last(); last.Path != "/jobs/wi_abc/resume-blocked" {
+	if last := d.rec.last(); last.Path != "/jobs/wi_abc/claim" {
 		t.Errorf("the daemon must claim after the door; last call %s", last.Path)
 	}
 }
