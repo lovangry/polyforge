@@ -5,12 +5,16 @@ package workspace
 // and the scratch staleness/prune rules. Temp dirs only.
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
 )
 
 func writeFile(t *testing.T, path, body string) {
@@ -356,5 +360,31 @@ func TestLayoutSection(t *testing.T) {
 		if exists != c.exists || has != c.has || (err != nil) != c.err {
 			t.Fatalf("%s: LayoutSection = %v, %v, %v; want %v, %v, err=%v", c.name, exists, has, err, c.exists, c.has, c.err)
 		}
+	}
+}
+
+// TestInitToleratesDirSyncFailure: when only the directory fsync after
+// the rename fails, the files are in place and `pf init` succeeds; any
+// other write failure is still reported.
+func TestInitToleratesDirSyncFailure(t *testing.T) {
+	orig := layoutWrite
+	t.Cleanup(func() { layoutWrite = orig })
+	layoutWrite = func(path string, data []byte, perm os.FileMode) error {
+		if err := os.WriteFile(path, data, perm); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: injected", atomicfile.ErrDirSync)
+	}
+	ws := t.TempDir()
+	res, err := Init(ws)
+	if err != nil {
+		t.Fatalf("a directory-fsync failure must not fail init: %v", err)
+	}
+	if res.NotesFile != "created" || !strings.Contains(readFile(t, filepath.Join(ws, NotesFile)), layoutOpen) {
+		t.Fatalf("init = %+v; CLAUDE.md must carry the layout", res)
+	}
+	layoutWrite = func(string, []byte, os.FileMode) error { return errors.New("disk full") }
+	if _, err := Init(t.TempDir()); err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("a real write failure must be reported, got %v", err)
 	}
 }

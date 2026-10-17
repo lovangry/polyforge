@@ -179,7 +179,9 @@ type SessionClaimResponse struct {
 }
 
 // SessionClaimRequest is the CAS claim body. session_id is the
-// client-minted secret, journaled durably BEFORE this call (B1).
+// client-minted secret, journaled durably BEFORE this call (B1); it is
+// also the replay key (a repeat by the holding session answers the same
+// claim). aihub does not read idempotency_key.
 type SessionClaimRequest struct {
 	WorkItemID     string `json:"work_item_id"`
 	SessionID      string `json:"session_id"`

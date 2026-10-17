@@ -101,7 +101,7 @@ func TestWIRepoInventoryRefusals(t *testing.T) {
 		{"url", RepoInventoryInput{entry(t, map[string]any{"name": "app", "url": "file:///etc"})}, "INVENTORY_URL_NOT_ALLOWED", "app"},
 		{"url-same-as-project", RepoInventoryInput{entry(t, map[string]any{"name": "app", "url": "file:///srv/app.git"})}, "INVENTORY_URL_NOT_ALLOWED", "app"},
 		{"subdir", RepoInventoryInput{entry(t, map[string]any{"name": "app", "subdir": "x"})}, "INVENTORY_SUBDIR_UNSUPPORTED", "app"},
-		{"base", RepoInventoryInput{entry(t, map[string]any{"name": "app", "base": "abc123"})}, "INVENTORY_BASE_UNSUPPORTED", "app"},
+		{"base", RepoInventoryInput{entry(t, map[string]any{"name": "app", "base": "abc123"})}, "", "app"},
 		{"unknown-key", RepoInventoryInput{entry(t, map[string]any{"name": "app", "ref": "main"})}, "", "app"},
 		{"no-name", RepoInventoryInput{entry(t, map[string]any{"url": "file:///etc"})}, "", ""},
 		{"not-in-project", names("app", "nope"), "REPO_NOT_IN_PROJECT", "nope"},
@@ -112,23 +112,6 @@ func TestWIRepoInventoryRefusals(t *testing.T) {
 			_, err := env.WIs.Create(invCreate(env, c.in))
 			wantTypedRefusal(t, env, err, api.ErrCoreBadInput, c.reason, c.sub)
 		})
-	}
-}
-
-// TestWIRepoInventoryBaseArray: the removed second array is refused when
-// it carries entries; absent, null and [] mean "no bases".
-func TestWIRepoInventoryBaseArray(t *testing.T) {
-	env := newEnv(t)
-	reposProject(t, env)
-	req := invCreate(env, names("app"))
-	req.RepoInventoryBase = json.RawMessage(`[{"name":"app","base":"abc"}]`)
-	_, err := env.WIs.Create(req)
-	wantTypedRefusal(t, env, err, api.ErrCoreBadInput, "INVENTORY_BASE_UNSUPPORTED", "")
-	for _, ok := range []string{`null`, `[]`} {
-		req.RepoInventoryBase = json.RawMessage(ok)
-		if _, err := env.WIs.Create(req); err != nil {
-			t.Fatalf("repo_inventory_base %s must mean no bases: %v", ok, err)
-		}
 	}
 }
 

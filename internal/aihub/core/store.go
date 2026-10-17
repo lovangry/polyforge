@@ -147,14 +147,6 @@ CREATE TABLE IF NOT EXISTS wi_dependencies (
 );
 CREATE INDEX IF NOT EXISTS idx_dep_blocked ON wi_dependencies(blocked_wi_id, kind);
 
-CREATE TABLE IF NOT EXISTS claim_idempotency (
-  idempotency_key TEXT PRIMARY KEY,
-  work_item_id    TEXT NOT NULL REFERENCES work_items(id),
-  caller_identity TEXT NOT NULL,
-  response_json   TEXT NOT NULL,
-  created_at      TEXT NOT NULL
-);
-
 CREATE TABLE IF NOT EXISTS wi_events (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   work_item_id TEXT NOT NULL REFERENCES work_items(id),

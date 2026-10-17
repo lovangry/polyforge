@@ -152,9 +152,18 @@ func fileCreate(ctx *Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := json.Unmarshal(raw, &req); err != nil {
+		var body struct {
+			aihubclient.CreateWorkItemRequest
+			// the removed pre-v2.5.0 second array: refused, never dropped
+			RepoInventoryBase json.RawMessage `json:"repo_inventory_base"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
 			return fmt.Errorf("stdin JSON: %w", err)
 		}
+		if b := strings.TrimSpace(string(body.RepoInventoryBase)); b != "" && b != "null" && b != "[]" {
+			return fmt.Errorf("stdin JSON: repo_inventory_base is not supported; omit it (the work machine clones each repo's default branch)")
+		}
+		req = body.CreateWorkItemRequest
 	}
 	if *project != "" {
 		req.Project = *project // flag fills a gap in the stdin body

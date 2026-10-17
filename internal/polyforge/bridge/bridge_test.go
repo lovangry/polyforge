@@ -97,6 +97,13 @@ func TestInterruptedFromCausePolicy(t *testing.T) {
 			t.Fatalf("archive detail %q, want the cause verbatim %q", got.Detail, cause)
 		}
 	}
+	// T booking: a system relaunch (hang, stall, death) books the
+	// interrupted dispatch; a daemon restart or an operator resume does not.
+	for cause, want := range map[string]bool{"agent_death": true, "driver_stalled": true, "daemon_restart": false, "operator resume": false} {
+		if got := interruptedFromCause(cause); got == nil || got.BookWall != want {
+			t.Fatalf("cause %q: archive %+v, want BookWall %v", cause, got, want)
+		}
+	}
 }
 
 // fakeRTSpawner is a scripted rt.Spawner: it records every Spawn's
@@ -218,7 +225,7 @@ func TestBridgeWiresDriverEventsAndSupervisionLink(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(bundle, "steps"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	front := "---\nname: wf\ndefaults:\n  model_candidates: [pi:m-a]\nsteps:\n  - { id: fix }\n---\n# body\n"
+	front := "---\nname: wf\nsteps:\n  - { id: fix }\n---\n# body\n"
 	if err := os.WriteFile(filepath.Join(bundle, "workflow.md"), []byte(front), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +242,7 @@ func TestBridgeWiresDriverEventsAndSupervisionLink(t *testing.T) {
 	defer cancel()
 	h, err := Start(ctx, Config{
 		WI: "wi_wire", CapsuleDir: dir, BundleName: "wf", SpawnN: 1, Spawner: sp,
-		Log: log, Link: link,
+		Log: log, Link: link, StepCandidates: map[string][]string{"fix": {"pi:m-a"}},
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)

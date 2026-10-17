@@ -12,7 +12,7 @@ package runtime
 //     blocked as compensation).
 //   - at startup, every uncleared entry is replayed: SessionVerify of
 //     the journaled session decides — matches → the session is still
-//     ours, adopt it and finish the start (the SAME idempotency key
+//     ours, adopt it and finish the start (the SAME session secret
 //     hands back the SAME claim answer, D4); not matches / the hub says
 //     otherwise → the intention is dead, drop the entry.
 //   - a claim call whose answer is lost (transport error, timeout, hub
@@ -61,7 +61,7 @@ type claimingFile struct {
 type claimingRec struct {
 	WorkItemID     string `json:"work_item_id"`    // the claimed id (an older entry: the submitted spelling)
 	SessionID      string `json:"session_id"`      // the minted SECRET (replay anchor)
-	IdempotencyKey string `json:"idempotency_key"` // the D4 replay token
+	IdempotencyKey string `json:"idempotency_key"` // sent with the claim; aihub does not read it (the secret is the D4 replay key)
 	MachineID      string `json:"machine_id"`
 	At             string `json:"at"`
 	// Models is the manual `pf submit --models` list of this start, so a
@@ -197,8 +197,8 @@ func (r *Runtime) markClaimEnding(key, sessionID, note string) {
 //   - aihub unreachable → keep the entry for the next restart, never
 //     guess a verdict;
 //   - SessionVerify says the journaled session still holds the WI →
-//     adopt: replay the claim with the SAME idempotency key (D4: the
-//     same response — bundle pin, repos, fingerprint — comes back) and
+//     adopt: replay the claim with the SAME session secret (D4: the
+//     same claim — bundle pin, repos, fingerprint — comes back) and
 //     enter its CLAIMING placeholder; the answered replays are carried
 //     to their agents by runReplays once Restart's records are seeded
 //     (B-8: the clone runs outside every lock), and their own failure
@@ -255,7 +255,7 @@ func (r *Runtime) resumeClaiming(ctx context.Context) (replays []claimReplay) {
 		})
 		if r.restartStopping(ctx) {
 			// shutdown: whatever the answer, the entry stays and the next
-			// start replays it (the same key hands the same answer back)
+			// start replays it (the same secret hands the same claim back)
 			return replays
 		}
 		if err != nil {

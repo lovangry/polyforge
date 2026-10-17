@@ -728,15 +728,6 @@ func (d *Driver) takeUnbooked(stepID string) int64 {
 	return ms
 }
 
-// bookWall persists the dispatch's wall time when it ended by
-// cancellation (best-effort: the T accumulator survives restarts).
-func (d *Driver) bookWall(stepID string, since time.Time) {
-	d.addUnbooked(stepID, since)
-	if ms := d.takeUnbooked(stepID); ms > 0 {
-		_ = d.transition(TransitionRequest{Kind: TransBudgetUpdate, StepID: stepID, SpawnN: d.currentSpawnN(), Budget: &capsule.Budget{WallMs: ms}})
-	}
-}
-
 // failDispatch records one failed dispatch (the dispatch's single failure
 // record): the step_ended fact, then the TransStepFailed write that
 // applies the death-cause table, then the D7 backoff the decision imposed
