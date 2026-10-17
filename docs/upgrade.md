@@ -1198,13 +1198,16 @@ it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
   rows, followed by the ids of every row that needed more than a copy. The
   migration is idempotent: once done, a start runs one query and reads no
   file. Measured: 3,800 documents of ~55 KB (~210 MB) take ~3.3 s on a
-  development machine — the switch window's HTTP poll allows
-  `UP_WAIT_SECS` (default 30 s) from the stop, the drain included, so on a
-  slow disk deploy the first DB-only release with `UP_WAIT_SECS=120`.
-- **The memory files are not deleted** in this release: they stay as a
-  fallback and are still copied by the deploy backup's rsync. A later
-  release removes them together with the `authority_path` column and the
-  unused `fs_mtime_ns` / `fs_size` columns.
+  development machine. deploy.sh's `UP_WAIT_SECS` default (the switch
+  window's HTTP poll, counted from the stop, drain included) is 120 s so
+  the first start's migration fits.
+- **The memory files are not deleted, and this release still writes them**
+  (transitional write-through): create writes `memory.md` exactly as
+  before and redact moves it to `_redacted/`, though aihub never reads
+  them while serving. They are still copied by the deploy backup's rsync.
+  The release after every deployment has run this one drops the
+  write-through, the files, the `authority_path` column and the unused
+  `fs_mtime_ns` / `fs_size` columns.
 - **Deploy gate (step 4)**: on a database with `memories.content` the
   snapshot must hold no memories row without content (such a row has no
   file to come from: restore its `memory.md` under the data dir's
@@ -1213,8 +1216,7 @@ it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
   checked the old way (rows == `memory.md` files in the backup).
 - `pf backup` (`VACUUM INTO`) now holds every memory; it still does not
   include the git repos.
-- **Rollback hazard:** an older aihub treats the memory files as the
-  truth and deletes, at its startup reconcile, every row without a file —
-  i.e. every memory written by this release. Before rolling back past it,
-  export those memories (`SELECT id, content FROM memories WHERE
-  authority_path = ''`) if they matter.
+- **Rollback**: safe, including deploy.sh's automatic rollback. Every row
+  written by this release has its file (write-through), so an older
+  aihub's startup reconcile keeps every memory; it ignores the content
+  column.

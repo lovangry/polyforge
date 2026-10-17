@@ -174,8 +174,9 @@ drains for 10s. SQLite (`core/store.go` `Open`): WAL, `foreign_keys(1)`, `busy_t
 `synchronous(FULL)`, one open connection (single writer). No startup schema migration: SQL moves only through `.polyforge/deploy.sh` with
 `deploy/sql/<tag>/` (`docs/upgrade.md`) — except `memories.content`, which the one-time memory content
 migration adds (§9). Data dir: `aihub.db`, `git/<wi>.git` (bare chain repos with the pre-receive hook,
-`git/repo.go`), `backups/`, and on databases older than `memories.content` the former memory files
-`memory/<project>/[_redacted/]<mem>/memory.md` (kept, read once by the migration).
+`git/repo.go`), `backups/`, and the memory files `memory/<project>/[_redacted/]<mem>/memory.md`
+(read once by the migration; still written through by create/redact for rollback safety, never read
+while serving).
 Startup runs the memory content migration after listening and before serving (§9). In production aihub runs as a docker
 compose service (`deploy/docker-compose.yml`, `restart: unless-stopped`).
 
@@ -208,6 +209,7 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 | `MEM-404` | Memory missing or read-denied |
 | `MEM-409` | Idempotency key reused; redact of a non-active memory |
 | `MEM-413` | Content over 1 MiB |
+| `MEM-500` | Memory write-through file failure (stage, rename, redact move) |
 | `MEM-503` | FTS query/scan failure |
 | `AUTH-401` | Missing/invalid API key |
 | `AUTH-403` | Not admin; key scoped to another project; not a writer |
@@ -402,7 +404,9 @@ grace 1m; per-step failure bound 3 (`DefaultMaxStepFailures`). Timeouts relax (d
 Detail: `06-memory-search.md#§1`. Summary (`internal/aihub/memory`): a memory is one `memories` row whose
 `content` column holds the document (frontmatter + body; `content_sha`/`content_len` describe it) plus an
 FTS5 trigram row (`memory_fts`). Create = one transaction (row + FTS); redact = one transaction (status +
-FTS removal; the document stays, never served). On start, `MigrateContent` fills `content` from the
+FTS removal; the document stays, never served). Transitional write-through (`memory/writethrough.go`):
+create still writes the `memory.md` file and redact still moves it to `_redacted/`, so an older aihub
+rolled back onto the data dir keeps every row; files are never read while serving. On start, `MigrateContent` fills `content` from the
 former memory files for rows that lack it (file bytes verbatim; a file differing from `content_sha` wins;
 a missing file leaves the row unserved and is retried next start; the files are not deleted). Search needs `q`;
 `match=all` (default) ANDs every token (≥3 runes as FTS phrases, shorter ones as substrings);

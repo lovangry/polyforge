@@ -173,9 +173,9 @@ CREATE TABLE IF NOT EXISTS memories (
   type         TEXT NOT NULL,
   title        TEXT,
   visibility   TEXT NOT NULL,
-  -- memory/<project>/<id>: where a row written before memories.content
-  -- existed kept its document as a file (read once by the content
-  -- migration); '' for rows written since.
+  -- memory/<project>/<id>: the directory of the row's memory.md file —
+  -- read once by the content migration, written through on create and
+  -- redact (memory/writethrough.go), never read while serving.
   authority_path TEXT NOT NULL,
   content_sha  TEXT NOT NULL,
   content_len  INTEGER NOT NULL,

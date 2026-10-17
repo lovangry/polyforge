@@ -41,8 +41,9 @@ type Entry struct {
 // Store is the memory subsystem.
 type Store struct {
 	db *core.DB
-	// dataDir holds the memory/ tree the content migration reads
-	// (migrate.go); nothing else touches the file system.
+	// dataDir holds the memory/ tree: read once by the content migration
+	// (migrate.go), written by the transitional write-through
+	// (writethrough.go), never read while serving.
 	dataDir string
 
 	// now is the search clock the freshness term ages entries against
@@ -68,7 +69,8 @@ type CreateRequest struct {
 }
 
 // Create renders the stored document (frontmatter + body) and writes the
-// row and its FTS row in one Core transaction. A blank title is derived
+// row and its FTS row in one Core transaction (with the authority-file
+// write-through around it, writethrough.go). A blank title is derived
 // from the body for the row (rowTitle); the document's frontmatter keeps
 // the title as requested.
 func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
@@ -145,6 +147,11 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	if len(doc) > maxContentBytes {
 		return nil, errf(api.ErrMemTooLarge, "", "authority document exceeds 1 MiB")
 	}
+	rel := authorityRel(projectID, memID)
+	tmp, err := s.stageAuthority(rel, doc)
+	if err != nil {
+		return nil, err
+	}
 	var idem any
 	if req.IdempotencyKey != nil && *req.IdempotencyKey != "" {
 		idem = *req.IdempotencyKey
@@ -159,16 +166,19 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	if _, err := tx.Exec(`INSERT INTO memories(id, project_id, owner_user_id, work_item_id, type, title,
 		visibility, authority_path, content_sha, content_len, tags, related, idempotency_key, status, created_at, updated_at,
 		content)
-		VALUES (?1,?2,?3,?4,?5,?6,?7,'',?8,?9,?10,?11,?12,'active',?13,?13,?14)`,
+		VALUES (?1,?2,?3,?4,?5,?6,?7,?15,?8,?9,?10,?11,?12,'active',?13,?13,?14)`,
 		memID, projectID, owner, anyPtr(req.WorkItemID), req.Type, anyPtr(title), req.Visibility,
 		shaHex([]byte(doc)), len(doc), jsonOrEmpty(req.Tags), jsonOrEmpty(req.Related), idem, now,
-		doc); err != nil {
+		doc, rel); err != nil {
 		return nil, err
 	}
 	if err := ftsReplace(tx, memID, extractBody(doc)); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	if err := placeAuthority(tmp); err != nil {
 		return nil, err
 	}
 	return s.load(memID)
@@ -653,7 +663,8 @@ func containsAll(have, want []string) bool {
 }
 
 // Redact soft-deletes: the row turns redacted and its FTS row goes, in
-// one Core transaction. The stored document stays in the row and is
+// one Core transaction (the authority directory moves into _redacted/
+// first, writethrough.go). The stored document stays in the row and is
 // never served again.
 func (s *Store) Redact(memID string) error {
 	tx, err := s.db.Begin()
@@ -661,8 +672,8 @@ func (s *Store) Redact(memID string) error {
 		return err
 	}
 	defer tx.Rollback()
-	var status string
-	err = tx.QueryRow(`SELECT status FROM memories WHERE id=?1 AND content IS NOT NULL`, memID).Scan(&status)
+	var status, rel string
+	err = tx.QueryRow(`SELECT status, authority_path FROM memories WHERE id=?1 AND content IS NOT NULL`, memID).Scan(&status, &rel)
 	if errors.Is(err, sql.ErrNoRows) {
 		return errf(api.ErrMemNotFound, "", "memory %s", memID)
 	}
@@ -671,6 +682,9 @@ func (s *Store) Redact(memID string) error {
 	}
 	if status != "active" {
 		return errf(api.ErrMemConflict, "", "memory is %s", status)
+	}
+	if err := s.redactAuthority(rel); err != nil {
+		return err
 	}
 	if _, err := tx.Exec(`UPDATE memories SET status='redacted', updated_at=?1 WHERE id=?2`, core.Now(), memID); err != nil {
 		return err

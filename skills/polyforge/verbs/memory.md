@@ -53,7 +53,7 @@ truncated regardless of `--max-bytes`:
 |---|---|---|
 | `AUTH-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / the config's `api_key`. |
 | `MEM-404` | Unknown or invisible memory id | No such memory (or it is not visible to you) — the id comes from a `recall` hit (`items[].id`). |
-| `CORE-500` | The server failed the read (database) | Nothing was shown — retry; if it persists the server's database is unhealthy. |
+| `MEM-500` | The memory store failed the read | Nothing was shown — retry; if it persists the server's memory store is unhealthy. |
 
 A local `pf: memory show: ...` line (exit 1, no typed code) means a local
 refusal before any wire call — a missing id, an unknown action, or an

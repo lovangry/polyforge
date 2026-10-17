@@ -233,10 +233,37 @@ func TestMigrateContentIdempotent(t *testing.T) {
 	}
 }
 
-// TestCreateIsDBOnly: a create writes no file; the stored document is the
-// frontmatter + body whose digest and length the row serves, and an
-// idempotent replay answers the original entry and body.
-func TestCreateIsDBOnly(t *testing.T) {
+// oldRulesKeep answers whether the file-authority store's reconcile (an
+// older aihub rolled back onto this data dir) would keep the row as it is:
+// an active row needs memory/<project>/<id>/memory.md whose digest is the
+// row's content_sha and whose frontmatter id is the directory name; a
+// redacted row needs its file under _redacted/.
+func oldRulesKeep(t *testing.T, e *env, id string) bool {
+	t.Helper()
+	var rel, sha, status string
+	if err := e.db.QueryRow(`SELECT authority_path, content_sha, status FROM memories WHERE id=?1`, id).Scan(&rel, &sha, &status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" {
+		i := strings.LastIndexByte(rel, '/')
+		rel = rel[:i] + "/_redacted/" + rel[i+1:]
+	}
+	raw, err := os.ReadFile(filepath.Join(e.store.dataDir, filepath.FromSlash(rel), "memory.md"))
+	if err != nil {
+		return false
+	}
+	block, _, ok := splitFrontmatter(string(raw))
+	fm, perr := parseFrontmatterBlock(block)
+	return ok && perr == nil && fm["id"] == id && filepath.Base(rel) == id &&
+		(status != "active" || shaHex(raw) == sha)
+}
+
+// TestCreateWritesThroughReadsDB: a create stores the document in the row
+// and writes the authority file with identical bytes; serving reads the
+// row only; an idempotent replay answers the original entry and body; a
+// redact moves the file into _redacted/; at every point the old
+// file-authority rules keep the row.
+func TestCreateWritesThroughReadsDB(t *testing.T) {
 	e := newEnv(t)
 	key := "step-summary-1"
 	body := "## Lesson\n\nthe step summary body\n---\nnot frontmatter\n"
@@ -245,15 +272,32 @@ func TestCreateIsDBOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ents, _ := os.ReadDir(e.store.dataDir); len(ents) != 0 {
-		t.Fatalf("create wrote into the data dir: %v", ents)
-	}
 	doc, err := e.store.Content(first.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if Body(doc) != body || first.ContentSHA != shaHex(doc) || first.ContentLen != int64(len(doc)) {
 		t.Fatalf("stored document %q does not match the row (%+v)", doc, first)
+	}
+	file := filepath.Join(e.store.dataDir, "memory", first.ProjectID, first.ID, "memory.md")
+	if raw, err := os.ReadFile(file); err != nil || string(raw) != string(doc) {
+		t.Fatalf("authority file = %q (%v), want the stored document", raw, err)
+	}
+	if _, err := os.Stat(file + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("staged tmp left behind (%v)", err)
+	}
+	if !oldRulesKeep(t, e, first.ID) {
+		t.Fatal("the old reconcile would not keep a fresh row")
+	}
+	// Serving never reads the file.
+	if err := os.WriteFile(file, []byte("tampered"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := e.store.Content(first.ID); err != nil || string(got) != string(doc) {
+		t.Fatalf("content after a file change = %q (%v), want the row's document", got, err)
+	}
+	if err := os.WriteFile(file, doc, 0o640); err != nil {
+		t.Fatal(err)
 	}
 	again, err := e.store.Create(CreateRequest{Project: "alpha", Type: "experience.wrap",
 		Visibility: "project", Content: "a different replayed body", IdempotencyKey: &key}, e.user)
@@ -265,6 +309,16 @@ func TestCreateIsDBOnly(t *testing.T) {
 	}
 	if err := e.store.Redact(first.ID); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("authority file still in place after the redact (%v)", err)
+	}
+	moved := filepath.Join(e.store.dataDir, "memory", first.ProjectID, "_redacted", first.ID, "memory.md")
+	if raw, err := os.ReadFile(moved); err != nil || string(raw) != string(doc) {
+		t.Fatalf("redacted file = %q (%v)", raw, err)
+	}
+	if !oldRulesKeep(t, e, first.ID) {
+		t.Fatal("the old reconcile would not keep the redacted row")
 	}
 	if err := e.store.Redact(first.ID); err == nil || err.(*APIError).Code != "MEM-409" {
 		t.Fatalf("second redact = %v, want MEM-409", err)

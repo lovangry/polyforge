@@ -9,7 +9,7 @@
 ## 1. 范围 <!-- §1 -->
 
 Memory 是 Core 域数据（项目知识沉淀）：一条 memory = `memories` 表的一行（`content` 列存文档）+ 一行 FTS 索引，
-全部在 Core 数据库里，没有权威文件。写入只有创建与 redact（软删除）两种；**没有更新路径**（改内容 = 新建一条，
+全部在 Core 数据库里，数据库是唯一的事实来源。写入只有创建与 redact（软删除）两种；**没有更新路径**（改内容 = 新建一条，
 必要时 redact 旧的）。检索只有 FTS5 trigram 文本检索，没有向量/语义层。
 
 ## 2. 不变量 <!-- §2 -->
@@ -17,6 +17,10 @@ Memory 是 Core 域数据（项目知识沉淀）：一条 memory = `memories` �
 - 创建：一个事务插入行（含 `content`）+ FTS 行（FTS 先删后插）（`Store.Create`）。redact：一个事务置
   `status='redacted'` + 删除 FTS 行；文档留在行里，此后永不服务（`Store.Redact`）。
 - `content_sha` = `content` 的 SHA-256，`content_len` = 其字节数（`pf memory show` 显示的 `content_len`）。
+- 过渡期写穿（`writethrough.go`，本版本被所有部署运行过之后的下一个版本删除）：创建时照旧写
+  `<data-dir>/memory/<project_id>/<mem_id>/memory.md`（临时文件 + fsync → 提交事务 → rename，字节与 `content`
+  相同，行的 `authority_path` 指向它），redact 时照旧把目录移进 `_redacted/`——回滚到旧版 aihub 时，旧的对账为每行
+  找到文件、保留全部行。运行时只写不读。
 - `content` 为 NULL 的行（只可能来自迁移时找不到文件，§4）对一切读写路径等同不存在（`MEM-404`）。
 
 ## 3. 文档格式 <!-- §3 -->
@@ -40,7 +44,7 @@ Memory 是 Core 域数据（项目知识沉淀）：一条 memory = `memories` �
 `content_sha` 一致 → 复制；不一致 → 以文件为准（旧版本的规则），重算 `content_sha`/`content_len`，active 行重写
 FTS；active 行的文件只在 `_redacted/` 下（redact 在挪文件后、提交前中断）→ 补完 redact；找不到文件 → 留 NULL、
 不服务，下次启动重试。每次启动记一行计数日志，非简单复制的行逐个列出 id。已填的行不再被选中：迁移过的库上
-只有一次查询，不读文件、不写。文件一律保留不删（本版本作为后备；删除留给后续版本，届时一并删除
+只有一次查询，不读文件、不写。文件一律保留不删（本版本作为后备；删除留给后续版本，届时与写穿一起删除，并删除
 `authority_path` 列与旧库遗留的 `fs_mtime_ns`/`fs_size` 列）。耗时：3,800 条约 55 KB 的文档（≈210 MB）在开发机上约
 3.3 s。
 
@@ -78,7 +82,7 @@ rowid 与 rank，再沿 rank 顺序分批读取条目元数据，直到下界 (1
 
 `MEM-400` 输入不合法（缺 `q`/`type`/`content`、可见性越界、frontmatter 不合法）；`MEM-403` 无写权限 / 能读但非 owner
 的 redact；`MEM-404` 不存在或无权读（含 redact 时无读权限）；`MEM-409` 幂等键复用、redact 非 active 条目；`MEM-413` 正文超 1 MiB；
-`MEM-503` FTS 查询/扫描失败；数据库事务失败 → `CORE-500`（常量见 `internal/common/api/errors.go` `ErrMem*`）。另：key 限定在其他项目 → `AUTH-403`；
+`MEM-500` 写穿文件（§2）写入/改名失败；`MEM-503` FTS 查询/扫描失败；数据库事务失败 → `CORE-500`（未分类的服务端错误）（常量见 `internal/common/api/errors.go` `ErrMem*`）。另：key 限定在其他项目 → `AUTH-403`；
 创建时项目不存在 → `CORE-404`。
 
 ## 6. 可见性 <!-- §6 -->
