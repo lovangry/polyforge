@@ -144,7 +144,9 @@ func TestSettledEnvelopeIsNotSettledTwice(t *testing.T) {
 		e := newCrashEnv(t, spec("s"))
 		sp := &fakeSpawner{script: []fakeEntry{{
 			res: &StepResult{Outcome: OutcomeNeedsInput, QuestionID: "q1", Question: "which?"},
-			act: func() { e.archived("s", 1, StepResult{Outcome: OutcomeNeedsInput, QuestionID: "q1", Question: "which?"}) },
+			act: func() {
+				e.archived("s", 1, StepResult{Outcome: OutcomeNeedsInput, QuestionID: "q1", Question: "which?"})
+			},
 		}}}
 		d := e.driver(sp, 0, nil)
 		ctx, cancel := context.WithCancel(context.Background())
