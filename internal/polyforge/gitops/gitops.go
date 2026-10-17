@@ -5,12 +5,6 @@
 //
 //   - per-WI git mutex: Runtime and Observe never run git against the same
 //     worktree concurrently (reference.md §8);
-//   - seq derivation has ONE authority: CommitPush derives the
-//     Polyforge-Seq trailer inside the per-WI lock as
-//     rev-list --count HEAD + 1 (first commit = 1). The lock makes the
-//     value monotonic, restart-safe and retry-safe (a failed push leaves
-//     no commit, so a retry recomputes the same number), which aihub's
-//     pre-receive hook requires (strictly increasing per commit);
 //   - pushes carry the session-scoped credential and go through aihub's
 //     git HTTP proxy; the credential travels via a one-shot GIT_ASKPASS
 //     helper (never in argv, never in persistent env) and reaches both
@@ -39,7 +33,7 @@
 //     Best-effort-loud: a carrier failure never fails the
 //     execution-state publish; the claim-time clone lane reads the
 //     carrier back via FetchTaskRef. aihub's pre-receive hook exempts
-//     the namespace from the chain-only seq/gitlink invariants.
+//     the namespace from the chain-only gitlink invariant.
 //
 // git-dir is ALWAYS external to the capsule (never inside agent-writable
 // space). All git access goes through the real git binary.
@@ -55,7 +49,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -393,8 +386,8 @@ type PushTimings struct {
 	PushMS   int64 `json:"push_ms"`
 }
 
-// CommitPush stages everything, commits with the seq trailer (derived
-// here — the single authority) and pushes to the aihub bare repo. It
+// CommitPush stages everything, commits and pushes to the aihub bare
+// repo. It
 // takes the per-WI git lock itself; callers must not hold it. A clean
 // tree (nothing staged after the porcelain check) PUSHES the standing
 // HEAD — an idempotent no-op ("Everything up-to-date") when the server
@@ -418,12 +411,6 @@ func CommitPush(ctx context.Context, o Opts, message string) (string, bool, Push
 	}
 	env := o.Env()
 	gitc := func(args ...string) (string, error) { return gitTimedCtx(ctx, 0, env, o.CapsuleDir, args...) }
-	// Auto-heal a foreign commit at the tip BEFORE anything else (both
-	// the dirty and the clean-tree path push HEAD, and aihub's hook
-	// rejects every pushed commit without an integer seq trailer).
-	if err := foldUntrailered(o, env); err != nil {
-		return "", false, timings, err
-	}
 	// Clean-tree check BEFORE committing: git reports "nothing to commit"
 	// on stdout, so the failure cannot be told apart from a real commit
 	// error by the error string. The porcelain listing is the honest
@@ -433,10 +420,6 @@ func CommitPush(ctx context.Context, o Opts, message string) (string, bool, Push
 		return "", false, timings, err
 	}
 	if strings.TrimSpace(status) != "" {
-		seq, err := nextSeq(env, o.CapsuleDir)
-		if err != nil {
-			return "", false, timings, err
-		}
 		if _, err := gitc("add", "-A"); err != nil {
 			// An embedded repository with no commit checked out fails the
 			// add itself — the same poison shape one step earlier.
@@ -451,9 +434,8 @@ func CommitPush(ctx context.Context, o Opts, message string) (string, bool, Push
 		if err := checkLocalGitlink(env, o.CapsuleDir); err != nil {
 			return "", false, timings, err
 		}
-		msg := fmt.Sprintf("%s\n\n%s: %d", message, capsule.SeqTrailer, seq)
 		commitStart := time.Now()
-		_, cerr := gitc("commit", "-m", msg)
+		_, cerr := gitc("commit", "-m", message)
 		timings.CommitMS = time.Since(commitStart).Milliseconds()
 		if cerr != nil {
 			return "", false, timings, cerr
@@ -471,95 +453,6 @@ func CommitPush(ctx context.Context, o Opts, message string) (string, bool, Push
 	return strings.TrimSpace(sha), pushed, timings, perr
 }
 
-// EventUntrailedCommitsFolded is the event kind raised when CommitPush
-// folds commits without a seq trailer back into the next chain commit.
-const EventUntrailedCommitsFolded = "untrailered_commits_folded"
-
-// foldUntrailered is the untrailered-commit auto-heal. The capsule
-// root's .git pointer (Clone) makes a step's own `git commit` in the
-// capsule root land on the chain branch with no Polyforge-Seq trailer;
-// aihub's pre-receive rejects every pushed commit without one, so every
-// later publish of that WI would fail forever, and nextSeq would count
-// the foreign commit too. When HEAD is not the newest trailered commit
-// (walking first parents), the branch is soft-reset onto that commit:
-// the foreign commits' content stays staged and is folded into the next
-// chain commit under a proper seq, and an EventUntrailedCommitsFolded
-// event records it.
-//
-// Only commits ABOVE the newest trailered one are ever touched, and none
-// of those can be on the server (the hook refuses them), so the reset
-// never rewrites published history. An unborn branch, or a history with
-// no trailered commit at all, is left alone (nothing safe to reset onto;
-// the hook answers loudly). NOT healed: a step's `git commit --amend` (or
-// any rewrite) of an already-PUSHED trailered commit — the amended tip
-// may still carry a trailer, and the push is then a non-fast-forward the
-// hook refuses; resetting onto the server's tip would be a history
-// rewrite this function never makes. The pointer file itself stays: without it a
-// step's git would walk up into whatever repository encloses the
-// workspace, which is worse.
-func foldUntrailered(o Opts, env []string) error {
-	// The steady state costs one call: HEAD carries its trailer.
-	tip, err := git(env, o.CapsuleDir, "log", "-1",
-		"--format=%(trailers:key="+capsule.SeqTrailer+",valueonly)", "HEAD")
-	if err != nil {
-		return nil // unborn branch: nothing committed, nothing to fold
-	}
-	if integerTrailer(tip) {
-		return nil
-	}
-	out, err := git(env, o.CapsuleDir, "log", "--first-parent",
-		"--format=%H%x1f%(trailers:key="+capsule.SeqTrailer+",valueonly)%x1e", "HEAD")
-	if err != nil {
-		return err
-	}
-	head, onto := "", ""
-	folded := 0
-	for _, rec := range strings.Split(out, "\x1e") {
-		rec = strings.TrimLeft(rec, "\n")
-		if rec == "" {
-			continue
-		}
-		sha, trailer, _ := strings.Cut(rec, "\x1f")
-		if head == "" {
-			head = sha
-		}
-		if integerTrailer(trailer) {
-			onto = sha
-			break
-		}
-		folded++
-	}
-	if folded == 0 || onto == "" {
-		return nil
-	}
-	if _, err := git(env, o.CapsuleDir, "reset", "-q", "--soft", onto); err != nil {
-		return err
-	}
-	if o.EventSink != nil {
-		o.EventSink(EventUntrailedCommitsFolded, map[string]any{
-			"count":       folded,
-			"folded_head": head,
-			"onto":        onto,
-		})
-	}
-	return nil
-}
-
-// integerTrailer applies the hook's own reading of a seq trailer value:
-// all whitespace removed, the rest must be a non-empty run of digits.
-func integerTrailer(v string) bool {
-	v = strings.Join(strings.Fields(v), "")
-	if v == "" {
-		return false
-	}
-	for _, c := range v {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 // Head answers the capsule's current HEAD commit SHA ("" with an error
 // for an unborn branch / unreadable repo). Read-only.
 func Head(o Opts) (string, error) {
@@ -570,25 +463,6 @@ func Head(o Opts) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(out), nil
-}
-
-// nextSeq derives the next Polyforge-Seq trailer value from the capsule's
-// commit count (monotonic per WI, survives a lost state.json, and safe to
-// recompute: only a landed commit moves the count). An unborn branch (no
-// commits yet) answers 1.
-func nextSeq(env []string, dir string) (int64, error) {
-	out, err := git(env, dir, "rev-list", "--count", "HEAD")
-	if err != nil {
-		if _, verr := git(env, dir, "rev-parse", "--verify", "-q", "HEAD"); verr != nil {
-			return 1, nil // unborn branch: the first commit is seq 1
-		}
-		return 0, err
-	}
-	n, perr := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
-	if perr != nil || n < 0 {
-		return 0, fmt.Errorf("gitops: unparsable rev-list count %q", strings.TrimSpace(out))
-	}
-	return n + 1, nil
 }
 
 // Push sends the capsule's standing HEAD to the aihub bare repo's main
@@ -659,8 +533,8 @@ func pushLocked(ctx context.Context, o Opts) (bool, int64, error) {
 // of a session's code commits is the capsule directory — exactly what a
 // re-claim renames away. The namespace lives OUTSIDE refs/heads/* so a
 // plain clone of the bare repo never materializes task branches, and
-// aihub's pre-receive hook exempts it from the chain-only seq/gitlink
-// invariants while keeping deletion, fast-forward and a blob limit (the
+// aihub's pre-receive hook exempts it from the chain-only gitlink
+// invariant while keeping deletion, fast-forward and a blob limit (the
 // carrier's own, capsule.MaxTaskBlobBytes).
 const TaskCarrierNamespace = "refs/pf-task/"
 
@@ -1386,8 +1260,8 @@ func (a *CarrierAlerts) clear(repo string) {
 }
 
 // IsPermanentPushRejection reports a push the server answered and refused
-// for a reason no retry can change: the pre-receive hook declined it (seq
-// trailer, gitlink, blob size limit, session fence) or the ref moved
+// for a reason no retry can change: the pre-receive hook declined it
+// (gitlink, blob size limit, session fence) or the ref moved
 // non-fast-forward. A transport failure (unreachable, timeout, auth
 // against a down proxy) is NOT permanent, nor is a lost ref-transaction
 // race (refCasRejected). Matches git's C-locale output

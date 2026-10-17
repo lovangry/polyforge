@@ -97,14 +97,8 @@ func TestV1S14ConcurrentTwoWI(t *testing.T) {
 		if strings.Contains(exec, wiA) && wi != wiA {
 			t.Fatalf("chain of %s carries A's state:\n%s", wi, exec)
 		}
-		seqs := inst.bareSeqTrailers(t, wi)
-		if len(seqs) == 0 {
+		if inst.bareCommitCount(t, wi) == 0 {
 			t.Fatalf("%s sealed an empty chain", wi)
-		}
-		for i, s := range seqs {
-			if s != int64(i+1) {
-				t.Fatalf("%s seq trailer %d is %d", wi, i, s)
-			}
 		}
 	}
 

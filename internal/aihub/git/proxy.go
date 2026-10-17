@@ -109,6 +109,13 @@ func (m *Manager) HandleGit(w http.ResponseWriter, r *http.Request) {
 		writeGitErr(w, api.ErrGitNotFound, "no repository for %s", wiID)
 		return
 	}
+	// A repo this process has not ensured yet (one created by an earlier
+	// build) gets this build's configuration and hook before its first
+	// push: the chain rules are always the running hub's.
+	if err := m.EnsureBare(wiID); err != nil {
+		writeGitErr(w, api.ErrGitInternal, "prepare repository for %s: %v", wiID, err)
+		return
+	}
 
 	// CGI environment (git http-backend contract). Base is the inherited
 	// process environment: http-backend execs git-receive-pack/upload-pack

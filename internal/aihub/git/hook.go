@@ -8,9 +8,6 @@ package git
 //     excepted, see below);
 //   - no ref deletion (refs/pf-wip/* excepted);
 //   - no gitlink (mode 160000) anywhere in a pushed commit's tree;
-//   - every commit carries the Polyforge-Seq trailer (capsule.SeqTrailer)
-//     and the sequence increases monotonically, continuing above the
-//     previous tip;
 //   - blob size ≤ MaxBlobBytes (via the GIT_PF_MAX_BLOB env the proxy
 //     sets; the default matches capsule.MaxBlobBytes) — for the
 //     refs/pf-task/* carrier refs the limit is MaxTaskBlobBytes instead
@@ -27,9 +24,8 @@ package git
 // (polyforge#108): the daemon's publish boundary mirrors each task
 // repo's LOCAL head there so a bounded-fail re-claim on a fresh session
 // can restore it. The history under these refs is the TASK repo's own —
-// it carries no Polyforge-Seq trailer and may legitimately contain
-// submodules — so the chain-only seq and gitlink invariants do not
-// apply to it. Deletion, fast-forward and the blob limit stay enforced
+// it may legitimately contain submodules — so the chain-only gitlink
+// invariant does not apply to it. Deletion, fast-forward and the blob limit stay enforced
 // for every ref; the carrier refs get the larger task-repo blob limit,
 // because the first carrier push of a repo carries its whole upstream
 // history and an upstream asset must not make it uncarriable
@@ -39,7 +35,7 @@ package git
 // of a task repo's UNCOMMITTED work (one daemon-made commit on top of the
 // carried head) across a re-claim. It is scratch by design — every close
 // supersedes it with a force push or deletes it — so it is exempt from
-// deletion, fast-forward, seq and gitlink; its new objects face the
+// deletion, fast-forward and gitlink; its new objects face the
 // carrier blob limit (MaxTaskBlobBytes).
 //
 // The hook is a bash script exec'd by the real git receive-pack; the
@@ -61,7 +57,6 @@ func hookTemplate(defaultMaxBlob, defaultMaxTaskBlob int64) string {
 set -u
 MAXBLOB="${GIT_PF_MAX_BLOB:-%d}"
 MAXTASKBLOB="${GIT_PF_MAX_TASK_BLOB:-%d}"
-TRAILER="${GIT_PF_SEQ_TRAILER:-Polyforge-Seq}"
 zero=0000000000000000000000000000000000000000
 reject() { echo "aihub: $*" >&2; exit 1; }
 
@@ -101,7 +96,7 @@ while read -r old new ref; do
   # Task-repo WIP namespace (polyforge#167): a scratch snapshot of a task
   # repo's uncommitted work, superseded (non-fast-forward) or deleted at
   # every close. Deletion and force are allowed; only the objects new to
-  # the repo face the carrier blob limit; no seq or gitlink invariant.
+  # the repo face the carrier blob limit; no gitlink invariant.
   case "$ref" in refs/pf-wip/*)
     [ "$new" = "$zero" ] && continue
     badblob=$(git rev-list --objects "$new" --not --all | awk '{print $1}' \
@@ -117,11 +112,8 @@ while read -r old new ref; do
     git merge-base --is-ancestor "$old" "$new" \
       || reject "non-fast-forward push to $ref is not allowed"
     range="$old..$new"
-    prev=$(git log -1 --format="%%(trailers:key=$TRAILER,valueonly)" "$old" | tr -d '[:space:]')
-    case "$prev" in ''|*[!0-9]*) prev="" ;; esac
   else
     range="$new"
-    prev=""
   fi
 
   # blob size limit (every ref; the carrier namespace has its own,
@@ -134,7 +126,7 @@ while read -r old new ref; do
   [ -z "$badblob" ] || reject "blob exceeds the ${limit}-byte limit: $badblob"
 
   # Task-repo carrier namespace: foreign (task-repo) history — the
-  # chain-only gitlink and seq invariants stop here. Deletion,
+  # chain-only gitlink invariant stops here. Deletion,
   # fast-forward and the blob limit above stay for every ref.
   case "$ref" in refs/pf-task/*) continue ;; esac
 
@@ -146,17 +138,6 @@ while read -r old new ref; do
     fi
   done
 
-  # seq trailer: present, integer, strictly increasing, above the old tip.
-  for c in $(git rev-list --reverse "$range"); do
-    seq=$(git log -1 --format="%%(trailers:key=$TRAILER,valueonly)" "$c" | tr -d '[:space:]')
-    case "$seq" in
-      ''|*[!0-9]*) reject "commit $c is missing an integer $TRAILER trailer" ;;
-    esac
-    if [ -n "$prev" ]; then
-      [ "$seq" -gt "$prev" ] || reject "$TRAILER must increase: commit $c has $seq, previous was $prev"
-    fi
-    prev="$seq"
-  done
 done
 exit 0
 `, defaultMaxBlob, defaultMaxTaskBlob)

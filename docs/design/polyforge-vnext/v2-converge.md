@@ -388,10 +388,8 @@ carrier ref 与 WIP ref 这三项**现行**机制的唯一设计记录。§14.2�
 ### 14.1 capsule 链规则 <!-- §14.1 -->
 
 - **一条 FF-only 链**：每个 WI 在 aihub 有一个裸仓库，capsule 的提交推到 `refs/heads/main`。aihub pre-receive hook（`internal/aihub/git/hook.go`）
-  强制：只能快进、不得删除 ref（`refs/pf-wip/*` 除外）、提交树中不得有 gitlink（`GIT-412`；daemon 在本地 commit 前预检同一规则并拒绝提交，`repos/`、`artifacts/release-*` 下的 gitlink 指引是恢复 capsule `.gitignore`，绝不删任务仓库的 `.git`）、blob ≤ 16 MiB（`capsule.MaxBlobBytes`）、
-  每个提交带 `Polyforge-Seq` trailer 且严格递增并接续旧 tip。
-- **seq 从 1 开始**：`gitops.CommitPush` 在每-WI git 锁内按 `rev-list --count HEAD + 1` 推导 trailer，**首个提交 seq = 1**（不是 0）；
-  推送失败不留下提交，重试得到同一个值。
+  强制：只能快进、不得删除 ref（`refs/pf-wip/*` 除外）、提交树中不得有 gitlink（`GIT-412`；daemon 在本地 commit 前预检同一规则并拒绝提交，`repos/`、`artifacts/release-*` 下的 gitlink 指引是恢复 capsule `.gitignore`，绝不删任务仓库的 `.git`）、blob ≤ 16 MiB（`capsule.MaxBlobBytes`）。
+  提交不带序号 trailer：step 在 capsule 根自己 `git commit` 的提交就是链上一个普通快进提交，随下一次发布原样推送。
 - **会话围栏**：推送经 aihub git 代理，Basic 口令必须是该 WI **当前活会话**的 secret（一次性 `GIT_ASKPASS` 传递，不进 argv）；被取代或已
   结束的会话被拒（`GIT-401`）。推送另带 `--push-option=session-fingerprint=<fp>`，hook 比对代理按凭证推出的公开指纹（备份层）。
 - **异步推送的重试调度**（`observe/observe.go`、`observe/monitor.go`）：失败后每 10s 重试；连续 5 次失败或 30 分钟无成功推送发一次

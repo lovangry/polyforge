@@ -162,15 +162,23 @@ func TestTaskRefPushSkipsRepoHooks(t *testing.T) {
 	}
 }
 
+// refuseCarrier installs a pre-receive hook that refuses every
+// refs/pf-task/* update.
+func refuseCarrier(t *testing.T, b *testBare) {
+	t.Helper()
+	refuse := "#!/bin/sh\nwhile read old new ref; do case \"$ref\" in refs/pf-task/*) echo \"carrier refused for the test\" >&2; exit 1 ;; esac; done\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(b.dir, "hooks", "pre-receive"), []byte(refuse), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Best-effort-loud, mechanically: a carrier push REJECTED by the remote
-// (this test's simplified hook enforces the seq trailer on every ref —
-// stricter than production's, which exempts refs/pf-task/*; pinned in
-// package git) must not fail the chain publish. The chain tip lands; the
-// rejected carrier does not; CommitPush answers success.
+// must not fail the chain publish. The chain tip lands; the rejected
+// carrier does not; CommitPush answers success.
 func TestCommitPushTaskRefRejectionNeverBlocksTheChain(t *testing.T) {
 	setIdentity(t)
 	o, base := taskOpts(t, "wi_task2")
-	mkBare(t, o.RemoteURL, true) // hook: seq enforced on EVERY ref
+	refuseCarrier(t, mkBare(t, o.RemoteURL, false))
 	mkTaskCapsule(t, o)
 	mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
 
@@ -382,7 +390,8 @@ func TestIsNonFastForwardOnRealGitOutput(t *testing.T) {
 func TestCarrierPushFailureAlertsOnceUntilSuccess(t *testing.T) {
 	setIdentity(t)
 	o, base := taskOpts(t, "wi_task6")
-	bare := mkBare(t, o.RemoteURL, true) // hook: seq enforced on EVERY ref
+	bare := mkBare(t, o.RemoteURL, false)
+	refuseCarrier(t, bare)
 	mkTaskCapsule(t, o)
 	workHead := mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
 	o.CarrierAlerts = &CarrierAlerts{} // the runtime's per-job state
@@ -408,7 +417,7 @@ func TestCarrierPushFailureAlertsOnceUntilSuccess(t *testing.T) {
 	if bodies[0]["repo"] != "demo-src" || bodies[0]["ref"] != TaskRefName("demo-src") {
 		t.Fatalf("event body = %v", bodies[0])
 	}
-	if e, _ := bodies[0]["error"].(string); !strings.Contains(e, "Polyforge-Seq") {
+	if e, _ := bodies[0]["error"].(string); !strings.Contains(e, "carrier refused for the test") {
 		t.Fatalf("event body must keep the git error as detail: %v", bodies[0])
 	}
 

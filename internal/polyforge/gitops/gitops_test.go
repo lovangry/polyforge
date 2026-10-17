@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
-	"github.com/silgrid/polyforge/internal/common/capsule"
 )
 
 // gitArgsProbe, when set, observes every git argv the package builds
@@ -90,32 +89,11 @@ func mkBare(t *testing.T, dir string, hook bool) *testBare {
 	return b
 }
 
-// writeTestHook installs a pre-receive hook shaped like aihub's: seq
-// trailer present + strictly increasing, and every push option recorded.
+// writeTestHook installs a pre-receive hook that records every push's
+// options.
 func writeTestHook(t *testing.T, b *testBare) {
 	t.Helper()
-	script := fmt.Sprintf(`#!/bin/sh
-TRAILER=Polyforge-Seq
-prev=""
-while read old new ref; do
-  range="$new"
-  if [ "$old" != "0000000000000000000000000000000000000000" ]; then
-    prev=$(git log -1 --format="%%(trailers:key=$TRAILER,valueonly)" "$old" | tr -d '[:space:]')
-    case "$prev" in ''|*[!0-9]*) prev="" ;; esac
-    range="$old..$new"
-  fi
-  for c in $(git rev-list --reverse "$range"); do
-    seq=$(git log -1 --format="%%(trailers:key=$TRAILER,valueonly)" "$c" | tr -d '[:space:]')
-    case "$seq" in ''|*[!0-9]*) echo "commit $c missing $TRAILER" >&2; exit 1 ;; esac
-    if [ -n "$prev" ]; then
-      [ "$seq" -gt "$prev" ] || { echo "$TRAILER must increase: $c has $seq, prev $prev" >&2; exit 1; }
-    fi
-    prev="$seq"
-  done
-done
-echo "$GIT_PUSH_OPTION_COUNT|$GIT_PUSH_OPTION_0" >> %q
-exit 0
-`, b.optsFile)
+	script := fmt.Sprintf("#!/bin/sh\necho \"$GIT_PUSH_OPTION_COUNT|$GIT_PUSH_OPTION_0\" >> %q\nexit 0\n", b.optsFile)
 	path := filepath.Join(b.dir, "hooks", "pre-receive")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
@@ -140,18 +118,14 @@ func (b *testBare) pushesSeen(t *testing.T) []string {
 	return out
 }
 
-// tipSeq reads the newest main commit's Polyforge-Seq on the bare repo.
-func (b *testBare) tipSeq(t *testing.T) int64 {
+// commits counts the bare repo's main commits.
+func (b *testBare) commits(t *testing.T) int64 {
 	t.Helper()
-	out, err := run("git", "--git-dir", b.dir, "log", "-1",
-		"--format=%(trailers:key="+capsule.SeqTrailer+",valueonly)", "main")
+	out, err := run("git", "--git-dir", b.dir, "rev-list", "--count", "main")
 	if err != nil {
-		t.Fatalf("bare log: %v: %s", err, out)
+		t.Fatalf("bare rev-list: %v: %s", err, out)
 	}
-	n, perr := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
-	if perr != nil {
-		t.Fatalf("tip trailer unparsable: %q", out)
-	}
+	n, _ := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
 	return n
 }
 
@@ -208,9 +182,9 @@ func testOpts(t *testing.T, wi string) (Opts, string) {
 }
 
 // ---------------------------------------------------------------------------
-// seq trailer: derived in-lock, strictly increasing, accepted by the hook
+// commit + push
 
-func TestCommitPushSeqMonotonicAndPushLands(t *testing.T) {
+func TestCommitPushEveryRoundLands(t *testing.T) {
 	setIdentity(t)
 	o, barePath := testOpts(t, "wi_seq")
 	bare := mkBare(t, barePath, true)
@@ -225,8 +199,8 @@ func TestCommitPushSeqMonotonicAndPushLands(t *testing.T) {
 		if sha == "" {
 			t.Fatalf("round %d: local SHA missing", i)
 		}
-		if got := bare.tipSeq(t); got != int64(i) {
-			t.Fatalf("round %d: bare tip seq = %d, want %d", i, got, i)
+		if got := bare.commits(t); got != int64(i) {
+			t.Fatalf("round %d: bare main has %d commits, want %d", i, got, i)
 		}
 	}
 	if n := len(bare.pushesSeen(t)); n != 3 {
@@ -234,7 +208,46 @@ func TestCommitPushSeqMonotonicAndPushLands(t *testing.T) {
 	}
 }
 
-func TestCommitPushRetryKeepsSeqConsistent(t *testing.T) {
+// A step's own `git commit` in the capsule root lands on the chain as an
+// ordinary commit: the next publish pushes it as it is, on top of the
+// daemon's history, and the daemon's next commit builds on it.
+func TestCommitPushPublishesAForeignCommitAsIs(t *testing.T) {
+	setIdentity(t)
+	o, barePath := testOpts(t, "wi_foreign")
+	bare := mkBare(t, barePath, true)
+	mkCapsule(t, o)
+	writeDirty(t, o, "a.txt", "a\n")
+	if _, pushed, _, err := CommitPush(context.Background(), o, "observe: v1"); err != nil || !pushed {
+		t.Fatalf("CommitPush: pushed=%v err=%v", pushed, err)
+	}
+	writeDirty(t, o, "agent.txt", "agent\n")
+	if out, err := run("git", "-C", o.CapsuleDir, "add", "agent.txt"); err != nil {
+		t.Fatalf("agent add: %v: %s", err, out)
+	}
+	if out, err := run("git", "-C", o.CapsuleDir, "commit", "-q", "-m", "agent's own commit"); err != nil {
+		t.Fatalf("agent commit: %v: %s", err, out)
+	}
+	foreign, err := run("git", "-C", o.CapsuleDir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeDirty(t, o, "b.txt", "b\n")
+	sha, pushed, _, err := CommitPush(context.Background(), o, "observe: v2")
+	if err != nil || !pushed {
+		t.Fatalf("CommitPush over a foreign commit: pushed=%v err=%v", pushed, err)
+	}
+	if out, err := run("git", "--git-dir", barePath, "merge-base", "--is-ancestor", strings.TrimSpace(foreign), "main"); err != nil {
+		t.Fatalf("the foreign commit is not on the hub's chain as it was: %v: %s", err, out)
+	}
+	if got, ok := bareRefSHA(t, barePath, "refs/heads/main"); !ok || got != sha {
+		t.Fatalf("hub main = %q, want the daemon's commit %q", got, sha)
+	}
+	if got := bare.commits(t); got != 3 {
+		t.Fatalf("hub main has %d commits, want 3", got)
+	}
+}
+
+func TestCommitPushRetryCarriesTheStandingCommit(t *testing.T) {
 	setIdentity(t)
 	o, barePath := testOpts(t, "wi_retry")
 	bare := mkBare(t, barePath, true)
@@ -251,9 +264,8 @@ func TestCommitPushRetryKeepsSeqConsistent(t *testing.T) {
 	if sha1 == "" {
 		t.Fatal("the local commit must still be reported on push failure")
 	}
-	// Round 2: a new change against the live remote — the seq continues
-	// above the standing commit, and the push carries BOTH commits
-	// through the hook's strict-increase check.
+	// Round 2: a new change against the live remote — the push carries
+	// BOTH commits.
 	writeDirty(t, o, "b.txt", "b\n")
 	sha2, pushed, _, err := CommitPush(context.Background(), o, "second")
 	if err != nil || !pushed {
@@ -262,8 +274,8 @@ func TestCommitPushRetryKeepsSeqConsistent(t *testing.T) {
 	if sha2 == sha1 {
 		t.Fatal("the second commit must be a new SHA")
 	}
-	if !bare.hasMain(t) {
-		t.Fatal("the push never landed")
+	if got := bare.commits(t); got != 2 {
+		t.Fatalf("bare main has %d commits, want both", got)
 	}
 }
 
@@ -358,8 +370,8 @@ func TestCommitPushCleanTreeRetryIsHonestAfterFailedPush(t *testing.T) {
 	if sha3 != sha1 {
 		t.Fatalf("the standing HEAD must be the one pushed: %q vs %q", sha3, sha1)
 	}
-	if got := bare.tipSeq(t); got != 1 {
-		t.Fatalf("bare tip seq = %d, want 1", got)
+	if got := bare.commits(t); got != 1 {
+		t.Fatalf("bare main has %d commits, want 1", got)
 	}
 }
 
@@ -382,7 +394,7 @@ func TestCommitPushCleanTreeWithNoHistoryIsTyped(t *testing.T) {
 	}
 }
 
-func TestCommitPushFirstCommitIsSeqOneOnUnbornBranch(t *testing.T) {
+func TestCommitPushFirstCommitOnUnbornBranch(t *testing.T) {
 	setIdentity(t)
 	o, barePath := testOpts(t, "wi_unborn")
 	bare := mkBare(t, barePath, true)
@@ -392,8 +404,8 @@ func TestCommitPushFirstCommitIsSeqOneOnUnbornBranch(t *testing.T) {
 	if _, pushed, _, err := CommitPush(context.Background(), o, "first"); err != nil || !pushed {
 		t.Fatalf("first CommitPush = (%v, %v)", pushed, err)
 	}
-	if got := bare.tipSeq(t); got != 1 {
-		t.Fatalf("first commit seq = %d, want 1", got)
+	if got := bare.commits(t); got != 1 {
+		t.Fatalf("bare main has %d commits, want 1", got)
 	}
 }
 
@@ -950,8 +962,8 @@ func TestChainPushIgnoresGlobalGitConfig(t *testing.T) {
 	if _, pushed, _, err := CommitPush(context.Background(), o, "observe: v1"); err != nil || !pushed {
 		t.Fatalf("CommitPush: pushed=%v err=%v", pushed, err)
 	}
-	if got := bare.tipSeq(t); got < 1 {
-		t.Fatalf("the real hub repo did not receive the push (tip seq %d)", got)
+	if got := bare.commits(t); got < 1 {
+		t.Fatalf("the real hub repo did not receive the push (%d commits)", got)
 	}
 	if out, err := run("git", "--git-dir", decoy, "rev-parse", "-q", "--verify", "refs/heads/main"); err == nil {
 		t.Fatalf("the push was rerouted to the decoy by ~/.gitconfig: %s", out)
