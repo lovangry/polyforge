@@ -479,9 +479,9 @@ func (r *Runtime) SaveTaskWIP(ctx context.Context, wi string) {
 	}
 }
 
-// stepWIPBound bounds the step-end WIP push: it holds the next dispatch,
-// so it stays well inside the driver stall window.
-const stepWIPBound = 2 * time.Minute
+// stepWIPBound bounds the step-end WIP push: it holds the step's result
+// write and the next dispatch.
+const stepWIPBound = 30 * time.Second
 
 // stepEnded is wi's driver step-end hook: the WIP push of the task-repo
 // work the step left uncommitted, so a kill -9 after a step end loses

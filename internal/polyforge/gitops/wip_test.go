@@ -473,9 +473,12 @@ func TestPushTaskWIPInfoAttributesAndIgnoredEmbedded(t *testing.T) {
 
 // A cancelled WIP lane (the driver or job context ending mid-push) kills
 // its hung git call's process group and releases the per-WI lock at once,
-// so the work item's next close does not wait out the lane's deadline.
+// so the work item's next close does not wait out the lane's deadline; it
+// raises no carrier_push_failed and keeps the once-per-ref alert.
 func TestPushTaskWIPStopsPromptlyOnCancel(t *testing.T) {
 	o, repo, _ := wipEnv(t, "wi_wip_cancel")
+	events := captureEvents(&o)
+	o.CarrierAlerts = &CarrierAlerts{}
 	writeT(t, filepath.Join(repo, "new.txt"), "x\n")
 	marker := filepath.Join(t.TempDir(), "push-entered")
 	if err := os.MkdirAll(filepath.Join(o.RemoteURL, "hooks"), 0o755); err != nil {
@@ -516,5 +519,17 @@ func TestPushTaskWIPStopsPromptlyOnCancel(t *testing.T) {
 	}
 	if el := time.Since(start); el > 2*time.Second {
 		t.Fatalf("the cancelled lane released the lock after %s, want about at once", el)
+	}
+	// a cancellation is not a failure: no carrier_push_failed, and the
+	// once-per-ref alert stays for a real failure
+	for _, e := range events() {
+		if e["kind"] == EventCarrierPushFailed {
+			t.Fatalf("a cancelled lane raised %v", e)
+		}
+	}
+	for _, ref := range []string{TaskRefName("demo-src"), TaskWIPRefName("demo-src")} {
+		if !o.CarrierAlerts.first(ref) {
+			t.Fatalf("the cancelled lane consumed the alert for %s", ref)
+		}
 	}
 }

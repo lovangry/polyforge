@@ -1057,8 +1057,14 @@ func (o Opts) carrierFailed(repo string, chainOK bool, detail string) {
 
 // carrierRefFailed is carrierFailed for any carrier-lane ref (the task
 // carrier or the WIP ref, polyforge#167); the once-per-job alert state is
-// kept per ref.
+// kept per ref. A cancelled lane raises nothing.
 func (o Opts) carrierRefFailed(repo, ref string, chainOK bool, detail string) {
+	if o.Ctx != nil && errors.Is(o.Ctx.Err(), context.Canceled) {
+		// a cancelled lane (a pause, recovery or shutdown stopped it) is
+		// not a failure: the log line says it; the once-per-ref alert stays
+		// for a real one
+		return
+	}
 	if !chainOK || o.EventSink == nil || !o.CarrierAlerts.first(ref) {
 		return
 	}
