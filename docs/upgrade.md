@@ -155,6 +155,39 @@ the v2.4.x DDL. `deploy/sql/v2.5.0/probe.sql` answers 0 when the table is
 gone and the column exists (a database created by v2.5.0 is already in
 that shape).
 
+## v2.14.0 (polyforge#194, memory and claim-cache cleanup)
+
+aihub stops writing memory files: create and redact touch only the
+database (see "Memories move into the database" below). The memories
+freshness columns the file-authority store used and the claim replay
+cache that claims no longer read are dropped. The file
+`deploy/sql/v2.14.0/upgrade.sql` is the source of truth; its content:
+
+```sql
+DROP TABLE IF EXISTS claim_idempotency;
+ALTER TABLE memories DROP COLUMN fs_mtime_ns;
+ALTER TABLE memories DROP COLUMN fs_size;
+```
+
+The post-swap row-count check leaves `claim_idempotency` out (it is
+dropped by this upgrade.sql). `deploy/sql/v2.14.0/rollback.sql` re-adds
+the two columns (NULL; v2.13.0 never reads them) and rebuilds
+`claim_idempotency` as an empty table from the v2.13.0 DDL.
+`deploy/sql/v2.14.0/probe.sql` answers 0 when the columns and the table
+are gone (a database created by v2.14.0 is already in that shape).
+
+- **Rollback target: v2.13.0 only.** v2.13.0 serves memories from the
+  database, so rows this release wrote (no file) serve there unchanged. A
+  release older than v2.13.0 reads memory files and must not run on this
+  database; deploy.sh already refuses a downgrade across a `deploy/sql`
+  version.
+- After an automatic rollback the claim cache starts empty: a claim
+  replayed by an idempotency key cached before the deploy is not answered
+  from the cache.
+- The files under `memory/` are left in place and still copied by the
+  deploy backup's rsync; aihub reads them only to fill a row without
+  content (a database last served before v2.13.0).
+
 ## Work item dependencies (polyforge#161)
 
 **Deploy aihub before upgrading the CLI.** `pf file create --after` sends
@@ -1197,8 +1230,7 @@ it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
 
 - Each memory's document (frontmatter + body) now lives in the new
   `memories.content` column; create and redact are one transaction each
-  and no memory file is read while serving (files are still written, see
-  the write-through below). `pf recall`,
+  and no memory file is read while serving. `pf recall`,
   `pf remember`, `pf memory show` and the search / read / redact faces
   answer exactly as before (`content_sha` / `content_len` still describe
   the same document bytes).
@@ -1212,43 +1244,23 @@ it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
   file keeps no content, is not served (MEM-404), and is retried on every
   start. The same pass derives the title of every active row whose title
   is blank from its document (the rule create uses: an explicit
-  frontmatter title, else the body's first usable line) and removes
-  `memory.md.tmp` leftovers. One log line counts copied / adopted /
-  redact-completed / missing rows, derived titles and swept tmp files,
+  frontmatter title, else the body's first usable line). One log line
+  counts copied / adopted / redact-completed / missing rows and derived
+  titles,
   followed by the ids of every row that needed more than a copy. The
   migration is idempotent: once done, a start reads no memory file and
   writes nothing. Measured on a copy of the production backup: 3,810
   documents in ~1.5 s. deploy.sh's `UP_WAIT_SECS` default (the switch
   window's HTTP poll, counted from the stop, drain included) is 120 s so
   the first start's migration fits.
-- **The memory files are not deleted, and this release still writes them**
-  (transitional write-through): create places `memory.md` (same path and
-  format as before) and only then commits the row; redact commits the row
-  and then moves the file to `_redacted/`. aihub never reads them while
-  serving. They are still copied by the deploy backup's rsync.
-  The release after every deployment has run this one drops the
-  write-through, the files, the `authority_path` column and the
-  `fs_mtime_ns` / `fs_size` columns (unused here, kept in the schema so a
-  fresh install of this release can still roll back).
 - **Deploy gate (step 4)**: on a database with `memories.content`, every
   active memories row in the snapshot must carry its content or have its
-  `memory.md` in the backup (a row an older aihub wrote after a rollback
-  has no content; the new aihub fills it from the file at start).
+  `memory.md` in the backup (a row of a database last served before
+  v2.13.0 has no content; aihub fills it from the file at start).
   Redacted rows never block. An active row with neither has no copy
   anywhere: restore its `memory.md` under the data dir's `memory/` from an
   older backup and restart aihub. A snapshot that
-  predates the column — the deploy that brings this release — is still
-  checked the old way (rows == `memory.md` files in the backup).
+  predates the column (a database last served before v2.13.0) is checked
+  the old way (rows == `memory.md` files in the backup).
 - `pf backup` (`VACUUM INTO`) now holds every memory; it still does not
   include the git repos.
-- **Rollback** to v2.11 (also deploy.sh's automatic rollback): every
-  memory stays and keeps serving. Rows written by this release have their
-  file in the active place (or, redacted, are kept redacted whatever their
-  file position), so v2.11's startup reconcile neither deletes nor
-  resurrects any of them, and it ignores `content`. Rows v2.11 writes have
-  no content; redeploying this release fills them from their files. Two
-  crash residues stay harmless: a file placed by a create that crashed
-  before its commit is no memory here (the caller never got a 201) and
-  v2.11 adopts it as one; a redact that crashed before its file move is
-  redacted in both. A fresh install of this release keeps the columns
-  v2.11 reads, so it can roll back too.

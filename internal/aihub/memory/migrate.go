@@ -6,8 +6,7 @@ package memory
 // memory/<project>/<id>/memory.md (memory/<project>/_redacted/<id>/memory.md
 // once redacted); the migration copies those bytes into the row. The
 // files are left in place. The same pass gives blank-titled active rows
-// the title their document derives (rowTitle) and sweeps memory.md.tmp
-// leftovers of interrupted creates.
+// the title their document derives (rowTitle).
 
 import (
 	"os"
@@ -38,9 +37,7 @@ type MigrateReport struct {
 	// are not served and the next pass retries them.
 	Missing []string
 	// Titled counts active rows given a derived title.
-	Titled int
-	// Swept counts memory.md.tmp leftovers removed.
-	Swept   int
+	Titled  int
 	Elapsed time.Duration
 }
 
@@ -50,7 +47,7 @@ const migrateBatchBytes = 16 << 20
 
 // MigrateContent adds the content column when the database predates it,
 // fills every row whose content is NULL from its memory file, then fills
-// blank titles and sweeps tmp leftovers. It is idempotent: a filled row
+// blank titles. It is idempotent: a filled row
 // is never selected again, so a pass over a migrated database reads no
 // memory file and writes nothing. Run it before serving (no create is in
 // flight, and a row without content answers MEM-404).
@@ -156,7 +153,6 @@ func (s *Store) MigrateContent() (MigrateReport, error) {
 	if rep.Titled, err = s.fillBlankTitles(); err != nil {
 		return rep, err
 	}
-	rep.Swept = s.sweepTmp()
 	rep.Elapsed = time.Since(start)
 	return rep, nil
 }
@@ -218,21 +214,6 @@ func (s *Store) fillBlankTitles() (int, error) {
 		}
 	}
 	return n, nil
-}
-
-// sweepTmp removes memory.md.tmp leftovers (a create interrupted before
-// its rename); no create is in flight while the migration runs.
-func (s *Store) sweepTmp() int {
-	n := 0
-	for _, pat := range []string{"*/*/memory.md.tmp", "*/_redacted/*/memory.md.tmp"} {
-		m, _ := filepath.Glob(filepath.Join(s.dataDir, "memory", pat))
-		for _, p := range m {
-			if os.Remove(p) == nil {
-				n++
-			}
-		}
-	}
-	return n
 }
 
 // readMemoryFile reads a row's memory file and reports whether it was

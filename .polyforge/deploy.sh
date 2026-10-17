@@ -1226,8 +1226,9 @@ show_counts "$WORK/frozen.counts"
 step 4 "consistency: memory content in the snapshot"
 # Each memory's document lives in its memories row (memories.content,
 # internal/aihub/memory). A row without content is one aihub fills from
-# its memory file at start (a row written by an older aihub, e.g. after a
-# rollback) - fine when the backup holds that file; an ACTIVE row without
+# its memory file at start (a row of a database last served before
+# v2.13.0, e.g. a restored old backup) - fine when the backup holds that
+# file; an ACTIVE row without
 # content AND without a file has no copy anywhere (aihub does not serve
 # it), so the deploy stops. Redacted rows are never served: a missing file
 # is fine. A snapshot that predates the column keeps the documents in

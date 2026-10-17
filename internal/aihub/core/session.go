@@ -100,111 +100,17 @@ type SessionPublic struct {
 	CleanPause         bool   `json:"clean_pause"`
 }
 
-// DerivedEpic is the w140 additive derived block for epic/parent
-// tickets (spec: the parent completion status is DERIVED from the
-// children, never written — the stored status stays queued). It rides
-// WIView (api.WorkItem is frozen and gains nothing): the epic marker
-// (has children) plus the child census (total / terminal / wrapped) and
-// the derived completion status — complete = every child terminal AND
-// at least one wrapped, else in_progress. A newly created child flips a
-// complete parent back with no reopen op (pure read-side derivation).
-// A childless ticket carries no block at all (omitempty).
-type DerivedEpic struct {
-	HasChildren      bool   `json:"has_children"`
-	ChildrenTotal    int    `json:"children_total"`
-	ChildrenTerminal int    `json:"children_terminal"`
-	ChildrenWrapped  int    `json:"children_wrapped"`
-	Completion       string `json:"completion"`
-}
-
-// Derived completion encodings (wire values).
-const (
-	DerivedCompletionInProgress = "in_progress"
-	DerivedCompletionComplete   = "complete"
-)
-
-// deriveEpicOf computes one WI's derived epic block (nil = childless;
-// the block is only ever additive exposure, never persisted).
-func deriveEpicOf(q queryRower, wiID string) (*DerivedEpic, error) {
-	var total, terminal, wrapped int
-	err := q.QueryRow(`SELECT COUNT(*),
-		COALESCE(SUM(CASE WHEN status IN ('wrapped','failed','canceled') THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN status='wrapped' THEN 1 ELSE 0 END), 0)
-		FROM work_items WHERE parent_id=?1`, wiID).Scan(&total, &terminal, &wrapped)
-	if err != nil {
-		return nil, err
-	}
-	if total == 0 {
-		return nil, nil
-	}
-	d := &DerivedEpic{
-		HasChildren:      true,
-		ChildrenTotal:    total,
-		ChildrenTerminal: terminal,
-		ChildrenWrapped:  wrapped,
-		Completion:       DerivedCompletionInProgress,
-	}
-	if terminal == total && wrapped >= 1 {
-		d.Completion = DerivedCompletionComplete
-	}
-	return d, nil
-}
-
-// derivedBatch computes many WIs' derived epic blocks in ONE grouped
-// query. Ids without children keep a nil block.
-func (db *DB) derivedBatch(ids []string) (map[string]*DerivedEpic, error) {
-	out := map[string]*DerivedEpic{}
-	if len(ids) == 0 {
-		return out, nil
-	}
-	var placeholders []string
-	var args []any
-	for i, id := range ids {
-		placeholders = append(placeholders, "?"+strconv.Itoa(i+1))
-		args = append(args, id)
-	}
-	rows, err := db.Query(`SELECT parent_id, COUNT(*),
-		COALESCE(SUM(CASE WHEN status IN ('wrapped','failed','canceled') THEN 1 ELSE 0 END), 0),
-		COALESCE(SUM(CASE WHEN status='wrapped' THEN 1 ELSE 0 END), 0)
-		FROM work_items WHERE parent_id IN (`+strings.Join(placeholders, ",")+`) GROUP BY parent_id`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var parent string
-		var total, terminal, wrapped int
-		if err := rows.Scan(&parent, &total, &terminal, &wrapped); err != nil {
-			return nil, err
-		}
-		d := &DerivedEpic{
-			HasChildren:      true,
-			ChildrenTotal:    total,
-			ChildrenTerminal: terminal,
-			ChildrenWrapped:  wrapped,
-			Completion:       DerivedCompletionInProgress,
-		}
-		if terminal == total && wrapped >= 1 {
-			d.Completion = DerivedCompletionComplete
-		}
-		out[parent] = d
-	}
-	return out, rows.Err()
-}
-
 // WIView is a WorkItem with its public session audit block attached. It
 // marshals as the api.WorkItem JSON plus the SessionPublic fields
 // (embedded structs flatten); Phase 0's api.WorkItem itself is frozen and
 // gains nothing, so the block rides alongside it at the server boundary.
 // The frozen §4.6 repo inventory rides the same way: a
 // well-formed create must be observable on the WI view, not silently
-// discarded; it is omitted when the WI declared none. The w140 derived
-// epic block rides the same additive face (omitted for childless WIs).
+// discarded; it is omitted when the WI declared none.
 type WIView struct {
 	api.WorkItem
 	SessionPublic
-	RepoInventory []RepoDecl   `json:"repo_inventory,omitempty"`
-	Derived       *DerivedEpic `json:"derived,omitempty"`
+	RepoInventory []RepoDecl `json:"repo_inventory,omitempty"`
 	// WaitingFor (polyforge#161) is read-only and derived: the unfinished
 	// `blocks` blockers (status other than wrapped) of a QUEUED work item
 	// — who it is waiting for. Never persisted, not a state; omitted
@@ -277,8 +183,8 @@ func (db *DB) sessionPublicOf(wiID string) (SessionPublic, error) {
 }
 
 // View wraps one WorkItem with its public session audit block, its
-// frozen repo inventory (§4.6), its derived epic
-// block (w140) and its derived waiting_for list (polyforge#161).
+// frozen repo inventory (§4.6) and its derived waiting_for list
+// (polyforge#161).
 func (m *WIManager) View(wi *api.WorkItem) (*WIView, error) {
 	sp, err := m.db.sessionPublicOf(wi.ID)
 	if err != nil {
@@ -288,15 +194,11 @@ func (m *WIManager) View(wi *api.WorkItem) (*WIView, error) {
 	if err != nil {
 		return nil, err
 	}
-	derived, err := deriveEpicOf(m.db, wi.ID)
-	if err != nil {
-		return nil, err
-	}
 	waiting, err := m.db.waitingForBatch([]string{wi.ID})
 	if err != nil {
 		return nil, err
 	}
-	return &WIView{WorkItem: *wi, SessionPublic: sp, RepoInventory: inv, Derived: derived,
+	return &WIView{WorkItem: *wi, SessionPublic: sp, RepoInventory: inv,
 		WaitingFor: waiting[wi.ID]}, nil
 }
 
@@ -333,9 +235,8 @@ func (db *DB) sessionPublicBatch(ids []string) (map[string]SessionPublic, error)
 	return out, rows.Err()
 }
 
-// Views wraps a batch of WorkItems with their session blocks (one query),
-// their derived epic blocks (one grouped query, w140) and their derived
-// waiting_for lists (one query, polyforge#161).
+// Views wraps a batch of WorkItems with their session blocks (one query)
+// and their derived waiting_for lists (one query, polyforge#161).
 // Order is preserved; a WI that vanished mid-read keeps a zero block.
 func (m *WIManager) Views(wis []api.WorkItem) ([]WIView, error) {
 	out := make([]WIView, 0, len(wis))
@@ -350,16 +251,12 @@ func (m *WIManager) Views(wis []api.WorkItem) ([]WIView, error) {
 	if err != nil {
 		return nil, err
 	}
-	derived, err := m.db.derivedBatch(ids)
-	if err != nil {
-		return nil, err
-	}
 	waiting, err := m.db.waitingForBatch(ids)
 	if err != nil {
 		return nil, err
 	}
 	for i := range wis {
-		out = append(out, WIView{WorkItem: wis[i], SessionPublic: blocks[wis[i].ID], Derived: derived[wis[i].ID],
+		out = append(out, WIView{WorkItem: wis[i], SessionPublic: blocks[wis[i].ID],
 			WaitingFor: waiting[wis[i].ID]})
 	}
 	return out, nil
@@ -377,10 +274,7 @@ func (m *WIManager) Views(wis []api.WorkItem) ([]WIView, error) {
 // WI the repeat answers the same claim, re-read from the row. A secret
 // that claimed this WI before but no longer holds it is refused
 // STALE_SESSION: a superseded or ended session never claims again.
-// idempotency_key is not read. Databases from before this rule still
-// carry a claim_idempotency table nothing reads; a future upgrade SQL
-// drops it before any work_items rebuild (its rows reference
-// work_items).
+// idempotency_key is not read.
 func (m *SessionManager) Claim(wiID string, req api.SessionClaimRequest, callerIdentity string) (*api.SessionClaim, error) {
 	if strings.TrimSpace(req.SessionID) == "" {
 		return nil, Fail(api.ErrCoreBadInput, "", "session_id required (the client-minted secret)")
@@ -707,7 +601,7 @@ func (m *SessionManager) ForceEnd(wiID, reason, callerIdentity string) error {
 // existing business attrs JSON — no schema change. Set by End(blocked) with
 // a head, cleared by every other End/Pause, read by the claim answer so a
 // continue on a different machine can check its clone. Create refuses the
-// key (executionStateKeys) and attrs is not PATCH-able (patchableFields),
+// key (checkAttrs) and attrs is not PATCH-able (patchableFields),
 // so only this file writes the seal; a missing or unreadable one only
 // disables the check (fail open).
 const blockedSealKey = "blocked_seal"

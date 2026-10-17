@@ -88,7 +88,6 @@ visibility V)`.
 | `CORE-404` | Unknown project (the server's project lookup) | The project does not exist — check `--project` (there is no default project; it must also be listed in a cli.toml `[workspace]` section). |
 | `MEM-403` | You lack the writer (or maintainer) role on the project | Ask a project maintainer for the writer role; nothing was saved. |
 | `MEM-413` | Content (or the whole authority document) exceeds 1 MiB | Split the memory or trim the content. |
-| `MEM-500` | The memory store failed to persist the authority file | Nothing was saved — retry; if it persists, the server's data dir is unhealthy. |
 
 A local `pf: remember: ...` line (exit 1, no typed code) means a local
 refusal before any wire call — missing `--type`, missing content, a
