@@ -143,11 +143,10 @@ type Driver struct {
 
 	cfg Config
 	log EventLogger
-	// degraded latches when atomicfile.Write succeeds at rename but fails
-	// at the post-rename directory fsync: disk may hold the new state
-	// while memory rolled back. All further transitions are refused
-	// until reconciliation (review issue 6).
-	degraded bool
+	// failed is set when a transition's persist failed: memory may be
+	// ahead of execution.json. Every further transition answers it and
+	// Run returns it; the restart reloads the file (transition.go).
+	failed error
 
 	// wake carries the "state changed, re-plan" signal to a Run loop
 	// parked on an open question; one buffered slot, coalescing.
@@ -571,6 +570,11 @@ func (d *Driver) settle(stepID string, n int64, res *StepResult, run StepRun) (s
 func (d *Driver) plan(ctx context.Context) (stop bool, stepID string, err error) {
 	for {
 		d.mu.Lock()
+		if d.failed != nil {
+			err := d.failed
+			d.mu.Unlock()
+			return false, "", err
+		}
 		status := d.exec.WorkflowStatus
 		stop = isTerminalStatus(status) || status == StatusBlocked
 		var pending bool
@@ -682,9 +686,10 @@ func (d *Driver) awaitAnswer(ctx context.Context) error {
 				pending = st.PendingQuestion != nil
 			}
 		}
+		failed := d.failed != nil
 		d.mu.Unlock()
-		if !pending {
-			return nil
+		if !pending || failed {
+			return nil // plan re-reads the state (and answers a failed driver)
 		}
 		select {
 		case <-ctx.Done():
