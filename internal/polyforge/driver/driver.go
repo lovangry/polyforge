@@ -1118,10 +1118,8 @@ func capsuleIDFor(wi string) string { return "cap_" + wi }
 // bundle's own resolution otherwise. The pointer recomputation, the
 // switch and the exhaustion paths all walk this list — across harnesses.
 func (d *Driver) effectiveCandidates(stepID string) []string {
-	if d.cfg.StepCandidates != nil {
-		if list, ok := d.cfg.StepCandidates[stepID]; ok {
-			return list
-		}
+	if list, ok := d.cfg.StepCandidates[stepID]; ok {
+		return list
 	}
 	if spec := d.workflow.step(stepID); spec != nil {
 		return spec.ModelCandidates

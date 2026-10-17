@@ -176,11 +176,12 @@ func checkPreExisting(output json.RawMessage, rules PreExistingRules, verificati
 			continue
 		}
 		preChecks++
+		pr := mentionsProtected(c.Name+" "+c.Detail, rules.Protected)
 		switch {
 		case reproName.MatchString(c.Name):
 			problems = append(problems, fmt.Sprintf("check %q is the repro of the bug being fixed — it fails on the base by definition, so it can never be pre_existing", c.Name))
-		case mentionsProtected(c.Name+" "+c.Detail, rules.Protected) != "":
-			problems = append(problems, fmt.Sprintf("check %q covers the protected test %s", c.Name, mentionsProtected(c.Name+" "+c.Detail, rules.Protected)))
+		case pr != "":
+			problems = append(problems, fmt.Sprintf("check %q covers the protected test %s", c.Name, pr))
 		case !baseSHAShape.MatchString(c.Detail):
 			problems = append(problems, fmt.Sprintf("check %q is pre_existing but its detail names no base commit sha", c.Name))
 		}
