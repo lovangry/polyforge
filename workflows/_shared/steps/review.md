@@ -107,6 +107,7 @@ these present:
 - **Stale docs.** Docs not updated with the code they describe.
 - **Leaked credentials** in an agent's env, a command line, a log or an artifact.
 - **Guess as fact.** An unverified claim stated as fact.
+- **Prior experience ignored.** The change repeats a pitfall or a failed approach that a recalled memory records, without saying why this time differs; or the step skipped its `## Prior experience` section.
 
 ## Position in the flow
 

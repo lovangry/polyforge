@@ -84,6 +84,8 @@ Separate destination (features, guarantees) from path; ask only about destinatio
 
 {{principles}}
 
+Before asking anything, check your `## Prior experience` hits: do not ask the owner what a memory already answers; turn a recorded pitfall into a question or an explicit constraint.
+
 ## Output
 
 Emit the final JSON object per the schema above: the Q&A log path, the memo path, the
