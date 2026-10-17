@@ -114,13 +114,13 @@ func TestD7RateLimitStreakResetsOnAnotherCause(t *testing.T) {
 func TestD7RateLimitRetriesSameModelWithoutCountBound(t *testing.T) {
 	var mu sync.Mutex
 	var waits []time.Duration
-	env := newSupEnv(t, func(c *Config) {
+	env := newChainEnv(t, func(c *Config) {
 		c.Sleep = func(_ context.Context, d time.Duration) {
 			mu.Lock()
 			waits = append(waits, d)
 			mu.Unlock()
 		}
-	}, chain("s", "a", "b", "c"))
+	}, "s", "a", "b", "c")
 	throttle := exitErr(1, "provider request failed: HTTP 429 Too Many Requests (rate limit)", false)
 	env.sp.script = []fakeEntry{throttle, throttle, throttle, throttle, throttle, done(`{"ok":true}`)}
 	if err := env.d.Run(context.Background()); err != nil {
@@ -178,9 +178,9 @@ func TestD7RateLimitRetriesSameModelWithoutCountBound(t *testing.T) {
 // a throttle reports retry_same_model (no from/to pair) and carries the
 // backoff it imposed.
 func TestD7RateLimitDispositionIsSameModelRetry(t *testing.T) {
-	env := newSupEnv(t, func(c *Config) {
+	env := newChainEnv(t, func(c *Config) {
 		c.Sleep = func(context.Context, time.Duration) {}
-	}, chain("s", "a", "b"))
+	}, "s", "a", "b")
 	env.sp.script = []fakeEntry{
 		exitErr(1, "429 Too Many Requests", false),
 		done(`{"ok":true}`),
@@ -217,9 +217,9 @@ func TestD7AllowanceAndAuthFailuresSwitchCandidates(t *testing.T) {
 		"403 Forbidden: insufficient permissions for this model",
 	} {
 		var slept []time.Duration
-		env := newSupEnv(t, func(c *Config) {
+		env := newChainEnv(t, func(c *Config) {
 			c.Sleep = func(_ context.Context, d time.Duration) { slept = append(slept, d) }
-		}, chain("s", "a", "b"))
+		}, "s", "a", "b")
 		env.sp.script = []fakeEntry{exitErr(1, text, true), done(`{"ok":true}`)}
 		if err := env.d.Run(context.Background()); err != nil {
 			t.Fatalf("%q: Run: %v", text, err)
@@ -242,9 +242,9 @@ func TestD7AllowanceAndAuthFailuresSwitchCandidates(t *testing.T) {
 // step's consumed runtime (and thus into the next dispatch's prior
 // runtime) — three throttles add at least 1s+2s+4s.
 func TestD7BackoffCountsIntoT(t *testing.T) {
-	env := newSupEnv(t, func(c *Config) {
+	env := newChainEnv(t, func(c *Config) {
 		c.Sleep = func(context.Context, time.Duration) {}
-	}, chain("s", "a", "b"))
+	}, "s", "a", "b")
 	throttle := exitErr(1, "429 Too Many Requests", false)
 	env.sp.script = []fakeEntry{throttle, throttle, throttle, done(`{"ok":true}`)}
 	if err := env.d.Run(context.Background()); err != nil {

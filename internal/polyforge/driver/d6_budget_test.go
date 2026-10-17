@@ -25,9 +25,9 @@ import (
 // followed by one healthy dispatch, over a step with the given chain.
 func timeoutOnce(t *testing.T, cause supervise.Cause, wall time.Duration, models ...string) *supEnv {
 	t.Helper()
-	env := newSupEnv(t, func(c *Config) {
+	env := newChainEnv(t, func(c *Config) {
 		c.Limits = supervise.Defaults{StepTimeout: wall}
-	}, chain("s", models...))
+	}, "s", models...)
 	env.sp.script = []fakeEntry{{hold: true}, done(`{"ok":true}`)}
 	go func() {
 		waitForSpawns(env, 1)
@@ -56,9 +56,9 @@ func TestD6SlowModelTimeoutRelaxesWallAndSwitches(t *testing.T) {
 // TestD6SlowModelRelaxationDoublesEachTime: every consecutive
 // slow-model timeout doubles the previous bound (6s -> 12s -> 24s).
 func TestD6SlowModelRelaxationDoublesEachTime(t *testing.T) {
-	env := newSupEnv(t, func(c *Config) {
+	env := newChainEnv(t, func(c *Config) {
 		c.Limits = supervise.Defaults{StepTimeout: 6 * time.Second}
-	}, chain("s", "a", "b", "c"))
+	}, "s", "a", "b", "c")
 	env.sp.script = []fakeEntry{{hold: true}, {hold: true}, done(`{"ok":true}`)}
 	go func() {
 		for n := int64(1); n <= 2; n++ {
@@ -79,9 +79,9 @@ func TestD6SlowModelRelaxationDoublesEachTime(t *testing.T) {
 // T x2 and retries the SAME model; the second one doubles T again and
 // blocks the step.
 func TestD6LongTaskRelaxesSameModelThenBlocks(t *testing.T) {
-	env := newSupEnv(t, func(c *Config) {
+	env := newChainEnv(t, func(c *Config) {
 		c.Limits = supervise.Defaults{StepTimeout: 3 * time.Second}
-	}, chain("s", "a", "b"))
+	}, "s", "a", "b")
 	env.sp.script = []fakeEntry{{hold: true}, {hold: true}}
 	go func() {
 		for n := int64(1); n <= 2; n++ {
@@ -125,13 +125,13 @@ func TestD6NonTimeoutDeathsNeverRelax(t *testing.T) {
 // own startup (the spec's named scenario).
 func TestD6SuccessorRunsUnderTheRelaxedBound(t *testing.T) {
 	tick := 0
-	env := newSupEnv(t, func(c *Config) {
+	env := newChainEnv(t, func(c *Config) {
 		c.Limits = supervise.Defaults{StepTimeout: 6 * time.Second}
 		c.Now = func() time.Time {
 			tick++
 			return time.Unix(1_000_000, 0).Add(time.Duration(tick) * 5 * time.Second)
 		}
-	}, chain("s", "a", "b"))
+	}, "s", "a", "b")
 	env.sp.script = []fakeEntry{{hold: true}, done(`{"ok":true}`)}
 	go func() {
 		waitForSpawns(env, 1)

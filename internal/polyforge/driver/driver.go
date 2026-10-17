@@ -70,14 +70,15 @@ type Config struct {
 	// Workflow supplies the execution graph directly (tests, or a
 	// daemon that already parsed it); nil → loaded from BundleDir.
 	Workflow *Workflow
-	// StepCandidates is the polyforge#79 effective per-step candidate
-	// map (post-precedence, computed at claim time; rehydrated or
-	// re-derived at recovery). When non-nil it SUBSTITUTES the parsed
-	// step-level lists for every step it keys — a present-empty entry
-	// governs and means no switchable chain. A step absent from the map
-	// (or a nil map) keeps the bundle's own resolution. Every candidate
-	// is `<harness>:<model>` (polyforge#175): the prefix is the harness
-	// that candidate's dispatch runs on (New refuses any other shape).
+	// StepCandidates is the per-step candidate lists of this claim
+	// (polyforge#79): composed once at claim time over every precedence
+	// level, the bundle's own lists included (workspace.ComposeCandidates),
+	// and rehydrated from the job record at recovery. It is the driver's
+	// only candidate source: a step without an entry, or with an empty
+	// one, has no switchable chain and runs on the harness default. Every
+	// candidate is `<harness>:<model>` (polyforge#175): the prefix is the
+	// harness that candidate's dispatch runs on (New refuses any other
+	// shape).
 	StepCandidates map[string][]string
 	// Interrupted, when set, archives ONE infra_failure attempt on the
 	// current in_progress step before the loop re-dispatches (the
@@ -228,14 +229,9 @@ func New(cfg Config) (*Driver, error) {
 	// polyforge#175: every candidate a step can walk must name its
 	// harness; refuse up front rather than mid-chain.
 	for _, spec := range wf.Steps {
-		list := spec.ModelCandidates
-		where, src := "model_candidates", "the bundle's own list"
-		if l, ok := cfg.StepCandidates[spec.ID]; ok {
-			list, where, src = l, "models", "the claim-time list: yaml, bundle or pf submit --models"
-		}
-		for i, c := range list {
+		for i, c := range cfg.StepCandidates[spec.ID] {
 			if _, err := harness.ParseCandidate(c); err != nil {
-				return nil, fmt.Errorf("driver: step %s: %s[%d] (%s): %w", spec.ID, where, i, src, err)
+				return nil, fmt.Errorf("driver: step %s: models[%d] (the claim-time list: yaml, bundle or pf submit --models): %w", spec.ID, i, err)
 			}
 		}
 	}
@@ -1126,27 +1122,17 @@ func skeletonExecution(wi WIInfo, wf *Workflow) *capsule.Execution {
 
 func capsuleIDFor(wi string) string { return "cap_" + wi }
 
-// effectiveCandidates answers the step's effective candidate list (each
-// `<harness>:<model>`, validated by New): the polyforge#79
-// post-precedence map when the claim/recovery supplied one, the
-// bundle's own resolution otherwise. The pointer recomputation, the
+// effectiveCandidates answers the step's claim-time candidate list (each
+// `<harness>:<model>`, validated by New). The pointer recomputation, the
 // switch and the exhaustion paths all walk this list — across harnesses.
 func (d *Driver) effectiveCandidates(stepID string) []string {
-	if list, ok := d.cfg.StepCandidates[stepID]; ok {
-		return list
-	}
-	if spec := d.workflow.step(stepID); spec != nil {
-		return spec.ModelCandidates
-	}
-	return nil
+	return d.cfg.StepCandidates[stepID]
 }
 
 // modelForLocked resolves the step's effective candidate for the NEXT
 // dispatch (the `<harness>:<model>` at the recomputed pointer; "" when
 // no candidate list is in effect). The recomputation runs over the
-// EFFECTIVE list (polyforge#79): the post-precedence list the claim
-// carried — or the recovery re-derived — never the raw bundle parse
-// alone. Model-class infra failures alone advance (bounded, capped at list end), a gate-FAIL
+// claim-time list (polyforge#79). Model-class infra failures alone advance (bounded, capped at list end), a gate-FAIL
 // rewind resets to the head.
 func (d *Driver) modelForLocked(stepID string) string {
 	list := d.effectiveCandidates(stepID)

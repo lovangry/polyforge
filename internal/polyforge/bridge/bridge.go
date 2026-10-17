@@ -84,10 +84,10 @@ type Config struct {
 	BundleName string
 	SpawnN     int64
 	Spawner    rt.Spawner
-	// StepCandidates is the polyforge#79 effective per-step candidate
-	// map the runtime computed at claim time (or rehydrated/re-derived
-	// at recovery); nil = no yaml layer, the bundle's own resolution.
-	// Forwarded to the driver verbatim.
+	// StepCandidates is the polyforge#79 per-step candidate map the
+	// runtime composed at claim time over every level, the bundle's own
+	// lists included (rehydrated at recovery); the driver's only
+	// candidate source, forwarded verbatim.
 	// Each candidate is `<harness>:<model>` (polyforge#175).
 	StepCandidates map[string][]string
 	// InterruptedCause is the recovery lane's cause string when THIS

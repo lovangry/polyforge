@@ -85,18 +85,25 @@ func newSupEnv(t *testing.T, mod func(*Config), steps ...StepSpec) *supEnv {
 	return &supEnv{d: d, sp: sp, link: link, log: log, execPath: execPath}
 }
 
-// chain declares a step's bundle candidate list; a bare test id runs on
-// pi (the test reads as the dispatched model ids — every candidate is
-// `<harness>:<model>`, polyforge#175).
-func chain(id string, models ...string) StepSpec {
-	s := spec(id)
+// newChainEnv is newSupEnv over one step id whose claim-time candidate
+// list is models; a bare test id runs on pi (the test reads as the
+// dispatched model ids — every candidate is `<harness>:<model>`,
+// polyforge#175).
+func newChainEnv(t *testing.T, mod func(*Config), id string, models ...string) *supEnv {
+	t.Helper()
+	list := []string{}
 	for _, m := range models {
 		if !strings.HasPrefix(m, "pi:") && !strings.HasPrefix(m, "claude:") {
 			m = "pi:" + m
 		}
-		s.ModelCandidates = append(s.ModelCandidates, m)
+		list = append(list, m)
 	}
-	return s
+	return newSupEnv(t, func(c *Config) {
+		if mod != nil {
+			mod(c)
+		}
+		c.StepCandidates = map[string][]string{id: list}
+	}, spec(id))
 }
 
 func exitErr(code int, lastErr string, turnErr bool) fakeEntry {
@@ -160,7 +167,7 @@ func TestClassifyWaitFailure(t *testing.T) {
 // environment.
 func failOnce(t *testing.T, cause string, models ...string) *supEnv {
 	t.Helper()
-	env := newSupEnv(t, nil, chain("s", models...))
+	env := newChainEnv(t, nil, "s", models...)
 	env.sp.script = []fakeEntry{failEntryFor(cause), done(`{"ok":true}`)}
 	if err := env.d.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -225,7 +232,7 @@ func TestDeathCauseTableModelClassSwitchesCandidate(t *testing.T) {
 }
 
 func TestDeathCauseTableHostClassBlocksWithoutSwitching(t *testing.T) {
-	env := newSupEnv(t, nil, chain("s", "a", "b"))
+	env := newChainEnv(t, nil, "s", "a", "b")
 	env.sp.script = []fakeEntry{failEntryFor(FailExitHost)}
 	if err := env.d.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -334,7 +341,7 @@ func TestEnvelopeRejectionsAreNotCounted(t *testing.T) {
 }
 
 func TestCandidatesExhaustedCountsAsSameModelRetry(t *testing.T) {
-	env := newSupEnv(t, nil, chain("s", "a", "b"))
+	env := newChainEnv(t, nil, "s", "a", "b")
 	env.sp.script = []fakeEntry{
 		failEntryFor(FailExitModel), // a -> b (switch, counter reset)
 		failEntryFor(FailExitModel), // b is the end: same-model retry, counted 1
@@ -641,7 +648,7 @@ func TestDriverStalledVerdictEndsRunForRelaunch(t *testing.T) {
 }
 
 func TestCancellationIsNotAFailureAndStaysUncounted(t *testing.T) {
-	env := newSupEnv(t, nil, chain("s", "a", "b"))
+	env := newChainEnv(t, nil, "s", "a", "b")
 	env.sp.script = []fakeEntry{fakeEntry{hold: true}}
 	ctx, cancel := context.WithCancel(context.Background())
 	runDone := make(chan error, 1)
@@ -665,7 +672,7 @@ func TestCancellationIsNotAFailureAndStaysUncounted(t *testing.T) {
 // --- facts --------------------------------------------------------------
 
 func TestFactsOutOnTheContract(t *testing.T) {
-	env := newSupEnv(t, nil, chain("grill", "m1"))
+	env := newChainEnv(t, nil, "grill", "m1")
 	env.sp.script = []fakeEntry{asks("q_1", "ok?"), done(`{}`)}
 	ctx := context.Background()
 	runDone := make(chan error, 1)
@@ -755,7 +762,7 @@ func TestEventAppendFailureNeverBreaksTheRun(t *testing.T) {
 func TestCandidateSwitchKeepsTCumulative(t *testing.T) {
 	var mu sync.Mutex
 	tick := 0
-	env := newSupEnv(t, func(c *Config) {
+	env := newChainEnv(t, func(c *Config) {
 		c.Now = func() time.Time {
 			mu.Lock()
 			defer mu.Unlock()
@@ -763,7 +770,7 @@ func TestCandidateSwitchKeepsTCumulative(t *testing.T) {
 			return time.Unix(1_000_000, 0).Add(time.Duration(tick) * 40 * time.Minute)
 		}
 		c.Limits = supervise.Defaults{StepTimeout: time.Hour}
-	}, chain("s", "a", "b"))
+	}, "s", "a", "b")
 	env.sp.script = []fakeEntry{exitErr(1, "model not found", false), done(`{}`)}
 	if err := env.d.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -808,7 +815,7 @@ func TestHumanContinueKeepsTCumulative(t *testing.T) {
 // --- ended_without_result (rule 1, ok-ended turn) ---------------------------
 
 func TestEndedWithoutResultVerdictRetriesSameModelWithFeedback(t *testing.T) {
-	env := newSupEnv(t, nil, chain("s", "a", "b"))
+	env := newChainEnv(t, nil, "s", "a", "b")
 	env.sp.script = []fakeEntry{{hold: true}, done(`{"ok":true}`)}
 	go func() {
 		waitForSpawns(env, 1)
@@ -856,7 +863,7 @@ func TestRetryPromptNamesEndedWithoutResult(t *testing.T) {
 }
 
 func TestStartupDeathWithModelStderrAdvancesCandidate(t *testing.T) {
-	env := newSupEnv(t, nil, chain("s", "a", "b"))
+	env := newChainEnv(t, nil, "s", "a", "b")
 	env.sp.script = []fakeEntry{
 		{spawnErr: errors.New(`runtime: initial prompt injection failed (process torn down): write |1: broken pipe; harness stderr: Error: model "a" not found`)},
 		done(`{"ok":true}`),
@@ -874,7 +881,7 @@ func TestStartupDeathWithModelStderrAdvancesCandidate(t *testing.T) {
 // defect must reach step_dead's evidence and the retry prompt, which must
 // not claim the agent wrote nothing.
 func TestEndedWithoutResultCarriesTheEnvelopeDefect(t *testing.T) {
-	env := newSupEnv(t, nil, chain("s", "a", "b"))
+	env := newChainEnv(t, nil, "s", "a", "b")
 	defect := errors.New(`driver: envelope outcome "done" is not in the closed set`)
 	env.sp.script = []fakeEntry{{hold: true, cancelErr: &EnvelopeDefectError{Defect: defect, Cause: context.Canceled}}, done(`{"ok":true}`)}
 	go func() {

@@ -1,8 +1,8 @@
 package driver
 
 // candidates_workspace_test.go: the driver's consumption of the
-// polyforge#79 effective candidate map — the recomputation indexes the
-// EFFECTIVE list (substitution, present-empty governance), and the
+// polyforge#79 claim-time candidate map — the recomputation indexes that
+// list (the only candidate source, present-empty governance), and the
 // recovery integration's interrupted-dispatch archive lands through the
 // single execution.json writer. Rotation semantics themselves are
 // untouched (INV-1g et al. — provider-class infra failures alone
@@ -76,9 +76,8 @@ func infraAttempt(n int, failureCause string) capsule.Attempt {
 	return capsule.Attempt{Cause: CauseInfraFailure, FailureCause: failureCause, AttemptSeq: n}
 }
 
-// The archived-attempt recomputation indexes the EFFECTIVE list: the
-// StepCandidates map substitutes the parsed bundle lists wholesale.
-func TestEffectiveListSubstitutesBundleLists(t *testing.T) {
+// The archived-attempt recomputation indexes the claim-time list.
+func TestClaimListHeadIsDispatched(t *testing.T) {
 	dir := t.TempDir()
 	execPath := filepath.Join(dir, capsule.ExecutionJSON)
 	seedExecution(t, execPath, "fix", capsule.StepInProgress, nil)
@@ -87,7 +86,7 @@ func TestEffectiveListSubstitutesBundleLists(t *testing.T) {
 		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
 		ExecPath: execPath,
 		Workflow: &Workflow{Steps: []StepSpec{
-			{ID: "fix", ContextPolicy: "fresh", ModelCandidates: []string{"pi:bundle-x", "pi:bundle-y"}},
+			{ID: "fix", ContextPolicy: "fresh"},
 		}, MaxTotal: 4, MaxPerStep: 2},
 		Spawner: sp,
 		Log:     &eventLog{},
@@ -103,7 +102,7 @@ func TestEffectiveListSubstitutesBundleLists(t *testing.T) {
 		t.Fatalf("prepareDispatch: %v", err)
 	}
 	if spawn.Model != "eff-a" {
-		t.Fatalf("model %q, want the effective head eff-a (the map substitutes the bundle list)", spawn.Model)
+		t.Fatalf("model %q, want the claim-time head eff-a", spawn.Model)
 	}
 }
 
@@ -170,9 +169,8 @@ func TestRotationAdvancesAndCapsOnEffectiveList(t *testing.T) {
 	}
 }
 
-// A present-empty effective entry governs: no switchable chain — the
-// harness adapter's default stays in effect (never a fall-through to
-// the bundle's own list).
+// A present-empty claim-time entry governs: no switchable chain — the
+// harness adapter's default stays in effect.
 func TestPresentEmptyEffectiveEntryGoverns(t *testing.T) {
 	dir := t.TempDir()
 	execPath := filepath.Join(dir, capsule.ExecutionJSON)
@@ -182,7 +180,7 @@ func TestPresentEmptyEffectiveEntryGoverns(t *testing.T) {
 		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
 		ExecPath: execPath,
 		Workflow: &Workflow{Steps: []StepSpec{
-			{ID: "fix", ContextPolicy: "fresh", ModelCandidates: []string{"pi:bundle-x"}},
+			{ID: "fix", ContextPolicy: "fresh"},
 		}, MaxTotal: 4, MaxPerStep: 2},
 		Spawner:        sp,
 		Log:            &eventLog{},
@@ -316,5 +314,38 @@ func TestInterruptedDispatchNoArchiveShapes(t *testing.T) {
 	raw2, _ := os.ReadFile(execPath2)
 	if strings.Contains(string(raw2), "infra_failure") {
 		t.Fatalf("a parked question archives nothing: %s", raw2)
+	}
+}
+
+// The bundle's model_candidates reach a dispatch only through the claim's
+// composition (workspace.ComposeCandidates, which reads every bundle
+// level): the driver reads no list of its own, so a step without a
+// claim-time entry runs on the harness default.
+func TestBundleListIsNotADriverCandidateSource(t *testing.T) {
+	dir := t.TempDir()
+	bundle := filepath.Join(dir, "bundle")
+	fm := "---\ndefaults:\n  model_candidates: [pi:prov/a]\nsteps:\n  - id: fix\n    context_policy: fresh\n    model_candidates: [pi:prov/b]\n---\n"
+	if err := os.MkdirAll(bundle, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "workflow.md"), []byte(fm), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(Config{
+		WI:        WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
+		BundleDir: bundle,
+		ExecPath:  filepath.Join(dir, capsule.ExecutionJSON),
+		Spawner:   &fakeSpawner{},
+		Log:       &eventLog{},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	spawn, _, err := d.prepareDispatch("fix")
+	if err != nil {
+		t.Fatalf("prepareDispatch: %v", err)
+	}
+	if spawn.Model != "" || spawn.Harness != "pi" {
+		t.Fatalf("dispatch %s:%s, want the harness default (no claim-time list)", spawn.Harness, spawn.Model)
 	}
 }

@@ -218,7 +218,7 @@ func TestBridgeWiresDriverEventsAndSupervisionLink(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(bundle, "steps"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	front := "---\nname: wf\ndefaults:\n  model_candidates: [pi:m-a]\nsteps:\n  - { id: fix }\n---\n# body\n"
+	front := "---\nname: wf\nsteps:\n  - { id: fix }\n---\n# body\n"
 	if err := os.WriteFile(filepath.Join(bundle, "workflow.md"), []byte(front), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -235,7 +235,7 @@ func TestBridgeWiresDriverEventsAndSupervisionLink(t *testing.T) {
 	defer cancel()
 	h, err := Start(ctx, Config{
 		WI: "wi_wire", CapsuleDir: dir, BundleName: "wf", SpawnN: 1, Spawner: sp,
-		Log: log, Link: link,
+		Log: log, Link: link, StepCandidates: map[string][]string{"fix": {"pi:m-a"}},
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)

@@ -100,9 +100,9 @@ func TestD8TransientStreakResetsOnAnotherCause(t *testing.T) {
 // remaining bound.
 func TestD8TransientArchiveLedgerAndSwitch(t *testing.T) {
 	var slept []time.Duration
-	env := newSupEnv(t, func(c *Config) {
+	env := newChainEnv(t, func(c *Config) {
 		c.Sleep = func(_ context.Context, d time.Duration) { slept = append(slept, d) }
-	}, chain("s", "a", "b"))
+	}, "s", "a", "b")
 	text := "Upstream tool call has incomplete or invalid JSON arguments"
 	env.sp.script = []fakeEntry{
 		exitErr(1, text, true),
