@@ -37,9 +37,6 @@ type JobInfo struct {
 	AgentPID           int
 	AgentStartedAt     string
 	Origin             *Origin
-	// AwaitingHub: the restart-time session verify could not reach aihub
-	// and is being retried (the job shows RECOVERING meanwhile).
-	AwaitingHub bool
 }
 
 // Info returns the snapshot of one job; ok=false when the work item has
@@ -88,7 +85,6 @@ func (j *job) info() JobInfo {
 		AgentPID:           j.agentPID,
 		AgentStartedAt:     j.agentStartedAt,
 		Origin:             j.origin,
-		AwaitingHub:        j.awaitingHub,
 	}
 }
 
@@ -96,22 +92,6 @@ func (j *job) info() JobInfo {
 // sequence calls it as its final durability step (reference.md §6.2: the persisted
 // bookkeeping must reflect reality before the process exits).
 func (r *Runtime) Persist() error { return r.persist() }
-
-// Reconciling reports whether the restart reconciliation still runs (its
-// wait ran out with records waiting for aihub; see Restart).
-func (r *Runtime) Reconciling() bool { return r.isRestarting() }
-
-// Busy reports whether an operation of wi (any id form this runtime
-// knows) is under way — a claim, a close, a recovery, a resume or its
-// restart reconciliation: a door of the work item would answer
-// DAEMON-409/503 now.
-func (r *Runtime) Busy(wi string) bool {
-	id := r.Resolve(wi)
-	if id == "" {
-		id = wi
-	}
-	return r.wiLocked(id)
-}
 
 // resolveJob answers the job behind any id form: the canonical key first,
 // then the alias table — so daemon-side route lookups by the operator's

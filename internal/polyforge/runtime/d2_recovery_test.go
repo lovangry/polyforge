@@ -155,7 +155,7 @@ func TestRestartRetriesEndPendingRecord(t *testing.T) {
 	hub.mu.Lock()
 	delete(hub.end, j.wi)
 	hub.mu.Unlock()
-	if err := r2.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r2); err != nil {
 		t.Fatal(err)
 	}
 	_ = toOB2
@@ -187,8 +187,9 @@ func TestEndPendingSettlesWhenSessionNoLongerHoldsWI(t *testing.T) {
 	}
 }
 
-// Bug 1: the clone-failure compensation is not one-shot — the claiming
-// journal entry stays, and the SessionEnd(blocked) is retried until it lands.
+// Bug 1: the clone-failure compensation is not one-shot — the session is
+// kept as an end_pending job (persisted before the journal entry goes),
+// and the SessionEnd(blocked) is retried until it lands.
 func TestAbandonClaimRetriesSessionEnd(t *testing.T) {
 	hub := newFakeHub()
 	r, j, _ := endPendingRuntime(t, hub)
@@ -198,17 +199,20 @@ func TestAbandonClaimRetriesSessionEnd(t *testing.T) {
 	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
 	orig := fmt.Errorf("capsule clone failed")
 	var got error
-	underLock(r, j.wi, func() { got = r.abandonClaim(context.Background(), j, j.wi, orig, "clone") })
+	underLock(r, j.wi, func() { got = r.abandonClaim(j, orig, "clone") })
 	if got != orig {
 		t.Fatalf("the original error must be returned, got %v", got)
 	}
-	if _, ok := r.loadClaiming()[j.wi]; !ok {
-		t.Fatal("the journal entry must stay while the close is unacknowledged")
+	if recs := loadRecords(t, r); len(recs) != 1 || recs[0].State != string(StateEndPending) || recs[0].SessionID != j.sessionID {
+		t.Fatalf("the unacknowledged close must be kept end_pending in state.json, got %+v", recs)
 	}
 	hub.mu.Lock()
 	delete(hub.end, j.wi)
 	hub.mu.Unlock()
-	waitFor(t, "the journal entry to clear", func() bool { _, ok := r.loadClaiming()[j.wi]; return !ok })
+	waitFor(t, "the end_pending job to settle", func() bool { return r.jobOf(j.wi) == nil })
+	if _, ok := r.loadClaiming()[j.wi]; ok {
+		t.Fatal("the journal entry outlived the compensation")
+	}
 	if hub.lastEnd().Status != api.StatusBlocked {
 		t.Fatalf("expected the blocked close, got %+v", hub.lastEnd())
 	}
@@ -330,7 +334,7 @@ func TestEndPendingWithGoneCapsuleStillRetries(t *testing.T) {
 	hub.mu.Lock()
 	delete(hub.end, j.wi)
 	hub.mu.Unlock()
-	if err := r2.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r2); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "the end_pending close to be replayed", func() bool { return hub.endCount() > 0 })

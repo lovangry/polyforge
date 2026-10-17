@@ -8,7 +8,7 @@ package driver
 //
 //   - verified heads: when `verification` completes, the driver records
 //     each task repo's HEAD in its output (verifiedHeadsKey) — never
-//     step-supplied (recordVerifiedHeads overwrites the key).
+//     step-supplied (the step-result transition overwrites the key).
 //   - tests covered: a repo's pushed HEAD equals the commit verification
 //     passed on, OR this dispatch's command evidence — in recorded order —
 //     ran every command of verification's test_bar for that repo, in that
@@ -327,15 +327,6 @@ func checkNothingToDeliver(reposDir, repo string) error {
 		return fmt.Errorf("it has %s commit(s) beyond its baseline", n)
 	}
 	return nil
-}
-
-// recordVerifiedHeads writes the capsule's task repos' HEADs into
-// verification's accepted output (overwriting anything the step supplied).
-func recordVerifiedHeads(out map[string]any, capsuleDir string) {
-	delete(out, verifiedHeadsKey)
-	if heads := repoHeads(filepath.Join(capsuleDir, capsule.DirRepos)); len(heads) > 0 {
-		out[verifiedHeadsKey] = heads
-	}
 }
 
 // verificationRecord reads the verified heads (driver-written) and the

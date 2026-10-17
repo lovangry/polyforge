@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -166,7 +167,7 @@ func TestClaimCrashRestartReplaysSameKey(t *testing.T) {
 	hub2.hold("wi_crashd", session, api.StatusRunning)
 	sp2 := &countingSpawner{}
 	r2, _, _ := newTestRuntimeAt(t, hub2, sp2, dataDir)
-	if err := r2.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r2); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	settleReplays(t, r2) // the journal replays clone outside Restart
@@ -210,7 +211,7 @@ func TestStaleClaimingEntryDropped(t *testing.T) {
 	if err := r.noteClaiming("wi_stalec", fakeSession("wi_stalec"), randomKey(), nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	settleReplays(t, r) // the journal replays clone outside Restart
@@ -245,7 +246,7 @@ func newTestRuntimeAt(t *testing.T, hub Aihub, sp Spawner, dataDir string) (*Run
 	toOB := supervise.NewQueue[protocol.RTMsg]()
 	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
-	t.Cleanup(func() { settleOps(t, r, 10e9) }) // see newTestRuntime
+	t.Cleanup(func() { r.Close(); settleOps(t, r, 10e9) }) // see newTestRuntime
 	// The claim-time capsule remote (see newTestRuntime): aihub creates
 	// the bare repo at claim; the fake hub implements the contract.
 	if fh, ok := hub.(*fakeHub); ok {
@@ -276,10 +277,10 @@ func idxOf(args []string, want string) int {
 }
 
 // When the compensation's hub close itself fails (an aihub outage at
-// the worst moment), the claiming entry is KEPT: a later restart replays
-// the same key and retries the compensation — the dangling claim window
-// stays closed even across a failing close.
-func TestAbandonedClaimKeepsJournalWhenCloseFails(t *testing.T) {
+// the worst moment), the session is KEPT as an end_pending record —
+// persisted before the claiming entry goes — and its close is retried:
+// the dangling claim window stays closed even across a failing close.
+func TestAbandonedClaimKeepsSessionWhenCloseFails(t *testing.T) {
 	setGitIdentity(t)
 	wfDir := pristineBundle(t)
 	hub := newFakeHub()
@@ -287,16 +288,16 @@ func TestAbandonedClaimKeepsJournalWhenCloseFails(t *testing.T) {
 	hub.end["wi_closefail"] = errLookupBoom            // the hub close fails
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.WorkflowsDir = wfDir
+	r.cfg.EndRetryBase = time.Hour // the retry stays out of the way
 
 	if err := r.Start(context.Background(), "wi_closefail"); err == nil {
 		t.Fatal("Start must fail on the unmaterializable inventory")
 	}
-	// the close never landed: the entry must survive for the next restart
-	items := r.loadClaiming()
-	if len(items) != 1 {
-		t.Fatalf("a failed close must keep the claiming entry, got %+v", items)
+	recs := loadRecords(t, r)
+	if len(recs) != 1 || recs[0].WorkItemID != "wi_closefail" || recs[0].State != string(StateEndPending) || recs[0].SessionID == "" {
+		t.Fatalf("a failed close must keep the session as an end_pending record, got %+v", recs)
 	}
-	if _, ok := items["wi_closefail"]; !ok {
-		t.Fatalf("the entry must be keyed by the submitted spelling, got %+v", items)
+	if items := r.loadClaiming(); len(items) != 0 {
+		t.Fatalf("the end_pending record replaces the claiming entry, got %+v", items)
 	}
 }

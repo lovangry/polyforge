@@ -34,7 +34,7 @@ func TestJournalReplayUnstartableCompensatesBlocked(t *testing.T) {
 	}
 	hub.hold("wi_adoptfail", session, api.StatusRunning)
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	settleReplays(t, r) // the journal replays clone outside Restart

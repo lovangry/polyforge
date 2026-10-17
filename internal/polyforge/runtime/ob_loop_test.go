@@ -67,13 +67,14 @@ func TestOBRecoveryWaitsForTheLock(t *testing.T) {
 	startRunning(t, r, a)
 	go func() { _ = r.Run(ctx) }()
 	spawn := spawnOf(r, a)
-	s := r.lockWI(a)
+	hold := make(chan struct{})
+	r.post(a, func() { <-hold }) // another operation of the work item under way
 	fromOB.Push(recoveryMsg(r.jobOf(a), "agent exited"))
 	time.Sleep(100 * time.Millisecond)
 	if n := spawnOf(r, a); n != spawn {
-		t.Fatalf("the recovery ran while the lock was held (spawn %d)", n)
+		t.Fatalf("the recovery ran while the work item's actor was busy (spawn %d)", n)
 	}
-	r.unlockWI(a, s)
+	close(hold)
 	waitFor(t, "the recovery once the lock was free", func() bool {
 		ji, ok := r.Info(a)
 		return ok && ji.State == StateRunning && ji.SpawnN == spawn+1

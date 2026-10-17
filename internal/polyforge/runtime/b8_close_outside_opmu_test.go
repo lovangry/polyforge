@@ -1,15 +1,17 @@
 package runtime
 
-// b8_close_outside_opmu_test.go — repo review 2026-10-16 B-8, the
-// remainder: the closes' and the recovery's network steps (chain push,
-// task-repo WIP, SessionEnd), a failed start's compensation and the
-// restart's journal-replay clone hold only their own work item's lock, so one
-// work item's hung push no longer freezes the stop, pause, resume and
-// wrap of the others.
+// b8_close_outside_opmu_test.go — repo review 2026-10-16 B-8: the closes'
+// and the recovery's network steps (chain push, task-repo WIP,
+// SessionEnd), a failed start's compensation and the restart's
+// journal-replay clone occupy only their own work item's actor, so one
+// work item's hung push never freezes the stop, pause, resume and wrap of
+// the others; a second operation of the SAME work item queues and gets
+// the final answer once the first settled.
 
 import (
 	"context"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -89,12 +91,12 @@ func stallPushes(t *testing.T, r *Runtime, wi string) (release func()) {
 }
 
 // waitBusy blocks until wi's push to its stalling remote is under way
-// (the operation pushing holds wi's lock).
+// (the operation pushing occupies wi's actor).
 func waitBusy(t *testing.T, r *Runtime, wi string) {
 	t.Helper()
 	waitFor(t, wi+" to reach its stalled push", func() bool {
 		j := r.jobOf(wi)
-		if j == nil || !r.Busy(wi) {
+		if j == nil || !actorBusy(r, wi) {
 			return false
 		}
 		j.mu.Lock()
@@ -110,11 +112,25 @@ func isConflict(err error) bool {
 	return ok && ae.Code == api.ErrDaemonConflict
 }
 
+// stillPending asserts none of chs answered yet: their operations queue
+// behind the one under way.
+func stillPending(t *testing.T, what string, chs ...chan error) {
+	t.Helper()
+	time.Sleep(200 * time.Millisecond)
+	for _, ch := range chs {
+		select {
+		case err := <-ch:
+			t.Fatalf("%s answered %v while the work item's operation hangs", what, err)
+		default:
+		}
+	}
+}
+
 // A wrap whose seal push hangs on work item A leaves B fully operable:
 // B pauses, resumes and wraps promptly while A is still pushing; a
-// second close or a resume of A is refused (409) instead of queueing
-// behind it; once the push fails, A's close finishes (degraded to
-// blocked, the kept semantics) and its record is gone.
+// second close or a resume of A queues behind it; once the push fails,
+// A's close finishes (degraded to blocked, the kept semantics), its
+// record is gone, and the queued operations get that final answer.
 func TestB8HungSealPushLeavesOtherWorkItemsResponsive(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
@@ -156,25 +172,20 @@ func TestB8HungSealPushLeavesOtherWorkItemsResponsive(t *testing.T) {
 		t.Fatal("B's wrap left its record")
 	}
 
-	within(t, 5*time.Second, "a second close of A", func() {
-		if err := r.Stop(ctx, a, protocol.FinishFailed); !isConflict(err) {
-			t.Errorf("second close of A during its push = %v, want DAEMON-409", err)
-		}
-	})
-	within(t, 5*time.Second, "a resume of A", func() {
-		if _, err := r.ResumePaused(ctx, a); !isConflict(err) {
-			t.Errorf("resume of A during its push = %v, want DAEMON-409", err)
-		}
-	})
-	select {
-	case err := <-stopA:
-		t.Fatalf("A's close returned while its push hangs: %v", err)
-	default:
-	}
+	secondA, resumeA := make(chan error, 1), make(chan error, 1)
+	go func() { secondA <- r.Stop(ctx, a, protocol.FinishFailed) }()
+	go func() { _, err := r.ResumePaused(ctx, a); resumeA <- err }()
+	stillPending(t, "A's operations", stopA, secondA, resumeA)
 
 	release()
 	if err := recvErr(t, stopA, "A's close"); err != nil {
 		t.Fatalf("A's close: %v", err)
+	}
+	if err := recvErr(t, secondA, "the second close of A"); err == nil || !strings.Contains(err.Error(), "no active job") {
+		t.Fatalf("the queued second close of A = %v, want the settled close's no-active-job answer", err)
+	}
+	if err := recvErr(t, resumeA, "the resume of A"); err == nil {
+		t.Fatal("the queued resume of the closed A answered nil")
 	}
 	ends := endsOf(hub, a, sessA)
 	if len(ends) != 1 || ends[0].Status != api.StatusBlocked {
@@ -185,7 +196,8 @@ func TestB8HungSealPushLeavesOtherWorkItemsResponsive(t *testing.T) {
 	}
 }
 
-// A pause whose push hangs latches only its own work item.
+// A pause whose push hangs occupies only its own work item; a wrap of
+// it queues and then closes the retained paused record.
 func TestB8HungPausePushLeavesOtherWorkItemsResponsive(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
@@ -205,17 +217,16 @@ func TestB8HungPausePushLeavesOtherWorkItemsResponsive(t *testing.T) {
 			t.Errorf("wrap B: %v", err)
 		}
 	})
-	within(t, 5*time.Second, "a wrap of the pausing A", func() {
-		if err := r.Stop(ctx, a, protocol.FinishWrapped); !isConflict(err) {
-			t.Errorf("wrap of A during its pause push = %v, want DAEMON-409", err)
-		}
-	})
+	wrapA := make(chan error, 1)
+	go func() { wrapA <- r.Stop(ctx, a, protocol.FinishWrapped) }()
+	stillPending(t, "A's operations", pauseA, wrapA)
 	release()
 	if err := recvErr(t, pauseA, "A's pause"); err != nil {
 		t.Fatalf("A's pause: %v", err)
 	}
-	if ji, ok := r.Info(a); !ok || ji.State != StatePaused {
-		t.Fatalf("A after its pause: %+v (ok=%v), want the retained paused record", ji, ok)
+	_ = recvErr(t, wrapA, "the queued wrap of A")
+	if _, ok := r.Info(a); ok {
+		t.Fatal("the queued wrap left the retained paused record")
 	}
 }
 
@@ -244,14 +255,14 @@ func TestB8HungRecoveryPushLeavesOtherWorkItemsResponsive(t *testing.T) {
 			t.Errorf("pause B: %v", err)
 		}
 	})
-	within(t, 5*time.Second, "a wrap of the recovering A", func() {
-		if err := r.Stop(ctx, a, protocol.FinishWrapped); !isConflict(err) {
-			t.Errorf("wrap of A during its recovery push = %v, want DAEMON-409", err)
-		}
-	})
-	// a supersession verdict meanwhile never quarantines the scene under
-	// the push
-	r.supersedeOp(ctx, ja, "test")
+	// a supersession verdict meanwhile queues: it never quarantines the
+	// scene under the push, and applies once the recovery settled
+	superseded := make(chan error, 1)
+	go func() {
+		r.handleOB(ctx, protocol.OBMsg{Kind: protocol.OBSuperseded, WorkItem: a, SessionFP: ja.fingerprint()})
+		superseded <- nil
+	}()
+	stillPending(t, "the supersession", superseded)
 	if r.jobOf(a) != ja {
 		t.Fatal("a supersession during the recovery push dropped the job")
 	}
@@ -261,18 +272,18 @@ func TestB8HungRecoveryPushLeavesOtherWorkItemsResponsive(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("the recovery never finished")
 	}
-	if ji, _ := r.Info(a); ji.State != StateRunning {
-		t.Fatalf("A after its recovery: %s, want running", ji.State)
-	}
+	_ = recvErr(t, superseded, "the supersession")
 	if sp.callCount() != spawns+1 {
 		t.Fatalf("the recovery relaunched %d time(s), want 1", sp.callCount()-spawns)
 	}
+	if r.jobOf(a) != nil {
+		t.Fatal("the queued supersession did not release A after its recovery")
+	}
 }
 
-// A shutdown during a hung seal push does not wait for it: the claim
-// abort, the persist and the retry-lane stop all return promptly, and
-// state.json keeps the SEALING record with its verdict — the next
-// start finishes the close.
+// A shutdown during a hung seal push does not wait for it: the actors'
+// cancel and the persist return promptly, and state.json keeps the
+// SEALING record with its verdict — the next start finishes the close.
 func TestB8ShutdownDuringHungSealPush(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
@@ -286,13 +297,10 @@ func TestB8ShutdownDuringHungSealPush(t *testing.T) {
 	waitBusy(t, r, a)
 
 	within(t, 10*time.Second, "the runtime's shutdown steps", func() {
-		actx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		r.BeginShutdown(actx)
+		r.Close()
 		if err := r.Persist(); err != nil {
 			t.Errorf("persist: %v", err)
 		}
-		r.Close()
 	})
 	var rec *jobRecord
 	for _, jr := range loadRecords(t, r) {
@@ -307,7 +315,7 @@ func TestB8ShutdownDuringHungSealPush(t *testing.T) {
 	_ = recvErr(t, stopA, "A's close")
 }
 
-// The restart's journal replay clones outside Restart and every lock: a hung
+// The restart's journal replay clones on its work item's actor: a hung
 // replay clone neither holds Restart (the daemon's socket waits on it)
 // nor the other work items; a shutdown defers it with its entry kept.
 func TestB8RestartReplayCloneOutsideOpMu(t *testing.T) {
@@ -333,9 +341,7 @@ func TestB8RestartReplayCloneOutsideOpMu(t *testing.T) {
 	within(t, 20*time.Second, "Start of another work item", func() {
 		startRunning(t, r, other)
 	})
-	actx, cancel := context.WithTimeout(bg(), 20*time.Second)
-	defer cancel()
-	within(t, 25*time.Second, "BeginShutdown", func() { r.BeginShutdown(actx) })
+	r.Close()
 	settleReplays(t, r)
 	if got := journaled(r, slow); got == nil || got.SessionID != sess {
 		t.Fatalf("journal after the deferred replay = %+v, want the original entry", got)
@@ -343,13 +349,12 @@ func TestB8RestartReplayCloneOutsideOpMu(t *testing.T) {
 	if n := len(endsOf(hub, slow, sess)); n != 0 {
 		t.Fatalf("the deferred replay ended its session %d time(s)", n)
 	}
-	r.Close()
 }
 
-// A failed start's compensation (SessionEnd blocked) holds only its own
-// work item's lock: a hung end holds neither another work item's start
-// nor its close, and a start of the SAME work item meanwhile answers the
-// typed transient instead of replaying the claim being ended.
+// A failed start's compensation (SessionEnd blocked) occupies only its
+// own work item's actor: a hung end holds neither another work item's
+// start nor its close, and a start of the SAME work item queues behind
+// it instead of replaying the claim being ended.
 func TestB8AbandonClaimEndOutsideOpMu(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
@@ -371,22 +376,21 @@ func TestB8AbandonClaimEndOutsideOpMu(t *testing.T) {
 			t.Errorf("wrap: %v", err)
 		}
 	})
-	within(t, 5*time.Second, "a second start of the ending work item", func() {
-		err := r.Start(bg(), bad)
-		ae, ok := err.(*api.Error)
-		if !ok || ae.Code != api.ErrDaemonHubUnavailable {
-			t.Errorf("start during the compensation = %v, want the DAEMON-503 transient", err)
-		}
-	})
+	claims := hub.claimCount()
+	second := make(chan error, 1)
+	go func() { second <- r.Start(bg(), bad) }()
+	stillPending(t, "a second start of the ending work item", startBad, second)
+	if n := hub.claimCount() - claims; n != 0 {
+		t.Fatalf("a start during the compensation claimed %d time(s)", n)
+	}
 	g.open()
 	if err := recvErr(t, startBad, "the failed Start"); err == nil {
 		t.Fatal("the failed start answered nil")
 	}
-	if journaled(r, bad) != nil {
-		t.Fatal("the settled compensation kept its journal entry")
-	}
-	if r.Busy(bad) {
-		t.Fatal("the work item's lock outlived the compensation")
+	_ = recvErr(t, second, "the queued second start")
+	settleOps(t, r, 20*time.Second)
+	if r.jobOf(bad) != nil {
+		terminateJobAgent(r, bad)
 	}
 }
 

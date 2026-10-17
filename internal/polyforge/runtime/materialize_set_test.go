@@ -288,7 +288,7 @@ func TestMaterializeSetClaimReplayReusesTrustedSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart (journal replay): %v", err)
 	}
 	t.Cleanup(func() {

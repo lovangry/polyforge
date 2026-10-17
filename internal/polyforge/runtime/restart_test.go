@@ -8,7 +8,6 @@ package runtime
 // interrupted-seal finish and the aihub-unreachable keep.
 
 import (
-	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,7 +80,7 @@ func TestRestartReconciliationMatrix(t *testing.T) {
 					}
 				}
 
-				if err := r.Restart(context.Background()); err != nil {
+				if err := restartSettled(t, r); err != nil {
 					t.Fatalf("Restart: %v", err)
 				}
 
@@ -182,7 +181,7 @@ func TestRestartAttachResumesPausedSession(t *testing.T) {
 	}
 	writeTranscript(t, jobFromRecord(rec))
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	if n := len(hub.attaches); n != 1 {
@@ -237,7 +236,7 @@ func TestRestartCleanPauseNotAutoResumed(t *testing.T) {
 	}
 	writeStateFile(t, r, []*jobRecord{rec})
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	if n := len(hub.attaches); n != 0 {
@@ -286,7 +285,7 @@ func TestRestartAttachesRetainedPausedRecord(t *testing.T) {
 	}
 	writeTranscript(t, jobFromRecord(rec))
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	if n := len(hub.attaches); n != 1 {
@@ -344,7 +343,7 @@ func TestRestartReleasesForeignHolder(t *testing.T) {
 		tapped = append(tapped, kind)
 	}
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	waitDead(t, pid) // the zombie tree is collected
@@ -407,7 +406,7 @@ func TestRestartFinishesInterruptedSeal(t *testing.T) {
 	// drop the in-memory seed so Restart owns the job
 	r.dropJob(j)
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	waitDead(t, pid)
@@ -429,12 +428,12 @@ func TestRestartFinishesInterruptedSeal(t *testing.T) {
 
 // TestRestartVerifyOutageKeepsRecordAndResumes (v2-converge §6, repo
 // review 2026-10-16 B-2): an unreachable aihub at restart is NOT a
-// verdict. The record is kept, the crash orphans are reaped first (single
-// writer), the job shows RECOVERING, nothing spawns and nothing is sent
-// to the hub — and once aihub answers, the deferred verify runs the
-// ordinary reconciliation: the WI resumes in its own capsule with no
-// `pf resume`, its unpushed local commit intact (never quarantined,
-// never re-cloned), and observe is handed the job (RTStarted).
+// verdict, and it never holds Restart. The record is kept, the work item's
+// actor verifies before anything else — nothing spawns, nothing is pushed
+// or sent to the hub meanwhile — and once aihub answers, the WI resumes
+// in its own capsule with no `pf resume`, its unpushed local commit
+// intact (never quarantined, never re-cloned), handed to observe
+// (RTRecovered: the daemon builds its monitor from it).
 func TestRestartVerifyOutageKeepsRecordAndResumes(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
@@ -447,40 +446,43 @@ func TestRestartVerifyOutageKeepsRecordAndResumes(t *testing.T) {
 	rec := matrixRecord(r, wi, pid, startedAt)
 	hub.hold(wi, rec.SessionID, api.StatusRunning)
 	hub.lookupErr[wi] = errLookupBoom
-	writeStateFile(t, r, []*jobRecord{rec})
 	// the capsule holds a local commit the hub never received
-	initGitCapsule(t, r.restoredJob(rec))
+	bare := initGitCapsule(t, r.restoredJob(rec))
+	rec.RemoteURL = bare
+	writeStateFile(t, r, []*jobRecord{rec})
 	local := gitHead(t, rec.GitDir)
+	remoteBefore := gitRefOrEmpty(bare)
 
-	if err := r.Restart(context.Background()); err != nil {
-		t.Fatalf("Restart must survive an unreachable aihub per record: %v", err)
-	}
-	waitDead(t, pid) // orphans reaped before anything else
-	if ji, ok := r.Info(wi); !ok || ji.State != StateRecovering || !ji.AwaitingHub {
-		t.Fatalf("the deferred job = %+v (ok=%v), want RECOVERING awaiting the hub", ji, ok)
+	within(t, 5*time.Second, "Restart against an unreachable aihub", func() {
+		if err := restartSettled(t, r); err != nil {
+			t.Errorf("Restart must survive an unreachable aihub: %v", err)
+		}
+	})
+	waitDead(t, pid)                  // the crash orphans are reaped whatever the hub answers
+	time.Sleep(80 * time.Millisecond) // several retry rounds against the dead hub
+	if ji, ok := r.Info(wi); !ok || ji.State != StateRunning || ji.Agent != nil {
+		t.Fatalf("the unverified record = %+v (ok=%v), want kept, no agent", ji, ok)
 	}
 	if recs := loadRecords(t, r); len(recs) != 1 || recs[0].SessionID != rec.SessionID {
 		t.Fatalf("the record (the only copy of the secret) must be kept, got %+v", recs)
 	}
-	time.Sleep(60 * time.Millisecond) // several retry rounds against the dead hub
-	if sp.callCount() != 0 || hub.endCount() != 0 {
-		t.Fatalf("an unreachable hub must decide nothing: %d spawns, %d ends", sp.callCount(), hub.endCount())
+	if sp.callCount() != 0 || hub.endCount() != 0 || gitRefOrEmpty(bare) != remoteBefore {
+		t.Fatalf("an unreachable hub must decide nothing: %d spawns, %d ends, pushed=%v", sp.callCount(), hub.endCount(), gitRefOrEmpty(bare) != remoteBefore)
 	}
 	assertNoRT(t, toOB)
 
-	// aihub answers: the deferred verify matches and the WI resumes.
+	// aihub answers: the verify matches and the WI resumes.
 	hub.mu.Lock()
 	delete(hub.lookupErr, wi)
 	hub.mu.Unlock()
-	waitFor(t, "the deferred verify to resume the work item", func() bool {
+	waitFor(t, "the verify to resume the work item", func() bool {
 		ji, ok := r.Info(wi)
 		return ok && ji.State == StateRunning && ji.Agent != nil
 	})
-	waitRetryIdle(t, r)
 	if hub.endCount() != 0 {
 		t.Fatalf("the resume must not close the session, got %+v", hub.lastEnd())
 	}
-	if ji, _ := r.Info(wi); ji.CapsuleDir != rec.CapsuleDir || ji.SessionID != rec.SessionID || ji.AwaitingHub {
+	if ji, _ := r.Info(wi); ji.CapsuleDir != rec.CapsuleDir || ji.SessionID != rec.SessionID {
 		t.Fatalf("the WI must resume in its own capsule under its own session, got %+v", ji)
 	}
 	if out, err := exec.Command("git", "--git-dir", rec.GitDir, "cat-file", "-e", local).CombinedOutput(); err != nil {
@@ -489,13 +491,18 @@ func TestRestartVerifyOutageKeepsRecordAndResumes(t *testing.T) {
 	if m, _ := filepath.Glob(rec.CapsuleDir + ".quarantined.*"); len(m) != 0 {
 		t.Fatalf("the capsule must not be quarantined: %v", m)
 	}
-	var kinds []protocol.RTMsgKind
-	for len(kinds) < 2 {
-		kinds = append(kinds, recvRT(t, toOB).Kind)
+	if m := recvRT(t, toOB); m.Kind != protocol.RTRecovered || m.WorkItem != wi {
+		t.Fatalf("observe must be handed the resumed job (RTRecovered), got %+v", m)
 	}
-	if kinds[len(kinds)-1] != protocol.RTStarted {
-		t.Fatalf("observe must be handed the late-resumed job (RTStarted last), got %v", kinds)
+}
+
+// gitRefOrEmpty answers the bare repo's main head ("" when absent).
+func gitRefOrEmpty(bare string) string {
+	out, err := exec.Command("git", "--git-dir", bare, "rev-parse", "--verify", "--quiet", "refs/heads/main").Output()
+	if err != nil {
+		return ""
 	}
+	return strings.TrimSpace(string(out))
 }
 
 // A typed refusal of the restart verify (4xx) is the hub's answer, not an
@@ -510,7 +517,7 @@ func TestRestartVerifyRefusedParksBlocked(t *testing.T) {
 	rec := matrixRecord(r, wi, pid, startedAt)
 	writeStateFile(t, r, []*jobRecord{rec})
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	waitDead(t, pid)
@@ -545,7 +552,7 @@ func TestRestartBlockedReapsJournaledOrphansOnly(t *testing.T) {
 	writeJournalPID(t, rec.CapsuleDir, pid, startedAt)
 	writeStateFile(t, r, []*jobRecord{rec})
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	waitDead(t, pid)

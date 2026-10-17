@@ -1333,6 +1333,19 @@ func IsTransientRemoteFailure(err error) bool {
 	return false
 }
 
+// IsCredentialRefused reports a remote git call the git face refused for
+// its credential (HTTP 401/403 — for a session-scoped credential: the
+// session no longer holds the work item). Matches git's C-locale output.
+func IsCredentialRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Authentication failed") ||
+		strings.Contains(msg, "returned error: 401") ||
+		strings.Contains(msg, "returned error: 403")
+}
+
 // IsNonFastForward reports a push refused because the remote ref is not an
 // ancestor of the pushed commit. It matches git's C-locale output
 // ("! [rejected] HEAD -> main (non-fast-forward)" / "(fetch first)"), so

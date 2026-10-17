@@ -20,7 +20,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -632,21 +631,17 @@ func (d *Daemon) dropReplay(e qEntry, reason string) {
 
 // replaySubmitQueue re-enqueues the submits the previous process accepted
 // but never started (v2 §5). It runs strictly after rt.Restart (which
-// replayed the B1 claiming journal), before the face serves:
-//   - the WI is read from aihub first: anything but queued (claimed
-//     elsewhere, terminal, paused, blocked) is dropped;
-//   - a WI the runtime already holds (the journal replay adopted it, or a
-//     parked record) is dropped — never claimed twice;
-//   - aihub unreachable: the entry stays queued (the claim CAS is the
-//     authority and a refused start lands a submit_rejected event).
+// seeded the B1 claiming journal's starts), before the face serves, and
+// asks aihub nothing:
+//   - a WI the runtime already holds as a record is dropped; one whose
+//     claiming-journal start is still being replayed is kept — its Start
+//     queues behind the replay in the work item's runtime actor and is
+//     dropped there if the replay adopted it (startEntry) — never claimed
+//     twice;
+//   - every other entry is enqueued: the claim's own probe and the hub's
+//     CAS decide it (a refused start lands a submit_rejected event).
 func (d *Daemon) replaySubmitQueue() {
 	entries := d.loadPersistedQueue()
-	// The restart reconciliation's wait ran out (aihub hung): the per-entry
-	// "still queued?" probe would hold the socket on the same hub. Skip it —
-	// the entries are enqueued, their Starts answer DAEMON-503 until the
-	// reconciliation finished, and the claim's own probe and the hub's CAS
-	// decide them then.
-	probe := !d.rt.Reconciling()
 	var keep []qEntry
 	for i, e := range entries {
 		if e.WorkItemID == "" {
@@ -660,15 +655,9 @@ func (d *Daemon) replaySubmitQueue() {
 			d.dropReplay(e, "auto is off on this machine (only explicit pf submit replays)")
 			continue
 		}
-		if _, live := d.rt.Info(e.WorkItemID); live {
+		if ji, live := d.rt.Info(e.WorkItemID); live && ji.State != runtime.StateClaiming {
 			d.dropReplay(e, "the work item is already held by this daemon (claiming-journal replay or kept record)")
 			continue
-		}
-		if probe {
-			if item, err := d.hub.GetWorkItem(e.WorkItemID); err == nil && item != nil && item.Status != api.StatusQueued {
-				d.dropReplay(e, fmt.Sprintf("aihub shows the work item %s, no longer queued", item.Status))
-				continue
-			}
 		}
 		crashpoint.At("queue.replay:" + strconv.Itoa(i))
 		keep = append(keep, e)

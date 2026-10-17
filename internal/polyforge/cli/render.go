@@ -409,11 +409,7 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 				origin += ":" + j.Origin.ChatID
 			}
 		}
-		status := j.Status
-		if j.AwaitingHub {
-			status += " (awaiting aihub)"
-		}
-		row := []string{api.DisplayName(j.Slug, j.WorkItemID), status, sess, spawn, pid, question, stepAge, lastWork}
+		row := []string{api.DisplayName(j.Slug, j.WorkItemID), j.Status, sess, spawn, pid, question, stepAge, lastWork}
 		if showCandidate {
 			row = append(row, orDash(j.Candidate))
 		}

@@ -72,10 +72,6 @@ type statusJob struct {
 	// runs. The attention face (D9) derives the terminal decision
 	// classes from it.
 	StopReason string `json:"stop_reason,omitempty"`
-	// AwaitingHub: the restart-time session verify could not reach aihub
-	// and is being retried — a RECOVERING job waiting for the hub, not an
-	// ordinary recovery.
-	AwaitingHub bool `json:"awaiting_hub,omitempty"`
 }
 
 type queueStats struct {
@@ -523,20 +519,12 @@ func (d *Daemon) resumePausedRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	canonical := d.canonWI(wi)
 	d.rt.NoteAlias(wi, canonical)
+	// the pause close released the job's observe monitor; the resumed
+	// derivation's RTRecovered rebuilds it (the bridge)
 	outcome, err := d.rt.ResumePaused(d.runCtx, canonical)
 	if err != nil {
 		writeErrOf(w, err)
 		return
-	}
-	if outcome == runtime.ResumeAttached {
-		// the pause close released the job's observe monitor; the
-		// in-place resume rebuilds it (the same re-attachment a restart
-		// does for its recovered jobs) so the QUESTION column, the M4
-		// revalidation and the watch faces all come back with the
-		// continuation.
-		if ji, live := d.rt.Info(canonical); live {
-			d.reattachJob(ji)
-		}
 	}
 	writeJSON(w, http.StatusOK, resumePausedResponse{
 		Resumed: outcome == runtime.ResumeAttached, WorkItemID: canonical, Outcome: outcome,
@@ -544,10 +532,10 @@ func (d *Daemon) resumePausedRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// pause / wrap: the CLI close paths. Both pass the seal guard; the loser
-// of a race between two closes answers DAEMON-409, and a close
-// that finds the work item already terminal answers gracefully (the
-// arbitration's idempotency contract).
+// pause / wrap: the CLI close paths. A close is a message of the work
+// item's runtime actor: of two racing closes the second gets the final
+// answer once the first settled, and a close that finds the work item
+// already terminal answers gracefully (the idempotency contract).
 
 // parkedWIClose handles a close that finds no local job because the
 // workflow is parked blocked on an honest incomplete result (polyforge#116):
@@ -570,34 +558,13 @@ func (d *Daemon) parkedWIClose(w http.ResponseWriter, wi string) bool {
 func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason string) {
 	wi = d.canonWI(wi) // a slug spelling closes the canonical job (F2)
 	ji, ok := d.rt.Info(wi)
-	if !ok {
-		if d.parkedWIClose(w, wi) {
-			return
-		}
-		if st, terr := d.terminalOf(wi); terr == nil {
-			writeJSON(w, http.StatusOK, closeResponse{
-				WorkItemID: wi, Outcome: "already_terminal", Status: st,
-			})
-			return
-		}
-		if d.rt.Busy(wi) {
-			// an operation holds the work item's lock with no job in the
-			// table yet — a start on its claim's hub calls: nothing to
-			// close until its CLAIMING placeholder exists
-			writeErr(w, api.ErrDaemonConflict, "a start of this work item is under way (its claim's hub calls are in flight); retry once it settles")
-			return
-		}
-		writeErr(w, api.ErrDaemonNotFound, "no local job for "+wi+" on this daemon")
+	if !ok && !d.rt.Busy(wi) {
+		d.noJobClose(w, wi)
 		return
 	}
-	if ji.AwaitingHub {
-		writeErr(w, api.ErrDaemonConflict, "work item is waiting for aihub: the restart could not verify its session and keeps retrying — it resumes (or closes) once aihub answers; retry then")
-		return
-	}
-	if ji.State == runtime.StateSealing || ji.State == runtime.StateRecovering {
-		writeErr(w, api.ErrDaemonConflict, "work item is "+string(ji.State)+"; a close is already in progress")
-		return
-	}
+	// (a start of the work item still on its claim's hub calls has no job
+	// yet: the close queues behind it in the runtime and answers once it
+	// settled.)
 	// Finding 2 (v1.5 review): a repeat pause of a RETAINED paused job is
 	// the graceful idempotency answer, not a conflict — the close already
 	// happened and the record is exactly where the contract wants it.
@@ -607,11 +574,6 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 		})
 		return
 	}
-	if !d.claimSeal(wi) {
-		writeErr(w, api.ErrDaemonConflict, "a close is already in progress for this work item")
-		return
-	}
-	defer d.releaseSeal(wi)
 	// The agent's death in this close is expected: arm the monitor's
 	// suppression BEFORE the teardown starts, so a fast exit poll can
 	// never win the race against the RTFinished teardown and journal a
@@ -621,6 +583,11 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 	d.obs.MarkClosing(wi)
 	if err := d.rt.Stop(ctx, wi, reason); err != nil {
 		graceful, ae := d.mapCloseErr(err)
+		if graceful && !ok {
+			// the operation it queued behind left no job here
+			d.noJobClose(w, wi)
+			return
+		}
 		if graceful {
 			writeJSON(w, http.StatusOK, closeResponse{WorkItemID: wi, Slug: ji.Slug, Outcome: "already_terminal"})
 			return
@@ -631,6 +598,21 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 	writeJSON(w, http.StatusOK, closeResponse{
 		WorkItemID: wi, Slug: ji.Slug, Outcome: "sealed", Reason: reason,
 	})
+}
+
+// noJobClose answers a close that finds no local job: a work item parked
+// blocked, one already terminal at the hub, or none held here (404).
+func (d *Daemon) noJobClose(w http.ResponseWriter, wi string) {
+	if d.parkedWIClose(w, wi) {
+		return
+	}
+	if st, terr := d.terminalOf(wi); terr == nil {
+		writeJSON(w, http.StatusOK, closeResponse{
+			WorkItemID: wi, Outcome: "already_terminal", Status: st,
+		})
+		return
+	}
+	writeErr(w, api.ErrDaemonNotFound, "no local job for "+wi+" on this daemon")
 }
 
 // terminalOf looks the work item up at aihub and reports its status when
@@ -708,7 +690,6 @@ func (d *Daemon) statusJobs() ([]statusJob, int) {
 			AgentPID:           ji.AgentPID,
 			Origin:             ji.Origin,
 			StopReason:         ji.StopReason,
-			AwaitingHub:        ji.AwaitingHub,
 		}
 		if pi, ok := pending[ji.WorkItem]; ok {
 			sj.QuestionID = pi.QuestionID

@@ -1,18 +1,19 @@
 package daemon
 
-// close_during_claim_test.go — a wrap or pause of a work item whose start
-// is still on its claim's hub calls (no CLAIMING placeholder yet) answers
-// the in-progress conflict, not "no local job".
+// close_during_claim_test.go — a wrap of a work item whose start is still
+// on its claim's hub calls (no CLAIMING placeholder yet) queues behind the
+// start and answers its final outcome: the claimed job is sealed once.
 
 import (
-	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 )
 
-func TestCloseDuringClaimHubCallIsConflict(t *testing.T) {
+func TestCloseDuringClaimHubCallGetsTheFinalAnswer(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	const wi = "wi_close_claiming"
 	release := make(chan struct{})
@@ -41,19 +42,31 @@ func TestCloseDuringClaimHubCallIsConflict(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("the requeued start never reached its journal verify")
 	}
-	for _, close := range []struct {
-		name string
-		do   func() error
-	}{
-		{"wrap", func() error { _, err := td.client.Wrap(wi, ""); return err }},
-		{"pause", func() error { _, err := td.client.Pause(wi); return err }},
-	} {
-		err := close.do()
-		var ae *api.Error
-		if !errors.As(err, &ae) || ae.Code != api.ErrDaemonConflict {
-			t.Fatalf("%s during the claim's hub call = %v, want DAEMON-409", close.name, err)
+	wrapped := make(chan error, 1)
+	go func() {
+		raw, err := td.client.Wrap(wi, "")
+		if err == nil && !strings.Contains(string(raw), `"outcome":"sealed"`) {
+			err = fmt.Errorf("wrap answer %s, want sealed", raw)
 		}
+		wrapped <- err
+	}()
+	// the wrap is not refused while the claim's verify hangs
+	select {
+	case err := <-wrapped:
+		t.Fatalf("wrap answered while the claim's hub call hangs: %v", err)
+	case <-time.After(200 * time.Millisecond):
 	}
 	close(release)
-	td.waitLive(t, wi)
+	select {
+	case err := <-wrapped:
+		if err != nil {
+			t.Fatalf("wrap queued behind the claim: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the wrap never got its answer once the claim settled")
+	}
+	waitGone(t, td, wi)
+	if e := td.hub.lastEnd(); td.hub.endCount() != 1 || e.Status != api.StatusWrapped {
+		t.Fatalf("SessionEnds = %d (last %+v), want the one wrapped close", td.hub.endCount(), e)
+	}
 }

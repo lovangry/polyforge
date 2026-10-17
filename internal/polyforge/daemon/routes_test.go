@@ -9,6 +9,7 @@ package daemon
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -129,22 +130,29 @@ func TestCloseArbitration(t *testing.T) {
 		wrapDone <- err
 	}()
 	waitState(t, td2, "wi_d", "sealing")
-	for name, call := range map[string]func() error{
-		"wrap":  func() error { _, err := td2.client.Wrap("wi_d", "wrap"); return err },
-		"pause": func() error { _, err := td2.client.Pause("wi_d"); return err },
+	// a concurrent close of the same work item queues behind the first
+	// and gets the final answer once it settled: already terminal
+	late := map[string]chan error{"wrap": make(chan error, 1), "pause": make(chan error, 1)}
+	for name, call := range map[string]func() (json.RawMessage, error){
+		"wrap":  func() (json.RawMessage, error) { return td2.client.Wrap("wi_d", "wrap") },
+		"pause": func() (json.RawMessage, error) { return td2.client.Pause("wi_d") },
 	} {
-		err := call()
-		if err == nil {
-			t.Fatalf("concurrent %s during the CLI close succeeded; want DAEMON-409", name)
-		}
-		var ae *api.Error
-		if !errors.As(err, &ae) || ae.Code != api.ErrDaemonConflict {
-			t.Fatalf("concurrent %s error = %v, want DAEMON-409", name, err)
-		}
+		go func() {
+			raw, err := call()
+			if err == nil && !strings.Contains(string(raw), `"outcome":"already_terminal"`) {
+				err = fmt.Errorf("answer %s, want already_terminal", raw)
+			}
+			late[name] <- err
+		}()
 	}
 	close(td2.hub.blockEnd)
 	if err := <-wrapDone; err != nil {
 		t.Fatalf("CLI wrap winner failed: %v", err)
+	}
+	for name, ch := range late {
+		if err := <-ch; err != nil {
+			t.Fatalf("concurrent %s during the CLI close: %v", name, err)
+		}
 	}
 	waitGone(t, td2, "wi_d")
 	if td2.hub.endCount() != 1 {

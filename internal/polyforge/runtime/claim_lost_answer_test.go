@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 )
@@ -113,11 +114,14 @@ func TestClaimTypedRefusalClearsJournal(t *testing.T) {
 }
 
 // The restart replay: a claim replay whose answer is lost keeps the
-// entry for the next replay; the next restart adopts.
+// entry, and the work item's actor retries until it adopts the journaled
+// session with the same key.
 func TestJournalReplayTransportErrorKeepsEntry(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
+	r.cfg.EndRetryBase = 10 * time.Millisecond
+	r.cfg.EndRetryMax = 20 * time.Millisecond
 	const wi = "wi_b1replay"
 	session, key := fakeSession(wi), randomKey()
 	if err := r.noteClaiming(wi, session, key, nil); err != nil {
@@ -127,13 +131,15 @@ func TestJournalReplayTransportErrorKeepsEntry(t *testing.T) {
 	hub.claimFaults = []claimFault{{err: errTransport}}
 
 	replayClaims(t, r)
-	if r.loadClaiming()[wi] == nil {
-		t.Fatal("a transport error on the claim replay must keep the journal entry")
-	}
-	replayClaims(t, r)
 	t.Cleanup(func() { terminateJobAgent(r, wi) })
 	if ji, ok := r.Info(wi); !ok || ji.SessionID != session {
-		t.Fatalf("the second replay must adopt the journaled session, job = %+v (ok=%v)", ji, ok)
+		t.Fatalf("the retried replay must adopt the journaled session, job = %+v (ok=%v)", ji, ok)
+	}
+	hub.mu.Lock()
+	claims := append([]api.SessionClaimRequest(nil), hub.claims...)
+	hub.mu.Unlock()
+	if len(claims) != 2 || claims[0].IdempotencyKey != key || claims[1].IdempotencyKey != key {
+		t.Fatalf("claims = %+v, want the lost one and its replay, both under the journaled key", claims)
 	}
 	if items := r.loadClaiming(); len(items) != 0 {
 		t.Fatalf("journal must be settled, got %+v", items)

@@ -87,7 +87,7 @@ func restartOver(t *testing.T, r *Runtime, wi, sess string, endErr error, events
 	}
 	sp2 := &scriptedSpawner{}
 	r2 := New(cfg2, hub2, sp2, supervise.NewQueue[protocol.RTMsg](), supervise.NewQueue[protocol.OBMsg]())
-	return r2, hub2, r2.Restart(context.Background())
+	return r2, hub2, restartSettled(t, r2)
 }
 
 // TestRestartReplaysPendingFailedAndBlockedCloseOfRetainedPausedRecord:
@@ -177,7 +177,7 @@ func TestRestartPendingCloseReplayFailureKeepsRecordAndSurfaces(t *testing.T) {
 	hub2.mu.Lock()
 	delete(hub2.end, wi)
 	hub2.mu.Unlock()
-	if err := r2.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r2); err != nil {
 		t.Fatalf("retry Restart: %v", err)
 	}
 	replayed := false
@@ -235,7 +235,7 @@ func TestRestartPlainRetainedPauseIsNotReplayed(t *testing.T) {
 	hub2.hold(wi, sess, api.StatusPaused)
 	hub2.cleanPause[wi] = true
 	r2 := New(cfg2, hub2, sp, supervise.NewQueue[protocol.RTMsg](), supervise.NewQueue[protocol.OBMsg]())
-	if err := r2.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r2); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	if len(hub2.ends) != 0 {

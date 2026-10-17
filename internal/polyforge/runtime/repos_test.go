@@ -161,7 +161,7 @@ func TestRematerializePreservesRepoScene(t *testing.T) {
 	// The journal replay (Restart) re-runs the start of the SAME session:
 	// the capsule husk is reused and materialize re-runs without
 	// touching repos/app.
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart (journal replay): %v", err)
 	}
 	if b, err := os.ReadFile(filepath.Join(repoDir, "dirty.txt")); err != nil || string(b) != "uncommitted\n" {

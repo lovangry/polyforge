@@ -59,7 +59,7 @@ type Config struct {
 	// (session.go). The daemon binds the shared aihub client; nil — the
 	// unit-test default — disables revalidation entirely.
 	SessionVerify SessionVerifier
-	// SessionRevalidateEvery is the M4 cadence (0 = the default ~5min;
+	// SessionRevalidateEvery is the M4 cadence (0 = the default 30s;
 	// negative = disabled).
 	SessionRevalidateEvery time.Duration
 

@@ -19,6 +19,7 @@ package observe
 //     the shared client) simply skips the whole mechanism.
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
@@ -207,3 +209,35 @@ func TestRevalidateSkipsWithoutSessionID(t *testing.T) {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+// TestRefusedPushRevalidatesAtOnce: a boundary push the git face refuses
+// for its credential re-runs the session check at the next tick instead
+// of waiting out the revalidation interval, so a work item another
+// session took over stops at once (OBSuperseded).
+func TestRefusedPushRevalidatesAtOnce(t *testing.T) {
+	var ours atomic.Bool
+	ours.Store(true)
+	verifier := &fakeVerifier{ans: func(wi, sid string) (*api.SessionVerifyResponse, error) {
+		return &api.SessionVerifyResponse{WorkItemID: wi, Matches: ours.Load(), Status: "running", CurrentFingerprint: "ab12cd34ef56aa00"}, nil
+	}}
+	h := newFakeHandle("att_s")
+	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
+		c.revalidate = time.Hour
+		c.verify = verifier
+		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
+			return "", false, gitops.PushTimings{}, errors.New("git push: exit status 128: fatal: Authentication failed for 'https://hub/git/wi_test.git/'")
+		}
+	})
+	m.rtQ.Push(Attach{
+		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", SpawnN: 1, SessionID: "sess_secret_r"},
+		Handle: h,
+		WI:     m.wi,
+	})
+	soon(t, 2*time.Second, "the first revalidation", func() bool { return verifier.calls.Load() == 1 })
+	ours.Store(false) // taken over at the hub; the next check is an hour away
+	expectNoOB(t, ob, 100*time.Millisecond, "an OB message before any push")
+	m.writeExec(t, 3, "code")
+	if msg := waitOB(t, ob, "OBSuperseded after the refused push"); msg.Kind != protocol.OBSuperseded {
+		t.Fatalf("OB message: %+v", msg)
+	}
+}

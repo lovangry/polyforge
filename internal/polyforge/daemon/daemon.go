@@ -134,10 +134,6 @@ type Config struct {
 	DrainInterval time.Duration // drain wave-fetch period (5s)
 	DispatchTick  time.Duration // dispatcher/backfill period (200ms)
 	ExitPoll      time.Duration // adapter exit-poll period (200ms)
-	// RestartHubWait is how long one hub call of the restart
-	// reconciliation may go unanswered before the socket serves anyway
-	// (0 = the runtime's default, 5s; see runtime.Config.RestartHubWait).
-	RestartHubWait time.Duration
 }
 
 // SupervisionConfig is the supervisor's global-default surface
@@ -161,7 +157,7 @@ type SupervisionConfig struct {
 	// (default 1m).
 	ModelErrorGrace time.Duration
 	// SessionRevalidateEvery is the M4 periodic session-revalidation
-	// cadence (0 = observe's default 5m; negative = disabled).
+	// cadence (0 = observe's default 30s; negative = disabled).
 	SessionRevalidateEvery time.Duration
 }
 
@@ -214,16 +210,11 @@ type Daemon struct {
 	obMsgs   *supervise.Queue[protocol.OBMsg]
 	attachCh *supervise.Queue[observe.Attach]
 	// attachedMu guards attached: the work items whose monitor-building
-	// RTStarted attachment went to the observe lane (the bridge, a
-	// re-attachment) with no RTFinished since — their monitor exists, or
-	// is about to once observe drains attachCh.
+	// RTStarted attachment went to the observe lane (the bridge) with no
+	// RTFinished since — their monitor exists, or is about to once
+	// observe drains attachCh.
 	attachedMu sync.Mutex
 	attached   map[string]bool
-
-	// sealGuard serializes the close paths (CLI wrap/pause): exactly one
-	// close may run per work item; the late arrival answers DAEMON-409.
-	sealMu   sync.Mutex
-	sealedWI map[string]bool
 
 	runCtx    context.Context // the loops' context; the shutdown cancels it
 	cancelRun context.CancelFunc
@@ -330,7 +321,6 @@ func New(cfg Config) (*Daemon, error) {
 		OperatorAgentDir:         cfg.OperatorAgentDir,
 		OperatorAgentDirExplicit: cfg.OperatorAgentDirExplicit,
 		EnvSecrets:               []string{cfg.APIKey},
-		RestartHubWait:           cfg.RestartHubWait,
 	}
 	rtCfg.FillDefaults()
 	if err := rtCfg.SyncStepAgentDir(); err != nil {
@@ -399,7 +389,6 @@ func New(cfg Config) (*Daemon, error) {
 		rtMsgs:   supervise.NewQueue[protocol.RTMsg](),
 		obMsgs:   supervise.NewQueue[protocol.OBMsg](),
 		attachCh: supervise.NewQueue[observe.Attach](),
-		sealedWI: map[string]bool{},
 		adapters: map[string]*agentAdapter{},
 		shutDone: make(chan struct{}),
 		sup:      supervise.NewRegistry(),
@@ -430,7 +419,7 @@ func New(cfg Config) (*Daemon, error) {
 		Resolve: d.resolveWI,
 		// M4 wiring: the periodic session revalidation rides the monitor
 		// tick against the shared aihub client (fencing-on-use discovery —
-		// a superseded daemon learns within ~5min even with zero push
+		// a superseded daemon learns within ~30s even with zero push
 		// traffic; unit-tested in observe, daemon-wired here).
 		SessionVerify: cfg.Hub,
 		// the supervisor's bounds pass through; zero fields keep the
@@ -438,7 +427,7 @@ func New(cfg Config) (*Daemon, error) {
 		Registry:        d.sup,
 		ModelErrorGrace: cfg.Supervision.ModelErrorGrace,
 		DriverStall:     cfg.Supervision.StallWindow,
-		// M4 cadence rides the same pass-through (0 = the 5m default,
+		// M4 cadence rides the same pass-through (0 = the 30s default,
 		// negative = disabled).
 		SessionRevalidateEvery: cfg.Supervision.SessionRevalidateEvery,
 	})
@@ -557,35 +546,22 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go d.obs.Run(d.runCtx)
 	go d.bridge()
 
-	// Restart reconciliation (§十一): every recorded job is re-derived
-	// against aihub's own verdict — strictly after this process owns
-	// the data dir and the socket (no second process may push the same
-	// work items), and before the face serves a single request: a client
-	// that reaches the daemon must see a reconciled runtime. Only a hung
-	// hub cuts the wait short (one reconciliation hub call unanswered for
-	// RestartHubWait): the records still unverified are then shown waiting
-	// for aihub, refuse their closes meanwhile, and the runtime finishes
-	// them (announcing what it brings back) once the hub answers.
+	// Restart (§十一): every recorded job and claiming-journal entry is
+	// handed to its runtime actor — strictly after this process owns the
+	// data dir and the socket (no second process may push the same work
+	// items). It asks aihub nothing, so the face serves at once; each
+	// actor reconciles its work item (and retries the hub) on its own.
 	if err := d.rt.Restart(d.runCtx); err != nil {
-		// The runtime could not be reconciled as a whole (a missing
-		// capsule or an unmapped project is NOT such a case — v2-converge
-		// §6 blocks only that work item at aihub and Restart returns nil).
-		// Stop without serving or persisting: state.json stays the
-		// pre-reconciliation truth for the next start, after the manual
+		// state.json is unreadable: stop without serving or persisting,
+		// so it stays the truth for the next start after the manual
 		// remediation the error names; the process exits non-zero.
 		d.closeFace()
 		d.cancelRun()
 		d.rt.Close()
-		for _, ji := range d.rt.List() {
-			if ji.Agent != nil {
-				_ = ji.Agent.Terminate(10 * time.Second)
-			}
-		}
 		return &needsOperatorError{fmt.Errorf("restart reconciliation failed: %w", err)}
 	}
-	d.reattachRecovered()
-	// v2 §5/§6: replay the persisted submit queue (after the B1 claiming
-	// journal replay inside Restart, so a WI is never claimed twice) and
+	// v2 §5/§6: replay the persisted submit queue (after Restart seeded
+	// the claiming journal's starts, so a WI is never claimed twice) and
 	// tell every recovered/parked WI the daemon restarted.
 	d.replaySubmitQueue()
 	d.announceRestart()
@@ -667,42 +643,6 @@ func (d *Daemon) closeFace() {
 	}
 }
 
-// reattachRecovered synthesizes the observe attachments for jobs the
-// restart reconciliation re-derived: their RTRecovered messages found
-// no live monitor (a fresh daemon has none), so the daemon re-attaches
-// them through the same RTStarted shape observe builds monitors on.
-func (d *Daemon) reattachRecovered() {
-	for _, ji := range d.rt.List() {
-		if !d.rt.RestartAttach(ji.WorkItem) {
-			continue // the runtime's reconciliation lane announces it itself
-		}
-		d.reattachJob(ji)
-	}
-}
-
-// reattachJob synthesizes ONE job's observe attachment through the
-// RTStarted shape. A retained-paused job's monitor was released at the
-// pause close (RTFinished), and the in-place resume's RTRecovered
-// alone cannot rebuild it — observe drops a recovered message for an
-// unmonitored work item (a fresh daemon's restart reconciliation has
-// the same shape, which is why reattachRecovered exists). The monitor
-// this creates reads the capsule's execution.json itself, so the
-// pending-question projection (and the M4 revalidation) come back with
-// it.
-func (d *Daemon) reattachJob(ji runtime.JobInfo) {
-	if ji.Agent == nil {
-		return
-	}
-	d.noteAttached(ji.WorkItem, true)
-	d.attachCh.Push(d.buildAttach(protocol.RTMsg{
-		Kind: protocol.RTStarted, SpawnN: ji.SpawnN,
-		WorkItem: ji.WorkItem, AgentPID: ji.AgentPID,
-		// the in-process secret re-arms the M4 revalidation for
-		// reattached jobs (it rides RTMsg, never a log surface).
-		SessionID: ji.SessionID,
-	}, ji))
-}
-
 // buildAttach turns one runtime snapshot into an observe attachment:
 // the protocol message plus the agent handle adapted to observe's face.
 func (d *Daemon) buildAttach(msg protocol.RTMsg, ji runtime.JobInfo) observe.Attach {
@@ -765,23 +705,22 @@ func (d *Daemon) bridge() {
 			if !ok {
 				break
 			}
-			if msg.Kind == protocol.RTRecovered && !d.isAttached(msg.WorkItem) {
-				if _, monitored := d.obs.Progress(msg.WorkItem); !monitored {
-					// a recovery of a job no monitor watches yet, nor one
-					// whose RTStarted attachment is still on its way —
-					// the restart reconciliation's, a deferred verify's, a
-					// live resume's: its RTStarted attachment (the startup
-					// re-attachment, the runtime's own announcement, the
-					// resume route) builds the monitor; observe would only
-					// log the message as dropped
-					continue
-				}
-			}
 			at := observe.Attach{Msg: msg}
 			if msg.Kind == protocol.RTStarted || msg.Kind == protocol.RTRecovered {
-				if ji, live := d.rt.Info(msg.WorkItem); live && ji.Agent != nil {
-					at = d.buildAttach(msg, ji)
-					if msg.Kind == protocol.RTStarted {
+				ji, live := d.rt.Info(msg.WorkItem)
+				live = live && ji.Agent != nil
+				if msg.Kind == protocol.RTRecovered && !d.isAttached(msg.WorkItem) {
+					if !live {
+						continue // nothing to watch: observe would only log it dropped
+					}
+					// a recovery no monitor watches — a restart's, or a
+					// paused record's resume (the pause released its
+					// monitor): it builds the monitor like a start
+					at.Msg.Kind = protocol.RTStarted
+				}
+				if live {
+					at = d.buildAttach(at.Msg, ji)
+					if at.Msg.Kind == protocol.RTStarted {
 						d.noteAttached(msg.WorkItem, true)
 					}
 				}
@@ -919,8 +858,8 @@ func (d *Daemon) dispatch() {
 		if e == nil {
 			return
 		}
-		// A claim that races the shutdown latch defers itself in the
-		// runtime (BeginShutdown); nothing here waits for it.
+		// A claim that races the shutdown defers itself in the runtime;
+		// nothing here waits for it.
 		go d.startEntry(*e)
 	}
 }
@@ -960,7 +899,12 @@ func (d *Daemon) startEntry(e qEntry) {
 		}
 		return
 	}
-	if err != nil {
+	if errors.As(err, &ae) && ae.Code == api.ErrDaemonConflict {
+		// the work item is already held here: a replayed submit whose
+		// claiming-journal start the runtime adopted first
+		// (replaySubmitQueue)
+		d.dropReplay(e, "the work item is already held by this daemon (claiming-journal replay or kept record)")
+	} else if err != nil {
 		fmt.Fprintf(os.Stderr, "daemon: start %s failed: %v\n", e.WorkItemID, err)
 		// The submit was answered `accepted`: record the refusal as a
 		// durable event on the WI so watchers can surface it (v2 §5).
@@ -1157,25 +1101,6 @@ func (d *Daemon) listenUDS() (net.Listener, error) {
 	// attribute the shutdown to the dialing process. The wrapper is
 	// transparent otherwise; closeFace closes it like any listener.
 	return &credListener{Listener: lst}, nil
-}
-
-// ---------------------------------------------------------------------------
-// Seal guard (the wrap dual-path arbitration).
-
-func (d *Daemon) claimSeal(wi string) bool {
-	d.sealMu.Lock()
-	defer d.sealMu.Unlock()
-	if d.sealedWI[wi] {
-		return false
-	}
-	d.sealedWI[wi] = true
-	return true
-}
-
-func (d *Daemon) releaseSeal(wi string) {
-	d.sealMu.Lock()
-	delete(d.sealedWI, wi)
-	d.sealMu.Unlock()
 }
 
 // terminalStatus reports whether an aihub status is terminal for the

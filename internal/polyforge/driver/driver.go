@@ -565,6 +565,7 @@ func (d *Driver) settle(stepID string, n int64, res *StepResult, run StepRun) (s
 		WallMs:                  d.takeUnbooked(stepID),
 		TestFilesCommit:         d.testFilesStamp(res),
 		RebaselineAuthoredTests: res.rebaseline,
+		VerifiedHeads:           d.verifiedHeads(stepID, res),
 	}); err != nil {
 		return true, fmt.Errorf("driver: step %s result transition failed: %w", stepID, err)
 	}
@@ -1046,6 +1047,16 @@ func (d *Driver) testFilesStamp(res *StepResult) map[string]any {
 		return nil
 	}
 	return heads
+}
+
+// verifiedHeads reads the task repos' HEADs a completed verification
+// result records (git I/O, so outside the transition's lock); nil
+// otherwise.
+func (d *Driver) verifiedHeads(stepID string, res *StepResult) map[string]any {
+	if stepID != verificationStepID || res.Outcome != OutcomeCompleted || d.wi.CapsuleDir == "" {
+		return nil
+	}
+	return repoHeads(filepath.Join(d.wi.CapsuleDir, capsule.DirRepos))
 }
 
 // parseOutput coerces a result's output payload to a JSON object map

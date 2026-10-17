@@ -32,10 +32,10 @@ type JobState string
 //	CLAIMING → RUNNING                        (the claim's agent started)
 //
 // CLAIMING is the in-memory placeholder of a start whose claim landed and
-// whose capsule clone/materialize runs with no lock held.
-// It occupies the work item's slot and refuses a second
-// start, but it is never persisted: the claiming journal is its durable
-// form, and every way out of it other than RUNNING drops the record.
+// whose capsule clone/materialize is still running on its actor. It
+// shows in status and lets a close cancel the clone, but it is never
+// persisted: the claiming journal is its durable form, and every way out
+// of it other than RUNNING drops the record.
 //
 // Every other edge is illegal and transition() refuses it.
 const (
@@ -196,11 +196,6 @@ type jobRecord struct {
 	// restart too — closes without pushing again. Absent (older records)
 	// = false: the retry tries the push.
 	EndPushGaveUp bool `json:"end_push_gave_up,omitempty"`
-	// AwaitingHub persists job.awaitingHub: the restart-time session
-	// verify could not reach aihub and is being retried. The next start
-	// verifies afresh and re-derives it (cleared once the hub answers).
-	// Absent (older records) = false.
-	AwaitingHub bool `json:"awaiting_hub,omitempty"`
 	// StepCandidates is the claim-time per-step candidate snapshot a
 	// recovery re-derivation dispatches under; kept here (daemon-private)
 	// rather than read back from the agent-writable capsule.json. Each
@@ -250,7 +245,6 @@ func (j *job) record() *jobRecord {
 		EndNote:            j.endNote,
 		EndHead:            j.endHead,
 		EndPushGaveUp:      j.endPushGaveUp,
-		AwaitingHub:        j.awaitingHub,
 		StepCandidates:     j.stepCandidates,
 	}
 }
@@ -289,7 +283,6 @@ func jobFromRecord(rec *jobRecord) *job {
 		endNote:              rec.EndNote,
 		endHead:              rec.EndHead,
 		endPushGaveUp:        rec.EndPushGaveUp,
-		awaitingHub:          rec.AwaitingHub,
 		stepCandidates:       rec.StepCandidates,
 	}
 }

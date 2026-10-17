@@ -17,7 +17,6 @@ package runtime
 // Regression test: before the fix the no-reason seal finished wrapped.
 
 import (
-	"context"
 	"strings"
 	"testing"
 
@@ -49,7 +48,7 @@ func TestRestartSealingWithoutRecordedReasonFinishesBlocked(t *testing.T) {
 	// drop the in-memory seed so Restart owns the job
 	r.dropJob(j)
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	waitDead(t, pid)
