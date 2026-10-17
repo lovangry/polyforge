@@ -387,52 +387,32 @@ func (m *WIManager) Get(idOrSlug string, opts GetOptions) (*api.WorkItem, error)
 	return wi, nil
 }
 
-func (m *WIManager) load(id string) (*api.WorkItem, error) {
+// wiSelect reads the api.WorkItem columns; scanWorkItem decodes one row
+// of it (any extra columns appended after w.closed_at land in extra).
+const wiSelect = `SELECT w.id, w.seq, w.project_id, p.name, w.goal, w.content, w.parent_id,
+	w.status, w.priority, w.milestone, w.labels, w.attrs, w.reporter, w.assignee, w.waiting_on,
+	w.bundle_name, w.created_at, w.updated_at, w.closed_at`
+
+const wiFrom = ` FROM work_items w JOIN projects p ON p.id=w.project_id`
+
+func scanWorkItem(scan func(dest ...any) error, extra ...any) (*api.WorkItem, error) {
 	var wi api.WorkItem
 	var content, parent, milestone, assignee, waitingOn, bundle, closed sql.NullString
 	var labels, attrs string
-	err := m.db.QueryRow(`SELECT w.id, w.seq, w.project_id, p.name, w.goal, w.content, w.parent_id,
-		w.status, w.priority, w.milestone, w.labels, w.attrs, w.reporter, w.assignee, w.waiting_on,
-		w.bundle_name, w.created_at, w.updated_at, w.closed_at
-		FROM work_items w JOIN projects p ON p.id=w.project_id WHERE w.id=?1`, id).
-		Scan(&wi.ID, &wi.Seq, &wi.ProjectID, &wi.ProjectName, &wi.Goal, &content, &parent,
-			&wi.Status, &wi.Priority, &milestone, &labels, &attrs, &wi.Reporter, &assignee, &waitingOn,
-			&bundle, &wi.CreatedAt, &wi.UpdatedAt, &closed)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, Fail(api.ErrCoreNotFound, "", "work item %s", id)
-	}
-	if err != nil {
+	dest := append([]any{&wi.ID, &wi.Seq, &wi.ProjectID, &wi.ProjectName, &wi.Goal, &content, &parent,
+		&wi.Status, &wi.Priority, &milestone, &labels, &attrs, &wi.Reporter, &assignee, &waitingOn,
+		&bundle, &wi.CreatedAt, &wi.UpdatedAt, &closed}, extra...)
+	if err := scan(dest...); err != nil {
 		return nil, err
 	}
 	wi.Slug = wi.ProjectName + "#" + strconv.FormatInt(wi.Seq, 10)
-	if content.Valid {
-		c := content.String
-		wi.Content = &c
-	}
-	if parent.Valid {
-		p := parent.String
-		wi.ParentID = &p
-	}
-	if milestone.Valid {
-		mi := milestone.String
-		wi.Milestone = &mi
-	}
-	if assignee.Valid {
-		a := assignee.String
-		wi.Assignee = &a
-	}
-	if waitingOn.Valid {
-		w := waitingOn.String
-		wi.WaitingOn = &w
-	}
-	if bundle.Valid {
-		b := bundle.String
-		wi.BundleName = &b
-	}
-	if closed.Valid {
-		c := closed.String
-		wi.ClosedAt = &c
-	}
+	wi.Content = nullStringPtr(content)
+	wi.ParentID = nullStringPtr(parent)
+	wi.Milestone = nullStringPtr(milestone)
+	wi.Assignee = nullStringPtr(assignee)
+	wi.WaitingOn = nullStringPtr(waitingOn)
+	wi.BundleName = nullStringPtr(bundle)
+	wi.ClosedAt = nullStringPtr(closed)
 	_ = json.Unmarshal([]byte(labels), &wi.Labels)
 	if wi.Labels == nil {
 		wi.Labels = []string{}
@@ -442,6 +422,22 @@ func (m *WIManager) load(id string) (*api.WorkItem, error) {
 		wi.Attrs = map[string]any{}
 	}
 	return &wi, nil
+}
+
+func nullStringPtr(v sql.NullString) *string {
+	if !v.Valid {
+		return nil
+	}
+	s := v.String
+	return &s
+}
+
+func (m *WIManager) load(id string) (*api.WorkItem, error) {
+	wi, err := scanWorkItem(m.db.QueryRow(wiSelect+wiFrom+` WHERE w.id=?1`, id).Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, Fail(api.ErrCoreNotFound, "", "work item %s", id)
+	}
+	return wi, err
 }
 
 // Event is one wi_events row.
@@ -565,7 +561,7 @@ func refuseBundleWithChildrenTx(q queryRower, wiID string) error {
 
 // diagnoseR2Window is the R2 bundle-PATCH gate's error face (w140). The
 // window is status==queued AND never claimed; "never claimed" uses the
-// claimTx judgment (spec Assumption 4): no live session row AND no
+// claim judgment (spec Assumption 4): no live session row AND no
 // session_claimed event — a force-end clears the session row but the
 // claim event remains, and the freeze stays. waiting_on is deliberately
 // NOT consulted: a waiting ticket inside the window still accepts the
@@ -748,9 +744,10 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 		}
 	}
 	if bp != nil {
-		// R2 window: fast-fail diagnosis on this snapshot; the guarded
-		// write below re-validates the same gates CAS-style (0 rows = the
-		// race was lost, re-diagnosed for the precise wire error).
+		// R2 window and the symmetric child rule, judged on this
+		// transaction's snapshot; the store has a single connection (Open:
+		// SetMaxOpenConns(1)), so no claim or child create interleaves
+		// before the write below.
 		if err := diagnoseR2Window(tx, id); err != nil {
 			return nil, err
 		}
@@ -768,37 +765,11 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 		args = append(args, name)
 	}
 	args = append(args, id)
-	q := `UPDATE work_items SET ` + strings.Join(sets, ",") + ` WHERE id=?`
-	if bp != nil {
-		// claimTx-style CAS guard (w140): only a queued, never-claimed row
-		// may take a bundle write, so a concurrent Claim makes THIS write
-		// a 0-row no-op instead of interleaving with it.
-		q += ` AND status='queued' AND session_hash IS NULL
-			AND (SELECT COUNT(*) FROM wi_events e
-			     WHERE e.work_item_id=work_items.id AND e.event_type='session_claimed')=0`
-		if bp.binding() {
-			// The symmetric child rule rides the same guarded write: a
-			// child that landed concurrently makes THIS write a 0-row
-			// no-op (bind-bundle vs new-child: exactly one wins, w140).
-			q += ` AND (SELECT COUNT(*) FROM work_items c WHERE c.parent_id=work_items.id)=0`
-		}
-	}
-	res, err := tx.Exec(q, args...)
+	res, err := tx.Exec(`UPDATE work_items SET `+strings.Join(sets, ",")+` WHERE id=?`, args...)
 	if err != nil {
 		return nil, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		if bp != nil {
-			if derr := diagnoseR2Window(tx, id); derr != nil {
-				return nil, derr
-			}
-			if bp.binding() {
-				if derr := refuseBundleWithChildrenTx(tx, id); derr != nil {
-					return nil, derr
-				}
-			}
-			return nil, Fail(api.ErrCoreConflict, "RACE_LOST", "state changed concurrently")
-		}
 		return nil, Fail(api.ErrCoreNotFound, "", "work item %s", id)
 	}
 	if err := appendEventTx(tx, id, Now(), "", "wi_content_updated", nil); err != nil {
@@ -883,8 +854,21 @@ func (m *WIManager) Cancel(idOrSlug string, actor string) (*api.WorkItem, error)
 // holder). Effect: status→queued, waiting_on=NULL, event wi_resumed; the
 // claim gate (unchanged: queued only) then admits the WI like any queued
 // ticket. Authorization (server layer, v2-converge §7): the WI's reporter,
-// a project maintainer, or an admin — the same gate as cancel.
+// a project maintainer, or an admin — the same gate as cancel. This is the
+// plain door: ResumeBlockedWith takes the door's options.
 func (m *WIManager) ResumeBlocked(idOrSlug string, actor string) (*api.WorkItem, error) {
+	return m.ResumeBlockedWith(idOrSlug, actor, api.ResumeBlockedRequest{})
+}
+
+// ResumeBlockedWith is ResumeBlocked with the door's options.
+// AcceptLostWork is the owner's override of the blocked seal: in the same
+// transaction the seal is cleared and a blocked_seal_abandoned event
+// records the abandoned head and machine (the event's actor and time say
+// who and when), so the claim that follows carries no seal and a
+// different machine continues from the chain aihub holds. Without it the
+// seal stands and a different machine's continue still refuses
+// (DAEMON-518).
+func (m *WIManager) ResumeBlockedWith(idOrSlug string, actor string, opts api.ResumeBlockedRequest) (*api.WorkItem, error) {
 	id, err := m.Resolve(idOrSlug)
 	if err != nil {
 		return nil, err
@@ -927,6 +911,17 @@ func (m *WIManager) ResumeBlocked(idOrSlug string, actor string) (*api.WorkItem,
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, Fail(api.ErrCoreConflict, "", "state changed concurrently")
 	}
+	if opts.AcceptLostWork {
+		if head, machine := blockedSealTx(tx, id); head != "" {
+			if err := setBlockedSealTx(tx, id, "", "", true); err != nil {
+				return nil, err
+			}
+			if err := appendEventTx(tx, id, now, actor, "blocked_seal_abandoned",
+				map[string]any{"head_sha": head, "machine_id": machine}); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if err := appendEventTx(tx, id, now, actor, "wi_resumed",
 		map[string]any{"from": api.StatusBlocked, "to": api.StatusQueued}); err != nil {
 		return nil, err
@@ -956,7 +951,7 @@ const defaultListLimit = 500
 
 // List returns work items matching the filters, newest first.
 func (m *WIManager) List(f ListFilters) ([]api.WorkItem, error) {
-	q := `SELECT w.id FROM work_items w JOIN projects p ON p.id=w.project_id WHERE 1=1`
+	q := wiSelect + wiFrom + ` WHERE 1=1`
 	var args []any
 	if f.Project != "" {
 		q += ` AND (p.name=? OR p.id=?)`
@@ -992,26 +987,15 @@ func (m *WIManager) List(f ListFilters) ([]api.WorkItem, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var ids []string
+	out := []api.WorkItem{}
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	out := make([]api.WorkItem, 0, len(ids))
-	for _, id := range ids {
-		wi, err := m.load(id)
+		wi, err := scanWorkItem(rows.Scan)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, *wi)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ package core
 import (
 	"database/sql"
 	"errors"
+	"sort"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 )
@@ -65,116 +66,87 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 		Paused:         []WIView{},
 		PendingBundles: []WIView{},
 	}
-	// Loaded per candidate below: bundle_name decides execution vs
-	// registration ticket (reference.md §2.2: the executable segments always exclude
-	// registration tickets — they cannot be claimed, #17); the child count
-	// feeds the w140 pending-bundle segment (an epic never queues).
-	rows, err := m.db.Query(`SELECT id, COALESCE(waiting_on,''), COALESCE(bundle_name,'')='',
-		(SELECT COUNT(*) FROM work_items c WHERE c.parent_id=work_items.id) FROM work_items
-		WHERE project_id=? AND status IN ('queued','running','paused')`, projectID)
+	// One read of every candidate: the WorkItem, its public session block
+	// (m4), the child count (an epic never queues, w140), the unfinished
+	// blockers flag (#161) and the frozen inventory (reference.md §2.1).
+	rows, err := m.db.Query(wiSelect+`, w.session_fingerprint, w.session_machine, w.session_started_at,
+		w.clean_pause, (SELECT COUNT(*) FROM work_items c WHERE c.parent_id=w.id),
+		EXISTS(SELECT 1 FROM wi_dependencies d JOIN work_items b ON b.id=d.blocking_wi_id
+			WHERE d.blocked_wi_id=w.id AND d.kind='blocks' AND b.status <> 'wrapped'),
+		w.repo_inventory`+wiFrom+`
+		WHERE w.project_id=? AND w.status IN ('queued','running','paused') ORDER BY w.rowid`, projectID)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	type cand struct {
-		wi           *api.WorkItem
-		view         *WIView
-		waitingOn    string
-		registration bool
-		children     int
+		view     WIView
+		children int
+		blocked  bool
+		inv      string
 	}
 	var cands []cand
 	var ids []string
 	for rows.Next() {
-		var id, waiting string
-		var registration bool
-		var children int
-		if err := rows.Scan(&id, &waiting, &registration, &children); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		ids = append(ids, id)
-		cands = append(cands, cand{waitingOn: waiting, registration: registration, children: children})
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	// One batched session-public read (m4): the running/paused segments
-	// expose their holder audit fields like every other WorkItem view.
-	sessionBlocks, err := m.db.sessionPublicBatch(ids)
-	if err != nil {
-		return nil, err
-	}
-	// One grouped derived-epic read (w140): every queue entry carries the
-	// additive derived block (parents show their child census).
-	derivedBlocks, err := m.db.derivedBatch(ids)
-	if err != nil {
-		return nil, err
-	}
-	for i := range cands {
-		wi, err := m.load(ids[i])
+		var c cand
+		var fp, machine, started, inv sql.NullString
+		wi, err := scanWorkItem(rows.Scan, &fp, &machine, &started, &c.view.CleanPause,
+			&c.children, &c.blocked, &inv)
 		if err != nil {
 			return nil, err
 		}
-		cands[i].wi = wi
-		cands[i].view = &WIView{WorkItem: *wi, SessionPublic: sessionBlocks[ids[i]], Derived: derivedBlocks[ids[i]]}
+		c.view.WorkItem = *wi
+		c.view.SessionFingerprint, c.view.SessionMachine, c.view.SessionStartedAt =
+			fp.String, machine.String, started.String
+		c.inv = inv.String
+		cands = append(cands, c)
+		ids = append(ids, wi.ID)
 	}
-	sortBy := func(list *[]WIView) {
-		// stable priority→created_at ordering
-		for i := 1; i < len(*list); i++ {
-			for j := i; j > 0 && queueLess(&(*list)[j], &(*list)[j-1]); j-- {
-				(*list)[j], (*list)[j-1] = (*list)[j-1], (*list)[j]
-			}
-		}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	// One grouped derived-epic read (w140): every queue entry carries the
+	// additive derived block (parents show their child census).
+	derived, err := m.db.derivedBatch(ids)
+	if err != nil {
+		return nil, err
 	}
 	for _, c := range cands {
-		switch c.wi.Status {
+		c.view.Derived = derived[c.view.ID]
+		waiting := c.view.WaitingOn != nil && *c.view.WaitingOn != ""
+		switch c.view.Status {
 		case api.StatusRunning:
-			q.Running = append(q.Running, *c.view)
+			q.Running = append(q.Running, c.view)
 		case api.StatusPaused:
-			q.Paused = append(q.Paused, *c.view)
+			q.Paused = append(q.Paused, c.view)
 		case api.StatusQueued:
-			if c.registration {
+			if c.view.BundleName == nil || *c.view.BundleName == "" {
 				// w140: the 待选 bundle segment (additive): a childless
 				// registration ticket that would execute if it had a
 				// bundle — the same exclusions as the executable segment
 				// (waiting_on and unfinished blocks edges). An epic
 				// (has children) never queues: it is neither executable
 				// (no bundle, #17) nor a pending-bundle candidate.
-				if c.children == 0 && c.waitingOn == "" {
-					blocked, err := m.hasUnfinishedBlockers(c.wi.ID)
-					if err != nil {
-						return nil, err
-					}
-					if !blocked {
-						q.PendingBundles = append(q.PendingBundles, *c.view)
-					}
+				if c.children == 0 && !waiting && !c.blocked {
+					q.PendingBundles = append(q.PendingBundles, c.view)
 				}
 				continue // registration tickets never execute (#17)
 			}
-			if c.waitingOn != "" {
+			if waiting || c.blocked {
 				continue // blocked-visible: not executable
 			}
-			blocked, err := m.hasUnfinishedBlockers(c.wi.ID)
+			gone, err := inventoryRepoGone(c.inv, inProject)
 			if err != nil {
 				return nil, err
 			}
-			if blocked {
-				continue
+			if !gone { // reference.md §2.1: a declared repo left the project
+				q.Items = append(q.Items, c.view)
 			}
-			gone, err := inventoryRepoGone(m.db, c.wi.ID, inProject)
-			if err != nil {
-				return nil, err
-			}
-			if gone {
-				continue // reference.md §2.1: a declared repo left the project
-			}
-			q.Items = append(q.Items, *c.view)
 		}
 	}
-	sortBy(&q.Items)
-	sortBy(&q.Running)
-	sortBy(&q.Paused)
-	sortBy(&q.PendingBundles)
+	for _, list := range [][]WIView{q.Items, q.Running, q.Paused, q.PendingBundles} {
+		sort.SliceStable(list, func(i, j int) bool { return queueLess(&list[i], &list[j]) })
+	}
 	return q, nil
 }

@@ -1511,8 +1511,8 @@ func (r *Runtime) verifySealedHead(j *job, c api.SessionClaim) error {
 		return nil
 	}
 	return &api.Error{Code: api.ErrDaemonSealedHeadMismatch,
-		Detail: fmt.Sprintf("continue refused: the work item was sealed blocked by machine %q at capsule head %s, but the aihub capsule this daemon cloned is at %q (%v) — the sealing daemon's last push did not land; continue it on %q, or abandon (pf cancel)",
-			c.SealedMachine, c.SealedHead, head, err, c.SealedMachine)}
+		Detail: fmt.Sprintf("continue refused: the work item was sealed blocked by machine %q at capsule head %s, but the aihub capsule this daemon cloned is at %q (%v) — the sealing daemon's last push did not land; continue it on %q, accept losing that work with pf resume %s --accept-lost-work, or abandon (pf cancel)",
+			c.SealedMachine, c.SealedHead, head, err, c.SealedMachine, j.wi)}
 }
 
 // prepareCapsule makes CapsuleDir a git worktree whose git-dir is EXTERNAL
