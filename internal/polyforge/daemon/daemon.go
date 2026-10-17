@@ -349,6 +349,7 @@ func New(cfg Config) (*Daemon, error) {
 				WI:             in.WI,
 				CapsuleDir:     in.CapsuleDir,
 				BundleName:     in.BundleName,
+				SessionHandle:  in.SessionHandle,
 				SpawnN:         in.SpawnN,
 				Spawner:        in.Spawner,
 				StepCandidates: in.StepCandidates,

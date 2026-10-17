@@ -67,8 +67,10 @@ type StartConfig struct {
 	WI         string
 	CapsuleDir string
 	BundleName string
-	SpawnN     int64 // the job's derivation ordinal (≥1)
-	Spawner    spawn.Spawner
+	// SessionHandle is the owning session's PUBLIC fingerprint.
+	SessionHandle string
+	SpawnN        int64 // the job's derivation ordinal (≥1)
+	Spawner       spawn.Spawner
 	// StepCandidates is the per-step candidate map the runtime composed at
 	// claim time (`<harness>:<model>` each); the driver's only candidate
 	// source.
@@ -90,7 +92,7 @@ func Start(ctx context.Context, cfg StartConfig) (*Handle, error) {
 	if cfg.CapsuleDir == "" || cfg.BundleName == "" {
 		return nil, fmt.Errorf("driver: capsule dir or bundle name empty")
 	}
-	wi := WIInfo{ID: cfg.WI, CapsuleDir: cfg.CapsuleDir, BundleName: cfg.BundleName}
+	wi := WIInfo{ID: cfg.WI, CapsuleDir: cfg.CapsuleDir, BundleName: cfg.BundleName, SessionHandle: cfg.SessionHandle}
 	adapter, err := NewStepSpawnAdapter(StepSpawnAdapter{
 		WI: wi, Spawner: cfg.Spawner, Link: cfg.Link, ClaudeConfigDir: cfg.ClaudeConfigDir,
 	})

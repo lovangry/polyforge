@@ -16,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/workflow"
 )
 
@@ -143,7 +142,6 @@ func capsuleWithShippedBundle(t *testing.T, bundle string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeCapsuleFile(t, capDir, capsule.SessionJSON, `{"harness":"pi","session_id":"ab12cd34"}`)
 	return capDir
 }
 
@@ -151,7 +149,7 @@ func spawnDeliverPrompt(t *testing.T, capDir, bundle string) string {
 	t.Helper()
 	sp := &captureSpawner{}
 	ad, err := NewStepSpawnAdapter(StepSpawnAdapter{
-		WI:           WIInfo{ID: "wi_sh", CapsuleDir: capDir, BundleName: bundle},
+		WI:           WIInfo{ID: "wi_sh", CapsuleDir: capDir, BundleName: bundle, SessionHandle: "ab12cd34"},
 		Spawner:      sp,
 		PollInterval: 2 * time.Millisecond,
 	})
@@ -251,7 +249,7 @@ func spawnStepPrompt(t *testing.T, bundle, stepID string) string {
 	}
 	sp := &captureSpawner{}
 	ad, err := NewStepSpawnAdapter(StepSpawnAdapter{
-		WI:           WIInfo{ID: "wi_sh", CapsuleDir: capDir, BundleName: bundle},
+		WI:           WIInfo{ID: "wi_sh", CapsuleDir: capDir, BundleName: bundle, SessionHandle: "ab12cd34"},
 		Spawner:      sp,
 		PollInterval: 2 * time.Millisecond,
 	})

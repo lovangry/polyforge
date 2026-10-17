@@ -569,7 +569,7 @@ func fakeSession(wi string) string {
 // shape the daemon tests' fake engine uses).
 func scriptedEngineStarter(sp Spawner) AgentStartFunc {
 	return func(ctx context.Context, in AgentStartInput) (AgentHandle, error) {
-		handle := capsuleSessionHandle(in.CapsuleDir)
+		handle := in.SessionHandle
 		p := SpawnParams{
 			WorkItemID:    in.WI,
 			CapsuleDir:    in.CapsuleDir,
@@ -975,20 +975,6 @@ func replayClaims(t testing.TB, r *Runtime) {
 		r.post(id, func() { r.reconcile(id) })
 	}
 	settleReplays(t, r)
-}
-
-// capsuleSessionHandle answers the session handle the capsule's
-// session.json carries — where the real driver reads it ("" when absent).
-func capsuleSessionHandle(capsuleDir string) string {
-	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.SessionJSON))
-	if err != nil {
-		return ""
-	}
-	var s capsule.Session
-	if json.Unmarshal(raw, &s) != nil {
-		return ""
-	}
-	return s.SessionID
 }
 
 // actorBusy reports whether wi's actor has work (a message running or

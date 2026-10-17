@@ -63,8 +63,7 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 	// pinned the deleted lineage; the fossil round removed even the zero
 	// fields from the frozen Identity shape, so the correct pin is the
 	// KEYS' ABSENCE — the runtime no longer writes generation/attempt_id
-	// into capsule.json at all, and session ownership lives in the
-	// daemon-private sync/session-handle marker (v2-converge.md Appendix E.5).
+	// into capsule.json at all.
 	for _, gone := range []string{"generation", "attempt_id"} {
 		if _, ok := idnMap[gone]; ok {
 			t.Fatalf("capsule.json still carries the deleted v1 lineage key %q: %v", gone, idnMap)

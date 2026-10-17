@@ -209,7 +209,10 @@ type AgentStartInput struct {
 	Project    string
 	CapsuleDir string
 	BundleName string
-	SpawnN     int64
+	// SessionHandle is the owning session's PUBLIC fingerprint (B3); it
+	// names the dispatches' spawn tokens and capsule transcripts.
+	SessionHandle string
+	SpawnN        int64
 	// StepCandidates is the polyforge#79 effective per-step candidate
 	// map this derivation dispatches under (nil = no yaml layer — the
 	// bundle's own resolution). The bridge forwards it to the driver.
@@ -839,8 +842,7 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, spelling, sessionID stri
 	}
 	if ex := r.jobOf(id); ex != nil {
 		// a retained paused record or a journal placeholder: the new
-		// session owns the WI (prepareCapsule quarantines the old scene on
-		// the session-marker mismatch)
+		// claim owns the WI (prepareCapsule quarantines the old scene)
 		r.dropJob(ex)
 		r.persistLog(id)
 	}
@@ -915,8 +917,7 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, spelling, sessionID stri
 	return j, cctx, nil
 }
 
-// claimScene lays the claimed capsule out: clone (or reuse this
-// session's own husk), the cross-daemon sealed-head guard, the spawn
+// claimScene lays the claimed capsule out: a fresh clone, the cross-daemon sealed-head guard, the spawn
 // counter seed and the materialize (task-repo clones included). A failure
 // answers the error and the close note.
 func (r *Runtime) claimScene(ctx context.Context, j *job, c api.SessionClaim) (note string, err error) {
@@ -991,13 +992,14 @@ func (r *Runtime) finishClaim(ctx context.Context, j *job, sceneErr error, note 
 	spawnN := j.spawnN
 	j.mu.Unlock()
 	h, err := starter(ctx, AgentStartInput{
-		WI:         j.wi,
-		Project:    j.project,
-		CapsuleDir: j.capsuleDir,
-		BundleName: j.bundleName,
-		SpawnN:     int64(spawnN),
-		Spawner:    r.spawner,
-		StepEnded:  r.stepEnded(j.wi),
+		WI:            j.wi,
+		Project:       j.project,
+		CapsuleDir:    j.capsuleDir,
+		BundleName:    j.bundleName,
+		SessionHandle: j.sessionFingerprint,
+		SpawnN:        int64(spawnN),
+		Spawner:       r.spawner,
+		StepEnded:     r.stepEnded(j.wi),
 		// polyforge#79: the claim-time compose rides to the driver
 		StepCandidates: j.stepCandidates,
 	})

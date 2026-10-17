@@ -171,7 +171,7 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		parts.Handoff = h
 	}
 
-	handle := a.sessionHandle()
+	handle := a.WI.SessionHandle
 	h := harness.Of(sp.Harness)
 	var transcript, hsession string
 	resume := sp.Resume
@@ -802,21 +802,6 @@ func spawnTokenDir(n int64) string { return "s" + strconv.FormatInt(n, 10) }
 
 // ---------------------------------------------------------------------------
 // Session identity + spawn journal.
-
-// sessionHandle answers the capsule's PUBLIC session fingerprint
-// (session.json carries exactly the B3 handle, never the secret); ""
-// when absent or unreadable.
-func (a *StepSpawnAdapter) sessionHandle() string {
-	raw, err := os.ReadFile(filepath.Join(a.WI.CapsuleDir, capsule.SessionJSON))
-	if err != nil {
-		return ""
-	}
-	var s capsule.Session
-	if json.Unmarshal(raw, &s) != nil {
-		return ""
-	}
-	return s.SessionID
-}
 
 // latestJournalEntry answers the step's highest-ordinal spawn-journal
 // line declaring a transcript (the zero entry when none): the previous

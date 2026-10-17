@@ -228,13 +228,14 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		ordinal := int64(j.spawnN)
 		j.mu.Unlock()
 		h, err := starter(ctx, AgentStartInput{
-			WI:         j.wi,
-			Project:    j.project,
-			CapsuleDir: j.capsuleDir,
-			BundleName: j.bundleName,
-			SpawnN:     ordinal,
-			Spawner:    r.spawner,
-			StepEnded:  r.stepEnded(j.wi),
+			WI:            j.wi,
+			Project:       j.project,
+			CapsuleDir:    j.capsuleDir,
+			BundleName:    j.bundleName,
+			SessionHandle: j.sessionFingerprint,
+			SpawnN:        ordinal,
+			Spawner:       r.spawner,
+			StepEnded:     r.stepEnded(j.wi),
 			// polyforge#79: the effective lists this re-derivation
 			// dispatches under, and the archive signal for the dispatch
 			// the recovery cause interrupted.

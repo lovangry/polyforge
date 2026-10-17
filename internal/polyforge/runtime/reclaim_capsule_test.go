@@ -54,9 +54,6 @@ func TestPrepareCapsuleReclaimQuarantinesGitDirAndPushes(t *testing.T) {
 	if out, err := exec.Command("git", "--git-dir", bare, "symbolic-ref", "HEAD", "refs/heads/main").CombinedOutput(); err != nil {
 		t.Fatalf("bare HEAD: %v: %s", err, out)
 	}
-	if err := writeSessionMarker(j.capsuleDir, "fp-old"); err != nil {
-		t.Fatal(err)
-	}
 	if _, pushed, _, err := gitops.CommitPush(context.Background(), j.git, "publish"); err != nil || !pushed {
 		t.Fatalf("first publish: pushed=%v err=%v", pushed, err)
 	}

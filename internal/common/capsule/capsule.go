@@ -26,7 +26,6 @@ const (
 	DirSession      = "session"       // harness transcripts synced at boundaries
 	DirWorkflows    = "workflows"     // materialized workflow bundle
 	CapsuleJSON     = "capsule.json"  // capsule identity
-	SessionJSON     = "session.json"  // session/harness state
 	WorkItemJSON    = "runtime-state/work-item.json"
 	ExecutionJSON   = "runtime-state/execution.json"
 	// RecalledMemoriesJSON is the claim-time memory snapshot the daemon
@@ -73,21 +72,6 @@ type WorkItemDoc struct {
 	Milestone  *string  `json:"milestone"`
 	BundleName string   `json:"bundle_name"`
 	UpdatedAt  string   `json:"updated_at"`
-}
-
-// Session is session.json: per-derivation harness session bookkeeping
-// used by the recovery engine (reference.md §6.2; discriminator =
-// transcript exists). The v1 attempt_id/generation lineage fields are
-// deleted (v1.5 session model); legacy files carrying those keys parse
-// fine (encoding/json ignores unknown keys).
-type Session struct {
-	// Harness is no longer written (polyforge#159: the harness is per
-	// step — the spawn journal names each dispatch's); older files carry
-	// "pi" and still parse.
-	Harness        string `json:"harness,omitempty"`
-	SessionID      string `json:"session_id"`      // harness-native session identifier
-	TranscriptPath string `json:"transcript_path"` // absolute path to the .jsonl transcript
-	UpdatedAt      string `json:"updated_at"`
 }
 
 // The workflow_status vocabulary (reference.md §7.3): the closed status set the

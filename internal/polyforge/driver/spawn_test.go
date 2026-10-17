@@ -117,10 +117,9 @@ func spawnEnv(t *testing.T) (*StepSpawnAdapter, *captureSpawner, string) {
 	writeCapsuleFile(t, capDir, "workflows/autopilot-x/steps/fix.md", "fix: implement the micro-spec")
 	writeCapsuleFile(t, capDir, "workflows/autopilot-x/steps/verification.md",
 		"---\ntools: [go]\n---\n\nverification: build, lint, test")
-	writeCapsuleFile(t, capDir, capsule.SessionJSON, `{"harness":"pi","session_id":"ab12cd34"}`)
 	sp := &captureSpawner{}
 	ad, err := NewStepSpawnAdapter(StepSpawnAdapter{
-		WI:           WIInfo{ID: "wi_sp", CapsuleDir: capDir, BundleName: "autopilot-x"},
+		WI:           WIInfo{ID: "wi_sp", CapsuleDir: capDir, BundleName: "autopilot-x", SessionHandle: "ab12cd34"},
 		Spawner:      sp,
 		PollInterval: 2 * time.Millisecond,
 	})
@@ -795,11 +794,10 @@ func TestSpawnStepWiresHarnessTranslatorOntoTheLink(t *testing.T) {
 	capDir := t.TempDir()
 	writeCapsuleFile(t, capDir, "workflows/autopilot-x/workflow.md", "---\n"+strings.TrimPrefix(extExample, "\n")+"---\n")
 	writeCapsuleFile(t, capDir, "workflows/autopilot-x/steps/grill.md", "grill")
-	writeCapsuleFile(t, capDir, capsule.SessionJSON, `{"harness":"pi","session_id":"ab12cd34"}`)
 	sp := &captureSpawner{}
 	link := supervise.NewLink("wi_sp")
 	ad, err := NewStepSpawnAdapter(StepSpawnAdapter{
-		WI:      WIInfo{ID: "wi_sp", CapsuleDir: capDir, BundleName: "autopilot-x"},
+		WI:      WIInfo{ID: "wi_sp", CapsuleDir: capDir, BundleName: "autopilot-x", SessionHandle: "ab12cd34"},
 		Spawner: sp, Link: link, PollInterval: 2 * time.Millisecond,
 	})
 	if err != nil {

@@ -47,6 +47,10 @@ type WIInfo struct {
 	ID         string
 	CapsuleDir string
 	BundleName string
+	// SessionHandle is the owning session's PUBLIC fingerprint (B3,
+	// never the secret): it names each dispatch's spawn token and
+	// capsule transcript.
+	SessionHandle string
 }
 
 // EventLogger is the driver's event emission face — the shape of

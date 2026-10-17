@@ -552,7 +552,7 @@ func fakeEngineStarter() AgentStartFunc {
 		h, err := in.Spawner.Spawn(ctx, runtime.SpawnParams{
 			WorkItemID:    in.WI,
 			CapsuleDir:    in.CapsuleDir,
-			SessionHandle: capsuleSessionHandle(in.CapsuleDir),
+			SessionHandle: in.SessionHandle,
 			SpawnN:        int(in.SpawnN),
 			InitialPrompt: "engine",
 		})
@@ -780,17 +780,3 @@ func (td *testDaemon) waitMonitored(t *testing.T, wi string) {
 // DirectShutdownCause is the shutdown cause of a direct in-process
 // Shutdown call (the tests).
 func DirectShutdownCause() string { return "direct: in-process Shutdown call" }
-
-// capsuleSessionHandle answers the session handle the capsule's
-// session.json carries — where the real driver reads it ("" when absent).
-func capsuleSessionHandle(capsuleDir string) string {
-	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.SessionJSON))
-	if err != nil {
-		return ""
-	}
-	var s capsule.Session
-	if json.Unmarshal(raw, &s) != nil {
-		return ""
-	}
-	return s.SessionID
-}

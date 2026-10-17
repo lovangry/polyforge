@@ -112,15 +112,14 @@ func TestStartClonesTaskRepos(t *testing.T) {
 	unseal(t, repoDir)
 }
 
-// A re-materialize of the SAME session's capsule (the crashed-Start
-// journal-replay shape — same secret, so the sync/session-handle marker
-// matches and the husk is reused) must not touch the existing task-repo
-// worktree: the agent's uncommitted edits survive, no fetch/reset happens
-// (the remote moving forward changes nothing), and the recorded
-// claim-time baseline is carried forward verbatim.
-func TestRematerializePreservesRepoScene(t *testing.T) {
+// A journal replay of the SAME session's crashed start (the claim
+// answered, the record never landed) still starts from a fresh clone:
+// the husk — with whatever the reaped step left uncommitted in a task
+// repo — is quarantined beside the capsule, bytes intact, and the
+// replayed claim clones the task repo afresh.
+func TestClaimReplayQuarantinesHusk(t *testing.T) {
 	setGitIdentity(t)
-	remoteDir, url, head := fakeTaskRemote(t)
+	_, url, _ := fakeTaskRemote(t)
 	hub := newFakeHub()
 	hub.repos = []api.ProjectRepo{{Name: "app", URL: url}}
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
@@ -131,10 +130,9 @@ func TestRematerializePreservesRepoScene(t *testing.T) {
 	capDir := testCapsuleDir(r, "wi_repo2")
 	repoDir := filepath.Join(capDir, capsule.DirRepos, "app")
 
-	// Simulate a daemon crash between spawn and any further step: the
+	// Simulate a daemon crash between spawn and the record's persist: the
 	// agent tree dies, the job leaves the map, the bookkeeping is wiped
-	// (the crash predates registration) and the journal still names the
-	// unsettled start of the SAME session.
+	// and the journal still names the unsettled start of the SAME session.
 	j := r.jobOf("wi_repo2")
 	j.mu.Lock()
 	session := j.sessionID
@@ -147,37 +145,26 @@ func TestRematerializePreservesRepoScene(t *testing.T) {
 	if err := r.noteClaiming("wi_repo2", session, nil); err != nil {
 		t.Fatal(err)
 	}
-
-	// The agent's uncommitted scene in the task repo.
 	if err := os.WriteFile(filepath.Join(repoDir, "dirty.txt"), []byte("uncommitted\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// The remote moves forward AFTER the claim: the recovery contract
-	// forbids fetching/resetting it into the worktree.
-	if out, err := exec.Command("git", "-C", remoteDir, "commit", "--allow-empty", "-m", "remote moved").CombinedOutput(); err != nil {
-		t.Fatalf("remote commit: %v: %s", err, out)
-	}
 
-	// The journal replay (Restart) re-runs the start of the SAME session:
-	// the capsule husk is reused and materialize re-runs without
-	// touching repos/app.
 	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart (journal replay): %v", err)
 	}
-	if b, err := os.ReadFile(filepath.Join(repoDir, "dirty.txt")); err != nil || string(b) != "uncommitted\n" {
-		t.Fatalf("uncommitted scene lost: %q, %v", b, err)
+	if r.jobOf("wi_repo2") == nil {
+		t.Fatal("the replayed claim must start the work item")
 	}
-	got, err := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
-	if err != nil || strings.TrimSpace(string(got)) != head {
-		t.Fatalf("worktree HEAD moved: %q, want %q, %v", got, head, err)
+	if _, err := os.Stat(filepath.Join(repoDir, "dirty.txt")); !os.IsNotExist(err) {
+		t.Fatalf("the replayed claim reused the husk's task repo (stat err %v)", err)
 	}
-	if b := capsuleReposOf(t, capDir)["app"]; b != head {
-		t.Fatalf("baseline not carried forward: %q, want %q", b, head)
+	husks, _ := filepath.Glob(capDir + ".quarantined.*")
+	if len(husks) != 1 {
+		t.Fatalf("the husk must be quarantined beside the capsule, got %v", husks)
 	}
-	// The dirty file is still uncommitted (nothing staged or committed it).
-	st, err := exec.Command("git", "-C", repoDir, "status", "--porcelain").CombinedOutput()
-	if err != nil || !strings.Contains(string(st), "dirty.txt") {
-		t.Fatalf("dirty file not uncommitted anymore: %s, %v", st, err)
+	kept := filepath.Join(husks[0], capsule.DirRepos, "app", "dirty.txt")
+	if b, err := os.ReadFile(kept); err != nil || string(b) != "uncommitted\n" {
+		t.Fatalf("the husk's uncommitted bytes must survive the quarantine: %q, %v", b, err)
 	}
 	if err := r.Stop(context.Background(), "wi_repo2", protocol.FinishWrapped); err != nil {
 		t.Fatalf("Stop: %v", err)

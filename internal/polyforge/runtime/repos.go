@@ -17,19 +17,9 @@ package runtime
 // never carries any task-repo credential (only the attempt-scoped capsule
 // push credential does, via the gitops choke point).
 //
-// Recovery contract: a repos/<name> that already exists at materialize
-// time AND has a baseline recorded in the prior capsule.json (a
-// same-generation husk from a crashed Start, or an in-place materialize
-// rerun) is NEVER fetched, reset or re-cloned — the agent's uncommitted
-// edits in that worktree are the live scene a later commit-dirty/deliver
-// path needs. A directory with NO recorded baseline is the crash window
-// between the clone and the capsule.json write: an untouched fresh
-// clone, which takes the carrier restore like any new clone.
-//
-// Durability contract (polyforge#108): a repos/<name> that does NOT
-// exist at materialize time — the bounded-fail re-claim shape, where
-// quarantine moved the whole scene away — is cloned from the bare
-// origin, which knows nothing of the previous session's commits. When
+// Durability contract (polyforge#108): every repos/<name> is cloned
+// into a fresh capsule (a re-claim quarantines the previous scene) from
+// the bare origin, which knows nothing of the previous session's commits. When
 // the previous session published a head to the WI's carrier ref
 // (refs/pf-task/<name>, written by every capsule publish via the gitops
 // lane), the fresh clone is MOVED there before the baseline is
@@ -58,16 +48,12 @@ import (
 
 // cloneTaskRepos materializes the claim's task-repo inventory into
 // repos/<name> and answers the capsule.json Repos map (repo name →
-// claim-time baseline SHA). Fresh names are cloned from their URL; names
-// whose directory already exists take the non-destructive path (see the
-// recovery contract above). Any clone failure is the typed DAEMON-507
+// claim-time baseline SHA). Any clone failure is the typed DAEMON-507
 // error — the caller closes the attempt as blocked, never a daemon crash.
 func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string, error) {
 	out := map[string]string{}
-	// The prior capsule.json (same-generation husk) is read BEFORE this
-	// materialize overwrites it: recorded baselines are claim-time facts
-	// and must survive a re-materialize even if the agent has since
-	// committed (moved HEAD).
+	// The prior capsule.json (the previous session's, carried by the
+	// clone) is read BEFORE this materialize overwrites it.
 	prior := readCapsuleRepos(j.capsuleDir)
 	// The required set is the claim inventory UNION the repos the prior
 	// capsule.json recorded: an inventory that went empty (or lost a
@@ -92,30 +78,11 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 			return nil, repoCloneErr(j.wi, pr, "repo name %q is not a single safe path element", pr.Name)
 		}
 		dir := filepath.Join(j.capsuleDir, capsule.DirRepos, pr.Name)
-		exists := dirExists(dir)
-		if exists {
-			// Resume/recovery shape: presence is the check; a recorded
-			// baseline is carried forward untouched.
-			// "Recorded" means the key is present, even with an empty value:
-			// a repo that was empty at claim time baselines "" and its
-			// directory may hold agent edits that must never be restored over
-			// or removed.
-			if sha, ok := prior[pr.Name]; ok {
-				out[pr.Name] = sha
-				continue
-			}
-			// No recorded key: the previous Start died between the
-			// clone and the capsule.json write, so the directory is an
-			// untouched fresh clone (the agent never ran). It takes the
-			// same carrier restore as a new clone, instead of adopting
-			// the origin's HEAD as the baseline.
-		} else {
-			if pr.URL == "" {
-				return nil, repoCloneErr(j.wi, pr, "recorded in the prior capsule.json but absent from the claim inventory and missing on disk: no URL to clone from")
-			}
-			if err := gitClone(ctx, pr.URL, dir); err != nil {
-				return nil, repoCloneErr(j.wi, pr, "clone failed: %v", err)
-			}
+		if pr.URL == "" {
+			return nil, repoCloneErr(j.wi, pr, "recorded in the prior capsule.json but absent from the claim inventory: no URL to clone from")
+		}
+		if err := gitClone(ctx, pr.URL, dir); err != nil {
+			return nil, repoCloneErr(j.wi, pr, "clone failed: %v", err)
 		}
 		// A clone of a history-less remote succeeds with no HEAD: the
 		// baseline is then empty, which is honest — there is no commit
