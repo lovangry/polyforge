@@ -52,10 +52,6 @@ type CreateRequest struct {
 	// served by the claim (URLs resolved from the project then) in place
 	// of the project's full repo list.
 	RepoInventory RepoInventoryInput `json:"repo_inventory"`
-	// RepoInventoryBase is the removed second array of the pre-v2.5.0
-	// shape. It is decoded only to be refused (INVENTORY_BASE_UNSUPPORTED):
-	// a frozen base is not supported and must not be silently dropped.
-	RepoInventoryBase json.RawMessage `json:"repo_inventory_base"`
 	// After (polyforge#161) names the work items (id or slug) this one
 	// runs after: one `blocks` edge per entry, written INSIDE the create
 	// transaction under the AddDependency rules (same project, blocker
@@ -224,9 +220,6 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 
 	// Repo inventory (reference.md §2.1): resolved INSIDE the create transaction
 	// against the project's repos, so a refused create persists nothing.
-	if err := refuseRepoInventoryBase(req.RepoInventoryBase); err != nil {
-		return nil, err
-	}
 	projectRepos, err := projectReposTx(tx, projectID)
 	if err != nil {
 		return nil, err

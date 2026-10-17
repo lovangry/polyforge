@@ -112,13 +112,13 @@ func runLive(t *testing.T, errs []liveCase) (*supEnv, []time.Duration) {
 	t.Helper()
 	var mu sync.Mutex
 	var waits []time.Duration
-	env := newSupEnv(t, func(c *Config) {
+	env := newChainEnv(t, func(c *Config) {
 		c.Sleep = func(_ context.Context, d time.Duration) {
 			mu.Lock()
 			waits = append(waits, d)
 			mu.Unlock()
 		}
-	}, chain("s", "glm-5.3", "kimi-k3", "opus-5"))
+	}, "s", "glm-5.3", "kimi-k3", "opus-5")
 	for range errs {
 		env.sp.script = append(env.sp.script, fakeEntry{hold: true})
 	}

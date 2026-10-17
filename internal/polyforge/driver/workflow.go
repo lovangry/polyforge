@@ -40,19 +40,16 @@ type Workflow struct {
 	MaxPerStep int
 }
 
-// StepSpec is one workflow step: identity and order, the candidate
-// chain, gate policy, context policy and the artifact surface the spawn
-// adapter assembles prompts from.
+// StepSpec is one workflow step: identity and order, gate policy,
+// context policy and the artifact surface the spawn adapter assembles
+// prompts from. Candidate lists are not read here: the claim composes
+// them (Config.StepCandidates).
 type StepSpec struct {
 	ID   string
 	Gate bool
 	// ContextPolicy is ContextInherit (the default) or ContextFresh.
 	ContextPolicy string
-	// ModelCandidates is the bundle's own list (`<harness>:<model>`
-	// each, polyforge#175; judged by New, not at parse — an old capsule's
-	// bundle snapshot recovers under its claim-time snapshot instead).
-	ModelCandidates []string
-	OnFail          *OnFail
+	OnFail        *OnFail
 	// Handoff marks a step that must produce a handoff artifact
 	// (artifacts/handoff-<id>.md) for a later inherit step; the prompt
 	// carries the duty, nothing checks the file (resolveHandoff).
@@ -144,9 +141,9 @@ func LoadWorkflow(bundleDir string) (*Workflow, error) {
 	return wf, nil
 }
 
-// parseWorkflow parses one frontmatter block, filling the defaults: context_policy inherit, rewind bounds
-// 4/2, workflow-level default model candidates. Judging the filled
-// values is validateWorkflow's job.
+// parseWorkflow parses one frontmatter block, filling the defaults:
+// context_policy inherit, rewind bounds 4/2. Judging the filled values is
+// validateWorkflow's job.
 func parseWorkflow(front []byte) (*Workflow, error) {
 	var doc extDoc
 	if err := yaml.Unmarshal(front, &doc); err != nil {
@@ -173,7 +170,6 @@ func parseWorkflow(front []byte) (*Workflow, error) {
 			RequiresHumanAnswer:     s.RequiresHumanAnswer.required,
 			HumanAnswerIfAsked:      s.RequiresHumanAnswer.ifAsked,
 			RequiresCommandEvidence: s.RequiresCommandEvidence,
-			ModelCandidates:         s.ModelCandidates,
 			Vars:                    s.Vars,
 		}
 		if s.Budget != nil {
@@ -184,9 +180,6 @@ func parseWorkflow(front []byte) (*Workflow, error) {
 		}
 		if s.OnFail != nil {
 			step.OnFail = &OnFail{Target: s.OnFail.Target}
-		}
-		if step.ModelCandidates == nil && doc.Defaults != nil {
-			step.ModelCandidates = doc.Defaults.ModelCandidates
 		}
 		wf.Steps = append(wf.Steps, step)
 	}
@@ -241,13 +234,8 @@ func validateWorkflow(wf *Workflow) error {
 // step `kind:` an old bundle snapshot may still carry included, so a
 // same-daemon recovery of such a capsule loads it unchanged).
 type extDoc struct {
-	Defaults *extDefaults `yaml:"defaults"`
-	Rewind   *extRewind   `yaml:"rewind"`
-	Steps    []extStep    `yaml:"steps"`
-}
-
-type extDefaults struct {
-	ModelCandidates []string `yaml:"model_candidates"`
+	Rewind *extRewind `yaml:"rewind"`
+	Steps  []extStep  `yaml:"steps"`
 }
 
 type extRewind struct {
@@ -262,7 +250,6 @@ type extStep struct {
 	RequiresHumanAnswer     humanGate         `yaml:"requires_human_answer"`
 	RequiresCommandEvidence bool              `yaml:"requires_command_evidence"`
 	ContextPolicy           string            `yaml:"context_policy"`
-	ModelCandidates         []string          `yaml:"model_candidates"`
 	OnFail                  *extOnFail        `yaml:"on_fail"`
 	Budget                  *extBudget        `yaml:"budget"`
 	Vars                    map[string]string `yaml:"vars"`

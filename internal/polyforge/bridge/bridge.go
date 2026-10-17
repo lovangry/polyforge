@@ -84,10 +84,10 @@ type Config struct {
 	BundleName string
 	SpawnN     int64
 	Spawner    rt.Spawner
-	// StepCandidates is the polyforge#79 effective per-step candidate
-	// map the runtime computed at claim time (or rehydrated/re-derived
-	// at recovery); nil = no yaml layer, the bundle's own resolution.
-	// Forwarded to the driver verbatim.
+	// StepCandidates is the polyforge#79 per-step candidate map the
+	// runtime composed at claim time over every level, the bundle's own
+	// lists included (rehydrated at recovery); the driver's only
+	// candidate source, forwarded verbatim.
 	// Each candidate is `<harness>:<model>` (polyforge#175).
 	StepCandidates map[string][]string
 	// InterruptedCause is the recovery lane's cause string when THIS
@@ -119,25 +119,27 @@ type Config struct {
 const causeOperatorShutdown = rt.CauseOperatorAttach
 
 // interruptedFromCause maps the recovery lane's cause onto the driver's
-// interrupted-dispatch archive. An empty cause or an operator shutdown
-// archives nothing; every other cause is archived verbatim as an
-// audit-only attempt (it is never model-class, so it never advances the
-// candidate pointer).
+// interrupted-dispatch archive.
 //
-// This is deliberately NOT the same list as runtime's restartExemptCause
-// (recover.go). That rule decides which recovery causes do not count
-// against the consecutive-failures budget (daemon_restart, the operator
-// attach, the operator resume). This one decides which interruptions are
-// written to execution.json attempts[] as audit-only records (every cause
-// except the operator-shutdown attach). An audit record for a
-// driver_relaunch / daemon_restart interruption is skipped by the driver's
-// own failure counting (driver/supervision.go trailingCause), so the two
-// lists need not match.
+// Destination: execution.json's attempts[] records every derivation that
+// ended without a result — an audit entry, never counted as a step
+// failure and never model-class, so it neither blocks the step nor moves
+// the candidate pointer (driver/supervision.go trailingCause skips it).
+// An empty cause or an operator-shutdown attach is a deliberate stop, not
+// an interruption of the step, and records nothing; every other cause is
+// archived verbatim.
+//
+// The interrupted dispatch's wall time is booked toward the step's T
+// only when the system relaunched it after a hang, stall or death
+// (runtime.LifecycleCause false): a daemon restart or an operator resume
+// is still recorded here — the derivation it killed ended without a
+// result — but books nothing, so a pause or a restart's downtime never
+// counts while a hang→relaunch loop still reaches T.
 func interruptedFromCause(cause string) *driver.InterruptedDispatch {
 	if cause == "" || cause == causeOperatorShutdown {
 		return nil
 	}
-	return &driver.InterruptedDispatch{Detail: cause}
+	return &driver.InterruptedDispatch{Detail: cause, BookWall: !rt.LifecycleCause(cause)}
 }
 
 // Start instantiates the driver over the capsule and runs it.

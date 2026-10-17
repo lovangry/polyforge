@@ -391,13 +391,13 @@ func TestAdminFaces(t *testing.T) {
 	if _, err := env.Admin.CreateProject(CreateProjectRequest{Name: "beta"}); !IsCode(err, api.ErrCoreConflict) {
 		t.Fatalf("duplicate project allowed: %v", err)
 	}
-	// Machine heartbeat: first registers + issues key; second refreshes.
+	// Machine heartbeat: first registers; second refreshes.
 	h1, err := env.Admin.Heartbeat(MachineHeartbeat{MachineID: "m1"})
-	if err != nil || !h1.Registered || h1.Key == nil {
+	if err != nil || !h1.Registered {
 		t.Fatalf("heartbeat register: %+v %v", h1, err)
 	}
 	h2, err := env.Admin.Heartbeat(MachineHeartbeat{MachineID: "m1"})
-	if err != nil || h2.Registered || h2.Key != nil {
+	if err != nil || h2.Registered {
 		t.Fatalf("heartbeat repeat: %+v %v", h2, err)
 	}
 	users, err := env.Admin.ListUsers()

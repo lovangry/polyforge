@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/common/workflow"
+	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // ---------------------------------------------------------------------------
@@ -683,11 +685,8 @@ steps:
 	if wf.Steps[0].ContextPolicy != ContextInherit {
 		t.Fatalf("spec step: %+v", wf.Steps[0])
 	}
-	if wf.Steps[1].ContextPolicy != "inherit" || len(wf.Steps[1].ModelCandidates) != 1 || wf.Steps[1].ModelCandidates[0] != "pi:prov/c" {
-		t.Fatalf("code step (step-level candidates replace defaults): %+v", wf.Steps[1])
-	}
-	if wf.Steps[0].ModelCandidates[0] != "pi:prov/a" {
-		t.Fatalf("defaults chain applies: %+v", wf.Steps[0].ModelCandidates)
+	if wf.Steps[1].ContextPolicy != "inherit" {
+		t.Fatalf("code step: %+v", wf.Steps[1])
 	}
 	of := wf.Steps[2].OnFail
 	if of == nil || of.Target != "code" {
@@ -701,10 +700,18 @@ steps:
 	if err := os.MkdirAll(filepath.Join(caps, capsule.DirWorkflows, "mybundle"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(caps, capsule.DirWorkflows, "mybundle", "workflow.md"), []byte(fm), 0o644)
+	bundleMD := filepath.Join(caps, capsule.DirWorkflows, "mybundle", "workflow.md")
+	os.WriteFile(bundleMD, []byte(fm), 0o644)
+	// the bundle's lists reach the dispatch through the claim-time
+	// composition, exactly as the runtime builds StepCandidates
+	front, err := workflow.ReadFrontmatter(bundleMD)
+	if err != nil {
+		t.Fatal(err)
+	}
 	d, err := New(Config{
-		WI:      WIInfo{ID: "wi_l", CapsuleDir: caps, BundleName: "mybundle"},
-		Spawner: sp,
+		WI:             WIInfo{ID: "wi_l", CapsuleDir: caps, BundleName: "mybundle"},
+		Spawner:        sp,
+		StepCandidates: workspace.ComposeCandidates(front, nil, "p", nil),
 	})
 	if err != nil {
 		t.Fatalf("New over the default bundle path: %v", err)

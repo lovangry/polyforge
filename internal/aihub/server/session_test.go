@@ -261,19 +261,21 @@ func TestForceEndSessionAuthorization(t *testing.T) {
 			t.Fatalf("membership: %d %s", code, raw)
 		}
 	}
-	// A registered machine (heartbeat shape) with writer membership.
+	// A registered machine (heartbeat shape) with writer membership and an
+	// admin-issued key for its identity.
 	var hb struct {
 		UserID string `json:"user_id"`
-		APIKey struct {
-			Plain string `json:"plain"`
-		} `json:"api_key"`
 	}
 	if code, raw := e.do(t, "POST", "/api/v1/machines/heartbeat", e.key,
-		map[string]any{"machine_id": "m-self", "live_wi_ids": []string{}}, &hb); code != 200 || hb.UserID == "" || hb.APIKey.Plain == "" {
+		map[string]any{"machine_id": "m-self", "live_wi_ids": []string{}}, &hb); code != 200 || hb.UserID == "" {
 		t.Fatalf("heartbeat registration: %d %s", code, raw)
 	}
+	machineKey, err := e.admin.CreateAPIKey(hb.UserID, "m-self", "")
+	if err != nil {
+		t.Fatalf("machine key: %v", err)
+	}
 	addMember(hb.UserID, "writer")
-	if code, raw := e.do(t, "POST", path, hb.APIKey.Plain, map[string]string{"reason": "x"}, nil); code != 403 {
+	if code, raw := e.do(t, "POST", path, machineKey.Plain, map[string]string{"reason": "x"}, nil); code != 403 {
 		t.Fatalf("machine credential force-end: %d %s", code, raw)
 	} else if c, _ := errEnvelope(t, raw); c != "AUTH-403" {
 		t.Fatalf("wrong refusal class: %s", raw)

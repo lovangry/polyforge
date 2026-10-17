@@ -1,11 +1,12 @@
 package driver
 
 // transition_test.go: the state-machine and atomic-write tests for the
-// single write entry point — fencing, per-kind validation, snapshot
-// revert on persist failure, and the durable execution.json shape the
-// observe lane keeps consuming.
+// single write entry point — fencing, per-kind validation before any
+// mutation, the failed driver after a persist failure, and the durable
+// execution.json shape the observe lane keeps consuming.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -726,60 +727,70 @@ func TestTransitionTerminalValidation(t *testing.T) {
 	}
 }
 
-func TestTransitionBudgetUpdate(t *testing.T) {
-	d, _, _, _ := testEnv(t, spec("a"), spec("b"))
-	mustInit(t, d)
-	mustStart(t, d, "a", 1)
-	if err := d.transition(TransitionRequest{
-		Kind: TransBudgetUpdate, StepID: "a", SpawnN: 1,
-		Budget: &capsule.Budget{WallMs: 1000},
-	}); err != nil {
-		t.Fatalf("budget: %v", err)
-	}
-	// StepID empty credits the CURRENT step.
-	if err := d.transition(TransitionRequest{
-		Kind: TransBudgetUpdate, SpawnN: 1,
-		Budget: &capsule.Budget{WallMs: 500},
-	}); err != nil {
-		t.Fatalf("budget (current step): %v", err)
-	}
-	snap := d.Snapshot()
-	st := snap.Steps["a"]
-	if st.BudgetConsumed.WallMs != 1500 {
-		t.Fatalf("step budget must accumulate: %+v", st.BudgetConsumed)
-	}
-	if snap.BudgetConsumed.WallMs != 1500 {
-		t.Fatalf("workflow budget aggregates the same deltas: %+v", snap.BudgetConsumed)
-	}
-}
-
 // ---------------------------------------------------------------------------
-// persist failure → revert
+// persist failure → the driver fails, the restart recovers from disk
 
-func TestTransitionPersistFailureRevertsInMemory(t *testing.T) {
+func TestTransitionPersistFailureFailsTheDriver(t *testing.T) {
 	d, _, _, execPath := testEnv(t, spec("a"))
 	mustInit(t, d)
-	// Occupy the target path with a directory: the tmp write succeeds,
-	// the rename cannot replace a directory with a file — the persist
-	// fails after apply, proving the snapshot revert.
-	if err := os.Remove(execPath); err != nil {
-		t.Fatalf("remove exec file: %v", err)
+	onDisk := readExec(t, execPath).Version
+	// A directory at the target path: the tmp write succeeds, the rename
+	// cannot replace a directory — the persist fails after apply mutated
+	// memory.
+	occupied := filepath.Join(t.TempDir(), capsule.ExecutionJSON)
+	if err := os.MkdirAll(occupied, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if err := os.Mkdir(execPath, 0o755); err != nil {
-		t.Fatalf("occupy path: %v", err)
-	}
-	before := d.Snapshot()
-	err := d.transition(TransitionRequest{Kind: TransStepStart, StepID: "a", Model: "m", SpawnN: 1})
-	if err == nil {
+	d.execPath = occupied
+	if err := d.transition(TransitionRequest{Kind: TransStepStart, StepID: "a", Model: "m", SpawnN: 1}); err == nil {
 		t.Fatal("the persist must fail over an occupied path")
 	}
-	if after := d.Snapshot(); after.CurrentStep != before.CurrentStep || after.Steps["a"].Status != before.Steps["a"].Status {
-		t.Fatalf("in-memory state must revert on persist failure: %+v", after)
+	if m := tmpLeftovers(occupied); len(m) > 0 {
+		t.Fatalf("the tmp file must be cleaned on failure: %v", m)
 	}
 	if d.SpawnN() != 0 {
 		t.Fatalf("the spawn counter must not advance over a failed start: %d", d.SpawnN())
 	}
-	if m := tmpLeftovers(execPath); len(m) > 0 {
-		t.Fatalf("the tmp file must be cleaned on failure: %v", m)
+	// The path is healthy again, but memory may disagree with the file:
+	// every further transition is refused and nothing is written.
+	d.execPath = execPath
+	if err := d.transition(TransitionRequest{Kind: TransTerminal, Status: StatusFailedGate, SpawnN: 0}); err == nil {
+		t.Fatal("a failed driver must refuse every further transition")
+	}
+	if got := readExec(t, execPath).Version; got != onDisk {
+		t.Fatalf("a failed driver wrote execution.json: version %d -> %d", onDisk, got)
+	}
+	if err := d.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "persist failed") {
+		t.Fatalf("Run of a failed driver must return the persist failure, got %v", err)
+	}
+	// The restart reloads the file: the failed start never happened.
+	d2, err := New(d.cfg)
+	if err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	snap := d2.Snapshot()
+	if snap.Version != onDisk || snap.CurrentStep != "" || snap.Steps["a"].Status != capsule.StepPending {
+		t.Fatalf("the restart must recover the on-disk state: version=%d current=%q a=%s", snap.Version, snap.CurrentStep, snap.Steps["a"].Status)
+	}
+}
+
+// TestTransitionRefusalMutatesNothing: a step_result refused by its own
+// validation (an output that is not a JSON object) leaves the dispatch
+// ordinal and the step's runtime as they were — every apply judges before
+// it mutates.
+func TestTransitionRefusalMutatesNothing(t *testing.T) {
+	d, _, _, _ := testEnv(t, spec("a"))
+	mustInit(t, d)
+	mustStart(t, d, "a", 1)
+	before := d.Snapshot()
+	if err := d.transition(TransitionRequest{
+		Kind: TransStepResult, StepID: "a", SpawnN: 1, WallMs: 5000, Result: completedResult("a", 1, `[1]`),
+	}); err == nil {
+		t.Fatal("a non-object output must be refused")
+	}
+	after := d.Snapshot()
+	if after.Version != before.Version || after.Steps["a"].Dispatch != before.Steps["a"].Dispatch ||
+		after.Steps["a"].BudgetConsumed.WallMs != 0 || after.BudgetConsumed.WallMs != 0 {
+		t.Fatalf("a refused result mutated memory: before=%+v after=%+v", before.Steps["a"], after.Steps["a"])
 	}
 }

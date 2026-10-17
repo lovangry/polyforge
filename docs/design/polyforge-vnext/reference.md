@@ -97,9 +97,10 @@ not authorize). One transaction (`core/session.go` `Claim`), checked in order: n
 unfinished blocker (`DEPENDENCY_BLOCKED`), bundle present (`NOT_CLAIMABLE`); then
 `UPDATE … WHERE status='queued' AND session_hash IS NULL` (0 rows → `CORE-409 RACE_LOST`); a declared inventory repo that left the project → `CORE-409 INVENTORY_REPO_GONE`. Response `{claim, work_item}`
 (`api.SessionClaimResponse`; `claim.repos` = the inventory-filtered project repos; `sealed_head` /
-`sealed_machine` from the blocked seal). Idempotency (`claim_idempotency` table): same key replays the
-same response; a different caller/WI → `CORE-409 IDEMPOTENCY_KEY_REUSED`; a replay whose session is no
-longer live → `CORE-403 STALE_SESSION`. Idempotency rows are kept forever (`v2-converge.md#§13`).
+`sealed_machine` from the blocked seal). Idempotency is keyed on the session secret (`idempotency_key` is
+not read): a repeat by the session that holds the WI answers the same claim, re-read from the row, with no
+write; a secret whose `session_claimed` event exists but that no longer holds the WI (force-ended,
+superseded, ended) → `CORE-403 STALE_SESSION` before any gate, so it never claims again.
 
 ### 3.3 Verify, attach, end <!-- §3.3 -->
 
@@ -117,7 +118,7 @@ aihub proxy only — pushes a step makes to an external origin are not fenced.
 
 ### 3.5 Daemon-side session state <!-- §3.5 -->
 
-- **Claiming journal** `<data-dir>/claiming.json` (`runtime/claiming.go`): `{work_item_id, session_id, idempotency_key, machine_id, at, models, ending, end_note}`, keyed by the canonical work-item id (an entry an older build keyed by the submitted spelling replays the same way), written durably **before** the claim call (write failure refuses the claim); cleared when the start settles. A post-claim failure whose compensation `SessionEnd(blocked)` does not land marks the entry `ending` and retries in the background: a Start of the work item answers `DAEMON-503` until it lands. Restart replay (`resumeClaiming`): `ending` → end the session blocked (no claim replay; retried in the background on failure); verify transport error → keep; no match → drop; already in the job table → drop; else re-claim with the same key; a refused re-claim ends the session blocked. An adopted replay enters the job table as a CLAIMING placeholder; its capsule clone and materialize run after Restart returns, outside every runtime lock (a shutdown defers it, entry kept). Corrupt file → quarantined `claiming.json.corrupt.<ts>`.
+- **Claiming journal** `<data-dir>/claiming.json` (`runtime/claiming.go`): `{work_item_id, session_id, idempotency_key, machine_id, at, models, ending, end_note}`, keyed by the canonical work-item id (an entry an older build keyed by the submitted spelling replays the same way), written durably **before** the claim call (write failure refuses the claim); cleared when the start settles. A post-claim failure whose compensation `SessionEnd(blocked)` does not land marks the entry `ending` and retries in the background: a Start of the work item answers `DAEMON-503` until it lands. Restart replay (`resumeClaiming`): `ending` → end the session blocked (no claim replay; retried in the background on failure); verify transport error → keep; no match → drop; already in the job table → drop; else re-claim with the same session secret; a refused re-claim ends the session blocked. An adopted replay enters the job table as a CLAIMING placeholder; its capsule clone and materialize run after Restart returns, outside every runtime lock (a shutdown defers it, entry kept). Corrupt file → quarantined `claiming.json.corrupt.<ts>`.
 - **Job record** `<data-dir>/runtime-state.json` (`runtime/state.go`): secret, fingerprint, job state, capsule/git dirs, remote, `spawn_n`, recovery-failure count, per-step candidate snapshot.
 - **M4 revalidation**: the monitor re-verifies every running job's session (default every 5m, `--revalidate-every`, `observe/session.go`); `matches=false` → kill tree, quarantine the capsule (`<name>.quarantined.<ts>`), drop the record, event `session_superseded`; no hub transition.
 - **end_pending lane** (`runtime/endpending.go`): a failed `SessionEnd(blocked)` is retried (pushing the local chain first) until aihub accepts it or verify shows the session is no longer held; a permanently rejected chain push is recorded on the job record (`end_push_gave_up`) and the retry, restarts included, closes without it.
@@ -182,7 +183,7 @@ compose service (`deploy/docker-compose.yml`, `restart: unless-stopped`).
 
 Heartbeat body `{machine_id, runtime_version, display_name, mode, live_wi_ids}` (`core/admin.go`);
 server-stamped `last_heartbeat_at`. A new `machine_id` creates (one transaction) a `mac_` machine user,
-the machines row and a first API key returned once; the daemon does not keep it. Daemon cadence
+and the machines row; no API key is issued (the daemon runs on its operator-issued key). Daemon cadence
 `-heartbeat-every` 60s (`daemon/heartbeat.go`), log-only failures with backoff. `GET /machines`
 returns `{machines:[{id,user_id,runtime_version,mode,live_wi_ids,last_heartbeat_at,heartbeat_age_seconds,stale}], stale_after_seconds, count}`, oldest first.
 The daemon id is the machine id: default `m-<hostname>`, persisted in `<data-dir>/daemon-id`
@@ -197,7 +198,7 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 | `CORE-400` | Validation. Reasons incl. `IMMUTABLE`, `HAS_CHILDREN_NO_BUNDLE`, `PARENT_*`, `INVENTORY_*`, `BLOCKER_*`, `EXECUTION_STATE_REJECTED` |
 | `CORE-403` | `STALE_SESSION`: the presented session is not the holder (attach/end/pause/idempotent replay) |
 | `CORE-404` | WI/project/user missing, or hidden by the read gate |
-| `CORE-409` | State conflict: `ALREADY_HELD NOT_CLAIMABLE DEPENDENCY_BLOCKED RACE_LOST IDEMPOTENCY_KEY_REUSED NOT_ATTACHABLE NOT_HELD NOT_RUNNING NOT_BLOCKED SESSION_HELD DEPENDENCY_CYCLE INVENTORY_REPO_GONE`; without a reason: cancel of a running WI, project already exists, state changed concurrently |
+| `CORE-409` | State conflict: `ALREADY_HELD NOT_CLAIMABLE DEPENDENCY_BLOCKED RACE_LOST NOT_ATTACHABLE NOT_HELD NOT_RUNNING NOT_BLOCKED SESSION_HELD DEPENDENCY_CYCLE INVENTORY_REPO_GONE`; without a reason: cancel of a running WI, project already exists, state changed concurrently |
 | `CORE-410` | `TERMINAL_STATE` |
 | `CORE-500` | Untyped server error (default mapping) |
 | `CORE-507` | Admin backup `VACUUM INTO` failed |

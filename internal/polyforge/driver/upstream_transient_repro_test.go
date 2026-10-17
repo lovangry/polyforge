@@ -30,9 +30,9 @@ const upstreamTransientToolArgs = "Upstream tool call has incomplete or invalid 
 // on the SAME model. Observed before the fix: the chain switches to the
 // next candidate on the first error.
 func TestUpstreamTransientToolArgsErrorRetriesSameModel(t *testing.T) {
-	env := newSupEnv(t, func(c *Config) {
+	env := newChainEnv(t, func(c *Config) {
 		c.Sleep = func(context.Context, time.Duration) {} // the retry's backoff must not sleep the test
-	}, chain("s", "glm-5.3", "opus-5"))
+	}, "s", "glm-5.3", "opus-5")
 	env.sp.script = []fakeEntry{
 		exitErr(1, upstreamTransientToolArgs, true),
 		done(`{"ok":true}`),
@@ -55,9 +55,9 @@ func TestUpstreamTransientToolArgsErrorRetriesSameModel(t *testing.T) {
 // candidate. Observed before the fix: the switch happens on the FIRST
 // error already.
 func TestUpstreamTransientRetryBound(t *testing.T) {
-	env := newSupEnv(t, func(c *Config) {
+	env := newChainEnv(t, func(c *Config) {
 		c.Sleep = func(context.Context, time.Duration) {}
-	}, chain("s", "glm-5.3", "opus-5"))
+	}, "s", "glm-5.3", "opus-5")
 	env.sp.script = []fakeEntry{
 		exitErr(1, upstreamTransientToolArgs, true),
 		exitErr(1, upstreamTransientToolArgs, true),

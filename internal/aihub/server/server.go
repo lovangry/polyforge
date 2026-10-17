@@ -313,11 +313,23 @@ func (s *Server) wiProject(idn *identity, idOrSlug string) (string, string, erro
 // Work items
 
 func (s *Server) hCreateWI(w http.ResponseWriter, r *http.Request, idn *identity) {
-	var req core.CreateRequest
-	if err := decodeBody(r, &req); err != nil {
+	var body struct {
+		core.CreateRequest
+		// RepoInventoryBase is the removed pre-v2.5.0 second array:
+		// refused by name, never silently dropped (absent, null and []
+		// mean "no bases").
+		RepoInventoryBase json.RawMessage `json:"repo_inventory_base"`
+	}
+	if err := decodeBody(r, &body); err != nil {
 		writeErr(w, err)
 		return
 	}
+	if b := strings.TrimSpace(string(body.RepoInventoryBase)); b != "" && b != "null" && b != "[]" {
+		writeErr(w, core.Fail(api.ErrCoreBadInput, "INVENTORY_BASE_UNSUPPORTED",
+			"repo_inventory_base is not supported; omit it (the work machine clones each repo's default branch)"))
+		return
+	}
+	req := body.CreateRequest
 	req.Reporter = idn.UserID
 	projectID, err := s.projectIDOf(req.Project)
 	if err != nil {
@@ -867,7 +879,7 @@ func (s *Server) hReadyQueue(w http.ResponseWriter, r *http.Request, idn *identi
 const defaultMachinesStaleAfter = 5 * time.Minute
 
 // authorizeMachineRegistration gates the FIRST-registration branch of the
-// heartbeat path (the M3 folded finding): minting a machine identity — a
+// heartbeat path (the M3 folded finding): creating a machine identity — a
 // machine_id with no machines row — is a privileged act, reserved for the
 // global admin or a maintainer of a configured project (the heartbeat body
 // carries no project context, so any project_members row with the

@@ -39,7 +39,7 @@ func harnessDriverErr(t *testing.T, list []string, attempts []capsule.Attempt) (
 		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
 		ExecPath: execPath,
 		Workflow: &Workflow{Steps: []StepSpec{
-			{ID: "review", ContextPolicy: "fresh", ModelCandidates: []string{"pi:bundle/x"}},
+			{ID: "review", ContextPolicy: "fresh"},
 		}, MaxTotal: 4, MaxPerStep: 2},
 		Spawner:        &fakeSpawner{},
 		Log:            &eventLog{},
@@ -64,7 +64,7 @@ func TestCandidatePrefixPicksHarness(t *testing.T) {
 		{"the prefix, not the id shape, decides", []string{"pi:claude-opus-5-5"}, nil, "pi", "claude-opus-5-5"},
 		{"the model keeps every further ':'", []string{"pi:ollama/llama3:8b"}, nil, "pi", "ollama/llama3:8b"},
 		{"a present-empty list: pi's own default model", []string{}, nil, "pi", ""},
-		{"no claim-time entry: the bundle's own list", nil, nil, "pi", "bundle/x"},
+		{"no claim-time entry: pi's own default model", nil, nil, "pi", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -140,16 +140,6 @@ func TestNewRefusesUnprefixedCandidates(t *testing.T) {
 		if _, err := harnessDriverErr(t, []string{"pi:ok/x", in}, nil); err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("%q: err %v, want %q", in, err, want)
 		}
-	}
-	dir := t.TempDir()
-	_, err := New(Config{
-		WI:       WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
-		ExecPath: filepath.Join(dir, capsule.ExecutionJSON),
-		Workflow: &Workflow{Steps: []StepSpec{{ID: "fix", ContextPolicy: "fresh", ModelCandidates: []string{"bundle/x"}}}},
-		Spawner:  &fakeSpawner{},
-	})
-	if err == nil || !strings.Contains(err.Error(), `step fix: model_candidates[0] (the bundle's own list): "bundle/x" needs a harness prefix`) {
-		t.Fatalf("bundle list: %v", err)
 	}
 }
 

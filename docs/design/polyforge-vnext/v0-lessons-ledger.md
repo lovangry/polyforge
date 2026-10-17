@@ -68,7 +68,7 @@ D3  Restart must reconcile with aihub before reviving (wrapped -> don't
     revive; running -> kill+recover; blocked -> leave).
 D4  Claim idempotency: re-sending the same key returns the same attempt
     (network retries); takeover requeue idempotency.
-    〔SUPERSEDED (2026-10-16): claim idempotency now replays the same session claim response (CORE-409 IDEMPOTENCY_KEY_REUSED on misuse); takeover is deleted — reference.md §3.2. The lesson stands.〕
+    〔SUPERSEDED (2026-10-16): claim idempotency is keyed on the session secret: the holder's repeat answers the same claim, a superseded or ended secret is refused CORE-403 STALE_SESSION; takeover is deleted — reference.md §3.2. The lesson stands.〕
 D5  Stale claim detection: a crash between claim and spawn must not
     orphan a generation forever (v0 known gap #Start-crash).
     〔SUPERSEDED (2026-10-16): the pre-claim claiming journal (claiming.json) is the fix — reference.md §3.5. The lesson stands.〕

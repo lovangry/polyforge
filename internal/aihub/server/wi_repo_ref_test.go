@@ -1,14 +1,14 @@
 package server
 
 // The §4.6 repo inventory on the HTTP surface: a create carrying a
-// client url, a base commit (per entry or as the removed
-// repo_inventory_base array) or a name that is not one of the project's
-// repos is refused with a typed CORE-400 and persists nothing; a PATCH
-// of the frozen inventory is refused IMMUTABLE.
+// client url, any key other than name (a base commit included) or a name
+// that is not one of the project's repos is refused with CORE-400 and
+// persists nothing; a PATCH of the frozen inventory is refused IMMUTABLE.
 
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -59,19 +59,32 @@ func TestWIRepoInventoryHTTPRefusals(t *testing.T) {
 			"project": "alpha", "goal": "a frozen base is not supported",
 			"repo_inventory": []map[string]any{{"name": "polyforge", "base": "abc123"}},
 		}, nil)
-		refuseShape(t, code, raw, "INVENTORY_BASE_UNSUPPORTED")
+		var envl api.Error
+		if code != http.StatusBadRequest || json.Unmarshal(raw, &envl) != nil || envl.Code != api.ErrCoreBadInput ||
+			!strings.Contains(envl.Detail, "unknown repo_inventory key") {
+			t.Fatalf("a base entry must be refused CORE-400 as an unknown key, got %d %s", code, raw)
+		}
 		nothingPersisted(t, e)
 	})
 
-	t.Run("create/base-array", func(t *testing.T) {
+	t.Run("create/removed-base-array", func(t *testing.T) {
 		e := newSrvEnv(t)
 		code, raw := e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{
-			"project": "alpha", "goal": "the removed second array is refused",
+			"project": "alpha", "goal": "the removed repo_inventory_base is refused, never dropped",
 			"repo_inventory":      []map[string]any{{"name": "polyforge"}},
 			"repo_inventory_base": []map[string]any{{"name": "polyforge", "base": "abc123"}},
 		}, nil)
 		refuseShape(t, code, raw, "INVENTORY_BASE_UNSUPPORTED")
 		nothingPersisted(t, e)
+		for _, empty := range []any{nil, []any{}} {
+			code, raw := e.do(t, "POST", "/api/v1/work-items", e.key, map[string]any{
+				"project": "alpha", "goal": "an empty base array means no bases",
+				"repo_inventory_base": empty,
+			}, nil)
+			if code >= 300 {
+				t.Fatalf("repo_inventory_base %v must mean no bases, got %d %s", empty, code, raw)
+			}
+		}
 	})
 
 	t.Run("create/client-url", func(t *testing.T) {

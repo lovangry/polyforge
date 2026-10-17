@@ -24,6 +24,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
+	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
 // cleanupBound bounds one teardown's waits inside the six-layer cleanup.
@@ -139,7 +140,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// attach is NOT a failure (v2-converge §2.3): those causes are exempt
 	// from the ledger entirely — neither counted nor resetting — so a deploy
 	// retry or a systemd restart loop cannot bounded-fail every running WI.
-	if !restartExemptCause(cause) {
+	if !LifecycleCause(cause) {
 		accepted := acceptedResultCount(j.capsuleDir) // disk read: outside the job's mutex
 		j.mu.Lock()
 		switch {
@@ -313,17 +314,44 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	}
 }
 
-// effectiveCandidatesForRecovery answers the per-step effective
-// candidate lists a recovery re-derivation dispatches under
-// (polyforge#79): the job's claim-time snapshot — live, or rehydrated
-// from the daemon-private state.json record (never from capsule.json,
-// which the agent can write). nil means bundle-only behavior. The yaml
-// is never re-read here: an edit governs the NEXT claim, never an
-// in-flight job.
+// effectiveCandidatesForRecovery answers the per-step candidate lists a
+// recovery re-derivation dispatches under (polyforge#79): the job's
+// claim-time snapshot — live, or rehydrated from the daemon-private
+// state.json record (never from capsule.json, which the agent can
+// write). The yaml is not re-read for a snapshot: an edit governs the
+// NEXT claim, never an in-flight job.
+//
+// A record without a snapshot (one written before claims stored it)
+// is recomposed exactly as a claim composes it — the driver reads no
+// other candidate source — over the current yaml and bundle; a
+// composition that cannot be read is logged and leaves no list.
 func (r *Runtime) effectiveCandidatesForRecovery(j *job) map[string][]string {
 	j.mu.Lock()
-	defer j.mu.Unlock()
-	return j.stepCandidates
+	snap, project, bundle, manual := j.stepCandidates, j.project, j.bundleName, j.manualModels
+	j.mu.Unlock()
+	if snap != nil || bundle == "" {
+		return snap
+	}
+	fm, err := r.readBundleFrontmatter(bundle)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: no claim-time candidate snapshot and the bundle cannot be read (%v); dispatching on the harness default\n", j.wi, err)
+		return nil
+	}
+	wcfg, err := r.LoadWorkspace(project)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: no claim-time candidate snapshot and the workspace yaml cannot be read (%v); dispatching on the harness default\n", j.wi, err)
+		return nil
+	}
+	composed := workspace.ComposeCandidates(fm, wcfg, project, manual)
+	if composed != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: no claim-time candidate snapshot in the record; recomposed from the current yaml and bundle\n", j.wi)
+		j.mu.Lock()
+		if j.stepCandidates == nil {
+			j.stepCandidates = composed
+		}
+		j.mu.Unlock()
+	}
+	return composed
 }
 
 // recovered finishes a successful re-derivation. A successful recovery
@@ -539,19 +567,22 @@ func (r *Runtime) killAgentTree(j *job) {
 	}
 }
 
-// restartExemptCause reports whether a recovery cause is a daemon
-// restart, an operator attach or an operator resume — a process-
-// lifecycle event, not a failure, so the consecutive-failures ledger
-// ignores it.
+// LifecycleCause reports whether a recovery cause is a daemon restart,
+// an operator attach or an operator resume — a lifecycle event, not a
+// relaunch the system ordered after a hang, stall or death.
 //
-// This is deliberately a DIFFERENT rule from the bridge's
-// interruptedFromCause (internal/polyforge/bridge): this one is about the
-// consecutive-failures budget; that one decides which interruptions are
-// archived in execution.json attempts[] as audit-only records (everything
-// except the operator-shutdown attach). The driver's failure counting
-// skips those audit records (driver/supervision.go trailingCause), so the
-// lists need not match.
-func restartExemptCause(cause string) bool {
+// Destinations: the consecutive-recovery-failures budget is spent only by
+// failures — a process-lifecycle event neither counts nor resets it, so a
+// deploy or a restart loop cannot bounded-fail a healthy work item; and
+// the step's runtime T books the interrupted dispatch of a system
+// relaunch only (the bridge's interruptedFromCause), so a pause or a
+// restart's downtime never counts while a hang→relaunch loop still
+// reaches T.
+//
+// The bridge's audit archive is a different list with a different
+// destination (every derivation that ended without a result is recorded
+// in attempts[]); a daemon restart is exempt here and recorded there.
+func LifecycleCause(cause string) bool {
 	return cause == causeDaemonRestart || cause == causeOperatorAttach || cause == causeOperatorResume
 }
 
