@@ -283,7 +283,7 @@ Socket: `--socket` > `PF_DAEMON_SOCKET` > cli.toml `daemon_socket` > `daemon.soc
 Default `~/.local/share/polyforge`. File inventory: `v2-converge.md#§E` (E.4), plus `git/askpass/`
 (one-shot credential helpers, swept at start; `gitops/gitops.go`). Events: one JSONL line per event in
 `events/wi-<id>.jsonl` (one file per work item, `events/daemon.jsonl` for daemon scope; per-WI seq
-monotonic across restarts; a work item silent for 30 days loses its file at start; `observe/events.go`); kinds and emitters in E.1. Execution state authority is always the capsule's
+monotonic across restarts; a file silent for 30 days is removed at start; `observe/events.go`); kinds and emitters in E.1. Execution state authority is always the capsule's
 `runtime-state/execution.json`; events are news.
 
 ## 7. Execution <!-- §7 -->

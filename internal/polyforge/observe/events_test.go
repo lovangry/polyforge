@@ -170,3 +170,33 @@ func TestLongEventLineKeepsTheNumbering(t *testing.T) {
 		t.Fatalf("after the long line: %+v, want seqs 2, 3", got)
 	}
 }
+
+// An idle work item's last seq is learned from its file once, not on
+// every poll; an id without a file adds nothing.
+func TestLastSeqIsLearnedOnce(t *testing.T) {
+	dir := t.TempDir()
+	l, err := NewEventLog(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = l.Append("wi_idle", "k", nil)
+	_ = l.Close()
+	l2, err := NewEventLog(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l2.Close()
+	if n := l2.LastSeq("wi_idle"); n != 1 {
+		t.Fatalf("LastSeq = %d, want 1", n)
+	}
+	if err := os.WriteFile(filepath.Join(dir, EventsDir, eventsFileName("wi_idle")), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n := l2.LastSeq("wi_idle"); n != 1 {
+		t.Fatalf("LastSeq re-read the file: %d", n)
+	}
+	_ = l2.LastSeq("wi_nofile")
+	if len(l2.logs) != 1 {
+		t.Fatalf("file table: %d entries, want only wi_idle", len(l2.logs))
+	}
+}

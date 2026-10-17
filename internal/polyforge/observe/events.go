@@ -23,7 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -140,7 +139,8 @@ type wiLog struct {
 }
 
 // NewEventLog opens (creating if needed) <dataDir>/events/ and drops the
-// files of work items silent past eventsRetention.
+// files (a work item's, or the daemon-scope one) silent past
+// eventsRetention.
 func NewEventLog(dataDir string) (*EventLog, error) {
 	dir := filepath.Join(dataDir, EventsDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -148,7 +148,7 @@ func NewEventLog(dataDir string) (*EventLog, error) {
 	}
 	if des, err := os.ReadDir(dir); err == nil {
 		for _, de := range des {
-			if fi, err := de.Info(); err == nil && strings.HasPrefix(de.Name(), "wi-") && time.Since(fi.ModTime()) > eventsRetention {
+			if fi, err := de.Info(); err == nil && time.Since(fi.ModTime()) > eventsRetention {
 				_ = os.Remove(filepath.Join(dir, de.Name()))
 			}
 		}
@@ -181,15 +181,21 @@ func (l *EventLog) of(wi string, create bool) *wiLog {
 }
 
 // loadLocked learns the last seq from the file (w.mu held).
-func (w *wiLog) loadLocked() {
+// An unreadable file leaves the counter unlearned (and the append that
+// asked fails) rather than restart the numbering at 1.
+func (w *wiLog) loadLocked() error {
 	if w.loaded {
-		return
+		return nil
 	}
-	w.loaded = true
-	es, _ := readEventsFile(w.path)
+	es, err := readEventsFile(w.path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	for _, e := range es {
 		w.seq = max(w.seq, e.Seq)
 	}
+	w.loaded = true
+	return nil
 }
 
 // Append writes one event for work item wi ("" = daemon scope). body may
@@ -211,7 +217,9 @@ func (l *EventLog) Append(wi, kind string, body any) error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.loadLocked()
+	if err := w.loadLocked(); err != nil {
+		return err
+	}
 	entry.Seq = w.seq + 1
 	entry.At = time.Now().UTC().Format(time.RFC3339Nano) // under the lock: per WI, time order is seq order
 	line, err := json.Marshal(entry)
@@ -265,17 +273,24 @@ func (l *EventLog) Newest(wi string, match func(kind string) bool) (protocol.Eve
 	return protocol.EventEntry{}, false
 }
 
-// LastSeq is the highest seq ever appended for wi (0 = none).
+// LastSeq is the highest seq ever appended for wi (0 = none). The
+// counter is learned from the file once and kept; an id with no file
+// adds nothing to the table.
 func (l *EventLog) LastSeq(wi string) int64 {
 	w := l.of(wi, false)
 	if w == nil {
-		probe := wiLog{path: filepath.Join(l.dir, eventsFileName(wi))}
-		probe.loadLocked()
-		return probe.seq
+		if _, err := os.Stat(filepath.Join(l.dir, eventsFileName(wi))); err != nil {
+			return 0
+		}
+		if w = l.of(wi, true); w == nil {
+			return 0
+		}
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.loadLocked()
+	if w.loadLocked() != nil {
+		return 0
+	}
 	return w.seq
 }
 
