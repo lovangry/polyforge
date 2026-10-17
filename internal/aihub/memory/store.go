@@ -70,7 +70,7 @@ type CreateRequest struct {
 
 // Create renders the stored document (frontmatter + body) and writes the
 // row and its FTS row in one Core transaction (with the authority-file
-// write-through around it, writethrough.go). A blank title is derived
+// write-through placed before it, writethrough.go). A blank title is derived
 // from the body for the row (rowTitle); the document's frontmatter keeps
 // the title as requested.
 func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
@@ -148,10 +148,15 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 		return nil, errf(api.ErrMemTooLarge, "", "authority document exceeds 1 MiB")
 	}
 	rel := authorityRel(projectID, memID)
-	tmp, err := s.stageAuthority(rel, doc)
-	if err != nil {
+	if err := s.writeAuthority(rel, doc); err != nil {
 		return nil, err
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			s.dropAuthority(rel)
+		}
+	}()
 	var idem any
 	if req.IdempotencyKey != nil && *req.IdempotencyKey != "" {
 		idem = *req.IdempotencyKey
@@ -178,9 +183,7 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	if err := placeAuthority(tmp); err != nil {
-		return nil, err
-	}
+	committed = true
 	return s.load(memID)
 }
 
@@ -664,7 +667,7 @@ func containsAll(have, want []string) bool {
 
 // Redact soft-deletes: the row turns redacted and its FTS row goes, in
 // one Core transaction (the authority directory moves into _redacted/
-// first, writethrough.go). The stored document stays in the row and is
+// after it, writethrough.go). The stored document stays in the row and is
 // never served again.
 func (s *Store) Redact(memID string) error {
 	tx, err := s.db.Begin()
@@ -683,16 +686,17 @@ func (s *Store) Redact(memID string) error {
 	if status != "active" {
 		return errf(api.ErrMemConflict, "", "memory is %s", status)
 	}
-	if err := s.redactAuthority(rel); err != nil {
-		return err
-	}
 	if _, err := tx.Exec(`UPDATE memories SET status='redacted', updated_at=?1 WHERE id=?2`, core.Now(), memID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM memory_fts WHERE mem_id=?1`, memID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.redactAuthority(rel)
+	return nil
 }
 
 // ftsReplace enforces the delete-then-insert invariant: each mem_id has

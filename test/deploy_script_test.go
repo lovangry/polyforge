@@ -585,44 +585,72 @@ func TestDeployRefusesNonPlainPaths(t *testing.T) {
 	}
 }
 
-// dbOnlyMemories gives the world's server database the memories.content
-// column with one filled row, plus the given number of rows without
-// content.
-func (d *deployWorld) dbOnlyMemories(nulls int) {
+// dbOnlyMemories gives the world's server database the memories columns
+// the step-4 check reads (content, status, authority_path) with one filled
+// row, plus the given rows without content: "active" or "redacted", each
+// with its memory.md in the data dir when withFile.
+func (d *deployWorld) dbOnlyMemories(rows ...nullRow) {
 	d.t.Helper()
 	py := `import sqlite3,sys
 c=sqlite3.connect(sys.argv[1])
-c.execute("alter table memories add column content text")
-c.execute("insert into memories(id, content) values (1, 'doc')")
-for i in range(int(sys.argv[2])): c.execute("insert into memories(id) values (?)", (i + 2,))
+for col in ("content text", "status text", "authority_path text"): c.execute("alter table memories add column " + col)
+c.execute("insert into memories(id, content, status, authority_path) values (1, 'doc', 'active', 'memory/p/mem_1')")
+for i, st in enumerate(sys.argv[2:]): c.execute("insert into memories(id, status, authority_path) values (?, ?, ?)", (i + 2, st, "memory/p/mem_%d" % (i + 2)))
 c.commit()`
-	db := filepath.Join(d.w, "srv", "data", "aihub", "aihub.db")
-	if out, err := exec.Command("python3", "-I", "-c", py, db, fmt.Sprint(nulls)).CombinedOutput(); err != nil {
+	data := filepath.Join(d.w, "srv", "data", "aihub")
+	args := []string{"-I", "-c", py, filepath.Join(data, "aihub.db")}
+	for i, r := range rows {
+		args = append(args, r.status)
+		if r.withFile {
+			wf(d.t, filepath.Join(data, "memory", "p", fmt.Sprintf("mem_%d", i+2), "memory.md"), "doc\n", 0o644)
+		}
+	}
+	if out, err := exec.Command("python3", args...).CombinedOutput(); err != nil {
 		d.t.Fatalf("memories fixture: %v\n%s", err, out)
 	}
 }
 
+type nullRow struct {
+	status   string
+	withFile bool
+}
+
 // TestDeployConsistencyDBOnlyMemories: on a database with
-// memories.content, step 4 checks that every row carries its content —
-// memory files are no longer counted (a stray file does not block) — and
-// a row without content stops the deploy before anything changed.
+// memories.content, step 4 no longer counts files (a stray file does not
+// block); rows without content pass when the backup holds their file
+// (a rollback to an older aihub wrote them; the new one fills them) or
+// when they are redacted (never served); an active row with neither stops
+// the deploy before anything changed, naming the row.
 func TestDeployConsistencyDBOnlyMemories(t *testing.T) {
 	d := newReadyWorld(t)
-	d.dbOnlyMemories(0)
+	d.dbOnlyMemories()
 	wf(t, filepath.Join(d.w, "srv", "data", "aihub", "memory", "p", "mem_x", "memory.md"), "left over\n", 0o644)
 	out, err := d.run("", "v2.3.0", "--confirm", "v2.3.0")
 	if err != nil {
 		t.Fatalf("deploy failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "snapshot memories rows without content: 0") || strings.Contains(out, "memory.md files in the backup") {
+	if !strings.Contains(out, "snapshot memories rows without content: 0") || strings.Contains(out, "memory.md files in the backup:") {
 		t.Errorf("step 4 did not check the content column:\n%s", out)
 	}
 
 	d = newReadyWorld(t)
-	d.dbOnlyMemories(2)
+	d.dbOnlyMemories(nullRow{"active", true}, nullRow{"redacted", false})
 	out, err = d.run("", "v2.3.0", "--confirm", "v2.3.0")
-	if exitCode(err) != 1 || !strings.Contains(out, "2 memories rows carry no content") {
-		t.Fatalf("want exit 1 at step 4, got %v\n%s", err, out)
+	if err != nil {
+		t.Fatalf("deploy with fillable / redacted rows failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "every active row without content has its memory.md in the backup") {
+		t.Errorf("step 4 did not check the files of rows without content:\n%s", out)
+	}
+
+	d = newReadyWorld(t)
+	d.dbOnlyMemories(nullRow{"active", true}, nullRow{"active", false})
+	out, err = d.run("", "v2.3.0", "--confirm", "v2.3.0")
+	if exitCode(err) != 1 || !strings.Contains(out, "1 active memories rows have neither content nor a memory.md in the backup (3)") {
+		t.Fatalf("want exit 1 at step 4 naming row 3, got %v\n%s", err, out)
+	}
+	if strings.Contains(out, "delete the row") {
+		t.Errorf("step 4 advises deleting rows:\n%s", out)
 	}
 	if strings.Contains(d.logOf("log-docker"), "stop -t") {
 		t.Errorf("the service was stopped although step 4 refused:\n%s", d.logOf("log-docker"))

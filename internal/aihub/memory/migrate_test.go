@@ -7,6 +7,7 @@ package memory
 // move, a missing file), and idempotency.
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -237,7 +238,7 @@ func TestMigrateContentIdempotent(t *testing.T) {
 // older aihub rolled back onto this data dir) would keep the row as it is:
 // an active row needs memory/<project>/<id>/memory.md whose digest is the
 // row's content_sha and whose frontmatter id is the directory name; a
-// redacted row needs its file under _redacted/.
+// redacted row is always kept.
 func oldRulesKeep(t *testing.T, e *env, id string) bool {
 	t.Helper()
 	var rel, sha, status string
@@ -245,8 +246,9 @@ func oldRulesKeep(t *testing.T, e *env, id string) bool {
 		t.Fatal(err)
 	}
 	if status != "active" {
-		i := strings.LastIndexByte(rel, '/')
-		rel = rel[:i] + "/_redacted/" + rel[i+1:]
+		// Redacted rows are terminal there: never deleted, never
+		// resurrected by a file in the active place.
+		return true
 	}
 	raw, err := os.ReadFile(filepath.Join(e.store.dataDir, filepath.FromSlash(rel), "memory.md"))
 	if err != nil {
@@ -254,8 +256,7 @@ func oldRulesKeep(t *testing.T, e *env, id string) bool {
 	}
 	block, _, ok := splitFrontmatter(string(raw))
 	fm, perr := parseFrontmatterBlock(block)
-	return ok && perr == nil && fm["id"] == id && filepath.Base(rel) == id &&
-		(status != "active" || shaHex(raw) == sha)
+	return ok && perr == nil && fm["id"] == id && filepath.Base(rel) == id && shaHex(raw) == sha
 }
 
 // TestCreateWritesThroughReadsDB: a create stores the document in the row
@@ -322,5 +323,141 @@ func TestCreateWritesThroughReadsDB(t *testing.T) {
 	}
 	if err := e.store.Redact(first.ID); err == nil || err.(*APIError).Code != "MEM-409" {
 		t.Fatalf("second redact = %v, want MEM-409", err)
+	}
+}
+
+// TestCreateCrashWindows: the write-through's two crash windows converge.
+// A file placed without its row (crash before the commit) is no memory
+// here — not served, not searched, not migrated — and stays on disk; a
+// create whose commit fails removes its file. A redact committed without
+// its file move (crash after the commit) is redacted here and kept
+// redacted by the old rules.
+func TestCreateCrashWindows(t *testing.T) {
+	e := newEnv(t)
+	var projectID string
+	if err := e.db.QueryRow(`SELECT id FROM projects WHERE name='alpha'`).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	rel := authorityRel(projectID, "mem_orphanfile")
+	fm := &frontmatter{ID: "mem_orphanfile", Type: "experience.debug", OwnerUserID: e.user, Tags: []string{},
+		Visibility: "project", ProjectID: projectID, Related: []string{}, CreatedAt: "t", UpdatedAt: "t"}
+	doc, err := buildDocument(fm, "an orphaned dingo file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.writeAuthority(rel, doc); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.store.Get("mem_orphanfile"); err == nil {
+		t.Fatal("a file without a row is served")
+	}
+	if ids := searchIDs(t, e, "dingo"); len(ids) != 0 {
+		t.Fatalf("a file without a row is searchable: %v", ids)
+	}
+	if rep, err := e.store.MigrateContent(); err != nil || rep.Copied != 0 || len(rep.Adopted) != 0 {
+		t.Fatalf("migration over an orphan file = %+v (%v)", rep, err)
+	}
+	if _, err := os.Stat(filepath.Join(e.store.dataDir, filepath.FromSlash(rel), "memory.md")); err != nil {
+		t.Fatalf("orphan file removed: %v", err)
+	}
+
+	// A failed commit (unknown work item: the foreign key refuses the
+	// row) leaves no file behind.
+	wi := "wi_nosuchitem"
+	if _, err := e.store.Create(CreateRequest{Project: "alpha", Type: "experience.debug",
+		Visibility: "project", Content: "never stored", WorkItemID: &wi}, e.user); err == nil {
+		t.Fatal("create with an unknown work item succeeded")
+	}
+	dirs, _ := filepath.Glob(filepath.Join(e.store.dataDir, "memory", projectID, "mem_*"))
+	if len(dirs) != 1 {
+		t.Fatalf("memory dirs after a failed create = %v, want only the orphan", dirs)
+	}
+
+	// Redact committed, file move lost.
+	entry := e.create(t, "a redacted bilby")
+	if _, err := e.db.Exec(`UPDATE memories SET status='redacted' WHERE id=?1`, entry.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.Exec(`DELETE FROM memory_fts WHERE mem_id=?1`, entry.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.store.Get(entry.ID); err == nil {
+		t.Fatal("redacted entry served")
+	}
+	if !oldRulesKeep(t, e, entry.ID) {
+		t.Fatal("the old rules would not keep the redacted row")
+	}
+	if err := e.store.Redact(entry.ID); err == nil || err.(*APIError).Code != "MEM-409" {
+		t.Fatalf("redact again = %v, want MEM-409", err)
+	}
+}
+
+// TestMigrateFillsBlankTitles: blank titles of active rows are derived
+// from the stored document — rows filled by this pass and rows that
+// already had content alike; an explicit frontmatter title wins; redacted
+// rows keep none; a second pass writes nothing.
+func TestMigrateFillsBlankTitles(t *testing.T) {
+	e := legacyEnv(t)
+	legacyEntry(t, e, "mem_legacy", "- legacy lesson one\nmore", "active", false)
+	legacyEntry(t, e, "mem_legacyred", "# redacted heading", "redacted", true)
+	if _, err := e.db.Exec(`UPDATE memories SET title=NULL`); err != nil {
+		t.Fatal(err)
+	}
+	if rep, err := e.store.MigrateContent(); err != nil || rep.Titled != 1 {
+		t.Fatalf("first pass = %+v (%v), want one title", rep, err)
+	}
+	filled := e.create(t, "### 遗留记忆二\n正文")
+	explicit, err := e.store.Create(CreateRequest{Project: "alpha", Type: "fact.note", Visibility: "project",
+		Title: sp("Keep me"), Content: "# not this"}, e.user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.Exec(`UPDATE memories SET title='  ' WHERE id IN (?1, ?2)`, filled.ID, explicit.ID); err != nil {
+		t.Fatal(err)
+	}
+	if rep, err := e.store.MigrateContent(); err != nil || rep.Titled != 2 {
+		t.Fatalf("second pass = %+v (%v), want two titles", rep, err)
+	}
+	want := map[string]string{"mem_legacy": "legacy lesson one", filled.ID: "遗留记忆二", explicit.ID: "Keep me"}
+	for id, w := range want {
+		got, err := e.store.Get(id)
+		if err != nil || deref(got.Title) != w {
+			t.Fatalf("%s title = %v (%v), want %q", id, deref(got.Title), err, w)
+		}
+	}
+	var red sql.NullString
+	if err := e.db.QueryRow(`SELECT title FROM memories WHERE id='mem_legacyred'`).Scan(&red); err != nil || red.Valid {
+		t.Fatalf("redacted row title = %v (%v), want none", red, err)
+	}
+	var before, after int64
+	e.db.QueryRow(`SELECT total_changes()`).Scan(&before)
+	if rep, err := e.store.MigrateContent(); err != nil || rep.Titled != 0 {
+		t.Fatalf("third pass = %+v (%v)", rep, err)
+	}
+	e.db.QueryRow(`SELECT total_changes()`).Scan(&after)
+	if after != before {
+		t.Fatalf("third pass wrote %d rows", after-before)
+	}
+}
+
+// TestMigrateSweepsTmp: memory.md.tmp leftovers go; memory files stay.
+func TestMigrateSweepsTmp(t *testing.T) {
+	e := newEnv(t)
+	entry := e.create(t, "kept body")
+	dir := filepath.Join(e.store.dataDir, "memory", entry.ProjectID, entry.ID)
+	red := filepath.Join(e.store.dataDir, "memory", entry.ProjectID, "_redacted", "mem_x")
+	if err := os.MkdirAll(red, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{filepath.Join(dir, "memory.md.tmp"), filepath.Join(red, "memory.md.tmp")} {
+		if err := os.WriteFile(p, []byte("partial"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rep, err := e.store.MigrateContent(); err != nil || rep.Swept != 2 {
+		t.Fatalf("pass = %+v (%v), want two swept", rep, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "memory.md")); err != nil {
+		t.Fatalf("memory file swept: %v", err)
 	}
 }

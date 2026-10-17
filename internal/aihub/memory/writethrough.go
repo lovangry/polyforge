@@ -1,12 +1,20 @@
 package memory
 
-// writethrough.go: the authority-file write-through. Create also writes
-// memory/<project>/<id>/memory.md exactly as the file-authority store did
-// (tmp + fsync → row → rename), and redact moves the directory into
-// _redacted/, so an older aihub rolled back onto this data dir finds a file
-// for every row and its reconcile keeps them. Files are written, never read:
-// the database is the source of truth.
-// Transitional: remove once every deployment has run this release (the release after it).
+// writethrough.go: the authority-file write-through, so an older aihub
+// (v2.11 and before, whose reconcile trusts the files) rolled back onto
+// this data dir keeps every row. Create places memory/<project>/<id>/
+// memory.md (tmp + fsync + rename) BEFORE committing the row: a crash in
+// between leaves a file without a row, which this release ignores (no row
+// is no memory; the client never got its 201) and an older aihub adopts.
+// A create whose commit fails removes its file. Redact commits the row
+// first and then moves the directory into _redacted/: a crash in between
+// leaves a redacted row with its file in place, which this release serves
+// as redacted and an older aihub keeps redacted (redacted rows are
+// terminal there). Files are written, never read: the database is the
+// source of truth.
+// Transitional, with the memories columns fs_mtime_ns / fs_size (core
+// DDL): remove once every deployment has run this release (the release
+// after it).
 
 import (
 	"os"
@@ -19,24 +27,17 @@ import (
 // authorityRel is a row's authority_path: memory/<project>/<id>.
 func authorityRel(projectID, memID string) string { return "memory/" + projectID + "/" + memID }
 
-// stageAuthority is write step ①: the document into memory.md.tmp, fsynced.
-// It answers the tmp path, renamed over memory.md by placeAuthority once
-// the row has committed.
-func (s *Store) stageAuthority(rel, doc string) (string, error) {
+// writeAuthority places the document as rel/memory.md: tmp + fsync,
+// rename, directory fsync.
+func (s *Store) writeAuthority(rel, doc string) error {
 	dir := filepath.Join(s.dataDir, filepath.FromSlash(rel))
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return "", errf(api.ErrMemInternal, "", "mkdir: %v", err)
+		return errf(api.ErrMemInternal, "", "mkdir: %v", err)
 	}
 	tmp := filepath.Join(dir, "memory.md.tmp")
 	if err := writeTmpSync(tmp, []byte(doc)); err != nil {
-		return "", errf(api.ErrMemInternal, "", "write authority: %v", err)
+		return errf(api.ErrMemInternal, "", "write authority: %v", err)
 	}
-	return tmp, nil
-}
-
-// placeAuthority is write step ③: rename the staged file over memory.md.
-func placeAuthority(tmp string) error {
-	dir := filepath.Dir(tmp)
 	if err := os.Rename(tmp, filepath.Join(dir, "memory.md")); err != nil {
 		return errf(api.ErrMemInternal, "", "rename authority: %v", err)
 	}
@@ -46,27 +47,30 @@ func placeAuthority(tmp string) error {
 	return nil
 }
 
-// redactAuthority moves an entry's authority directory into
-// memory/<project>/_redacted/. A row without a file (written by no
-// file-authority store, or already moved) has nothing to move.
-func (s *Store) redactAuthority(rel string) error {
+// dropAuthority removes the directory of a create that did not commit
+// (a fresh id: nothing else lives there).
+func (s *Store) dropAuthority(rel string) {
+	_ = os.RemoveAll(filepath.Join(s.dataDir, filepath.FromSlash(rel)))
+}
+
+// redactAuthority moves a redacted entry's authority directory into
+// memory/<project>/_redacted/, best effort: the redact has committed, and
+// a file left in place is harmless (an older aihub keeps a redacted row
+// redacted whatever its file position).
+func (s *Store) redactAuthority(rel string) {
 	rel = filepath.ToSlash(rel)
 	i := strings.LastIndexByte(rel, '/')
 	if i < 0 || !filepath.IsLocal(rel) {
-		return nil
+		return
 	}
 	src := filepath.Join(s.dataDir, filepath.FromSlash(rel))
 	dst := filepath.Join(s.dataDir, filepath.FromSlash(rel[:i]+"/_redacted/"+rel[i+1:]))
-	if _, err := os.Lstat(src); os.IsNotExist(err) {
-		return nil
+	if _, err := os.Lstat(src); err != nil {
+		return
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
-		return err
+	if os.MkdirAll(filepath.Dir(dst), 0o750) == nil {
+		_ = os.Rename(src, dst)
 	}
-	if err := os.Rename(src, dst); err != nil {
-		return errf(api.ErrMemInternal, "", "redact move: %v", err)
-	}
-	return nil
 }
 
 // writeTmpSync writes body to tmp, fsyncs it and its directory.

@@ -5,13 +5,17 @@ package memory
 // before the column existed carries each memory's document only as
 // memory/<project>/<id>/memory.md (memory/<project>/_redacted/<id>/memory.md
 // once redacted); the migration copies those bytes into the row. The
-// files are left in place.
+// files are left in place. The same pass gives blank-titled active rows
+// the title their document derives (rowTitle) and sweeps memory.md.tmp
+// leftovers of interrupted creates.
 
 import (
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/silgrid/polyforge/internal/aihub/core"
 )
@@ -33,6 +37,10 @@ type MigrateReport struct {
 	// Missing lists rows left without content (no readable file); they
 	// are not served and the next pass retries them.
 	Missing []string
+	// Titled counts active rows given a derived title.
+	Titled int
+	// Swept counts memory.md.tmp leftovers removed.
+	Swept   int
 	Elapsed time.Duration
 }
 
@@ -40,11 +48,12 @@ type MigrateReport struct {
 // writes.
 const migrateBatchBytes = 16 << 20
 
-// MigrateContent adds the content column when the database predates it
-// and fills every row whose content is NULL from its memory file. It is
-// idempotent: a filled row is never selected again, so a pass over a
-// migrated database reads no file and writes nothing. Run it before
-// serving: a row without content answers MEM-404.
+// MigrateContent adds the content column when the database predates it,
+// fills every row whose content is NULL from its memory file, then fills
+// blank titles and sweeps tmp leftovers. It is idempotent: a filled row
+// is never selected again, so a pass over a migrated database reads no
+// memory file and writes nothing. Run it before serving (no create is in
+// flight, and a row without content answers MEM-404).
 func (s *Store) MigrateContent() (MigrateReport, error) {
 	start := time.Now()
 	var rep MigrateReport
@@ -144,8 +153,86 @@ func (s *Store) MigrateContent() (MigrateReport, error) {
 	if err := flush(); err != nil {
 		return rep, err
 	}
+	if rep.Titled, err = s.fillBlankTitles(); err != nil {
+		return rep, err
+	}
+	rep.Swept = s.sweepTmp()
 	rep.Elapsed = time.Since(start)
 	return rep, nil
+}
+
+// fillBlankTitles gives every active row with content and a blank title
+// the title its document derives: the frontmatter title when it has
+// content, else the body's first usable line (rowTitle, as Create does).
+// A row whose document derives none stays blank and is reconsidered on
+// the next pass; the guarded UPDATE writes nothing twice.
+func (s *Store) fillBlankTitles() (int, error) {
+	rows, err := s.db.Query(`SELECT id FROM memories WHERE status='active'
+		AND content IS NOT NULL AND (title IS NULL OR trim(title) = '')`)
+	if err != nil {
+		return 0, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	n := 0
+	for i := 0; i < len(ids); i += 256 {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return n, err
+		}
+		for _, id := range ids[i:min(i+256, len(ids))] {
+			var doc string
+			if err := tx.QueryRow(`SELECT content FROM memories WHERE id=?1`, id).Scan(&doc); err != nil {
+				tx.Rollback()
+				return n, err
+			}
+			var fm frontmatter
+			block, body, ok := splitFrontmatter(doc)
+			if ok && yaml.Unmarshal([]byte(block), &fm) != nil {
+				continue
+			}
+			t := rowTitle(fm.Title, body)
+			if t == nil {
+				continue
+			}
+			if _, err := tx.Exec(`UPDATE memories SET title=?1 WHERE id=?2
+				AND (title IS NULL OR trim(title) = '')`, *t, id); err != nil {
+				tx.Rollback()
+				return n, err
+			}
+			n++
+		}
+		if err := tx.Commit(); err != nil {
+			return n, err
+		}
+	}
+	return n, nil
+}
+
+// sweepTmp removes memory.md.tmp leftovers (a create interrupted before
+// its rename); no create is in flight while the migration runs.
+func (s *Store) sweepTmp() int {
+	n := 0
+	for _, pat := range []string{"*/*/memory.md.tmp", "*/_redacted/*/memory.md.tmp"} {
+		m, _ := filepath.Glob(filepath.Join(s.dataDir, "memory", pat))
+		for _, p := range m {
+			if os.Remove(p) == nil {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // readMemoryFile reads a row's memory file and reports whether it was

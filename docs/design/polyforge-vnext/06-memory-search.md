@@ -18,9 +18,12 @@ Memory 是 Core 域数据（项目知识沉淀）：一条 memory = `memories` �
   `status='redacted'` + 删除 FTS 行；文档留在行里，此后永不服务（`Store.Redact`）。
 - `content_sha` = `content` 的 SHA-256，`content_len` = 其字节数（`pf memory show` 显示的 `content_len`）。
 - 过渡期写穿（`writethrough.go`，本版本被所有部署运行过之后的下一个版本删除）：创建时照旧写
-  `<data-dir>/memory/<project_id>/<mem_id>/memory.md`（临时文件 + fsync → 提交事务 → rename，字节与 `content`
-  相同，行的 `authority_path` 指向它），redact 时照旧把目录移进 `_redacted/`——回滚到旧版 aihub 时，旧的对账为每行
-  找到文件、保留全部行。运行时只写不读。
+  `<data-dir>/memory/<project_id>/<mem_id>/memory.md`（临时文件 + fsync + rename 落位**之后**才提交行；字节与
+  `content` 相同，行的 `authority_path` 指向它；提交失败则删掉该文件），redact 先提交行、再把目录移进
+  `_redacted/`（尽力而为）——回滚到 v2.11 时，旧的对账为每个 active 行找到文件、redacted 行原样保留。崩溃残留：
+  落位后、提交前崩溃留下的无行文件在本版本不是 memory（不服务、不迁移、不删除），v2.11 会把它收为 memory；
+  提交后、挪文件前崩溃的 redact 在两边都是 redacted。运行时只写不读。`fs_mtime_ns`/`fs_size` 列同为过渡保留
+  （本版本不用；保证全新安装也能回滚到 v2.11）。
 - `content` 为 NULL 的行（只可能来自迁移时找不到文件，§4）对一切读写路径等同不存在（`MEM-404`）。
 
 ## 3. 文档格式 <!-- §3 -->
@@ -43,10 +46,10 @@ Memory 是 Core 域数据（项目知识沉淀）：一条 memory = `memories` �
 找 active / `_redacted` 位置，再找另一个），文件字节原样写入 `content`，按 16 MiB 一批小事务提交。文件 sha 与
 `content_sha` 一致 → 复制；不一致 → 以文件为准（旧版本的规则），重算 `content_sha`/`content_len`，active 行重写
 FTS；active 行的文件只在 `_redacted/` 下（redact 在挪文件后、提交前中断）→ 补完 redact；找不到文件 → 留 NULL、
-不服务，下次启动重试。每次启动记一行计数日志，非简单复制的行逐个列出 id。已填的行不再被选中：迁移过的库上
-只有一次查询，不读文件、不写。文件一律保留不删（本版本作为后备；删除留给后续版本，届时与写穿一起删除，并删除
-`authority_path` 列与旧库遗留的 `fs_mtime_ns`/`fs_size` 列）。耗时：3,800 条约 55 KB 的文档（≈210 MB）在开发机上约
-3.3 s。
+不服务，下次启动重试。随后同一趟为标题为空的 active 行按其文档派生标题（与创建同一规则：frontmatter 的非空
+`title`，否则正文首个可用行；派生不出的保持为空），并删除 `memory.md.tmp` 残留。每次启动记一行计数日志，非简单复制的行逐个列出 id。已填的行不再被选中：迁移过的库上
+不读 memory 文件、不写。文件一律保留不删（本版本作为后备；删除留给后续版本，届时与写穿一起删除，并删除
+`authority_path` 列与旧库遗留的 `fs_mtime_ns`/`fs_size` 列）。耗时：生产备份副本上 3,810 条约 1.5 s。
 
 ## 5. API 与错误码 <!-- §5 -->
 

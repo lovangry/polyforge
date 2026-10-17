@@ -188,7 +188,12 @@ CREATE TABLE IF NOT EXISTS memories (
   -- The stored document (frontmatter + body); content_sha/content_len
   -- describe it. NULL only on a row the memory content migration could
   -- not fill (memory/migrate.go): such a row is never served.
-  content      TEXT
+  content      TEXT,
+  -- Transitional (memory/writethrough.go): unused here, kept so a fresh
+  -- install can roll back to v2.11, whose memory store reads and writes
+  -- them. Remove with the write-through.
+  fs_mtime_ns  INTEGER,
+  fs_size      INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_mem_work_item ON memories(work_item_id) WHERE work_item_id IS NOT NULL;

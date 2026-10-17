@@ -47,8 +47,9 @@
 #                       server from the saved old binary
 #   3 online backup     rsync memory/ git/ (pass 1) -> sqlite backup-API snapshot
 #                       of aihub.db -> rsync catch-up; snapshot integrity + counts
-#   4 consistency       every memories row in the snapshot carries its content (a
-#                       snapshot predating memories.content: rows == memory.md files)
+#   4 consistency       every active memories row in the snapshot carries its content or
+#                       has its memory.md in the backup (a snapshot predating
+#                       memories.content: rows == memory.md files)
 #   5 off-host          rsync backup to BACKUP_ROOT, manifests equal, integrity + counts
 #                       then mark it .verified (both sides) and keep the newest 3 verified
 #                       aihub-backup-<ver>-<TS> dirs (this one included) on the server and
@@ -1114,7 +1115,7 @@ cat <<EOF
                      rsync -a $AIHUB_DATA/ -> $SRV_BACKUP/   (pass 1, excluding aihub.db, -wal, -shm, service.lock, bootstrap-admin.key, .verified)
                      python3 sqlite3 backup API: $AIHUB_DATA/aihub.db (ro) -> $SRV_BACKUP/aihub.db ; integrity_check + counts >= baseline
                      rsync -a again (catch-up, files at least as new as the DB)
-4. consistency       every memories row in the snapshot carries its content (none missing -> continue; otherwise stop, nothing changed);
+4. consistency       every active memories row in the snapshot carries its content or has its memory.md in the backup (otherwise stop, nothing changed);
                      a snapshot predating memories.content: its memories rows == memory.md files under $SRV_BACKUP/memory (retry up to 2x; still different -> stop)
 5. off-host copy     rsync $AIHUB_HOST:$SRV_BACKUP/ -> $LOCAL_BACKUP/
                      server manifest == local manifest; integrity_check ok + row counts == frozen baseline on the local aihub.db
@@ -1224,16 +1225,36 @@ show_counts "$WORK/frozen.counts"
 # ---------------------------------------------------------------- step 4
 step 4 "consistency: memory content in the snapshot"
 # Each memory's document lives in its memories row (memories.content,
-# internal/aihub/memory), so the snapshot alone holds every memory: each
-# row must carry its content. A NULL is a row aihub's startup content
-# migration found no memory file for (aihub logs its id; it is not
-# served). A snapshot that predates the column keeps the documents in
+# internal/aihub/memory). A row without content is one aihub fills from
+# its memory file at start (a row written by an older aihub, e.g. after a
+# rollback) - fine when the backup holds that file; an ACTIVE row without
+# content AND without a file has no copy anywhere (aihub does not serve
+# it), so the deploy stops. Redacted rows are never served: a missing file
+# is fine. A snapshot that predates the column keeps the documents in
 # <data>/memory/<project>/[_redacted/]<id>/memory.md files instead: then
 # each row must have its file in the backup.
+# shellcheck disable=SC2016
+PYMEM='
+import os, sqlite3, sys
+db, root = sys.argv[1], sys.argv[2]
+c = sqlite3.connect("file:" + db + "?mode=ro", uri=True, timeout=30)
+bad = []
+for mid, rel in c.execute("select id, authority_path from memories where content is null and status = \"active\""):
+    head, _, tail = rel.rpartition("/")
+    places = [rel, head + "/_redacted/" + tail] if rel else []
+    if not any(os.path.isfile(os.path.join(root, p, "memory.md")) for p in places):
+        bad.append(str(mid))
+print(len(bad), " ".join(bad[:20]))
+'
 nocontent="$(sed -n 's/^memcontent //p' "$WORK/frozen.counts.raw")"
 if [ "$nocontent" != "none" ]; then
-  note "snapshot memories rows without content: $nocontent"
-  [ "$nocontent" = 0 ] || die "$nocontent memories rows carry no content (no memory file at aihub's startup content migration; the aihub log names them and they are not served) - restore their memory.md under $AIHUB_DATA/memory and restart aihub, or delete the rows; nothing was changed"
+  note "snapshot memories rows without content: $nocontent (aihub fills them from their memory files at start)"
+  if [ "$nocontent" != 0 ]; then
+    lost="$(printf '%s\n' "$PYMEM" | rssh python3 - "$SRV_BACKUP/aihub.db" "$SRV_BACKUP" 2>&1)" \
+      || die "memory content check of the snapshot failed: $lost"
+    [ "${lost%% *}" = 0 ] || die "${lost%% *} active memories rows have neither content nor a memory.md in the backup (${lost#* }) - aihub cannot fill or serve them; restore their memory.md under $AIHUB_DATA/memory from an older backup and restart aihub (nothing was changed)"
+    note "every active row without content has its memory.md in the backup"
+  fi
 else
   tries=0
   while :; do
