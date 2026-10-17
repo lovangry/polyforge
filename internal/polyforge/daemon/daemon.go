@@ -512,17 +512,6 @@ func validateWorkspace(ws string) error {
 // context ends, which triggers the same shutdown).
 // It returns when the process should exit.
 func (d *Daemon) Run(ctx context.Context) error {
-	// Startup askpass sweep (crash residue): a previous daemon killed
-	// mid-push leaves one-shot credential scripts — they hold push
-	// secrets — under <DataDir>/git/askpass. Nothing can be live this
-	// early, so every entry there is residue. Best-effort, non-fatal.
-	if err := gitops.SweepAskpass(filepath.Join(d.cfg.DataDir, "git")); err != nil {
-		fmt.Fprintf(os.Stderr, "daemon: askpass sweep: %v\n", err)
-	}
-	// Same for the carrier lane's pf-carrier-* temporary bare repos.
-	if err := gitops.SweepCarrierTemps(filepath.Join(d.cfg.DataDir, "git")); err != nil {
-		fmt.Fprintf(os.Stderr, "daemon: carrier temp sweep: %v\n", err)
-	}
 	// M5: flock the daemon data dir BEFORE the socket probe — the two
 	// together are the single-instance guard. The dial probe alone is a
 	// TOCTOU: two daemons started in the same window can both observe a
@@ -536,6 +525,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	defer d.releaseDataLock()
+	// Startup askpass sweep (crash residue): a previous daemon killed
+	// mid-push leaves one-shot credential scripts — they hold push
+	// secrets — under <DataDir>/git/askpass. Only the data-dir lock holder
+	// sweeps, so nothing of another daemon can be live there: every entry
+	// is residue. Best-effort, non-fatal.
+	if err := gitops.SweepAskpass(filepath.Join(d.cfg.DataDir, "git")); err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: askpass sweep: %v\n", err)
+	}
+	// Same for the carrier lane's pf-carrier-* temporary bare repos.
+	if err := gitops.SweepCarrierTemps(filepath.Join(d.cfg.DataDir, "git")); err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: carrier temp sweep: %v\n", err)
+	}
 	lst, err := d.listenUDS()
 	if err != nil {
 		_ = lock.Close()

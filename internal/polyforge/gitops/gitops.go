@@ -1290,8 +1290,8 @@ func shellQuote(s string) string {
 // script — which holds the push secret — under <gitRoot>/askpass
 // forever. Call it ONCE at daemon startup with the directory that holds
 // the external git-dirs (filepath.Dir of any GitDir, i.e.
-// <DataDir>/git): nothing can be live that early, so every askpass-*
-// entry is crash residue. Best-effort — an unreadable entry is skipped
+// <DataDir>/git), holding the data-dir lock: nothing of another daemon
+// can be live then, so every askpass-* entry is crash residue. Best-effort — an unreadable entry is skipped
 // (the first removal error is reported, the sweep continues).
 func SweepAskpass(gitRoot string) error {
 	dir := filepath.Join(gitRoot, "askpass")
@@ -1317,7 +1317,8 @@ func SweepAskpass(gitRoot string) error {
 // SweepCarrierTemps removes the pf-carrier-* temporary bare repos a
 // killed process left next to the external git-dirs (pushCarrier removes
 // its own when the call unwinds). Call it ONCE at daemon startup with
-// the same gitRoot as SweepAskpass: nothing can be live that early.
+// the same gitRoot as SweepAskpass, holding the data-dir lock (nothing of
+// another daemon can be live then).
 // Best-effort — the first removal error is reported, the sweep
 // continues.
 func SweepCarrierTemps(gitRoot string) error {

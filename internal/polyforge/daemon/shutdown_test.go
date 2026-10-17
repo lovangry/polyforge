@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -201,6 +202,38 @@ func TestShutdownTerminatesJobsInParallel(t *testing.T) {
 	for i, a := range agents {
 		if !a.isDone() {
 			t.Fatalf("agent %d was not terminated", i)
+		}
+	}
+}
+
+// Only the data-dir lock holder sweeps crash residue: a second start the
+// lock refuses leaves the running daemon's askpass scripts and carrier
+// temp repos alone (a push of the running daemon may be using them).
+func TestRefusedStartLeavesTheRunningDaemonsGitFiles(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	gitRoot := filepath.Join(td.cfg.DataDir, "git")
+	askpass := filepath.Join(gitRoot, "askpass", "askpass-live")
+	carrier := filepath.Join(gitRoot, "pf-carrier-live")
+	for _, dir := range []string{filepath.Dir(askpass), carrier} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(askpass, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := td.cfg
+	cfg.SocketPath = filepath.Join(t.TempDir(), "second.sock")
+	d2, err := New(cfg)
+	if err != nil {
+		t.Fatalf("second New: %v", err)
+	}
+	if err := d2.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "data-dir lock") {
+		t.Fatalf("second Run = %v, want the data-dir lock refusal", err)
+	}
+	for _, p := range []string{askpass, carrier} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("the refused start removed the running daemon's %s: %v", p, err)
 		}
 	}
 }
