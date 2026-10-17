@@ -1081,8 +1081,12 @@ func (r *stepRun) archive(res *StepResult) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(r.capsuleRoot, capsule.DirArtifacts, "steps", r.sp.StepID, spawnTokenDir(r.sp.SpawnN), "result.json")
-	return atomicfile.Write(path, blob, 0o644)
+	return atomicfile.Write(r.archivePath(), blob, 0o644)
+}
+
+// archivePath is the dispatch's R14 staging path.
+func (r *stepRun) archivePath() string {
+	return filepath.Join(r.capsuleRoot, capsule.DirArtifacts, "steps", r.sp.StepID, spawnTokenDir(r.sp.SpawnN), "result.json")
 }
 
 // maxQuotedAgentText bounds agent-written text quoted into a defect: the

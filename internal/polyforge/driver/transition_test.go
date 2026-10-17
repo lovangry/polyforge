@@ -396,38 +396,50 @@ func TestTransitionStepResultRefusals(t *testing.T) {
 const OutcomeWeird Outcome = "weird"
 
 func TestTransitionStepResultGateFailedAndIncomplete(t *testing.T) {
-	d, _, _, _ := testEnv(t, gateSpec("check", "a"), spec("a"))
+	d, _, _, execPath := testEnv(t, spec("a"), gateSpec("check", "a"))
 	mustInit(t, d)
-	mustStart(t, d, "check", 1)
+	mustStart(t, d, "a", 1)
+	if err := d.transition(TransitionRequest{Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: completedResult("a", 1, `{}`)}); err != nil {
+		t.Fatalf("result a: %v", err)
+	}
+	mustStart(t, d, "check", 2)
+	before := readExec(t, execPath).Version
 	if err := d.transition(TransitionRequest{
-		Kind: TransStepResult, StepID: "check", SpawnN: 1,
-		Result: &StepResult{StepID: "check", SpawnN: 1,
+		Kind: TransStepResult, StepID: "check", SpawnN: 2,
+		Result: &StepResult{StepID: "check", SpawnN: 2,
 			Outcome: OutcomeGateFailed, Output: json.RawMessage(`{"verdict":"FAIL"}`)},
 	}); err != nil {
 		t.Fatalf("gate_failed: %v", err)
 	}
-	snap := d.Snapshot()
-	st := snap.Steps["check"]
+	disk := readExec(t, execPath)
+	st := disk.Steps["check"]
 	if st.Status != capsule.StepInProgress || st.Output["verdict"] != "FAIL" {
 		t.Fatalf("a FAILing gate is never done and holds its verdict: %+v", st)
 	}
-	if snap.ReviewRounds["check"] != 1 {
-		t.Fatalf("review_rounds must count the evaluation: %+v", snap.ReviewRounds)
+	if disk.ReviewRounds["check"] != 1 {
+		t.Fatalf("review_rounds must count the evaluation: %+v", disk.ReviewRounds)
+	}
+	// the verdict and its rewind are ONE durable write: no crash can
+	// leave a recorded FAIL that nothing consumes
+	if disk.Version != before+1 || disk.CurrentStep != "a" || disk.RewindStats.Count != 1 ||
+		disk.Steps["a"].PendingRewindInput == nil {
+		t.Fatalf("the gate verdict must land with its rewind in one write: version %d->%d, %+v", before, disk.Version, disk)
 	}
 	// incomplete → blocked, position frozen, partial output recorded.
+	mustStart(t, d, "a", 3)
 	if err := d.transition(TransitionRequest{
-		Kind: TransStepResult, StepID: "check", SpawnN: 1,
-		Result: &StepResult{StepID: "check", SpawnN: 1,
+		Kind: TransStepResult, StepID: "a", SpawnN: 3,
+		Result: &StepResult{StepID: "a", SpawnN: 3,
 			Outcome: OutcomeIncomplete, Output: json.RawMessage(`{"partial":true}`)},
 	}); err != nil {
 		t.Fatalf("incomplete: %v", err)
 	}
-	snap = d.Snapshot()
-	if snap.WorkflowStatus != StatusBlocked || snap.CurrentStep != "check" || snap.Steps["check"].Status != capsule.StepInProgress {
+	snap := d.Snapshot()
+	if snap.WorkflowStatus != StatusBlocked || snap.CurrentStep != "a" || snap.Steps["a"].Status != capsule.StepInProgress {
 		t.Fatalf("incomplete must block with the position frozen: %+v", snap)
 	}
-	if snap.Steps["check"].Output["partial"] != true {
-		t.Fatalf("the honest partial output must be recorded: %+v", snap.Steps["check"])
+	if snap.Steps["a"].Output["partial"] != true {
+		t.Fatalf("the honest partial output must be recorded: %+v", snap.Steps["a"])
 	}
 }
 
@@ -506,11 +518,6 @@ func TestTransitionGateFailRewind(t *testing.T) {
 		Kind: TransStepResult, StepID: "check", SpawnN: 3,
 		Result: &StepResult{StepID: "check", SpawnN: 3,
 			Outcome: OutcomeGateFailed, Output: json.RawMessage(`{"verdict":"FAIL: tests red"}`)},
-	}); err != nil {
-		t.Fatalf("gate result: %v", err)
-	}
-	if err := d.transition(TransitionRequest{
-		Kind: TransGateFail, StepID: "check", SpawnN: 3,
 		Gate: &GateVerdict{GateStepID: "check", TargetStep: "build",
 			VerdictText: "FAIL: tests red"},
 	}); err != nil {
@@ -572,12 +579,7 @@ func TestTransitionGateFailBounds(t *testing.T) {
 		if err := d.transition(TransitionRequest{
 			Kind: TransStepResult, StepID: "check", SpawnN: n + 1,
 			Result: &StepResult{StepID: "check", SpawnN: n + 1, Outcome: OutcomeGateFailed},
-		}); err != nil {
-			t.Fatalf("gate result (round %d): %v", round, err)
-		}
-		if err := d.transition(TransitionRequest{
-			Kind: TransGateFail, StepID: "check", SpawnN: n + 1,
-			Gate: &GateVerdict{GateStepID: "check", TargetStep: "a", VerdictText: "v"},
+			Gate:   &GateVerdict{GateStepID: "check", TargetStep: "a", VerdictText: "v"},
 		}); err != nil {
 			t.Fatalf("gate_fail (round %d): %v", round, err)
 		}
@@ -612,13 +614,7 @@ func TestTransitionGateFailBounds(t *testing.T) {
 	if err := d2.transition(TransitionRequest{
 		Kind: TransStepResult, StepID: "check", SpawnN: 2,
 		Result: &StepResult{StepID: "check", SpawnN: 2, Outcome: OutcomeGateFailed},
-	}); err != nil {
-		t.Fatalf("gate result: %v", err)
-	}
-	// First rewind to a passes (per-step count 0 → 1)...
-	if err := d2.transition(TransitionRequest{
-		Kind: TransGateFail, StepID: "check", SpawnN: 2,
-		Gate: &GateVerdict{GateStepID: "check", TargetStep: "a", VerdictText: "v"},
+		Gate:   &GateVerdict{GateStepID: "check", TargetStep: "a", VerdictText: "v"},
 	}); err != nil {
 		t.Fatalf("first rewind: %v", err)
 	}
@@ -631,12 +627,7 @@ func TestTransitionGateFailBounds(t *testing.T) {
 	if err := d2.transition(TransitionRequest{
 		Kind: TransStepResult, StepID: "check", SpawnN: 4,
 		Result: &StepResult{StepID: "check", SpawnN: 4, Outcome: OutcomeGateFailed},
-	}); err != nil {
-		t.Fatalf("gate result: %v", err)
-	}
-	if err := d2.transition(TransitionRequest{
-		Kind: TransGateFail, StepID: "check", SpawnN: 4,
-		Gate: &GateVerdict{GateStepID: "check", TargetStep: "a", VerdictText: "v"},
+		Gate:   &GateVerdict{GateStepID: "check", TargetStep: "a", VerdictText: "v"},
 	}); err != nil {
 		t.Fatalf("second rewind: %v", err)
 	}
@@ -656,13 +647,7 @@ func TestTransitionGateFailTerminateAndIllegalTarget(t *testing.T) {
 	if err := d.transition(TransitionRequest{
 		Kind: TransStepResult, StepID: "check", SpawnN: 2,
 		Result: &StepResult{StepID: "check", SpawnN: 2, Outcome: OutcomeGateFailed},
-	}); err != nil {
-		t.Fatalf("gate result: %v", err)
-	}
-	// no rewind target declared → failed_gate.
-	if err := d.transition(TransitionRequest{
-		Kind: TransGateFail, StepID: "check", SpawnN: 2,
-		Gate: &GateVerdict{GateStepID: "check", VerdictText: "v"},
+		Gate:   &GateVerdict{GateStepID: "check", VerdictText: "v"},
 	}); err != nil {
 		t.Fatalf("terminate: %v", err)
 	}
@@ -677,23 +662,21 @@ func TestTransitionGateFailTerminateAndIllegalTarget(t *testing.T) {
 	d2, _, _, _ := testEnv(t, spec("a"), spec("b"), gateSpec("check", "a"))
 	mustInit(t, d2)
 	mustStart(t, d2, "check", 1)
-	if err := d2.transition(TransitionRequest{
-		Kind: TransStepResult, StepID: "check", SpawnN: 1,
-		Result: &StepResult{StepID: "check", SpawnN: 1, Outcome: OutcomeGateFailed},
-	}); err != nil {
-		t.Fatalf("gate result: %v", err)
-	}
 	// A rewind target at or after the gate is illegal ("b" in
 	// [a, b, check] IS legal — the target only needs to be earlier than
-	// the gate).
+	// the gate); the refused verdict leaves the gate untouched.
 	for _, bad := range []string{"check", "nope"} {
 		err := d2.transition(TransitionRequest{
-			Kind: TransGateFail, StepID: "check", SpawnN: 1,
-			Gate: &GateVerdict{GateStepID: "check", TargetStep: bad, VerdictText: "v"},
+			Kind: TransStepResult, StepID: "check", SpawnN: 1,
+			Result: &StepResult{StepID: "check", SpawnN: 1, Outcome: OutcomeGateFailed},
+			Gate:   &GateVerdict{GateStepID: "check", TargetStep: bad, VerdictText: "v"},
 		})
 		if err == nil {
 			t.Fatalf("rewind target %q must be refused", bad)
 		}
+	}
+	if st := d2.Snapshot().Steps["check"]; st.Status != capsule.StepInProgress || st.Output != nil {
+		t.Fatalf("a refused gate verdict must not half-land: %+v", st)
 	}
 }
 
