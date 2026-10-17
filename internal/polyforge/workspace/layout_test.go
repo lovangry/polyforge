@@ -189,14 +189,14 @@ func TestStaleScratchAndPrune(t *testing.T) {
 	set("olddir", old)
 	set("mixed/old.txt", old)
 	set("mixed", old) // the dir is old, but new.txt under it is fresh
-	rep, err := StaleScratch(ws, now, ScratchMaxAge)
+	rep, err := Scratch(ws, now, ScratchMaxAge, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := []string{"old.log", "olddir"}; !reflect.DeepEqual(rep.Stale, want) || len(rep.Skipped) != 0 {
 		t.Fatalf("stale = %+v, want %v", rep, want)
 	}
-	pruned, err := PruneScratch(ws, now, ScratchMaxAge)
+	pruned, err := Scratch(ws, now, ScratchMaxAge, true)
 	if err != nil || !reflect.DeepEqual(pruned.Stale, rep.Stale) {
 		t.Fatalf("prune = %+v, %v", pruned, err)
 	}
@@ -208,7 +208,7 @@ func TestStaleScratchAndPrune(t *testing.T) {
 	if want := []string{"fresh.log", "mixed"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("scratch after prune = %v, want %v", names, want)
 	}
-	if rep, err := StaleScratch(t.TempDir(), now, ScratchMaxAge); err != nil || rep.Stale != nil {
+	if rep, err := Scratch(t.TempDir(), now, ScratchMaxAge, false); err != nil || rep.Stale != nil {
 		t.Fatalf("no scratch/: %+v %v", rep, err)
 	}
 }
@@ -222,11 +222,11 @@ func TestScratchCountsCtime(t *testing.T) {
 	if err := os.Chtimes(filepath.Join(ws, ScratchDir, "download.tar"), old, old); err != nil {
 		t.Fatal(err)
 	}
-	rep, err := StaleScratch(ws, time.Now(), ScratchMaxAge)
+	rep, err := Scratch(ws, time.Now(), ScratchMaxAge, false)
 	if err != nil || len(rep.Stale) != 0 {
 		t.Fatalf("a backdated-mtime arrival is stale: %+v %v", rep, err)
 	}
-	rep, err = PruneScratch(ws, time.Now(), ScratchMaxAge)
+	rep, err = Scratch(ws, time.Now(), ScratchMaxAge, true)
 	if err != nil || len(rep.Stale) != 0 {
 		t.Fatalf("prune removed a fresh arrival: %+v %v", rep, err)
 	}
@@ -250,11 +250,11 @@ func TestScratchSymlinkNeverFollowed(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(ws, ScratchDir)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := StaleScratch(ws, time.Now(), ScratchMaxAge); err == nil || !strings.Contains(err.Error(), "not a plain directory") {
-		t.Fatalf("StaleScratch on a symlinked scratch: %v", err)
+	if _, err := Scratch(ws, time.Now(), ScratchMaxAge, false); err == nil || !strings.Contains(err.Error(), "not a plain directory") {
+		t.Fatalf("Scratch(prune=false) on a symlinked scratch: %v", err)
 	}
-	if rep, err := PruneScratch(ws, time.Now(), ScratchMaxAge); err == nil || len(rep.Stale) != 0 {
-		t.Fatalf("PruneScratch on a symlinked scratch: %+v %v", rep, err)
+	if rep, err := Scratch(ws, time.Now(), ScratchMaxAge, true); err == nil || len(rep.Stale) != 0 {
+		t.Fatalf("Scratch(prune=true) on a symlinked scratch: %+v %v", rep, err)
 	}
 	if _, err := os.Stat(precious); err != nil {
 		t.Fatalf("the symlink target lost its file: %v", err)
