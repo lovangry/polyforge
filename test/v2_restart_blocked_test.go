@@ -86,7 +86,12 @@ func TestV2RestartCapsuleMissingBlocksThenResumeFromCheckpoint(t *testing.T) {
 		fix := x.Steps["fix"]
 		return fix != nil && fix.Status == "done"
 	})
-	preSpawns := len(spawnJournal(t, capA))
+	preMax := 0.0 // the highest ordinal dispatched before the loss
+	for _, s := range spawnJournal(t, capA) {
+		if n, _ := s["spawn_n"].(float64); n > preMax {
+			preMax = n
+		}
+	}
 
 	// the daemon dies; the operator's capsule loss happens while it is down
 	d.crash()
@@ -135,16 +140,22 @@ func TestV2RestartCapsuleMissingBlocksThenResumeFromCheckpoint(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(repoB, "work.txt")); err != nil || !strings.Contains(string(b), wi) {
 		t.Fatalf("the fix step's work.txt is missing after the resume: %q, %v", b, err)
 	}
-	// completed steps were NOT re-run: every dispatch after the loss is
-	// verification
+	// completed steps were NOT re-run: every dispatch after the loss —
+	// an ordinal past the dead session's (the chain may lack the dead
+	// dispatch's journal line, never its step_start) — is verification
 	spawns := spawnJournal(t, d2.capsuleDir(wi))
-	if len(spawns) <= preSpawns {
-		t.Fatalf("the resume dispatched nothing (%d entries, %d before)", len(spawns), preSpawns)
-	}
-	for _, s := range spawns[preSpawns:] {
+	resumed := 0
+	for _, s := range spawns {
+		if n, _ := s["spawn_n"].(float64); n <= preMax {
+			continue
+		}
+		resumed++
 		if id, _ := s["step_id"].(string); id != "verification" {
 			t.Fatalf("a completed step was re-run after the resume: %v (spawns %v)", s["step_id"], spawns)
 		}
+	}
+	if resumed == 0 {
+		t.Fatalf("the resume dispatched nothing past ordinal %v (spawns %v)", preMax, spawns)
 	}
 	x := readExecution(t, d2.capsuleDir(wi))
 	for _, step := range []string{"grill", "fix", "verification"} {
