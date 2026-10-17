@@ -87,6 +87,10 @@ type Config struct {
 	Interrupted *InterruptedDispatch
 	// Spawner derives the step processes. Required.
 	Spawner StepSpawner
+	// StepEnded runs after each dispatch's process is gone, before its
+	// result or failure is written (production: the task-repo WIP push).
+	// It never fails the step; nil = nothing to run.
+	StepEnded func(context.Context)
 	// SpawnN seeds the per-WI monotonic derivation counter (B2): the
 	// same sources the runtime uses — state.json's spawn_n, or the
 	// capsule spawn-journal max across a fresh clone. Each step process
@@ -368,6 +372,9 @@ func (d *Driver) Run(ctx context.Context) error {
 		}
 		d.announceStart(spawn, run, dispatchedAt)
 		res, werr, verdict := d.awaitDispatch(ctx, run, stepID, n)
+		if d.cfg.StepEnded != nil && ctx.Err() == nil {
+			d.cfg.StepEnded(ctx)
+		}
 		if verdict != nil {
 			// The supervisor judged the dispatch dead. The process is
 			// already torn down; this is the dispatch's one failure record.

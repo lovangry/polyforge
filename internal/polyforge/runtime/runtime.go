@@ -274,6 +274,9 @@ type AgentStartInput struct {
 	InterruptedCause string
 	// Spawner is the runtime's process spawner (production: pi).
 	Spawner Spawner
+	// StepEnded is the driver's step-end hook: the task-repo WIP push of
+	// the step that just ended (SaveTaskWIP, bounded by stepWIPBound).
+	StepEnded func(context.Context)
 }
 
 // AgentStartFunc starts the execution engine for a claimed work item
@@ -1309,6 +1312,7 @@ func (r *Runtime) installClaim(ctx context.Context, wi string, j *job) error {
 			BundleName: j.bundleName,
 			SpawnN:     spawnN,
 			Spawner:    r.spawner,
+			StepEnded:  r.stepEnded(j.wi),
 			// polyforge#79: the claim-time compose rides to the driver —
 			// every dispatch of this derivation resolves its model from
 			// the post-precedence effective list.

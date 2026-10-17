@@ -256,6 +256,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 			BundleName: j.bundleName,
 			SpawnN:     ordinal,
 			Spawner:    r.spawner,
+			StepEnded:  r.stepEnded(j.wi),
 			// polyforge#79: the effective lists this re-derivation
 			// dispatches under, and the archive signal for the dispatch
 			// the recovery cause interrupted.
@@ -454,7 +455,7 @@ var pushTaskWIPFn = gitops.PushTaskWIP
 
 // SaveTaskWIP snapshots wi's task-repo uncommitted work to refs/pf-wip
 // once its step process is gone (the shutdown, after terminating the
-// agent tree), so a re-claim restores it.
+// agent tree; the driver, at each step end), so a re-claim restores it.
 // ctx's deadline is the gitops Deadline: every git call of the lane is
 // cut to it and its process group killed on expiry. The caller is
 // released at ctx's end at the latest. No runtime lock is held across
@@ -474,6 +475,21 @@ func (r *Runtime) SaveTaskWIP(ctx context.Context, wi string) {
 	select {
 	case <-done:
 	case <-ctx.Done():
+	}
+}
+
+// stepWIPBound bounds the step-end WIP push: it holds the next dispatch,
+// so it stays well inside the driver stall window.
+const stepWIPBound = 2 * time.Minute
+
+// stepEnded is wi's driver step-end hook: the WIP push of the task-repo
+// work the step left uncommitted, so a kill -9 after a step end loses
+// none of it on a re-claim.
+func (r *Runtime) stepEnded(wi string) func(context.Context) {
+	return func(ctx context.Context) {
+		ctx, cancel := context.WithTimeout(ctx, stepWIPBound)
+		defer cancel()
+		r.SaveTaskWIP(ctx, wi)
 	}
 }
 

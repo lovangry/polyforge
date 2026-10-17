@@ -370,6 +370,7 @@ func New(cfg Config) (*Daemon, error) {
 				Spawner:          in.Spawner,
 				StepCandidates:   in.StepCandidates,
 				InterruptedCause: in.InterruptedCause,
+				StepEnded:        in.StepEnded,
 				// polyforge#171: the resume decision for claude dispatches
 				// locates the native session under the claude-config dir
 				// the spawner hard-set (never the daemon's process env).

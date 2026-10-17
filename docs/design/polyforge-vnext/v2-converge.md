@@ -447,7 +447,9 @@ blocked→resume 等重新认领从上游 clone 后按 carrier ref 恢复任务�
 carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改动。补充一条 WIP ref `refs/pf-wip/<name>`（`gitops.PushTaskWIP`）：
 
 - **何时写**：只在步骤进程已退出的关闭点——bounded-fail（blocked，SessionEnd 之前）、`stopOp` 收尾（failed / blocked 等非 wrapped）、
-  operator pause（`pauseOp`）、daemon 关停（杀掉 agent 树之后）。observe 的常规发布不写。
+  operator pause（`pauseOp`）、daemon 关停（杀掉 agent 树之后）、以及每个 step 结束时（driver 在该次派发的进程退出后、写入其结果或失败之前
+  调用 `StepEnded`，即 `runtime.SaveTaskWIP`，上限 2 分钟；失败不影响该 step，不持任何 runtime 锁），所以 kill -9 至多丢掉当前 step
+  尚未结束的改动。observe 的常规发布不写。
   先按 §14.2 镜像每个仓库的 HEAD 到 `refs/pf-task/<name>`，再对每个仓库：有未提交改动（已跟踪修改、删除与未跟踪文件）→ 生成一个
   WIP 提交（唯一父提交 = HEAD）并强推到 `refs/pf-wip/<name>`；干净或 wrapped 关闭 → 直接推 `:refs/pf-wip/<name>` 删除
   （hub 上没有该 ref 时静默）。本次 WIP 生成/推送失败时**保留** hub 上较旧的 WIP ref：它只在父提交等于恢复后的 HEAD（即它被拍下时
@@ -476,7 +478,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
     `unable to index file` 行。
   - `add` 之后兜底剔除：属性为 lfs/git-crypt filter 的改动文件；单个超过 blob 上限的；改动总量超过上限时先剔除最大的。
   被剔除的已跟踪路径在快照里保持 HEAD 的内容（不会变成删除），未跟踪路径直接不收。
-- **关停**：快照的期限（所有 job 并行、共用一个 30 秒期限）作为 `gitops.Opts.Deadline`：carrier
+- **关停与 step 结束**：快照的期限（关停：所有 job 并行、共用一个 30 秒期限；step 结束：2 分钟）作为 `gitops.Opts.Deadline`：carrier
   通道每次 git 调用的超时都截到该时刻，到点杀掉整个 git 进程组；到点后剩下的仓库不再尝试，`carrier_push_failed` 写明
   `deadline exceeded`（而不是误导的仓库布局拒绝原因）。
 - **hook**：`refs/pf-wip/*` 是草稿 ref，允许删除与 non-fast-forward；只检查新对象（`rev-list --objects <new> --not --all`）的
