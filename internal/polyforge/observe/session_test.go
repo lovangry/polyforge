@@ -93,7 +93,7 @@ func TestRevalidateMismatchSupersedes(t *testing.T) {
 	// One emission and one verdict event (the PUBLIC fingerprint —
 	// never the secret): the OB queue never drops and the runtime fences
 	// OBSuperseded on the session fingerprint, so nothing re-emits. The
-	// monitor is quiet from here: no further verify.
+	// monitor stops: no further verify, no verdict, no push.
 	expectNoOB(t, ob, 150*time.Millisecond, "a re-emitted OBSuperseded")
 	if evs := eventsOf(m, EvSessionSuperseded); len(evs) != 1 {
 		t.Fatalf("session_superseded events: %d, want exactly 1", len(evs))
@@ -106,11 +106,17 @@ func TestRevalidateMismatchSupersedes(t *testing.T) {
 		}
 	}
 	if n := verifier.calls.Load(); n != 1 {
-		t.Fatalf("verify calls after supersession: %d, want 1 (a superseded monitor is quiet)", n)
+		t.Fatalf("verify calls after supersession: %d, want 1 (a superseded monitor stops)", n)
 	}
-	// and it raises no recovery for the agent the runtime now kills
+	soon(t, time.Second, "the monitor stopped", func() bool { return len(eventsOf(m, EvJobStopped)) == 1 })
 	m.link.Fact(supervise.StepStarted{Step: "s", SpawnN: 1, StartedAt: time.Now(), Thresholds: supervise.Thresholds{Silence: 10 * time.Millisecond}})
 	expectNoVerdict(t, m, 100*time.Millisecond, "a superseded monitor judges nothing")
+	rawWrite(t, m, 9, "s")
+	m.link.Fact(supervise.ExecCommitted{Version: 9, Step: "s"})
+	time.Sleep(100 * time.Millisecond)
+	if n := len(eventsOf(m, EvPublished)); n != 0 {
+		t.Fatalf("a superseded monitor pushed %d times into the capsule the runtime quarantines", n)
+	}
 }
 
 // TestRevalidateMatchIsQuiet: matches=true → no OB message, no event,

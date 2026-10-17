@@ -15,7 +15,8 @@ package observe
 //   - matches == false → the session was superseded (force-end
 //     landed on another daemon). The monitor emits OBSuperseded once —
 //     the runtime kills the tree, quarantines the capsule and releases
-//     the record — and turns quiet. The daemon makes NO hub transition:
+//     the record — and stops: no judging, no push into the capsule being
+//     quarantined. The daemon makes NO hub transition:
 //     superseded is not terminal, and the work item belongs to the new
 //     owner.
 //
@@ -155,16 +156,13 @@ func (m *Monitor) onVerifyResult(res verifyResult) {
 	if res.matches {
 		return // still the holder: nothing to do
 	}
-	// matches == false: superseded. The monitor turns quiet (no judging,
-	// no recovery request, no further verify) and hands the
-	// kill+quarantine+release to the runtime; Observe makes NO hub
-	// transition (the new owner owns it). One emission suffices: the OB
-	// queue never drops, and the runtime fences OBSuperseded on the
-	// session fingerprint, not on the derivation counter, so a recovery
-	// racing the verify cannot lose it.
-	m.stateMu.Lock()
-	m.quiet = true
-	m.stateMu.Unlock()
+	// matches == false: superseded. The monitor hands the
+	// kill+quarantine+release to the runtime and stops (no judging, no
+	// recovery request, no push into the capsule the runtime moves);
+	// Observe makes NO hub transition (the new owner owns it). One
+	// emission suffices: the OB queue never drops, and the runtime fences
+	// OBSuperseded on the session fingerprint, not on the derivation
+	// counter, so a recovery racing the verify cannot lose it.
 	_ = m.log.Append(m.wi.WorkItem, EvSessionSuperseded, map[string]any{
 		"current_fingerprint": res.currentFingerprint,
 		"detail": "session revalidation learned this session no longer holds the work item (force-ended or claimed elsewhere); " +
@@ -181,4 +179,5 @@ func (m *Monitor) onVerifyResult(res verifyResult) {
 		// runtime never kills a successor job of the same WI with it.
 		SessionFP: m.sessionFingerprint(),
 	})
+	m.requestStop()
 }

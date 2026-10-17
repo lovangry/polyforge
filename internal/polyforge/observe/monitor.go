@@ -24,13 +24,14 @@ package observe
 // verdict on the link, after which the supervisor stays silent for that
 // spawn until step_ended. State is per dispatch: created on
 // step_started, dropped on step_ended. Between steps (and not waiting on
-// a human) the supervisor also times the DRIVER: driver_stalled.
+// a human) the supervisor also times the DRIVER: a driver_stalled
+// verdict plus a recovery request.
 //
-// QUIET: after WINeedsRecovery is sent (driver exit / stall), a
-// daemon-initiated close (MarkClosing) or a superseded session, the
-// monitor neither judges nor raises recovery until RTRecovered adopts a
-// new derivation. Pushes go on: the runtime fences what may reach the
-// hub.
+// QUIET: after WINeedsRecovery is sent (driver exit / stall) the monitor
+// neither judges nor raises recovery until RTRecovered adopts a new
+// derivation; after a daemon-initiated close (MarkClosing) it stays so.
+// Pushes go on: the capsule chain keeps being published. A superseded
+// session stops the monitor (session.go).
 
 import (
 	"context"
@@ -152,7 +153,7 @@ type Monitor struct {
 	cur        *dispatchState
 	phase      string
 	phaseSince time.Time
-	stalled    bool // driver_stalled sent for the current gap
+	stalled    bool // the driver stall was raised for the current gap
 
 	// execution.json state, refreshed on driver facts (monitor goroutine).
 	dirtyVersion  int64 // latest Version seen that has no confirmed push
@@ -185,10 +186,10 @@ type Monitor struct {
 	// stateMu guards the fields every goroutine (HTTP view, push
 	// sub-goroutines) reads.
 	stateMu sync.Mutex
-	// quiet: a recovery was requested, a close is under way or the
-	// session was superseded — no judging, no recovery request, no
-	// revalidation until RTRecovered (see the file comment).
-	quiet bool
+	// quiet: a recovery was requested — no judging, no recovery request,
+	// no revalidation until RTRecovered; closing: the same for good, a
+	// daemon-initiated close is under way (see the file comment).
+	quiet, closing bool
 	// act is the published activity copy of the current dispatch (the
 	// ops status face reads it): nil outside a dispatch.
 	act *dispatchState
@@ -291,7 +292,7 @@ func (m *Monitor) onTick() {
 func (m *Monitor) isQuiet() bool {
 	m.stateMu.Lock()
 	defer m.stateMu.Unlock()
-	return m.quiet
+	return m.quiet || m.closing
 }
 
 // ---------------------------------------------------------------------------
@@ -494,11 +495,11 @@ func (m *Monitor) onExit() {
 }
 
 // needRecovery sends the derivation's one WINeedsRecovery and turns the
-// monitor quiet until RTRecovered ("已发后静默到恢复完成"); a quiet
-// monitor sends nothing.
+// monitor quiet until RTRecovered ("已发后静默到恢复完成"); a quiet or
+// closing monitor sends nothing.
 func (m *Monitor) needRecovery(reason, detail string) {
 	m.stateMu.Lock()
-	if m.quiet {
+	if m.quiet || m.closing {
 		m.stateMu.Unlock()
 		return
 	}
@@ -728,10 +729,11 @@ func (m *Monitor) currentSpawn() int {
 	return m.spawnN
 }
 
-// markClosing turns the monitor quiet for a daemon-initiated close (see
-// Observe.MarkClosing): the agent's imminent exit is expected.
+// markClosing turns the monitor quiet for good for a daemon-initiated
+// close (see Observe.MarkClosing): the agent's imminent exit is expected,
+// even after a recovery the close was queued behind.
 func (m *Monitor) markClosing() {
 	m.stateMu.Lock()
-	m.quiet = true
+	m.closing = true
 	m.stateMu.Unlock()
 }

@@ -53,7 +53,7 @@
 - driver 消费判定时**不得在跨 WI 的锁下做网络 / git 等长操作**（避免一个 WI 的推送卡住所有 WI）；runtime 只按 WI 加锁跨网络，全局的任务表锁持有期间不做任何 I/O。
 - harness 的海量输出**只保留最新状态**（合并，不排队）。
 - 持久化：`execution.json` 是**唯一权威**（进度、待答问题、失败计数、放宽后的阈值、终态）；事件日志是**补充记录**——driver 事件也写入（替代只打 stderr 的 `stdLogger`），每条事件带**跨重启单调递增 id**（不再每次重启从 1 重编），每个 WI 一个文件；磁盘满时事件追加失败只降级为日志告警，权威仍在 `execution.json`。
-- supervisor 不再轮询 `execution.json` 作为主路径；推送进度到 aihub 改由事件触发，**保留退避与同错熔断**（F18/F22 教训：曾 185 次推送风暴）。
+- supervisor 不再轮询 `execution.json` 作为主路径；推送进度到 aihub 改由事件触发，**失败按指数退避重试**（F18/F22 教训：曾 185 次推送风暴；见 §14.1）。
 - 转录同步（F3）以最近一次 `step_started.transcript_path` 为源，commit 前同步。（现状：job 级收尾前的活转录同步**保留**——C11 裁定，polyforge#150；实现为 `runtime/pitranscript.go` 的 `syncLiveTranscript`（commit 24cde0d 恢复）：job 在 pause / bounded-fail / seal 等收尾路径上结束时，当前派发的 step 未走到提交边界，其活转录若不在收尾提交前同步就会丢失——收尾前同步保证终态前转录落盘。）
 
 **driver → supervisor（事实）**
@@ -590,7 +590,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `job_started` / `job_stopped` | observe（`monitor.go`、`observe.go`） | 监督开始 / 结束一个 job |
 | `needs_recovery` | observe `monitor.go` | 同一 attempt 内的信号要求恢复（reason/detail/spawn_n） |
 | `wi_agent_rederived` | observe `monitor.go` | 恢复后的后继 step 进程已起（spawn_n） |
-| `pending_invalid` | observe `monitor.go` | `execution.json` 的 `pending_question` 缺 `id`，被投影忽略（每次看到一条） |
+| `pending_invalid` | observe `monitor.go` | `execution.json` 的 `pending_question` 缺 `id`，状态面不把它当待答问题（每次看到一条） |
 | `transcript_missing` | observe `monitor.go` | 提交边界找不到本次派生的 harness 会话文件（F3，仅告警，提交照常） |
 | `published` / `push_failed` / `push_backpressure` / `push_poisoned_local` | observe `monitor.go`；`push_failed` 另由 runtime 封存路径经 EventTap 发出（`runtime.go`、`restart.go`） | capsule 链推送成功 / 失败 / 背压 / 本地 gitlink 预检拒绝（后者不计入 M8） |
 | `session_superseded` | observe `session.go`；runtime `runtime.go` | 周期 session 校验发现另一 daemon 持有该 WI（载荷只有公开指纹） |

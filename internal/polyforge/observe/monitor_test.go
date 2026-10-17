@@ -488,3 +488,20 @@ func TestIDLessPendingQuestionWritesPendingInvalid(t *testing.T) {
 	writePendingQuestion(t, m, "", "which?", "grill")
 	soon(t, time.Second, "the pending_invalid event", func() bool { return len(eventsOf(m, "pending_invalid")) >= 1 })
 }
+
+// A daemon-initiated close stays quiet even when a recovery it was queued
+// behind adopts a new derivation: that derivation's expected exit raises
+// nothing either.
+func TestMarkClosingOutlivesARecovery(t *testing.T) {
+	h := newFakeHandle("att_1")
+	m, ob := newTestMonitor(t, h, nil)
+	m.markClosing()
+	h2 := newFakeHandle("att_2")
+	m.rtQ.Push(Attach{Msg: protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", SpawnN: 2}, Handle: h2})
+	soon(t, time.Second, "recovery adopted", func() bool { return m.currentSpawn() == 2 })
+	h2.die()
+	expectNoOB(t, ob, 200*time.Millisecond, "the closed derivation's exit")
+	if n := len(eventsOf(m, EvNeedsRecovery)); n != 0 {
+		t.Fatalf("needs_recovery events after MarkClosing: %d", n)
+	}
+}
