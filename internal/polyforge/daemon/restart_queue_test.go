@@ -177,19 +177,36 @@ func TestSubmitModelsPersistedAndValidated(t *testing.T) {
 	}
 }
 
-// Replay drops what must not run: a WI aihub shows claimed elsewhere gets
-// a submit_dropped event. A persisted entry from an older daemon still
-// carrying an "intent" key replays as the plain claim it always was.
-func TestSubmitReplayDropsClaimedElsewhere(t *testing.T) {
+// casHub refuses a claim of a work item that is not queued — the hub's
+// claim CAS.
+type casHub struct{ *fakeHub }
+
+func (h *casHub) SessionClaim(req api.SessionClaimRequest) (*api.SessionClaimResponse, error) {
+	h.mu.Lock()
+	st := h.status[h.canonicalID(req.WorkItemID)]
+	h.mu.Unlock()
+	if st != api.StatusQueued {
+		return nil, &api.Error{Code: "CORE-409", Detail: "NOT_CLAIMABLE: held elsewhere"}
+	}
+	return h.fakeHub.SessionClaim(req)
+}
+
+// Replay never runs what aihub shows claimed elsewhere: the replay asks
+// aihub nothing before the socket serves, the claim's CAS refuses it and
+// the refusal is a durable submit_rejected event. A persisted entry from
+// an older daemon still carrying an "intent" key replays as the plain
+// claim it always was.
+func TestSubmitReplayNeverRunsClaimedElsewhere(t *testing.T) {
 	setGitIdentity(t)
-	hub := newFakeHub()
+	hub := &casHub{newFakeHub()}
 	const (
 		wiOK    = "wi_r_ok"
 		wiTaken = "wi_r_claimed_elsewhere"
 		wiOld   = "wi_r_old_intent_key"
 	)
+	other := e2eSession("another-machine")
 	hub.status[wiOK] = api.StatusQueued
-	hub.status[wiTaken] = api.StatusRunning
+	hub.hold(wiTaken, other, api.StatusRunning)
 	hub.status[wiOld] = api.StatusQueued
 	td := newTestDaemon(t, func(c *Config) {
 		c.Hub = hub
@@ -211,16 +228,17 @@ func TestSubmitReplayDropsClaimedElsewhere(t *testing.T) {
 	})
 	td.waitLive(t, wiOK)
 	td.waitLive(t, wiOld)
-	for _, w := range []string{wiTaken} {
-		if !hasKind(eventKinds(td.Daemon, w), observe.EvSubmitDropped) {
-			t.Errorf("%s: want a submit_dropped event, got %v", w, eventKinds(td.Daemon, w))
-		}
-		if _, live := td.rt.Info(w); live {
-			t.Errorf("%s must not be started", w)
-		}
+	waitFor(t, "the refused replay recorded", 10*time.Second, func() bool {
+		return hasKind(eventKinds(td.Daemon, wiTaken), observe.EvSubmitRejected)
+	})
+	if _, live := td.rt.Info(wiTaken); live {
+		t.Fatalf("%s must not be started", wiTaken)
 	}
-	if hub.claimCount() != 2 {
-		t.Fatalf("only the two queued claims may run (claims=%d)", hub.claimCount())
+	hub.mu.Lock()
+	holder := hub.held[wiTaken]
+	hub.mu.Unlock()
+	if holder != other {
+		t.Fatal("the work item claimed elsewhere changed hands")
 	}
 }
 

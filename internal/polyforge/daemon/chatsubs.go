@@ -614,7 +614,7 @@ func (d *Daemon) watchSnapshot(wi string, after int64) protocol.WatchSnapshot {
 		snap.Slug = j.Slug
 		localLive = j.Status != string(runtime.StatePaused)
 		wj := &protocol.WatchJob{Status: j.Status,
-			QuestionID: j.QuestionID, LastProgressAgoSec: j.LastWorkAgoSec, AwaitingHub: j.AwaitingHub}
+			QuestionID: j.QuestionID, LastProgressAgoSec: j.LastWorkAgoSec}
 		if j.Origin != nil {
 			wj.Origin = &protocol.WatchOrigin{Kind: j.Origin.Kind, ChatID: j.Origin.ChatID, Owner: j.Origin.Owner}
 		}

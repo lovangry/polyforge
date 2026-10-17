@@ -1,10 +1,9 @@
 package daemon
 
-// startup_hung_hub_test.go — the restart reconciliation's wait for aihub is
-// bounded (runtime.Config.RestartHubWait): a daemon whose hub hangs at the
-// startup verify still serves its socket promptly, shows the record waiting
-// for aihub and refuses its close meanwhile, and the record ends up
-// recovered and monitored once the hub answers.
+// startup_hung_hub_test.go — the restart never waits on aihub: a daemon
+// whose hub hangs at a record's session verify answers `pf ops status`
+// within a second, recovers nothing before the hub answered, and the
+// record ends up recovered and monitored (announced once) once it does.
 
 import (
 	"context"
@@ -71,7 +70,6 @@ func TestStartupWithHungHubServesStatusPromptly(t *testing.T) {
 	sp := &fakeSpawner{}
 	sock := filepath.Join(dir, "d.sock")
 	cfg := e2eConfig(sock, ws, data, hubBase, hub, sp)
-	cfg.RestartHubWait = 200 * time.Millisecond
 	d, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -127,11 +125,22 @@ func TestStartupWithHungHubServesStatusPromptly(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the daemon did not serve /status while the hub hangs (startup blocked on the restart verify)")
 	}
-	if len(st.Jobs) != 1 || st.Jobs[0].WorkItemID != wi || !st.Jobs[0].AwaitingHub {
-		t.Fatalf("status while the verify hangs = %+v, want the record shown awaiting aihub", st.Jobs)
+	for i := 0; i < 3; i++ {
+		t0 := time.Now()
+		raw, err := client.Status()
+		if err != nil {
+			t.Fatalf("status: %v", err)
+		}
+		if d := time.Since(t0); d > time.Second {
+			t.Fatalf("status took %s while the hub hangs, want ≤ 1s", d)
+		}
+		st = cli.StatusResponse{}
+		if err := json.Unmarshal(raw, &st); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if _, err := client.Wrap(wi, ""); err == nil {
-		t.Fatal("a wrap of a record still waiting for its restart verify must be refused")
+	if len(st.Jobs) != 1 || st.Jobs[0].WorkItemID != wi {
+		t.Fatalf("status while the verify hangs = %+v, want the kept record", st.Jobs)
 	}
 	if sp.callCount() != 0 {
 		t.Fatal("nothing may be recovered before the hub answered")
@@ -139,16 +148,11 @@ func TestStartupWithHungHubServesStatusPromptly(t *testing.T) {
 
 	open()
 	waitFor(t, "the record recovered once the hub answers", 20*time.Second, func() bool {
-		if sp.callCount() != 1 {
-			return false
-		}
-		raw, serr := client.Status()
-		st = cli.StatusResponse{} // awaiting_hub is omitempty: never decode over the old answer
-		if serr != nil || json.Unmarshal(raw, &st) != nil || len(st.Jobs) != 1 {
-			return false
-		}
+		// the replayed submit's claim (no longer held back behind the
+		// restart) spawns too: look at the recovered record itself
+		ji, live := d.rt.Info(wi)
 		_, monitored := d.obs.Progress(wi)
-		return st.Jobs[0].Status == "running" && !st.Jobs[0].AwaitingHub && monitored
+		return live && ji.State == runtime.StateRunning && ji.SpawnN == 2 && monitored
 	})
 	if hub.endCount() != 0 {
 		t.Fatalf("the recovery must not end the session, got %+v", hub.lastEnd())
@@ -168,10 +172,10 @@ func TestStartupWithHungHubServesStatusPromptly(t *testing.T) {
 	if starts != 1 || stops != 0 {
 		t.Fatalf("%s observe events: %d job_started, %d job_stopped (want 1, 0): %v", wi, starts, stops, eventKinds(d, wi))
 	}
-	// the unprobed queue entry is claimed once the reconciliation is over
+	// the unprobed queue entry is claimed once the hub answers
 	waitFor(t, "the replayed submit to be claimed", 20*time.Second, func() bool {
-		_, live := d.rt.Info(queued)
-		return live
+		ji, live := d.rt.Info(queued)
+		return live && ji.State == runtime.StateRunning
 	})
 	hub.mu.Lock()
 	n := 0
@@ -183,5 +187,8 @@ func TestStartupWithHungHubServesStatusPromptly(t *testing.T) {
 	hub.mu.Unlock()
 	if n != 1 {
 		t.Fatalf("the replayed submit claimed %d times, want 1", n)
+	}
+	if c := sp.callCount(); c != 2 {
+		t.Fatalf("%d agent spawns, want 2 (the one recovery, the one claim)", c)
 	}
 }

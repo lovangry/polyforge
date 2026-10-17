@@ -239,9 +239,7 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 	waitClaiming(t, r, wi)
 	rec := journaled(r, wi)
 
-	actx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	within(t, 25*time.Second, "BeginShutdown", func() { r.BeginShutdown(actx) })
+	r.Close() // the shutdown cancels the actors' context
 	if err := recvErr(t, startErr, "Start"); !IsClaimDeferred(err) {
 		t.Fatalf("Start answered %v, want the shutdown deferral", err)
 	}
@@ -255,9 +253,8 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 		t.Fatal("the deferred claim left its placeholder in the table")
 	}
 	if err := r.Start(context.Background(), "wi_b8_other"); !IsClaimDeferred(err) {
-		t.Fatalf("a start after BeginShutdown answered %v, want the deferral", err)
+		t.Fatalf("a start after the shutdown answered %v, want the deferral", err)
 	}
-	r.Close()
 
 	// The next daemon start: same data dir, the remote reachable again
 	// (the hub's replay cache answers the original claim, so its repo
@@ -274,7 +271,7 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 	sp := &scriptedSpawner{}
 	r2 := New(r.cfg, hub, sp, r.toOB, r.fromOB)
 	t.Cleanup(r2.Close)
-	if err := r2.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r2); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	settleReplays(t, r2) // the journal replays clone outside Restart
@@ -300,12 +297,10 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 	}
 }
 
-// BeginShutdown waits only for claims already CLAIMING and agent starts
-// under way. A long close of another work item (its session end hung,
-// its lock held) is never waited on, and a Start after the latch defers
-// without claiming — so the shutdown keeps its budget for the WIP
-// snapshots.
-func TestB8BeginShutdownDoesNotWaitOnALongClose(t *testing.T) {
+// The shutdown waits on no actor: a long close of another work item (its
+// session end hung) is never waited on, and a Start after the shutdown
+// defers without claiming.
+func TestB8ShutdownDoesNotWaitOnALongClose(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
@@ -317,15 +312,9 @@ func TestB8BeginShutdownDoesNotWaitOnALongClose(t *testing.T) {
 	go func() { stopped <- r.Stop(context.Background(), long, protocol.FinishWrapped) }()
 	g.waitEntered(t, "the long close's session end")
 	claims := hub.claimCount()
-	actx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	t0 := time.Now()
-	r.BeginShutdown(actx)
-	if d := time.Since(t0); d > 2*time.Second {
-		t.Fatalf("BeginShutdown waited %s on a long close", d)
-	}
+	r.Close()
 	if err := r.Start(context.Background(), queued); !IsClaimDeferred(err) {
-		t.Fatalf("a Start after the latch answered %v, want the deferral", err)
+		t.Fatalf("a Start after the shutdown answered %v, want the deferral", err)
 	}
 	if n := hub.claimCount() - claims; n != 0 {
 		t.Fatalf("the deferred Start claimed %d time(s)", n)
@@ -347,7 +336,8 @@ func TestB8ClosedClaimQuarantinesCapsuleAndOBIgnoresPlaceholder(t *testing.T) {
 	go func() { startErr <- r.Start(context.Background(), wi) }()
 	waitClaiming(t, r, wi)
 	j := r.jobOf(wi)
-	r.handleOB(context.Background(), protocol.OBMsg{Kind: protocol.OBSuperseded, WorkItem: wi})
+	// the fence itself (the message would otherwise queue behind the claim)
+	r.applyOB(protocol.OBMsg{Kind: protocol.OBSuperseded, WorkItem: wi})
 	if r.jobOf(wi) != j {
 		t.Fatal("a stale OBSuperseded dropped the CLAIMING placeholder")
 	}

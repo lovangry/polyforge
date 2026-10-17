@@ -111,7 +111,7 @@ func TestRestartForgetsPendingWrapOfRetainedPausedRecord(t *testing.T) {
 	}
 	toOB2 := supervise.NewQueue[protocol.RTMsg]()
 	r2 := New(cfg2, hub2, sp2, toOB2, supervise.NewQueue[protocol.OBMsg]())
-	restartErr := r2.Restart(context.Background())
+	restartErr := restartSettled(t, r2)
 
 	// -- EXPECTED: the pending wrap close is replayed to the hub (a
 	// SessionEnd(wrapped) on our session secret — the hub's status for

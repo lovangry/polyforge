@@ -61,26 +61,17 @@ func (m *matrixRig) statusResponsive(t *testing.T, hung string) {
 	within(t, statusBound, "List/Info while "+hung+" hangs", func() {
 		_ = m.r.List()
 		_, _ = m.r.Info(hung)
-		_ = m.r.Busy(hung)
 	})
 }
 
 // othersResponsive drives another work item through start, pause, resume
-// and wrap while hung's operation is parked. live names a work item
-// already running (the restart rows: every Start answers the typed
-// transient while the reconciliation runs, so the other work item is one
-// the lane already revived).
+// and wrap while hung's operation is parked. live: the other work item is
+// already running (the restart rows: one the restart revived).
 func (m *matrixRig) othersResponsive(t *testing.T, hung, other string, live bool) {
 	t.Helper()
 	m.statusResponsive(t, hung)
 	ctx := context.Background()
-	if live {
-		within(t, doorBound, "a Start during the reconciliation", func() {
-			if err := m.r.Start(ctx, "wi_hm_newcomer"); !isTransient(err) {
-				t.Errorf("Start during the reconciliation = %v, want the typed transient", err)
-			}
-		})
-	} else {
+	if !live {
 		within(t, doorBound, "Start of "+other, func() {
 			if err := m.r.Start(ctx, other); err != nil {
 				t.Errorf("Start(%s): %v", other, err)
@@ -125,11 +116,7 @@ func TestHangMatrixOtherWorkItemsStayResponsive(t *testing.T) {
 	ctx := context.Background()
 	rows := []struct {
 		name string
-		// live: the other work item b is revived by the restart lane;
-		// statusOnly: nothing else is operable meanwhile by rule (the
-		// journal replay runs before any record is reconciled, and every
-		// Start waits for the reconciliation) — the row checks the status
-		// faces and the Start refusal itself
+		// live: the other work item b is revived by the restart
 		live, statusOnly bool
 		// hang parks a's operation and answers its release; the matrix
 		// waits for done (when non-nil) after the release
@@ -280,7 +267,7 @@ func TestHangMatrixOtherWorkItemsStayResponsive(t *testing.T) {
 			g.waitEntered(t, "the restart verify")
 			return g.open, nil
 		}},
-		{"restart-replay", true, true, func(t *testing.T, m *matrixRig) (func(), <-chan error) {
+		{"restart-replay", true, false, func(t *testing.T, m *matrixRig) (func(), <-chan error) {
 			recB, _ := restartRecord(t, m.r, m.hub, b)
 			writeStateFile(t, m.r, []*jobRecord{recB})
 			sess := fakeSession(a)
@@ -289,18 +276,8 @@ func TestHangMatrixOtherWorkItemsStayResponsive(t *testing.T) {
 			}
 			m.hub.hold(a, sess, api.StatusRunning)
 			g := m.hub.hangCall(t, "claim", a)
-			// the replay runs first: b is revived once the replay answered,
-			// so the other work item here is b's live record after the
-			// release — before it, only the status faces and the Start
-			// refusal are this row's to check
-			go func() { _ = m.r.Restart(ctx) }()
+			restartReturning(t, m, b)
 			g.waitEntered(t, "the replayed claim")
-			m.statusResponsive(t, a)
-			within(t, promptly, "a Start during the hung replay", func() {
-				if err := m.r.Start(ctx, "wi_hm_newcomer"); !isTransient(err) {
-					t.Errorf("Start during the reconciliation = %v, want the typed transient", err)
-				}
-			})
 			return g.open, nil
 		}},
 		{"restart-attach", true, false, func(t *testing.T, m *matrixRig) (func(), <-chan error) {
@@ -312,7 +289,7 @@ func TestHangMatrixOtherWorkItemsStayResponsive(t *testing.T) {
 			g.waitEntered(t, "the restart attach")
 			return g.open, nil
 		}},
-		{"deferred-verify", false, false, func(t *testing.T, m *matrixRig) (func(), <-chan error) {
+		{"verify-retry", false, false, func(t *testing.T, m *matrixRig) (func(), <-chan error) {
 			m.r.cfg.EndRetryBase = 10 * time.Millisecond
 			m.r.cfg.EndRetryMax = 20 * time.Millisecond
 			recA, _ := restartRecord(t, m.r, m.hub, a)
@@ -325,7 +302,7 @@ func TestHangMatrixOtherWorkItemsStayResponsive(t *testing.T) {
 			m.hub.mu.Lock()
 			delete(m.hub.lookupErr, a)
 			m.hub.mu.Unlock()
-			g.waitEntered(t, "the deferred verify")
+			g.waitEntered(t, "the verify's retry")
 			return g.open, nil
 		}},
 		{"agent-start", false, false, func(t *testing.T, m *matrixRig) (func(), <-chan error) {
@@ -350,16 +327,9 @@ func TestHangMatrixOtherWorkItemsStayResponsive(t *testing.T) {
 			hub := newFakeHub()
 			sp := &scriptedSpawner{}
 			r, toOB, _ := newTestRuntime(t, hub, sp)
-			r.cfg.RestartHubWait = 200 * time.Millisecond
 			t.Cleanup(func() { r.Close(); terminateJobAgent(r, a); terminateJobAgent(r, b) })
 			m := &matrixRig{r: r, hub: hub, sp: sp, toOB: toOB}
 			release, done := row.hang(t, m)
-			// every hung operation holds a's lock — but a clone (the job
-			// sits CLAIMING) and a journal replay's hub calls, which run
-			// with no lock
-			if ji, _ := r.Info(a); !r.Busy(a) && ji.State != StateClaiming && !row.statusOnly {
-				t.Fatalf("%s's hung operation does not hold its lock", a)
-			}
 			if !row.statusOnly {
 				m.othersResponsive(t, a, b, row.live)
 			}
@@ -438,11 +408,11 @@ func endPendingJob(t *testing.T, m *matrixRig, a string) *job {
 	return ja
 }
 
-// restartReturning runs Restart, which returns once the hung call of the
-// second record outlived the wait, the first (live) record revived.
+// restartReturning runs Restart — which never waits on a hub call — and
+// waits for the live record to be revived by its actor.
 func restartReturning(t *testing.T, m *matrixRig, live string) {
 	t.Helper()
-	within(t, promptly, "Restart with a hung lane call", func() {
+	within(t, promptly, "Restart with a hung hub call", func() {
 		if err := m.r.Restart(context.Background()); err != nil {
 			t.Errorf("Restart: %v", err)
 		}
@@ -451,4 +421,27 @@ func restartReturning(t *testing.T, m *matrixRig, live string) {
 		ji, ok := m.r.Info(live)
 		return ok && ji.State == StateRunning && ji.Agent != nil
 	})
+}
+
+// restartRecord writes a crash-mid-run record of wi (capsule included)
+// the hub still holds as running, answering its live sleeper's pid.
+func restartRecord(t *testing.T, r *Runtime, hub *fakeHub, wi string) (*jobRecord, int) {
+	t.Helper()
+	pid, startedAt := spawnSleeper(t, wi)
+	rec := matrixRecord(r, wi, pid, startedAt)
+	hub.hold(wi, rec.SessionID, api.StatusRunning)
+	initGitCapsule(t, r.restoredJob(rec))
+	return rec, pid
+}
+
+// pausedAttachRecord writes a record of wi the hub holds paused with
+// clean_pause cleared: the restart attaches and resumes it.
+func pausedAttachRecord(t *testing.T, r *Runtime, hub *fakeHub, wi string) *jobRecord {
+	t.Helper()
+	pid, startedAt := spawnSleeper(t, wi)
+	rec := matrixRecord(r, wi, pid, startedAt)
+	hub.hold(wi, rec.SessionID, api.StatusPaused)
+	initGitCapsule(t, r.restoredJob(rec))
+	writeTranscript(t, jobFromRecord(rec))
+	return rec
 }

@@ -1,15 +1,16 @@
 package runtime
 
 // claim_hub_offlock_test.go — the hub calls of a claim (work-item probe,
-// journal verify, SessionClaim) and of a live resume (verify, attach) run
-// under work item A's lock alone: one hung hub call for A no longer
-// freezes the doors of every other work item, and the work item it hangs
-// for stays single-claimed and refuses competing doors meanwhile.
+// journal verify, SessionClaim) and of a live resume (verify, attach)
+// occupy work item A's actor alone: one hung hub call for A never freezes
+// the doors of another work item, and the work item it hangs for stays
+// single-claimed — its competing doors queue and get the final answer.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -165,30 +166,29 @@ func TestOffLockHungClaimHubCallLeavesOthersResponsive(t *testing.T) {
 				}
 			})
 
-			// the hung work item refuses the competing doors meanwhile
-			within(t, promptly, "a second Start of the hung work item", func() {
-				if err := r.Start(ctx, a); !isTransient(err) {
-					t.Errorf("second Start(%s) = %v, want the typed transient", a, err)
-				}
-			})
+			// competing starts of the hung work item (its id, and its slug
+			// once the probe answers) wait and claim nothing of their own
+			second, slug := make(chan error, 1), make(chan error, 1)
+			go func() { second <- r.Start(ctx, a) }()
+			go func() { slug <- r.Start(ctx, "proj#9") }()
+			stillPending(t, "the competing starts of the hung work item", aErr, second)
 			if kind != "probe" {
-				// the slug spelling probes (its probe is not gated) and
-				// meets the canonical latch
-				within(t, promptly, "a Start of the hung work item's slug", func() {
-					if err := r.Start(ctx, "proj#9"); !isTransient(err) {
-						t.Errorf("Start(proj#9) = %v, want the typed transient", err)
-					}
-				})
+				stillPending(t, "the slug start of the hung work item", slug)
 			}
-			within(t, promptly, "a Stop of the hung work item", func() {
-				if err := r.Stop(ctx, a, protocol.FinishWrapped); !isConflictErr(err) {
-					t.Errorf("Stop(%s) during its claim's hub call = %v, want DAEMON-409", a, err)
-				}
-			})
 
 			g.open()
-			if err := recvErr(t, aErr, "the hung Start"); err != nil {
-				t.Fatalf("Start(%s) after the hub answered: %v", a, err)
+			nils := 0
+			for _, ch := range []chan error{aErr, second, slug} {
+				err := recvErr(t, ch, "a start of the hung work item")
+				switch {
+				case err == nil:
+					nils++
+				case !strings.Contains(err.Error(), "already active"):
+					t.Fatalf("a competing start of %s = %v, want nil or already active", a, err)
+				}
+			}
+			if nils != 1 {
+				t.Fatalf("%d starts of %s succeeded, want exactly one", nils, a)
 			}
 			defer terminateJobAgent(r, a)
 			if n := claimsOf(hub, a); n != wantClaims {
@@ -204,10 +204,10 @@ func TestOffLockHungClaimHubCallLeavesOthersResponsive(t *testing.T) {
 	}
 }
 
-// A live resume whose session verify hangs latches only its own work
-// item: another work item closes promptly, while a Stop, a second resume
-// or a Start of the resuming one answer DAEMON-409 / DAEMON-503. Once the
-// hub answers, the resume attaches exactly once.
+// A live resume whose session verify hangs occupies only its own work
+// item: another work item closes promptly, while a second resume and a
+// Start of the resuming one queue. Once the hub answers, the resume
+// attaches exactly once and the queued doors get the final answers.
 func TestOffLockResumeHungVerifyWhileAnotherCloses(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
@@ -236,20 +236,25 @@ func TestOffLockResumeHungVerifyWhileAnotherCloses(t *testing.T) {
 			t.Errorf("wrap %s: %v", q, err)
 		}
 	})
-	within(t, promptly, "doors of the resuming work item", func() {
-		if err := r.Stop(ctx, p, protocol.FinishWrapped); !isConflictErr(err) {
-			t.Errorf("Stop during the resume's verify = %v, want DAEMON-409", err)
+	again, start := make(chan error, 1), make(chan error, 1)
+	go func() {
+		out, err := r.ResumePaused(ctx, p)
+		if err == nil && out != ResumeAlreadyLive {
+			err = errors.New("second resume outcome " + out)
 		}
-		if _, err := r.ResumePaused(ctx, p); !isConflictErr(err) {
-			t.Errorf("second resume during the verify = %v, want DAEMON-409", err)
-		}
-		if err := r.Start(ctx, p); !isTransient(err) {
-			t.Errorf("Start during the resume's verify = %v, want the typed transient", err)
-		}
-	})
+		again <- err
+	}()
+	go func() { start <- r.Start(ctx, p) }()
+	stillPending(t, "the doors of the resuming work item", res, again, start)
 	g.open()
 	if err := recvErr(t, res, "the hung resume"); err != nil {
 		t.Fatalf("resume after the hub answered: %v", err)
+	}
+	if err := recvErr(t, again, "the queued second resume"); err != nil {
+		t.Fatalf("the queued second resume: %v", err)
+	}
+	if err := recvErr(t, start, "the queued start"); err == nil {
+		t.Fatal("a start of the resumed work item answered nil")
 	}
 	defer terminateJobAgent(r, p)
 	if n := attachCount(hub, p); n != 1 {
@@ -260,8 +265,8 @@ func TestOffLockResumeHungVerifyWhileAnotherCloses(t *testing.T) {
 	}
 }
 
-// A Stop during a resume's hung attach answers DAEMON-409 (the attach
-// decides the job), a second resume too, and the attach goes out once.
+// A Stop during a resume's hung attach queues behind it (the attach
+// decides the job first), and the attach goes out once.
 func TestOffLockStopDuringHungAttach(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
@@ -276,32 +281,26 @@ func TestOffLockStopDuringHungAttach(t *testing.T) {
 	res := make(chan error, 1)
 	go func() { _, err := r.ResumePaused(ctx, p); res <- err }()
 	g.waitEntered(t, "the resume's attach")
-	within(t, promptly, "Stop during the attach", func() {
-		if err := r.Stop(ctx, p, protocol.FinishWrapped); !isConflictErr(err) {
-			t.Errorf("Stop during the attach = %v, want DAEMON-409", err)
-		}
-		if _, err := r.ResumePaused(ctx, p); !isConflictErr(err) {
-			t.Errorf("second resume during the attach = %v, want DAEMON-409", err)
-		}
-	})
+	stop := make(chan error, 1)
+	go func() { stop <- r.Stop(ctx, p, protocol.FinishWrapped) }()
+	stillPending(t, "the Stop during the attach", res, stop)
 	g.open()
 	if err := recvErr(t, res, "the hung resume"); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	defer terminateJobAgent(r, p)
+	if err := recvErr(t, stop, "the queued Stop"); err != nil {
+		t.Fatalf("the queued Stop after the resume settled: %v", err)
+	}
 	if n := attachCount(hub, p); n != 1 {
 		t.Fatalf("attached %d times, want 1 (no double attach)", n)
 	}
-	// the Stop the attach refused works once it settled
-	if err := r.Stop(ctx, p, protocol.FinishWrapped); err != nil {
-		t.Fatalf("Stop after the resume settled: %v", err)
-	}
 }
 
-// A shutdown during each hung claim hub call is not held by it
-// (BeginShutdown waits only on CLAIMING claims) and the start defers once
-// the hub answers: nothing is claimed after a probe, and the journal entry
-// a verify or a claim was working on is kept for the next start.
+// A shutdown during each hung claim hub call is not held by it and the
+// start defers once the hub answers: nothing is claimed after a probe,
+// and the journal entry a verify or a claim was working on is kept for
+// the next start.
 func TestOffLockShutdownDuringHungClaimHubCall(t *testing.T) {
 	for _, kind := range []string{"probe", "verify", "claim"} {
 		t.Run(kind, func(t *testing.T) {
@@ -322,12 +321,7 @@ func TestOffLockShutdownDuringHungClaimHubCall(t *testing.T) {
 			go func() { aErr <- r.Start(ctx, a) }()
 			g.waitEntered(t, kind+" of "+a)
 
-			actx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			defer cancel()
-			within(t, promptly, "BeginShutdown during the hung "+kind, func() { r.BeginShutdown(actx) })
-			if actx.Err() != nil {
-				t.Fatal("BeginShutdown waited out its whole bound on a pre-claim hub call")
-			}
+			r.Close()
 			g.open()
 			if err := recvErr(t, aErr, "the hung Start"); !IsClaimDeferred(err) {
 				t.Fatalf("Start after the shutdown latch = %v, want the deferral", err)
@@ -368,9 +362,7 @@ func TestOffLockShutdownDuringHungResumeVerify(t *testing.T) {
 	res := make(chan error, 1)
 	go func() { _, err := r.ResumePaused(ctx, p); res <- err }()
 	g.waitEntered(t, "the resume's verify")
-	actx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	within(t, promptly, "BeginShutdown during the resume's verify", func() { r.BeginShutdown(actx) })
+	r.Close()
 	g.open()
 	err := recvErr(t, res, "the hung resume")
 	var ae *api.Error

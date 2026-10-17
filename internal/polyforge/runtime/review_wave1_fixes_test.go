@@ -2,10 +2,10 @@ package runtime
 
 // review_wave1_fixes_test.go — the review of the 2026-10-16 repo-review
 // fixes: the first blocked close pushes before it closes, Restart never
-// blocks on the end_pending lane, a permanent push rejection stops the
-// push and closes, the deferred verify yields to shutdown and takes
-// today's path on a non-matching answer, and a refused replay of an open
-// session ends it instead of dropping its only secret.
+// blocks on an end_pending close, a permanent push rejection stops the
+// push and closes, a restart after the shutdown starts nothing, a record
+// whose session another daemon holds is released, and a refused
+// replay of an open session ends it instead of dropping its only secret.
 
 import (
 	"context"
@@ -127,7 +127,7 @@ func TestBlockedClosePermanentPushRejectionClosesWithoutIt(t *testing.T) {
 	j.mu.Unlock()
 	local := gitHead(t, j.git.GitDir)
 
-	if !r.endPendingAttempt(j) {
+	if !endPendingAttempt(r, j) {
 		t.Fatal("a permanent push rejection must not keep the close pending")
 	}
 	if hub.endCount() != 1 || hub.lastEnd().Status != api.StatusBlocked {
@@ -157,7 +157,7 @@ func TestBlockedCloseTransientPushFailureKeepsRetrying(t *testing.T) {
 	j.state = StateEndPending
 	j.mu.Unlock()
 	for i := 0; i < 3; i++ {
-		if r.endPendingAttempt(j) {
+		if endPendingAttempt(r, j) {
 			t.Fatal("a transient push failure must keep the close pending")
 		}
 	}
@@ -166,9 +166,9 @@ func TestBlockedCloseTransientPushFailureKeepsRetrying(t *testing.T) {
 	}
 }
 
-// Item 4: a deferred verify attempt after shutdown began recovers and
-// spawns nothing; the record persists for the next restart.
-func TestDeferredVerifyStopsOnShutdown(t *testing.T) {
+// Item 4: a restart after the shutdown began recovers and spawns
+// nothing; the record persists for the next start.
+func TestRestartAfterShutdownStartsNothing(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
 	r, _, _ := newTestRuntime(t, hub, sp)
@@ -176,28 +176,15 @@ func TestDeferredVerifyStopsOnShutdown(t *testing.T) {
 	const wi = "wi_rf_shutdown"
 	rec := matrixRecord(r, wi, 0, "")
 	hub.hold(wi, rec.SessionID, api.StatusRunning)
-	hub.lookupErr[wi] = errLookupBoom
 	writeStateFile(t, r, []*jobRecord{rec})
 	if err := os.MkdirAll(rec.CapsuleDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Restart(context.Background()); err != nil {
+	r.Close() // shutdown
+	if err := restartSettled(t, r); err != nil {
 		t.Fatal(err)
 	}
-	r.Close() // shutdown
 	waitRetryIdle(t, r)
-	hub.mu.Lock()
-	delete(hub.lookupErr, wi) // the hub answers — too late
-	hub.mu.Unlock()
-	j := r.jobOf(wi)
-	if j == nil || !r.verifyAttempt(context.Background(), j, true) {
-		t.Fatal("a verify attempt during shutdown must stop")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if !r.verifyAttempt(ctx, j, true) {
-		t.Fatal("a verify attempt with a cancelled run context must stop")
-	}
 	if sp.callCount() != 0 {
 		t.Fatalf("nothing may spawn during shutdown, got %d spawns", sp.callCount())
 	}
@@ -209,33 +196,38 @@ func TestDeferredVerifyStopsOnShutdown(t *testing.T) {
 	}
 }
 
-// Item 11: the deferred verify's answer says another session holds the
-// WI — today's release path (quarantine, record dropped), no spawn.
-func TestDeferredVerifyNonMatchingReleases(t *testing.T) {
+// Item 11: a running record whose session another daemon holds is
+// released at restart (quarantine, record dropped, session_released) —
+// no spawn, no push, no hub transition.
+func TestRestartNonMatchingReleases(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
 	r, _, _ := newTestRuntime(t, hub, sp)
 	fastRetry(r)
 	t.Cleanup(r.Close)
+	var mu sync.Mutex
+	var kinds []string
+	r.cfg.EventTap = func(_ string, kind string, _ map[string]any) {
+		mu.Lock()
+		kinds = append(kinds, kind)
+		mu.Unlock()
+	}
 	const wi = "wi_rf_taken"
 	rec := matrixRecord(r, wi, 0, "")
-	hub.hold(wi, rec.SessionID, api.StatusRunning)
-	hub.lookupErr[wi] = errLookupBoom
+	hub.hold(wi, fakeSession("another-daemon"), api.StatusRunning)
+	bare := initGitCapsule(t, r.restoredJob(rec))
+	rec.RemoteURL = bare
 	writeStateFile(t, r, []*jobRecord{rec})
-	if err := os.MkdirAll(rec.CapsuleDir, 0o755); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Restart(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	hub.mu.Lock()
-	hub.held[wi] = fakeSession("another-daemon") // taken elsewhere meanwhile
-	delete(hub.lookupErr, wi)
-	hub.mu.Unlock()
-	waitFor(t, "the deferred verify to release the job", func() bool { _, ok := r.Info(wi); return !ok })
+	waitFor(t, "the verify to release the job", func() bool { _, ok := r.Info(wi); return !ok })
 	waitRetryIdle(t, r)
 	if sp.callCount() != 0 {
 		t.Fatalf("a WI held elsewhere must not spawn here, got %d", sp.callCount())
+	}
+	if head := gitRefOrEmpty(bare); head != "" {
+		t.Fatalf("a WI held elsewhere must not push here, the hub chain moved to %s", head)
 	}
 	if m, _ := filepath.Glob(rec.CapsuleDir + ".quarantined.*"); len(m) != 1 {
 		t.Fatalf("the foreign scene must be quarantined, got %v", m)
@@ -245,6 +237,11 @@ func TestDeferredVerifyNonMatchingReleases(t *testing.T) {
 	}
 	if hub.endCount() != 0 {
 		t.Fatal("no hub transition on release")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(strings.Join(kinds, ","), "session_released") {
+		t.Fatalf("events = %v, want session_released", kinds)
 	}
 }
 

@@ -83,7 +83,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	stepTimeout := fs.Duration("step-timeout", 0, "T: cumulative step runtime bound across its dispatches (cli.toml [daemon] step_timeout; default 90m; a step's budget.wall_minutes is an estimate, not an override: that step's T = max(3 x wall_minutes, this value))")
 	stallWindow := fs.Duration("stall-window", 0, "N: the driver between steps (not waiting on a human) for longer than this is judged stalled (cli.toml [daemon] stall_window; default 10m; negative disables)")
 	modelErrorGrace := fs.Duration("model-error-grace", 0, "test/dev-only: grace after a turn ends on a model error before the step is judged dead (default 1m)")
-	revalidateEvery := fs.Duration("revalidate-every", 0, "test/dev-only: M4 periodic session revalidation cadence (0 = default 5m; negative disables)")
+	revalidateEvery := fs.Duration("revalidate-every", 0, "test/dev-only: M4 periodic session revalidation cadence (0 = default 30s; negative disables)")
 	heartbeatEvery := fs.Duration("heartbeat-every", 60*time.Second, "test/dev-only: machines heartbeat cadence (0 = disabled)")
 	if err := fs.Parse(argv); err != nil {
 		return 2

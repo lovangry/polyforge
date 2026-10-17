@@ -3,7 +3,7 @@ package daemon
 // shutdown.go: the daemon process's shutdown (reference.md §6.2). Every
 // state change is durable when it happens — a kill -9 loses nothing the
 // restart path cannot recover — so the shutdown only stops the work and
-// saves what exists nowhere else: latch → cancel the loops → terminate
+// saves what exists nowhere else: cancel the actors and the loops → terminate
 // each live agent tree → push each job's task-repo WIP to refs/pf-wip
 // (all jobs in parallel) → persist state.json once → close the face.
 // The waiting shares one wipLimit deadline. Running work
@@ -39,12 +39,11 @@ func (d *Daemon) Shutdown(ctx context.Context, cause string) error {
 	}
 	fmt.Fprintf(os.Stderr, "daemon: shutdown: cause=%s\n", cause)
 	d.modes.SetShuttingDown()
-	// The runtime latch, without waiting: an in-flight claim defers itself
-	// (its journal entry replays at the next start) and an agent start
-	// still binding tears its own handle down.
-	latched, latch := context.WithCancel(context.Background())
-	latch()
-	d.rt.BeginShutdown(latched)
+	// Cancel the runtime actors' context, then the loops: no actor starts
+	// an agent or a retry any more, an in-flight claim defers itself (its
+	// journal entry replays at the next start), and every driver — its
+	// context is the run context — terminates its step process.
+	d.rt.Close()
 	d.cancelRun()
 	wctx, cancel := context.WithTimeout(context.Background(), wipLimit)
 	defer cancel()
@@ -69,7 +68,6 @@ func (d *Daemon) Shutdown(ctx context.Context, cause string) error {
 		}
 	}
 	d.closeFace()
-	d.rt.Close()
 	close(d.shutDone)
 	return nil
 }

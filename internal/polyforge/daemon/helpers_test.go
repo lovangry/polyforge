@@ -629,6 +629,17 @@ func newTestDaemon(t *testing.T, mutate func(*Config)) *testDaemon {
 		case <-td.runDone:
 		case <-time.After(5 * time.Second):
 		}
+		// the shutdown waits for no claim: let one still under way (its
+		// durable tail, its queue settle) finish before the temp dir goes
+		settled := func() bool {
+			d.q.mu.Lock()
+			n := len(d.q.inflight)
+			d.q.mu.Unlock()
+			return n == 0 && d.rt.Idle()
+		}
+		for deadline := time.Now().Add(5 * time.Second); !settled() && time.Now().Before(deadline); {
+			time.Sleep(5 * time.Millisecond)
+		}
 	})
 	return td
 }
@@ -709,9 +720,7 @@ func (td *testDaemon) waitLive(t *testing.T, wi string) {
 			var st cli.StatusResponse
 			if json.Unmarshal(raw, &st) == nil {
 				for _, j := range st.Jobs {
-					// live, and its start settled: the next door of the
-					// work item is not refused as in progress
-					if j.WorkItemID == wi && j.Status != string(runtime.StateClaiming) && !td.rt.Busy(wi) {
+					if j.WorkItemID == wi && j.Status != string(runtime.StateClaiming) {
 						return
 					}
 				}

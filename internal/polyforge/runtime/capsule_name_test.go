@@ -69,7 +69,7 @@ func TestNewClaimCapsuleNamedBySlugAndFoundAfterRestart(t *testing.T) {
 	terminateJobAgent(r, wi)
 	toOB2 := supervise.NewQueue[protocol.RTMsg]()
 	r2 := New(r.cfg, hub, sp, toOB2, supervise.NewQueue[protocol.OBMsg]())
-	if err := r2.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r2); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	defer terminateJobAgent(r2, wi)
@@ -139,7 +139,7 @@ func TestUpgradeOldNamedCapsulesContinue(t *testing.T) {
 	}
 	writeTranscript(t, jobFromRecord(pause))
 	writeStateFile(t, r, []*jobRecord{run, pause})
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	defer terminateJobAgent(r, "wi_old_run")

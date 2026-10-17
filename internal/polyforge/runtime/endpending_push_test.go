@@ -2,7 +2,7 @@ package runtime
 
 // endpending_push_test.go — repo review 2026-10-16 B-2 stage 1: an
 // end_pending close pushes the local chain BEFORE its SessionEnd, on the
-// same retry lane. boundedFail commits the dirty capsule first; when that
+// same retry. boundedFail commits the dirty capsule first; when that
 // push failed (the outage that parked the close), the commits used to
 // stay local forever — the retry only re-sent SessionEnd.
 
@@ -36,7 +36,7 @@ func TestEndPendingPushesTheChainBeforeTheClose(t *testing.T) {
 	j.state = StateEndPending
 	j.endNote = "bounded fail"
 	j.mu.Unlock()
-	r.retryEndPending(j)
+	underLock(r, wi, func() { r.retry(j) })
 	time.Sleep(80 * time.Millisecond)
 	if n := hub.endCount(); n != 0 {
 		t.Fatalf("the blocked close went out before the chain push landed (%d ends)", n)
@@ -77,7 +77,7 @@ func TestEndPendingPushFailureWithSessionGoneSettles(t *testing.T) {
 	j.git.RemoteURL = filepath.Join(t.TempDir(), "unreachable.git")
 	j.state = StateEndPending
 	j.mu.Unlock()
-	if !r.endPendingAttempt(j) {
+	if !endPendingAttempt(r, j) {
 		t.Fatal("a session that no longer holds the WI must settle the end_pending close")
 	}
 	if _, ok := r.Info(wi); ok {
@@ -85,13 +85,24 @@ func TestEndPendingPushFailureWithSessionGoneSettles(t *testing.T) {
 	}
 }
 
-// waitRetryIdle waits until no goRetry lane runs (the settling attempt's
+// waitRetryIdle waits until no actor has work (the settling attempt's
 // trailing persist included), so the test's temp dirs are quiet.
 func waitRetryIdle(t *testing.T, r *Runtime) {
 	t.Helper()
-	waitFor(t, "the retry lanes to finish", func() bool {
-		r.endMu.Lock()
-		defer r.endMu.Unlock()
-		return len(r.endRetrying) == 0
+	waitFor(t, "the actors to finish", func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return len(r.boxes) == 0
 	})
+}
+
+// endPendingAttempt runs one attempt of an end_pending job's close on its
+// actor (reconcile's end_pending step); true = settled (record dropped).
+func endPendingAttempt(r *Runtime, j *job) (settled bool) {
+	underLock(r, j.wi, func() {
+		if settled = r.closeBlocked(j, true); settled {
+			r.settleEndPending(j)
+		}
+	})
+	return settled
 }

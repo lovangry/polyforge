@@ -95,7 +95,7 @@ func TestBlockedRecordDroppedAtRestartThenResumeReclaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeStateFile(t, r, []*jobRecord{rec})
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	hub.status[wi] = api.StatusQueued // pf resume

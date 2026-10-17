@@ -342,9 +342,7 @@ func TestShutdownRestartFullChainPushIdempotency(t *testing.T) {
 		return gitHead(t, gitPush, "HEAD") != "" &&
 			gitHead(t, barePush, "refs/heads/main") == gitHead(t, gitPush, "HEAD")
 	})
-	waitFor(t, "old process's reconciliation lane to end", 15*time.Second, func() bool {
-		return !d1.rt.Reconciling()
-	})
+	stillSpawned(t, sp1.callCount, 1)
 	if n := sp1.callCount(); n != 1 {
 		t.Fatalf("old process spawned %d agent(s); the relaunch behind the shutdown latch must start nothing", n)
 	}
@@ -443,16 +441,10 @@ func (s *ctxSpawner) Spawn(ctx context.Context, p runtime.SpawnParams) (runtime.
 func (s *ctxSpawner) callCount() int { return int(s.calls.Load()) }
 
 // TestShutdownDuringStartupReconciliationNeverServesFace pins the
-// other ordering of the same window: the shutdown sequence runs to
-// completion (step 5 included) WHILE Run is still inside restart
-// reconciliation — the face's server was never started, so closing it
-// falls to the listener itself. The hardened contract: Run must then
-// refuse to start serving on the closed face (return nil, exactly like
-// the shutDone case), no connection may be accepted afterwards, and the
-// cancelled reconciliation must not spawn an agent behind the sequence's
-// back. Before the closeFace/startFace latch this corner left the
-// listener open and Run serving a daemon whose shutdown had already
-// completed.
+// shutdown that runs to completion WHILE a work item's restart
+// reconciliation is still mid-push: Run returns nil, no connection is
+// accepted afterwards, and the cancelled reconciliation spawns no agent
+// behind the sequence's back.
 func TestShutdownDuringStartupReconciliationNeverServesFace(t *testing.T) {
 	setGitIdentity(t)
 	dir := t.TempDir()
@@ -531,8 +523,19 @@ func TestShutdownDuringStartupReconciliationNeverServesFace(t *testing.T) {
 	waitFor(t, "the in-flight push to land", 15*time.Second, func() bool {
 		return gitHead(t, bare, "refs/heads/main") == gitHead(t, gitDir, "HEAD")
 	})
-	waitFor(t, "the reconciliation lane to end", 15*time.Second, func() bool { return !d.rt.Reconciling() })
+	stillSpawned(t, sp.callCount, 0)
 	if n := sp.callCount(); n != 0 {
 		t.Fatalf("the reconciliation spawned %d agent(s) once its push landed behind the shutdown", n)
+	}
+}
+
+// stillSpawned checks, over a short window, that count stays at want: a
+// reconciliation whose push just landed decides its relaunch right after.
+func stillSpawned(t *testing.T, count func() int, want int) {
+	t.Helper()
+	for end := time.Now().Add(500 * time.Millisecond); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		if n := count(); n != want {
+			t.Fatalf("%d agent(s) spawned, want %d", n, want)
+		}
 	}
 }

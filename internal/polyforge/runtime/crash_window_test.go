@@ -47,7 +47,7 @@ func TestRestartClearsIndexLockLeftByKilledCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
@@ -202,7 +202,7 @@ func TestCrashMidPauseReplaysThePause(t *testing.T) {
 	}
 	writeStateFile(t, r, []*jobRecord{rec})
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	if sp.callCount() != 0 {
@@ -272,7 +272,7 @@ func TestPauseReplayFailureRetriesUntilItLands(t *testing.T) {
 	}
 	writeStateFile(t, r, []*jobRecord{rec})
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	time.Sleep(100 * time.Millisecond) // several failed retries

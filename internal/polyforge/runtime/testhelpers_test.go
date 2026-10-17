@@ -532,15 +532,15 @@ func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, *supervise.Q
 	return r, toOB, fromOB
 }
 
-// settleOps waits, at most bound, until no restart reconciliation runs,
-// no operation holds a work item's lock and no claim sits CLAIMING; an
-// operation still under way at the bound fails the test.
+// settleOps waits, at most bound, until no work item's actor has work
+// and no claim sits CLAIMING; an operation still under way at the bound
+// fails the test.
 func settleOps(t testing.TB, r *Runtime, bound time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(bound)
 	for time.Now().Before(deadline) {
 		r.mu.Lock()
-		idle := len(r.slots) == 0 && !r.restarting
+		idle := len(r.boxes) == 0
 		for _, j := range r.jobs {
 			if st, _ := j.snapshot(); st == StateClaiming {
 				idle = false
@@ -552,7 +552,7 @@ func settleOps(t testing.TB, r *Runtime, bound time.Duration) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Errorf("an operation was still under way %s later (a lock held, a claim CLAIMING or the restart lane running)", bound)
+	t.Errorf("an operation was still under way %s later (an actor busy or a claim CLAIMING)", bound)
 }
 
 // fakeSession mints a deterministic per-WI session SECRET for tests
@@ -951,25 +951,27 @@ func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...
 	return newProcOpts(cmd, stdin, stdout, procOpts{taps: taps})
 }
 
-// underLock runs fn holding wi's lock, as the runtime's own doors call
-// the locked operations.
+// underLock runs fn as a message of wi's actor, as the runtime's own
+// doors run the job operations, and waits for it.
 func underLock(r *Runtime, wi string, fn func()) {
-	s := r.lockWI(wi)
-	defer r.unlockWI(wi, s)
-	fn()
+	_ = r.call(wi, func() error { fn(); return nil })
 }
 
 // settleReplays waits for the restart's journal replays (and every other
 // operation under way) to settle.
 func settleReplays(t testing.TB, r *Runtime) { settleOps(t, r, 20*time.Second) }
 
-// replayClaims runs the claiming-journal replay as Restart does —
-// resumeClaiming, then the replays' clones — and waits for every replay
-// to settle.
+// replayClaims runs the claiming-journal replay as Restart does — a
+// CLAIMING placeholder per entry with no job, each reconciled by its
+// actor — and waits for every replay to settle.
 func replayClaims(t testing.TB, r *Runtime) {
 	t.Helper()
-	rs := r.resumeClaiming(context.Background())
-	r.runReplays(context.Background(), rs)
+	for id, e := range r.loadClaiming() {
+		if r.jobOf(id) == nil {
+			r.putJob(&job{wi: id, sessionID: e.SessionID, state: StateClaiming})
+		}
+		r.post(id, func() { r.reconcile(id) })
+	}
 	settleReplays(t, r)
 }
 
@@ -985,4 +987,22 @@ func capsuleSessionHandle(capsuleDir string) string {
 		return ""
 	}
 	return s.SessionID
+}
+
+// actorBusy reports whether wi's actor has work (a message running or
+// queued).
+func actorBusy(r *Runtime, wi string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.boxes[wi] != nil
+}
+
+// restartSettled runs Restart and waits until every actor it started
+// settled — the reconciliation as one step, for the tests that assert its
+// outcome.
+func restartSettled(t testing.TB, r *Runtime) error {
+	t.Helper()
+	err := r.Restart(context.Background())
+	settleOps(t, r, 20*time.Second)
+	return err
 }

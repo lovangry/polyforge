@@ -228,7 +228,7 @@ func TestRestartDropsPreSessionRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	if r.jobOf(slug) != nil {

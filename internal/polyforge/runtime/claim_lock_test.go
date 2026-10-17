@@ -1,10 +1,10 @@
 package runtime
 
-// claim_lock_test.go — a start claims under its canonical id's lock: two
-// starts of one work item under different spellings meet on one lock
-// (never two claims), a door of the canonical id refuses while a start of
-// a known alias probes, and a claim whose compensation has not landed
-// refuses the next start until it does — and ends blocked at a restart.
+// claim_lock_test.go — a start claims on its canonical id's actor: two
+// starts of one work item under different spellings meet in one mailbox
+// (never two claims), and a claim whose compensation has not landed is
+// kept end_pending — refusing the next start until it lands, and ending
+// blocked at a restart.
 
 import (
 	"context"
@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
-	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
 // Starts of one work item by slug and by id, either first, with the first
@@ -52,13 +51,14 @@ func TestSlugAndIDStartsClaimOnce(t *testing.T) {
 				go func() { firstErr <- r.Start(ctx, first) }()
 				g.waitEntered(t, kind+" of "+first)
 
-				var secondErr error
-				within(t, promptly, "the second start", func() { secondErr = r.Start(ctx, second) })
-				if kind != "probe" && !isTransient(secondErr) {
-					t.Fatalf("Start(%s) during %s's %s = %v, want the typed transient", second, first, kind, secondErr)
+				secondCh := make(chan error, 1)
+				go func() { secondCh <- r.Start(ctx, second) }()
+				if kind != "probe" {
+					stillPending(t, "the second start", secondCh)
 				}
 				g.open()
 				err1 := recvErr(t, firstErr, "the hung start")
+				secondErr := recvErr(t, secondCh, "the second start")
 				ok := 0
 				for _, err := range []error{err1, secondErr} {
 					if err == nil {
@@ -136,39 +136,11 @@ func (h *noIDHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 	return w, err
 }
 
-// With the slug registered as an alias, a start by slug probes under the
-// canonical id's lock: a Stop by the canonical id meanwhile answers
-// DAEMON-409 (the start is under way), not "no active job".
-func TestStopByIDDuringAliasedSlugProbe(t *testing.T) {
-	setGitIdentity(t)
-	hub := newFakeHub()
-	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
-	const a, slug = "wi_cl_alias", "proj#43"
-	t.Cleanup(func() { r.Close(); terminateJobAgent(r, a) })
-	hub.canonical = map[string]string{slug: a}
-	r.NoteAlias(slug, a)
-	g := hub.hangCallAs(t, "probe", slug)
-	done := make(chan error, 1)
-	go func() { done <- r.Start(context.Background(), slug) }()
-	g.waitEntered(t, "the slug's probe")
-	within(t, promptly, "Stop by the canonical id", func() {
-		if err := r.Stop(context.Background(), a, protocol.FinishWrapped); !isConflictErr(err) {
-			t.Errorf("Stop(%s) during the slug's probe = %v, want DAEMON-409", a, err)
-		}
-	})
-	if !r.Busy(a) || !r.Busy(slug) {
-		t.Fatal("the probing start is not reported busy")
-	}
-	g.open()
-	if err := recvErr(t, done, "the start"); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// A failed start whose compensation SessionEnd does not land: the journal
-// entry is marked ending, a Start of the work item answers the typed
-// transient (never a replay of the claim being ended) until the retry
-// lands the close, and then starts afresh.
+// A failed start whose compensation SessionEnd does not land keeps its
+// session as an end_pending job (never a dangling running session): a
+// Start of the work item meanwhile refuses without claiming (never a
+// replay of the claim being ended); once the retry lands the close the
+// job is gone and the work item starts afresh.
 func TestClaimEndRetryRefusesStart(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
@@ -184,14 +156,20 @@ func TestClaimEndRetryRefusesStart(t *testing.T) {
 	if err := r.Start(context.Background(), bad); err == nil {
 		t.Fatal("the start whose clone fails succeeded")
 	}
-	rec := journaled(r, bad)
-	if rec == nil || !rec.Ending {
-		t.Fatalf("journal after the failed compensation = %+v, want the entry marked ending", rec)
+	if journaled(r, bad) != nil {
+		t.Fatal("the compensation kept the claiming-journal entry next to its end_pending record")
+	}
+	ji, ok := r.Info(bad)
+	if !ok || ji.State != StateEndPending {
+		t.Fatalf("after the failed compensation: %+v (ok=%v), want the end_pending job", ji, ok)
+	}
+	if recs := loadRecords(t, r); len(recs) != 1 || recs[0].State != string(StateEndPending) || recs[0].SessionID != ji.SessionID {
+		t.Fatalf("state.json = %+v, want the end_pending record carrying the claim's session", recs)
 	}
 	claims := hub.claimCount()
 	for i := 0; i < 3; i++ {
-		if err := r.Start(context.Background(), bad); !isTransient(err) {
-			t.Fatalf("Start during the compensation retry = %v, want the typed transient", err)
+		if err := r.Start(context.Background(), bad); err == nil {
+			t.Fatal("a Start during the compensation retry succeeded")
 		}
 		time.Sleep(30 * time.Millisecond)
 	}
@@ -202,8 +180,8 @@ func TestClaimEndRetryRefusesStart(t *testing.T) {
 	delete(hub.end, bad)
 	hub.reposFor = nil
 	hub.mu.Unlock()
-	waitFor(t, "the compensation retry to land", func() bool { return journaled(r, bad) == nil })
-	if last := hub.lastEnd(); last.Status != api.StatusBlocked || last.SessionID != rec.SessionID {
+	waitFor(t, "the compensation retry to land", func() bool { return r.jobOf(bad) == nil })
+	if last := hub.lastEnd(); last.Status != api.StatusBlocked || last.SessionID != ji.SessionID {
 		t.Fatalf("the retried close = %+v, want blocked under the claim's session", last)
 	}
 	hub.forceEnd(bad) // the owner's resume of the blocked work item
@@ -212,9 +190,9 @@ func TestClaimEndRetryRefusesStart(t *testing.T) {
 	}
 }
 
-// At a restart a journal entry marked ending is ended blocked — its claim
-// is never replayed; a close that still fails keeps the entry for the
-// background retry.
+// At a restart an abandoned claim's end_pending record is ended blocked
+// with its note — its claim is never replayed; a close that still fails
+// keeps the record for the retry.
 func TestRestartEndsEndingJournalEntry(t *testing.T) {
 	for _, landed := range []bool{true, false} {
 		name := "lands"
@@ -225,49 +203,43 @@ func TestRestartEndsEndingJournalEntry(t *testing.T) {
 			setGitIdentity(t)
 			hub := newFakeHub()
 			r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
-			r.cfg.EndRetryBase = time.Hour // the background retry stays out of the way
+			r.cfg.EndRetryBase = time.Hour // the retry stays out of the way
 			t.Cleanup(r.Close)
 			const x = "wi_cl_restart_ending"
 			sess := fakeSession(x)
-			if err := r.noteClaiming(x, sess, randomKey(), nil); err != nil {
-				t.Fatal(err)
-			}
-			r.markClaimEnding(x, sess, "clone failed (scripted)")
+			writeStateFile(t, r, []*jobRecord{{WorkItemID: x, SessionID: sess, State: string(StateEndPending),
+				EndNote: "clone failed (scripted)", EndPushGaveUp: true}})
 			hub.hold(x, sess, api.StatusRunning)
 			if !landed {
 				hub.mu.Lock()
 				hub.end[x] = errors.New("hub unreachable (scripted)")
 				hub.mu.Unlock()
 			}
-			if err := r.Restart(context.Background()); err != nil {
+			if err := restartSettled(t, r); err != nil {
 				t.Fatalf("Restart: %v", err)
 			}
+			settleOps(t, r, 10*time.Second)
 			if n := hub.claimCount(); n != 0 {
-				t.Fatalf("the ending entry's claim was replayed %d time(s)", n)
+				t.Fatalf("the abandoned claim was replayed %d time(s)", n)
 			}
-			if r.jobOf(x) != nil {
-				t.Fatal("the ending entry left a job")
-			}
-			rec := journaled(r, x)
 			if landed {
-				if rec != nil {
-					t.Fatalf("the landed close kept the entry %+v", rec)
+				if r.jobOf(x) != nil {
+					t.Fatal("the landed close kept the job")
 				}
 				if e := hub.lastEnd(); e.Status != api.StatusBlocked || e.SessionID != sess || e.Note != "clone failed (scripted)" {
-					t.Fatalf("restart close = %+v, want blocked with the journaled note", e)
+					t.Fatalf("restart close = %+v, want blocked with the recorded note", e)
 				}
 				return
 			}
-			if rec == nil || !rec.Ending {
-				t.Fatalf("the failed close dropped the entry: %+v", rec)
+			if recs := loadRecords(t, r); len(recs) != 1 || recs[0].State != string(StateEndPending) {
+				t.Fatalf("the failed close dropped the record: %+v", recs)
 			}
 		})
 	}
 }
 
 // A start the local admission refuses — the work item already running
-// here, or the restart reconciliation still under way — answers without
-// a hub call.
+// here — answers without a hub call.
 func TestStartLocalRefusalMakesNoHubCall(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
@@ -281,15 +253,6 @@ func TestStartLocalRefusalMakesNoHubCall(t *testing.T) {
 			t.Errorf("Start of a running work item = %v, want the already-active refusal", err)
 		}
 	})
-	r.mu.Lock()
-	r.restarting = true
-	r.mu.Unlock()
-	within(t, promptly, "a Start during the reconciliation", func() {
-		if err := r.Start(context.Background(), "wi_cl_local_other"); !isTransient(err) {
-			t.Errorf("Start during the reconciliation = %v, want the typed transient", err)
-		}
-	})
-	r.endRestarting()
 	select {
 	case <-g.entered:
 		t.Fatal("a locally refused start probed the hub")

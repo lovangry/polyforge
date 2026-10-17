@@ -208,15 +208,17 @@ func TestManualModelsReclaimIsDaemonLocal(t *testing.T) {
 	_ = r.Stop(context.Background(), "wi_rc", protocol.FinishWrapped)
 }
 
-// A terminal verdict at the hub (found at restart) drops the record; a
-// planted capsule manual_candidates is never read.
+// A terminal verdict at the hub (a verify answering not-ours) drops the
+// record; a planted capsule manual_candidates is never read.
 func TestManualModelsRecordDroppedOnTerminalVerdict(t *testing.T) {
 	hub := newFakeHub()
 	r, _ := newManualRuntime(t, hub)
 	j := seedJob(r, "wi_term")
 	r.saveManualModels("wi_term", []string{"pi:m/one"})
 	hub.hold("wi_term", "other", api.StatusWrapped)
-	underLock(r, j.wi, func() { r.restartOne(context.Background(), j.record()) })
+	underLock(r, j.wi, func() {
+		r.notOurs(j, &api.SessionVerifyResponse{Matches: false, Status: api.StatusWrapped})
+	})
 	if got := r.loadManualModels("wi_term"); got != nil {
 		t.Fatalf("record survived a wrapped verdict: %v", got)
 	}

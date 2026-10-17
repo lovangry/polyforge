@@ -89,7 +89,7 @@ func TestRestartMissingMidflightCapsuleBlocks(t *testing.T) {
 	writeStateFile(t, r, []*jobRecord{rec})
 	// the capsule dir is deliberately NOT created.
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("a missing capsule must block the WI, not fail Restart: %v", err)
 	}
 	assertBlocked(t, r, hub, sp, rec, EventCapsuleMissing, "capsule missing at "+testCapsuleDir(r, wi), events)
@@ -113,7 +113,7 @@ func TestRestartMissingPausedCapsuleBlocksBeforeAttach(t *testing.T) {
 	hub.hold(wi, rec.SessionID, api.StatusPaused)
 	writeStateFile(t, r, []*jobRecord{rec})
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	assertBlocked(t, r, hub, sp, rec, EventCapsuleMissing, "capsule missing at", events)
@@ -134,7 +134,7 @@ func TestRestartMissingPendingCloseCapsuleBlocks(t *testing.T) {
 	hub.hold(wi, rec.SessionID, api.StatusPaused)
 	writeStateFile(t, r, []*jobRecord{rec})
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
 	assertBlocked(t, r, hub, sp, rec, EventCapsuleMissing, "capsule missing at", events)
@@ -153,7 +153,7 @@ func TestRestartUnmappedProjectBlocks(t *testing.T) {
 	hub.hold(wi, rec.SessionID, api.StatusRunning)
 	writeStateFile(t, r, []*jobRecord{rec})
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("an unmapped project must block the WI, not fail Restart: %v", err)
 	}
 	assertBlocked(t, r, hub, sp, rec, EventProjectUnmapped, `project "ghost"`, events)
@@ -176,7 +176,7 @@ func TestRestartMissingCapsuleBlockedCloseRetries(t *testing.T) {
 	hub.mu.Unlock()
 	writeStateFile(t, r, []*jobRecord{rec})
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatal(err)
 	}
 	recs := loadRecords(t, r)
@@ -194,8 +194,8 @@ func TestRestartMissingCapsuleBlockedCloseRetries(t *testing.T) {
 	waitFor(t, "state.json to drop the record", func() bool { return len(loadRecords(t, r)) == 0 })
 }
 
-// The resume entry itself (restartRunning → restartResume) refuses with
-// the typed error when the capsule vanishes after start.
+// The resume guard refuses with the typed error when the capsule vanishes
+// after start.
 func TestRestartResumeMissingCapsuleTypedError(t *testing.T) {
 	hub := newFakeHub()
 	sp := &scriptedSpawner{}
@@ -207,7 +207,7 @@ func TestRestartResumeMissingCapsuleTypedError(t *testing.T) {
 	r.mu.Unlock()
 
 	var err error
-	underLock(r, rec.WorkItemID, func() { err = r.restartRunning(context.Background(), rec) })
+	underLock(r, rec.WorkItemID, func() { err = r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir) })
 	var miss *MissingCapsuleError
 	if !errors.As(err, &miss) {
 		t.Fatalf("want *MissingCapsuleError, got %T: %v", err, err)
@@ -271,7 +271,7 @@ func TestRestartBlocksOnlyBadWI(t *testing.T) {
 	}
 	writeStateFile(t, r, []*jobRecord{bad, good})
 
-	if err := r.Restart(context.Background()); err != nil {
+	if err := restartSettled(t, r); err != nil {
 		t.Fatalf("Restart must not fail for one bad WI: %v", err)
 	}
 	if n := sp.callCount(); n != 1 {
