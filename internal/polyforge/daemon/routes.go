@@ -665,12 +665,11 @@ func (d *Daemon) wrapRoute(w http.ResponseWriter, r *http.Request) {
 
 // statusJobs builds the jobs[] bookkeeping (with the running-slot count);
 // the status route and the watch lane share it. The per-job needs_input
-// projection (D6) is derived from the observe lane's monitors (keyed by
-// the canonical id — the same key rt.List() reports); the same loop
+// projection (D6) is read from each job's execution.json; the same loop
 // carries the per-job liveness reading (step age + last real-work-signal
 // age).
 func (d *Daemon) statusJobs() ([]statusJob, int) {
-	pending := d.obs.PendingInputs()
+	pending := d.pendingQuestions()
 	activity := d.obs.Activities()
 	jobs := make([]statusJob, 0, 8)
 	// running slots: a retained PAUSED job (Finding 2) holds no agent and
@@ -692,8 +691,8 @@ func (d *Daemon) statusJobs() ([]statusJob, int) {
 			Origin:             ji.Origin,
 			StopReason:         ji.StopReason,
 		}
-		if pi, ok := pending[ji.WorkItem]; ok {
-			sj.QuestionID = pi.QuestionID
+		if qid, ok := pending[ji.WorkItem]; ok {
+			sj.QuestionID = qid
 			// the presentation rule: runtime says running but the monitor
 			// holds a pending question → needs_input wins. Any other
 			// runtime state (sealing, recovering) keeps its own name — a

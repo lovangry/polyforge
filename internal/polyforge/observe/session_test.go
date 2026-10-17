@@ -128,8 +128,8 @@ func TestRevalidateMatchIsQuiet(t *testing.T) {
 	if verifier.calls.Load() == 0 {
 		t.Fatal("the revalidation never ran")
 	}
-	// The live derivation keeps being observed: a pending question
-	// persisted in execution.json is still projected.
+	// The live derivation keeps being observed: its commit boundaries
+	// are still published.
 	writePendingQuestion(t, m, "q_m", "ok?", "code")
 }
 
@@ -156,8 +156,8 @@ func TestRevalidateTransportErrorNeverActs(t *testing.T) {
 	soon(t, 2*time.Second, "the verify was never retried", func() bool {
 		return verifier.calls.Load() >= 2
 	})
-	// The monitor still behaves normally: the exec_committed-triggered read keeps
-	// projecting a pending question.
+	// The monitor still behaves normally: its commit boundaries are
+	// still published.
 	writePendingQuestion(t, m, "q_t", "ok?", "code")
 }
 

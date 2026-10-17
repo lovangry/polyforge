@@ -268,10 +268,16 @@ func writePendingQuestionAt(t *testing.T, m *Monitor, qid, question, step, asked
 		t.Fatal(err)
 	}
 	m.link.Fact(supervise.ExecCommitted{Version: version, Step: step})
-	soon(t, 2*time.Second, "pending question "+qid+" projected", func() bool {
-		m.stateMu.Lock()
-		defer m.stateMu.Unlock()
-		return m.pending != nil && m.pending.ID == qid && m.pending.AskedAt == askedAt
+	soon(t, 2*time.Second, "the commit boundary carrying "+qid+" published", func() bool {
+		for _, e := range eventsOf(m, EvPublished) {
+			var b struct {
+				Version int64 `json:"version"`
+			}
+			if json.Unmarshal(e.Body, &b) == nil && b.Version == version {
+				return true
+			}
+		}
+		return false
 	})
 }
 

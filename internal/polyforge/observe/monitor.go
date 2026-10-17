@@ -155,7 +155,6 @@ type Monitor struct {
 	stalled    bool // driver_stalled sent for the current gap
 
 	// execution.json state, refreshed on driver facts (monitor goroutine).
-	currentStep   string
 	dirtyVersion  int64 // latest Version seen that has no confirmed push
 	pushedVersion int64
 
@@ -186,7 +185,6 @@ type Monitor struct {
 	// stateMu guards the fields every goroutine (HTTP view, push
 	// sub-goroutines) reads.
 	stateMu sync.Mutex
-	pending *protocol.PendingView
 	// quiet: a recovery was requested, a close is under way or the
 	// session was superseded — no judging, no recovery request, no
 	// revalidation until RTRecovered (see the file comment).
@@ -381,8 +379,8 @@ func (m *Monitor) onStepEnded(f supervise.StepEnded) {
 }
 
 // refreshExec is the event-triggered read of the authoritative file: the
-// pending-question projection and the Version to publish. version > 0 is
-// the committed Version the fact named.
+// Version to publish (version > 0 is the committed Version the fact
+// named) and the pending_invalid diagnostic.
 func (m *Monitor) refreshExec(version int64) {
 	if version > m.dirtyVersion {
 		m.dirtyVersion = version
@@ -395,11 +393,17 @@ func (m *Monitor) refreshExec(version int64) {
 	if json.Unmarshal(data, &exec) != nil {
 		return // torn/partial write: the next fact retries
 	}
-	m.currentStep = exec.CurrentStep
 	if exec.Version > m.dirtyVersion {
 		m.dirtyVersion = exec.Version
 	}
-	m.applyPendingFromExec(&exec)
+	if st := exec.Steps[exec.CurrentStep]; st != nil && st.PendingQuestion != nil && st.PendingQuestion.ID == "" {
+		// F10: a schema-invalid pending (id missing — e.g. the wire field
+		// name written instead of the schema's `id`) is unanswerable; the
+		// status face ignores it, this event names it.
+		_ = m.log.Append(m.wi.WorkItem, "pending_invalid", map[string]any{
+			"step": st.PendingQuestion.Step, "hint": "execution.json pending_question.id missing; see skill §7.2",
+		})
+	}
 }
 
 func (m *Monitor) execPath() string { return m.execJSONPath() }
@@ -549,72 +553,7 @@ func (m *Monitor) onRecovered(at Attach) {
 }
 
 // ---------------------------------------------------------------------------
-// execution.json projection + async commit/push
-
-// applyPendingFromExec reconciles the pending-question projection with
-// the authoritative file (the agent persists pending_question in
-// execution.json; the projection is idempotent by question id).
-func (m *Monitor) applyPendingFromExec(exec *capsule.Execution) {
-	var pv *protocol.PendingView
-	if s := exec.Steps[exec.CurrentStep]; s != nil && s.PendingQuestion != nil {
-		q := s.PendingQuestion
-		if q.ID == "" {
-			// F10: a schema-invalid pending (id missing — e.g. the agent wrote
-			// the wire field name instead of the schema's `id`) must NOT
-			// clobber a valid recorded pending, and must not become an unanswerable projection: ignore it for the
-			// pending projection, one event per invalid sighting.
-			_ = m.log.Append(m.wi.WorkItem, "pending_invalid", map[string]any{
-				"step": q.Step, "hint": "execution.json pending_question.id missing; see skill §7.2",
-			})
-			return
-		}
-		pv = &protocol.PendingView{
-			ID: q.ID, Step: q.Step, Question: q.Question, AskedAt: q.AskedAt,
-		}
-	}
-	m.applyPending(pv)
-}
-
-// applyPending records/clears the pending question, idempotent by id. A nil
-// view after a successful execution read means the agent consumed the
-// question itself: clear the projection quietly (the answered event
-// belongs to the answer path).
-func (m *Monitor) applyPending(pv *protocol.PendingView) {
-	m.stateMu.Lock()
-	switch {
-	case pv == nil:
-		if m.pending != nil {
-			// The agent consumed the question itself: clear the projection
-			// quietly (the archived answer lives in execution.json).
-			m.pending = nil
-		}
-		m.stateMu.Unlock()
-		return
-	case m.pending != nil && m.pending.ID == pv.ID:
-		// Idempotent re-present of the SAME question id (a recovered
-		// derivation re-presenting its persisted pending question, or the
-		// execution.json poll reconciling): refresh the asked_at — the one
-		// observable a repeat moves — but never open a second
-		// pending, never re-announce, and never let a text-less re-present
-		// erase the recorded question. One question id is one needs_input,
-		// minted once (F9).
-		m.pending.AskedAt = pv.AskedAt
-		if pv.Question != "" {
-			m.pending.Question = pv.Question
-		}
-		if pv.Step != "" {
-			m.pending.Step = pv.Step
-		}
-		m.stateMu.Unlock()
-		return
-	default:
-		// First sight of this question id, or a genuinely new question.
-		m.pending = pv
-	}
-	m.stateMu.Unlock()
-	// the needs_input event is the DRIVER's (it lands in this same log at
-	// the park transition); this projection only feeds the status faces
-}
+// async commit/push
 
 // transcriptSnapshot captures the current derivation's transcript-sync
 // inputs (monitor goroutine only); the push sub-goroutines receive the

@@ -115,13 +115,6 @@ const (
 	JobNeedsInput = "needs_input"
 )
 
-type PendingView struct {
-	ID       string `json:"id"`
-	Step     string `json:"step"`
-	Question string `json:"question"`
-	AskedAt  string `json:"asked_at"`
-}
-
 // EventEntry is one line of the daemon events file + observe output.
 // Seq is the observe ring's per-WI monotonic append ordinal, assigned at
 // Append time; served entries carry it so a client can resume with

@@ -692,17 +692,48 @@ func (d *Daemon) loadExecution(wi string, item *api.WorkItem) *capsule.Execution
 		}
 	}
 	for _, p := range candidates {
-		raw, err := os.ReadFile(p)
-		if err != nil {
-			continue
+		if ex := readExecutionFile(p); ex != nil {
+			return ex
 		}
-		var ex capsule.Execution
-		if json.Unmarshal(raw, &ex) != nil {
-			continue
-		}
-		return &ex
 	}
 	return nil
+}
+
+// readExecutionFile parses one execution.json; nil when absent or torn.
+func readExecutionFile(path string) *capsule.Execution {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var ex capsule.Execution
+	if json.Unmarshal(raw, &ex) != nil {
+		return nil
+	}
+	return &ex
+}
+
+// pendingQuestions answers, per running job with a live driver, the id
+// of the question its execution.json (the authority) holds at the
+// current step — the status face presents such a job as needs_input
+// (D6), and an answer to it is accepted. Before the driver is
+// (re-)derived nothing could take the answer, so nothing is shown. A
+// pending without an id is unanswerable and ignored (the monitor's
+// pending_invalid names it).
+func (d *Daemon) pendingQuestions() map[string]string {
+	out := map[string]string{}
+	for _, ji := range d.rt.List() {
+		if ji.State != runtime.StateRunning || ji.Agent == nil || ji.CapsuleDir == "" {
+			continue
+		}
+		ex := readExecutionFile(filepath.Join(ji.CapsuleDir, capsule.ExecutionJSON))
+		if ex == nil {
+			continue
+		}
+		if st := ex.Steps[ex.CurrentStep]; st != nil && st.PendingQuestion != nil && st.PendingQuestion.ID != "" {
+			out[ji.WorkItem] = st.PendingQuestion.ID
+		}
+	}
+	return out
 }
 
 // readExecution projects loadExecution onto the watch wire shape.

@@ -1,32 +1,9 @@
 package observe
 
 // view.go: the monitor's owner-facing projections for the status and
-// watch faces (pending input, activity, live progress).
+// watch faces (activity, live progress).
 
-import (
-	"time"
-
-	"github.com/silgrid/polyforge/internal/common/protocol"
-)
-
-// PendingInput is one work item's owner-facing needs_input projection
-// (D6): the pending question's id, step and ask moment, derived from the
-// per-WI monitor's pending state — the /status face merges it over the
-// runtime's own bookkeeping so an agent blocked on a human is never
-// presented as merely "running".
-type PendingInput struct {
-	QuestionID string
-	Step       string
-	AskedAt    string
-}
-
-// pendingQuestion answers the monitor's current pending-question
-// projection (stateMu-guarded; nil = none).
-func (m *Monitor) pendingQuestion() *protocol.PendingView {
-	m.stateMu.Lock()
-	defer m.stateMu.Unlock()
-	return m.pending
-}
+import "time"
 
 // Activity is one work item's owner-facing liveness reading (the ops
 // status face): when its current dispatch began and when its harness last
@@ -59,28 +36,6 @@ func (o *Observe) Activities() map[string]Activity {
 	out := map[string]Activity{}
 	for _, m := range monitors {
 		out[m.wi.WorkItem] = m.activity()
-	}
-	return out
-}
-
-// PendingInputs answers the needs_input state of every monitored work
-// item (D6): canonical work-item id → pending question. Monitors are
-// keyed by the canonical id the runtime announced; the caller merges by
-// the same key.
-func (o *Observe) PendingInputs() map[string]PendingInput {
-	o.mu.Lock()
-	monitors := make([]*Monitor, 0, len(o.monitors))
-	for _, m := range o.monitors {
-		monitors = append(monitors, m)
-	}
-	o.mu.Unlock()
-	out := map[string]PendingInput{}
-	for _, m := range monitors {
-		if pv := m.pendingQuestion(); pv != nil {
-			out[m.wi.WorkItem] = PendingInput{
-				QuestionID: pv.ID, Step: pv.Step, AskedAt: pv.AskedAt,
-			}
-		}
 	}
 	return out
 }

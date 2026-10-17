@@ -480,3 +480,11 @@ func TestActivityCarriesCandidateWithEffort(t *testing.T) {
 		t.Fatalf("candidate %q, want pi:m", got)
 	}
 }
+
+// F10: an id-less pending question in execution.json is unanswerable;
+// the commit-boundary read names it with one pending_invalid event.
+func TestIDLessPendingQuestionWritesPendingInvalid(t *testing.T) {
+	m, _ := newTestMonitor(t, newFakeHandle("att_1"), nil)
+	writePendingQuestion(t, m, "", "which?", "grill")
+	soon(t, time.Second, "the pending_invalid event", func() bool { return len(eventsOf(m, "pending_invalid")) >= 1 })
+}

@@ -4,7 +4,7 @@ package observe
 // the events log (driver events land in it too, durably), spawns one
 // per-WI supervisor goroutine per RTStarted, routes RTRecovered/RTFinished
 // to the right monitor, and exposes the monitors' read faces (Activities,
-// PendingInputs, Progress, the events log) to the daemon. Runtime talks to
+// Progress, the events log) to the daemon. Runtime talks to
 // Observe through two queues (RT lifecycle messages in, OB messages out);
 // the agent handle a monitor watches is resolved when its lifecycle
 // message is consumed (Config.Agent).
