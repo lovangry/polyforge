@@ -451,7 +451,7 @@ func (r *Runtime) persist() error {
 		recs = append(recs, j.record())
 	}
 	r.mu.Unlock()
-	blob, err := json.MarshalIndent(&stateFile{Version: 1, MachineID: r.cfg.MachineID, Jobs: recs}, "", "  ")
+	blob, err := json.MarshalIndent(&stateFile{Version: 1, Jobs: recs}, "", "  ")
 	if persistSnapped != nil {
 		persistSnapped(gen)
 	}

@@ -840,7 +840,7 @@ func reapTestGroups() error {
 
 func writeStateFile(t *testing.T, r *Runtime, recs []*jobRecord) {
 	t.Helper()
-	blob, err := json.MarshalIndent(&stateFile{Version: 1, MachineID: r.cfg.MachineID, Jobs: recs}, "", "  ")
+	blob, err := json.MarshalIndent(&stateFile{Version: 1, Jobs: recs}, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -223,7 +223,7 @@ func TestRestartDropsPreSessionRecord(t *testing.T) {
 		RemoteURL:  "http://hub/git/" + slug + ".git",
 		SpawnN:     1,
 	}
-	blob, _ := json.MarshalIndent(&stateFile{Version: 1, MachineID: r.cfg.MachineID, Jobs: []*jobRecord{rec}}, "", "  ")
+	blob, _ := json.MarshalIndent(&stateFile{Version: 1, Jobs: []*jobRecord{rec}}, "", "  ")
 	if err := atomicfile.Write(r.statePath, blob, stateFilePerm); err != nil {
 		t.Fatal(err)
 	}

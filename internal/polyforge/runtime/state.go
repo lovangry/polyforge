@@ -107,9 +107,8 @@ func (j *job) snapshot() (state JobState, spawn int) {
 const stateFilePerm = 0o600
 
 type stateFile struct {
-	Version   int          `json:"version"`
-	MachineID string       `json:"machine_id"`
-	Jobs      []*jobRecord `json:"jobs"`
+	Version int          `json:"version"`
+	Jobs    []*jobRecord `json:"jobs"`
 }
 
 // jobRecord is one persisted job (reference.md §3.5): the session
