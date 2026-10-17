@@ -1615,15 +1615,60 @@ func quarantineCapsule(capsuleDir, gitDir string) error {
 	if !dirExists(capsuleDir) {
 		return nil // nothing to move (a capsule never materialized)
 	}
+	// The worktree's .git pointer names the git-dir by absolute path. It
+	// follows the git-dir BEFORE the worktree moves: left in place it
+	// would name the fresh clone's git-dir that takes the old path, and a
+	// git run in the quarantined tree would commit that tree onto the
+	// live chain.
+	if err := repointWorktree(capsuleDir, gitDir, movedGit); err != nil {
+		if movedGit != "" {
+			if rerr := renameFn(movedGit, gitDir); rerr != nil {
+				return fmt.Errorf("quarantine split the scene: repointing the worktree failed (%w) and restoring the git-dir from %s failed (%v)", err, movedGit, rerr)
+			}
+		}
+		return fmt.Errorf("quarantine of the capsule failed, git-dir restored: %w", err)
+	}
 	if err := renameFn(capsuleDir, capsuleDir+".quarantined."+ts); err != nil {
 		if movedGit != "" {
 			if rerr := renameFn(movedGit, gitDir); rerr != nil {
 				return fmt.Errorf("quarantine split the scene: moving the worktree failed (%w) and restoring the git-dir from %s failed (%v)", err, movedGit, rerr)
 			}
+			_ = repointWorktree(capsuleDir, movedGit, gitDir)
 		}
 		return fmt.Errorf("quarantine of the capsule failed, git-dir restored: %w", err)
 	}
 	return nil
+}
+
+// samePath compares two absolute paths whose last element may not exist
+// (git records the git-dir with its parent's symlinks resolved).
+func samePath(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	resolve := func(p string) string {
+		dir, err := filepath.EvalSymlinks(filepath.Dir(p))
+		if err != nil {
+			return filepath.Clean(p)
+		}
+		return filepath.Join(dir, filepath.Base(p))
+	}
+	return resolve(a) == resolve(b)
+}
+
+// repointWorktree rewrites a worktree's .git pointer that names gitDir
+// from to the git-dir to; an empty to (the git-dir is gone) removes the
+// pointer. A pointer naming anything else is left alone.
+func repointWorktree(worktree, from, to string) error {
+	pointer := filepath.Join(worktree, ".git")
+	raw, err := os.ReadFile(pointer)
+	if err != nil || from == "" || !samePath(strings.TrimSpace(strings.TrimPrefix(string(raw), "gitdir:")), from) {
+		return nil
+	}
+	if to == "" {
+		return os.Remove(pointer)
+	}
+	return atomicfile.Write(pointer, []byte("gitdir: "+to+"\n"), 0o644)
 }
 
 // renameFn is the filesystem move quarantineCapsule uses (a seam for the
