@@ -397,7 +397,7 @@ func TestCarrierPushFailedAlertStateIsPerJob(t *testing.T) {
 	wi := "wi_alert"
 	publish := func(label string) {
 		t.Helper()
-		if _, _, _, err := gitops.CommitPush(r.jobOf(wi).git, label); err != nil {
+		if _, _, _, err := gitops.CommitPush(context.Background(), r.jobOf(wi).git, label); err != nil {
 			t.Fatalf("CommitPush(%s): %v", label, err)
 		}
 	}

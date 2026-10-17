@@ -268,15 +268,13 @@ func jobFromRecord(rec *jobRecord) *job {
 		capsuleDir:         rec.CapsuleDir,
 		git: gitops.Opts{
 			// v1.5 gitops call sites: Username = the work-item id,
-			// Secret = the session id (the push password),
-			// Fingerprint = the PUBLIC handle (§1.6 backup layer).
-			WorkItemID:  rec.WorkItemID,
-			Fingerprint: rec.SessionFingerprint,
-			CapsuleDir:  rec.CapsuleDir,
-			GitDir:      rec.GitDir,
-			RemoteURL:   rec.RemoteURL,
-			Username:    rec.WorkItemID,
-			Secret:      rec.SessionID,
+			// Secret = the session id (the push password).
+			WorkItemID: rec.WorkItemID,
+			CapsuleDir: rec.CapsuleDir,
+			GitDir:     rec.GitDir,
+			RemoteURL:  rec.RemoteURL,
+			Username:   rec.WorkItemID,
+			Secret:     rec.SessionID,
 		},
 		cleanPause:           rec.CleanPause,
 		spawnN:               rec.SpawnN,

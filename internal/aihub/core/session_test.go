@@ -306,8 +306,8 @@ func TestSessionForceEnd(t *testing.T) {
 	if st != api.StatusQueued || cp || (hash != nil && *hash != "") || (fp != nil && *fp != "") {
 		t.Fatalf("force-end did not clear the session: status=%s clean=%v hash=%v fp=%v", st, cp, hash, fp)
 	}
-	if fp, err := env.Owners.CheckSessionCredential(id, id, oldSecret); err == nil {
-		t.Fatalf("old secret still authenticates (fp=%s)", fp)
+	if err := env.Owners.CheckSessionCredential(id, id, oldSecret); err == nil {
+		t.Fatal("old secret still authenticates")
 	}
 	if err := m.End(id, api.SessionEndRequest{SessionID: oldSecret, Status: api.StatusWrapped}, env.UserID); !IsCode(err, api.ErrCoreForbidden) || ErrorReason(err) != "STALE_SESSION" {
 		t.Fatalf("old secret can still end: %v", err)
@@ -554,30 +554,6 @@ func TestSessionClaimGates(t *testing.T) {
 	}
 }
 
-// A held session whose stored fingerprint is empty/NULL/divergent must be
-// refused: the proxy would otherwise hand the hook an empty expected
-// fingerprint, which skips the push-option fence.
-func TestCheckSessionCredentialRejectsBadFingerprint(t *testing.T) {
-	env, m := sessionEnv(t)
-	secret := "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
-	id := mustCreateExecWI(t, env, "fp guard", nil, "")
-	mustSessionClaim(t, m, env, id, secret, "p-1")
-	for _, bad := range []string{"", "deadbeefdeadbeef"} {
-		if _, err := env.DB.Exec(`UPDATE work_items SET session_fingerprint=?1 WHERE id=?2`, bad, id); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := env.Owners.CheckSessionCredential(id, id, secret); !IsCode(err, api.ErrGitUnauthorized) || ErrorReason(err) != "BAD_FINGERPRINT" {
-			t.Fatalf("fingerprint %q not refused: %v", bad, err)
-		}
-	}
-	if _, err := env.DB.Exec(`UPDATE work_items SET session_fingerprint=NULL WHERE id=?1`, id); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := env.Owners.CheckSessionCredential(id, id, secret); !IsCode(err, api.ErrGitUnauthorized) {
-		t.Fatalf("NULL fingerprint not refused: %v", err)
-	}
-}
-
 // TestCheckSessionCredentialSessionPath: the git credential check validates
 // hex(sha256(password)) == session_hash AND status==running (M3); the
 // mismatch names the current holder fingerprint.
@@ -587,14 +563,11 @@ func TestCheckSessionCredentialSessionPath(t *testing.T) {
 	id := mustCreateExecWI(t, env, "push auth", nil, "")
 	mustSessionClaim(t, m, env, id, secret, "p-1")
 
-	// Match: returns the PUBLIC fingerprint (the hook backup fence's
-	// expected value).
-	fp, err := env.Owners.CheckSessionCredential(id, id, secret)
-	if err != nil || fp != api.SessionFingerprint(secret) {
-		t.Fatalf("valid session secret rejected: %v %q", err, fp)
+	if err := env.Owners.CheckSessionCredential(id, id, secret); err != nil {
+		t.Fatalf("valid session secret rejected: %v", err)
 	}
 	// Mismatch: GIT-401, detail names the current holder.
-	_, err = env.Owners.CheckSessionCredential(id, id, "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b")
+	err := env.Owners.CheckSessionCredential(id, id, "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b")
 	if !IsCode(err, api.ErrGitUnauthorized) || ErrorReason(err) != "BAD_CREDENTIAL" {
 		t.Fatalf("wrong secret accepted: %v", err)
 	}
@@ -605,7 +578,7 @@ func TestCheckSessionCredentialSessionPath(t *testing.T) {
 	if err := m.Pause(id, secret, false, "", env.UserID); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	_, err = env.Owners.CheckSessionCredential(id, id, secret)
+	err = env.Owners.CheckSessionCredential(id, id, secret)
 	if !IsCode(err, api.ErrGitForbidden) || ErrorReason(err) != "PAUSED" {
 		t.Fatalf("paused push not refused: %v", err)
 	}
@@ -616,11 +589,11 @@ func TestCheckSessionCredentialSessionPath(t *testing.T) {
 	if err := m.ForceEnd(id, "swap", env.UserID); err != nil {
 		t.Fatalf("force-end: %v", err)
 	}
-	if _, err := env.Owners.CheckSessionCredential(id, id, secret); !IsCode(err, api.ErrGitUnauthorized) {
+	if err := env.Owners.CheckSessionCredential(id, id, secret); !IsCode(err, api.ErrGitUnauthorized) {
 		t.Fatalf("superseded secret still valid: %v", err)
 	}
 	// Wrong username never authenticates.
-	if _, err := env.Owners.CheckSessionCredential(id, "otheruser", "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"); !IsCode(err, api.ErrGitUnauthorized) {
+	if err := env.Owners.CheckSessionCredential(id, "otheruser", "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"); !IsCode(err, api.ErrGitUnauthorized) {
 		t.Fatalf("wrong username accepted: %v", err)
 	}
 }

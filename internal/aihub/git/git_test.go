@@ -2,8 +2,7 @@ package git
 
 // Full-chain tests through the real git binary: httptest server + the
 // git-http-backend proxy + clone/push. Each pre-receive violation gets a
-// dedicated test: non-FF, ref deletion, gitlink, seq regression, blob
-// over-limit; plus legal push/clone and session fencing (the superseded
+// dedicated test: non-FF, ref deletion, gitlink, blob over-limit; plus legal push/clone and session fencing (the superseded
 // session's secret rejected after force-end).
 
 import (
@@ -11,7 +10,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -110,33 +108,8 @@ func (e *gitEnv) credURL(wiID, secret string) string {
 	return strings.Replace(base, "http://", "http://"+wiID+":"+secret+"@", 1)
 }
 
-// runGit runs git in dir. A push to a credentialed proxy URL carries the
-// session-fingerprint push option the way the daemon's gitops layer does
-// (the hook requires it); runGitRaw sends exactly the given args.
+// runGit runs git in dir with exactly the given args.
 func runGit(t *testing.T, dir string, args ...string) (string, error) {
-	t.Helper()
-	if len(args) > 1 && args[0] == "push" {
-		hasOpt := false
-		var fp string
-		for _, a := range args[1:] {
-			if strings.HasPrefix(a, "--push-option=") {
-				hasOpt = true
-			}
-			if u, err := url.Parse(a); err == nil && u.User != nil {
-				if pw, ok := u.User.Password(); ok {
-					fp = api.SessionFingerprint(pw)
-				}
-			}
-		}
-		if !hasOpt && fp != "" {
-			args = append([]string{"push", "--push-option=session-fingerprint=" + fp}, args[1:]...)
-		}
-	}
-	return runGitRaw(t, dir, args...)
-}
-
-// runGitRaw runs git in dir with exactly the given args.
-func runGitRaw(t *testing.T, dir string, args ...string) (string, error) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
@@ -170,16 +143,6 @@ func newWorktree(t *testing.T) string {
 	return dir
 }
 
-// commitSeq writes a file and commits it with the seq trailer.
-func commitSeq(t *testing.T, dir, name, content string, seq int64) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	mustGit(t, dir, "add", "-A")
-	mustGit(t, dir, "commit", "-m", fmt.Sprintf("%s\n\nPolyforge-Seq: %d", name, seq))
-}
-
 // push pushes HEAD:main to the given remote URL.
 func push(t *testing.T, dir, remote string) error {
 	t.Helper()
@@ -190,7 +153,7 @@ func push(t *testing.T, dir, remote string) error {
 // claimSessionWI creates a queued execution ticket and CAS-claims it
 // under the v1.5 session model with the given CLIENT-MINTED secret,
 // installing the bare repo. Returns the WI id and the session's PUBLIC
-// fingerprint (the push-option backup fence's expected value).
+// fingerprint.
 func (e *gitEnv) claimSessionWI(t *testing.T, secret string) (wiID, fingerprint string) {
 	t.Helper()
 	wi, err := e.wis.Create(core.CreateRequest{
@@ -212,84 +175,31 @@ func (e *gitEnv) claimSessionWI(t *testing.T, secret string) (wiID, fingerprint 
 	return wi.ID, claim.SessionFingerprint
 }
 
-// pushWithFingerprint pushes HEAD:main carrying
-// --push-option=session-fingerprint=<fp>, exactly the way the v1.5 pf
-// gitops choke point does (reference.md §3.4 backup layer).
-func pushWithFingerprint(t *testing.T, dir, remote, fp string) (string, error) {
-	t.Helper()
-	return runGit(t, dir, "push", "--push-option=session-fingerprint="+fp, remote, "HEAD:refs/heads/main")
-}
-
-// TestPushOptionAdvertisedAndFenced (§1.6 backup layer): the bare repo
-// advertises push options (without the advertisement git rejects every
-// push that carries one — and the gitops choke point now always does), a
-// push whose session-fingerprint option matches the credential's session
-// succeeds, and one with a foreign fingerprint is rejected by the
-// pre-receive hook.
-func TestPushOptionAdvertisedAndFenced(t *testing.T) {
+// A daemon older than this hub still sends
+// --push-option=session-fingerprint=<fp>: the repo keeps advertising push
+// options (git refuses an option-carrying push to a repo that does not)
+// and the hook ignores the option — fencing is the proxy's credential
+// check, so even a value that is not the session's is harmless.
+func TestOldDaemonPushOptionIsHarmless(t *testing.T) {
 	e := newGitEnv(t)
 	secret := "0123456789abcdef0123456789abcdef"
 	wiID, fp := e.claimSessionWI(t, secret)
-	if fp == "" {
-		t.Fatalf("claim result carries no session fingerprint")
-	}
-	// A freshly created bare repo advertises push options.
-	out := mustGit(t, e.mgr.RepoDir(wiID), "config", "receive.advertisePushOptions")
-	if strings.TrimSpace(out) != "true" {
+	if out := mustGit(t, e.mgr.RepoDir(wiID), "config", "receive.advertisePushOptions"); strings.TrimSpace(out) != "true" {
 		t.Fatalf("receive.advertisePushOptions = %q, want true", strings.TrimSpace(out))
 	}
-
 	cred := e.credURL(wiID, secret)
 	wt := newWorktree(t)
-	commitSeq(t, wt, "a.txt", "one\n", 1)
-	// A push WITHOUT the option is refused through the proxy: the option
-	// is required whenever the proxy vouches for a session.
-	out, err := runGitRaw(t, wt, "push", cred, "HEAD:refs/heads/main")
-	if err == nil || !strings.Contains(out, "no session-fingerprint push option") {
-		t.Fatalf("option-less push through the proxy accepted or wrongly rejected: %v (%s)", err, out)
+	commitPlain(t, wt, "a.txt", "one\n")
+	if out, err := runGit(t, wt, "push", "--push-option=session-fingerprint="+fp, cred, "HEAD:refs/heads/main"); err != nil {
+		t.Fatalf("push with the session's option rejected: %v (%s)", err, out)
 	}
-	// The matching session-fingerprint option succeeds (same commit).
-	commitSeq(t, wt, "b.txt", "two\n", 2)
-	if out, err := pushWithFingerprint(t, wt, cred, fp); err != nil {
-		t.Fatalf("push with the matching session-fingerprint option failed: %v (%s)", err, out)
+	commitPlain(t, wt, "b.txt", "two\n")
+	if out, err := runGit(t, wt, "push", "--push-option=session-fingerprint=deadbeefdeadbeef", cred, "HEAD:refs/heads/main"); err != nil {
+		t.Fatalf("push with another option value rejected: %v (%s)", err, out)
 	}
-	// A foreign fingerprint is rejected by the pre-receive hook.
-	commitSeq(t, wt, "c.txt", "three\n", 3)
-	out, err = pushWithFingerprint(t, wt, cred, "deadbeefdeadbeef")
-	if err == nil {
-		t.Fatalf("push with a foreign session-fingerprint accepted: %s", out)
-	}
-	if !strings.Contains(out, "does not match the credential's session fingerprint") {
-		t.Fatalf("wrong rejection: %s", out)
-	}
-	// The rejected push moved nothing: the remote tip still ends at b.txt,
-	// and a corrected push (same commits, right fingerprint) lands cleanly.
-	second := filepath.Join(t.TempDir(), "second")
-	mustGit(t, t.TempDir(), "clone", cred, second)
-	if _, err := os.Stat(filepath.Join(second, "c.txt")); !os.IsNotExist(err) {
-		t.Fatalf("rejected push leaked c.txt into the bare repo: %v", err)
-	}
-	if out, err := pushWithFingerprint(t, wt, cred, fp); err != nil {
-		t.Fatalf("corrected push failed: %v (%s)", err, out)
-	}
-}
-
-// TestPushOptionFenceAbsentExpected: when PF_EXPECTED_FINGERPRINT is
-// absent (a push that never traveled through the proxy — e.g. a direct
-// local push against the bare repo for testing) the hook must NOT fence,
-// even though the push carries a session-fingerprint option: there is
-// nothing to compare against.
-func TestPushOptionFenceAbsentExpected(t *testing.T) {
-	e := newGitEnv(t)
-	wiID, fp := e.claimSessionWI(t, "abcdef0123456789abcdef0123456789")
-	wt := newWorktree(t)
-	commitSeq(t, wt, "a.txt", "one\n", 1)
-	// Direct push to the bare repo path (no proxy, no
-	// PF_EXPECTED_FINGERPRINT) carrying a session-fingerprint option:
-	// accepted.
-	out, err := pushWithFingerprint(t, wt, e.mgr.RepoDir(wiID), fp)
-	if err != nil {
-		t.Fatalf("local option-carrying push rejected: %v (%s)", err, out)
+	commitPlain(t, wt, "c.txt", "three\n")
+	if out, err := runGit(t, wt, "push", cred, "HEAD:refs/heads/main"); err != nil {
+		t.Fatalf("option-less push rejected: %v (%s)", err, out)
 	}
 }
 
@@ -303,12 +213,12 @@ func TestLegalPushAndClone(t *testing.T) {
 	mustGit(t, wt, "clone", cred, filepath.Join(wt, "clone"))
 	clone := filepath.Join(wt, "clone")
 
-	// Worktree against the remote: commit seq 1, push, commit seq 2, push.
-	commitSeq(t, clone, "capsule.txt", "step one\n", 1)
+	// Worktree against the remote: commit, push, commit, push.
+	commitPlain(t, clone, "capsule.txt", "step one\n")
 	if err := push(t, clone, cred); err != nil {
 		t.Fatalf("first push failed: %v", err)
 	}
-	commitSeq(t, clone, "step two.txt", "step two\n", 2)
+	commitPlain(t, clone, "step two.txt", "step two\n")
 	if err := push(t, clone, cred); err != nil {
 		t.Fatalf("second push failed: %v", err)
 	}
@@ -318,11 +228,6 @@ func TestLegalPushAndClone(t *testing.T) {
 	mustGit(t, wt, "clone", cred, second)
 	if data, err := os.ReadFile(filepath.Join(second, "step two.txt")); err != nil || string(data) != "step two\n" {
 		t.Fatalf("fresh clone missing content: %v %q", err, data)
-	}
-	// Both commits carry their seq trailers.
-	log := mustGit(t, second, "log", "--format=%(trailers:key=Polyforge-Seq,valueonly)")
-	if !strings.Contains(strings.ReplaceAll(log, " ", ""), "1") || !strings.Contains(strings.ReplaceAll(log, " ", ""), "2") {
-		t.Fatalf("seq trailers missing from history: %q", log)
 	}
 	// The pre-receive hook file exists and is executable.
 	hook := filepath.Join(e.mgr.RepoDir(wiID), "hooks", "pre-receive")
@@ -337,7 +242,7 @@ func TestPushWithoutCredentialRejected(t *testing.T) {
 	wiID, _ := e.claimWI(t)
 	anon := fmt.Sprintf("%s/git/%s.git", e.ts.URL, wiID)
 	wt := newWorktree(t)
-	commitSeq(t, wt, "f.txt", "x\n", 1)
+	commitPlain(t, wt, "f.txt", "x\n")
 	if err := push(t, wt, anon); err == nil {
 		t.Fatalf("push without credentials accepted")
 	}
@@ -348,13 +253,13 @@ func TestNonFastForwardRejected(t *testing.T) {
 	wiID, secret := e.claimWI(t)
 	cred := e.credURL(wiID, secret)
 	wt := newWorktree(t)
-	commitSeq(t, wt, "a.txt", "one\n", 1)
+	commitPlain(t, wt, "a.txt", "one\n")
 	if err := push(t, wt, cred); err != nil {
 		t.Fatalf("base push: %v", err)
 	}
-	// Rewrite history: amend the pushed commit (same seq, new sha via a
-	// changed message so the commit id genuinely differs).
-	mustGit(t, wt, "commit", "--amend", "-m", "a.txt rewritten\n\nPolyforge-Seq: 1")
+	// Rewrite history: amend the pushed commit (a new sha via a changed
+	// message so the commit id genuinely differs).
+	mustGit(t, wt, "commit", "--amend", "-m", "a.txt rewritten")
 	err := push(t, wt, cred)
 	if err == nil {
 		t.Fatalf("non-FF push accepted")
@@ -370,7 +275,7 @@ func TestRefDeletionRejected(t *testing.T) {
 	wiID, secret := e.claimWI(t)
 	cred := e.credURL(wiID, secret)
 	wt := newWorktree(t)
-	commitSeq(t, wt, "a.txt", "one\n", 1)
+	commitPlain(t, wt, "a.txt", "one\n")
 	if err := push(t, wt, cred); err != nil {
 		t.Fatalf("base push: %v", err)
 	}
@@ -388,14 +293,14 @@ func TestGitlinkRejected(t *testing.T) {
 	wiID, secret := e.claimWI(t)
 	cred := e.credURL(wiID, secret)
 	wt := newWorktree(t)
-	commitSeq(t, wt, "a.txt", "one\n", 1)
+	commitPlain(t, wt, "a.txt", "one\n")
 	if err := push(t, wt, cred); err != nil {
 		t.Fatalf("base push: %v", err)
 	}
 	// Stage a gitlink (submodule commit reference) without the object.
 	mustGit(t, wt, "update-index", "--add", "--cacheinfo", "160000,0123456789012345678901234567890123456789,vendored-thing")
-	commitSeq(t, wt, "marker.txt", "two\n", 2)
-	// Re-stage the gitlink entry lost by commitSeq's add -A.
+	commitPlain(t, wt, "marker.txt", "two\n")
+	// Re-stage the gitlink entry lost by commitPlain's add -A.
 	mustGit(t, wt, "update-index", "--add", "--cacheinfo", "160000,0123456789012345678901234567890123456789,vendored-thing")
 	mustGit(t, wt, "commit", "--amend", "--no-edit")
 	out, err := runGit(t, wt, "push", cred, "HEAD:refs/heads/main")
@@ -407,37 +312,48 @@ func TestGitlinkRejected(t *testing.T) {
 	}
 }
 
-func TestSeqRegressionRejected(t *testing.T) {
+// The chain carries no sequence rule: a commit with no trailer is an
+// ordinary fast-forward commit, and one with an old daemon's
+// Polyforge-Seq trailer (any value) is accepted just the same.
+func TestChainCommitsNeedNoTrailer(t *testing.T) {
 	e := newGitEnv(t)
 	wiID, secret := e.claimWI(t)
 	cred := e.credURL(wiID, secret)
 	wt := newWorktree(t)
-	commitSeq(t, wt, "a.txt", "one\n", 1)
-	if err := push(t, wt, cred); err != nil {
-		t.Fatalf("base push: %v", err)
+	commitPlain(t, wt, "a.txt", "one\n")
+	if out, err := runGit(t, wt, "push", cred, "HEAD:refs/heads/main"); err != nil {
+		t.Fatalf("trailer-less push rejected: %v (%s)", err, out)
 	}
-	// Regression: a NEW commit whose seq does not increase past the tip.
-	commitSeq(t, wt, "b.txt", "two\n", 1)
-	out, err := runGit(t, wt, "push", cred, "HEAD:refs/heads/main")
-	if err == nil {
-		t.Fatalf("seq regression accepted: %s", out)
+	for _, msg := range []string{"old daemon\n\nPolyforge-Seq: 1", "old daemon again\n\nPolyforge-Seq: 1"} {
+		if err := os.WriteFile(filepath.Join(wt, "b.txt"), []byte(msg), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mustGit(t, wt, "add", "-A")
+		mustGit(t, wt, "commit", "-m", msg)
+		if out, err := runGit(t, wt, "push", cred, "HEAD:refs/heads/main"); err != nil {
+			t.Fatalf("a commit with an old daemon's trailer rejected: %v (%s)", err, out)
+		}
 	}
-	if !strings.Contains(out, "Polyforge-Seq must increase") {
-		t.Fatalf("wrong rejection: %s", out)
+}
+
+// A repo created by an earlier hub build keeps that build's hook on disk;
+// the first request a hub process serves for it rewrites the hook, so the
+// chain rules are always the running build's (the hub deploys first and
+// its rules must reach the repos of work items already running).
+func TestProxyRefreshesAStaleHook(t *testing.T) {
+	e := newGitEnv(t)
+	wiID, secret := e.claimWI(t)
+	hook := filepath.Join(e.mgr.RepoDir(wiID), "hooks", "pre-receive")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\necho 'stale hook' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	// Missing trailer entirely.
-	mustGit(t, wt, "reset", "--hard", "HEAD~1")
-	if err := os.WriteFile(filepath.Join(wt, "c.txt"), []byte("three\n"), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	mustGit(t, wt, "add", "-A")
-	mustGit(t, wt, "commit", "-m", "no trailer at all")
-	out, err = runGit(t, wt, "push", cred, "HEAD:refs/heads/main")
-	if err == nil {
-		t.Fatalf("missing trailer accepted: %s", out)
-	}
-	if !strings.Contains(out, "missing an integer Polyforge-Seq trailer") {
-		t.Fatalf("wrong rejection: %s", out)
+	e.mgr.mu.Lock()
+	e.mgr.known = map[string]bool{} // a restarted hub process
+	e.mgr.mu.Unlock()
+	wt := newWorktree(t)
+	commitPlain(t, wt, "a.txt", "one\n")
+	if out, err := runGit(t, wt, "push", e.credURL(wiID, secret), "HEAD:refs/heads/main"); err != nil {
+		t.Fatalf("push against a repo with a stale hook failed: %v (%s)", err, out)
 	}
 }
 
@@ -453,7 +369,7 @@ func TestBlobOverLimitRejected(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	mustGit(t, wt, "add", "-A")
-	mustGit(t, wt, "commit", "-m", "big\n\nPolyforge-Seq: 1")
+	mustGit(t, wt, "commit", "-m", "big")
 	out, err := runGit(t, wt, "push", cred, "HEAD:refs/heads/main")
 	if err == nil {
 		t.Fatalf("oversized blob accepted: %s", out)
@@ -468,7 +384,7 @@ func TestOldSecretRejectedAfterForceEnd(t *testing.T) {
 	wiID, secret1 := e.claimWI(t)
 	cred1 := e.credURL(wiID, secret1)
 	wt := newWorktree(t)
-	commitSeq(t, wt, "a.txt", "one\n", 1)
+	commitPlain(t, wt, "a.txt", "one\n")
 	if err := push(t, wt, cred1); err != nil {
 		t.Fatalf("push with the live session secret failed: %v", err)
 	}
@@ -483,7 +399,7 @@ func TestOldSecretRejectedAfterForceEnd(t *testing.T) {
 	}, e.userID); err != nil {
 		t.Fatalf("re-claim after force-end: %v", err)
 	}
-	commitSeq(t, wt, "b.txt", "two\n", 2)
+	commitPlain(t, wt, "b.txt", "two\n")
 	out, perr := runGit(t, wt, "push", cred1, "HEAD:refs/heads/main")
 	if perr == nil {
 		t.Fatalf("push with the SUPERSEDED session secret accepted: %s", out)
@@ -491,7 +407,7 @@ func TestOldSecretRejectedAfterForceEnd(t *testing.T) {
 	if !strings.Contains(out, "Authentication") && !strings.Contains(out, "401") {
 		t.Fatalf("wrong rejection for the superseded secret: %s", out)
 	}
-	// The new secret works and continues the seq chain.
+	// The new secret works and continues the chain.
 	cred2 := e.credURL(wiID, secret2)
 	if err := push(t, wt, cred2); err != nil {
 		t.Fatalf("push with the new session secret failed: %v", err)
@@ -556,7 +472,7 @@ func TestSlugClaimedTicketPushesToCanonicalBareRepo(t *testing.T) {
 		t.Fatalf("canonical remote URL %q must name the bare repo /git/%s.git", cred, wi.ID)
 	}
 	wt := newWorktree(t)
-	commitSeq(t, wt, "a.txt", "one\n", 1)
+	commitPlain(t, wt, "a.txt", "one\n")
 	if err := push(t, wt, cred); err != nil {
 		t.Fatalf("push to the canonical remote failed: %v", err)
 	}
@@ -569,7 +485,7 @@ func TestSlugClaimedTicketPushesToCanonicalBareRepo(t *testing.T) {
 	// The remote built from the SLUG (the pilot's failure shape) can never
 	// reach the bare repo: "#" cuts the URL at the fragment.
 	slugURL := e.ts.URL + "/git/" + wi.Slug + ".git"
-	commitSeq(t, wt, "b.txt", "two\n", 2)
+	commitPlain(t, wt, "b.txt", "two\n")
 	if perr := push(t, wt, slugURL); perr == nil {
 		t.Fatalf("push to the slug-built remote %q must fail", slugURL)
 	}
@@ -602,13 +518,13 @@ func TestSessionPushAuthFencing(t *testing.T) {
 	// Correct secret: push lands.
 	cred := e.credURL(wiID, secret)
 	wt := newWorktree(t)
-	commitSeq(t, wt, "a.txt", "one\n", 1)
+	commitPlain(t, wt, "a.txt", "one\n")
 	if err := push(t, wt, cred); err != nil {
 		t.Fatalf("push with the live session secret failed: %v", err)
 	}
 
 	// Wrong secret: 401 at the proxy.
-	commitSeq(t, wt, "b.txt", "two\n", 2)
+	commitPlain(t, wt, "b.txt", "two\n")
 	out, err := runGit(t, wt, "push", e.credURL(wiID, "99999999888888887777777766666666"), "HEAD:refs/heads/main")
 	if err == nil {
 		t.Fatalf("push with a wrong session secret accepted: %s", out)
@@ -621,7 +537,7 @@ func TestSessionPushAuthFencing(t *testing.T) {
 	if err := e.sessions.Pause(wiID, secret, false, "daemon shutdown", e.userID); err != nil {
 		t.Fatalf("session pause: %v", err)
 	}
-	commitSeq(t, wt, "c.txt", "three\n", 3)
+	commitPlain(t, wt, "c.txt", "three\n")
 	out, err = runGit(t, wt, "push", cred, "HEAD:refs/heads/main")
 	if err == nil {
 		t.Fatalf("push while paused accepted: %s", out)
@@ -631,7 +547,7 @@ func TestSessionPushAuthFencing(t *testing.T) {
 	}
 
 	// Force-end then a fresh claim swaps the session; the old secret is
-	// dead, the new one pushes and continues the seq chain.
+	// dead, the new one pushes and continues the chain.
 	newSecret := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	if err := e.sessions.ForceEnd(wiID, "machine lost", e.userID); err != nil {
 		t.Fatalf("force-end: %v", err)
@@ -659,8 +575,7 @@ func TestSessionPushAuthFencing(t *testing.T) {
 	}
 }
 
-// commitPlain writes a file and commits it WITHOUT the Polyforge-Seq
-// trailer — the shape of a task repo's own history.
+// commitPlain writes a file and commits it.
 func commitPlain(t *testing.T, dir, name, content string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
@@ -673,8 +588,8 @@ func commitPlain(t *testing.T, dir, name, content string) {
 // TestTaskCarrierRefAccepted (polyforge#108): the refs/pf-task/<repo>
 // namespace is the task-repo durability lane — the daemon mirrors a task
 // repo's local head there so a bounded-fail re-claim can restore it. The
-// history is the TASK repo's own: no Polyforge-Seq trailer, submodules
-// allowed. The hook must accept exactly that shape (while the chain
+// history is the TASK repo's own: submodules allowed. The hook must
+// accept exactly that shape (while the chain
 // invariants stay enforced on refs/heads/* — pinned by the dedicated
 // tests above).
 func TestTaskCarrierRefAccepted(t *testing.T) {
@@ -710,9 +625,8 @@ func TestTaskCarrierRefAccepted(t *testing.T) {
 }
 
 // TestTaskCarrierRefStillFenced: the namespace exemption is ONLY the
-// chain-only seq/gitlink pair — deletion and fast-forward stay enforced
-// for carrier refs, and the chain invariants stay enforced on
-// refs/heads/*.
+// chain-only gitlink rule — deletion and fast-forward stay enforced for
+// carrier refs.
 func TestTaskCarrierRefStillFenced(t *testing.T) {
 	e := newGitEnv(t)
 	wiID, secret := e.claimWI(t)
@@ -741,13 +655,6 @@ func TestTaskCarrierRefStillFenced(t *testing.T) {
 	} else if !strings.Contains(out, "deletion") {
 		t.Fatalf("wrong rejection: %s", out)
 	}
-	// The chain invariants stay enforced on refs/heads/*: a seq-less
-	// commit to main is still refused.
-	if out, err := runGit(t, wt, "push", cred, "HEAD:refs/heads/main"); err == nil {
-		t.Fatalf("seq-less chain push accepted: %s", out)
-	} else if !strings.Contains(out, "Polyforge-Seq") {
-		t.Fatalf("wrong rejection: %s", out)
-	}
 }
 
 // TestTaskCarrierBlobLimit (polyforge#158): the carrier refs carry the
@@ -771,7 +678,7 @@ func TestTaskCarrierBlobLimit(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	mustGit(t, wt, "add", "-A")
-	mustGit(t, wt, "commit", "-m", "upstream asset\n\nPolyforge-Seq: 1")
+	mustGit(t, wt, "commit", "-m", "upstream asset")
 	if out, err := runGit(t, wt, "push", cred, "HEAD:refs/pf-task/demo-src"); err != nil {
 		t.Fatalf("carrier push of a blob under the carrier limit rejected: %s", out)
 	}
@@ -820,7 +727,7 @@ func TestTaskCarrierBlobOverCarrierLimitRejected(t *testing.T) {
 // TestTaskWIPRefScratch (polyforge#167): refs/pf-wip/<repo> carries a
 // snapshot of a task repo's uncommitted work and is scratch — every close
 // supersedes it with a force push or deletes it. The hook accepts a
-// seq-less commit (gitlinks allowed), a non-fast-forward replacement and
+// commit with gitlinks, a non-fast-forward replacement and
 // deletion, and still refuses a new blob over the carrier limit.
 func TestTaskWIPRefScratch(t *testing.T) {
 	e := newGitEnv(t)

@@ -157,16 +157,10 @@ func TestV1S01DefaultInstallSmoke(t *testing.T) {
 		t.Fatalf("wrapped work item still names session %q", sess2.Fingerprint)
 	}
 
-	// The sealed chain: seq trailers strictly increasing from 1, the
-	// execution state committed, the final push done.
-	seqs := inst.bareSeqTrailers(t, wi)
-	if len(seqs) < 2 {
-		t.Fatalf("sealed chain too short: %d commits", len(seqs))
-	}
-	for i, s := range seqs {
-		if s != int64(i+1) {
-			t.Fatalf("seq trailer %d is %d, want %d (chain: %v)", i, s, i+1, seqs)
-		}
+	// The sealed chain: several commits, the execution state committed,
+	// the final push done.
+	if n := inst.bareCommitCount(t, wi); n < 2 {
+		t.Fatalf("sealed chain too short: %d commits", n)
 	}
 	waitUntil(t, 30*time.Second, "sealed chain never carried runtime-state/execution.json", func() bool {
 		return inst.bareHasPath(t, wi, "runtime-state/execution.json")

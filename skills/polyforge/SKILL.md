@@ -304,7 +304,7 @@ pf [global flags] <verb> [verb flags] [positional args]
 - **Error code families** (the closed registry, `internal/common/api/errors.go`):
   `CORE-*` work-item/project/user business errors, `MEM-*` memory search,
   `AUTH-*` HTTP-boundary auth, `GIT-*` the git push-proxy surface
-  (non-fast-forward, gitlink, blob size, sequence-trailer violations),
+  (non-fast-forward, ref deletion, gitlink, blob size violations),
   `DAEMON-*` the local daemon face. There is no `CAP-*` family (the
   prefix exists only in the archived 00 allocation table).
 - A daemon-face failure to dial (`dial unix ...`) means the daemon is not

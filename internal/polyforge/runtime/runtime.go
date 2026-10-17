@@ -1128,13 +1128,11 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, wi, journalKey, sessionI
 		state:              StateClaiming,
 		git: gitops.Opts{
 			WorkItemID: id,
-			// §1.6 fencing-on-use backup layer: the PUBLIC fingerprint.
-			Fingerprint: fp,
-			GitDir:      r.gitDirFor(id),
-			RemoteURL:   r.remoteURLFor(id),
-			Username:    id,
-			Secret:      sessionID, // v1.5: the session secret IS the push password
-			EventSink:   r.gitEventSink(id),
+			GitDir:     r.gitDirFor(id),
+			RemoteURL:  r.remoteURLFor(id),
+			Username:   id,
+			Secret:     sessionID, // v1.5: the session secret IS the push password
+			EventSink:  r.gitEventSink(id),
 			// once-per-repo carrier_push_failed state: per job, so a
 			// re-claim (a new job) alerts afresh.
 			CarrierAlerts: &gitops.CarrierAlerts{},
@@ -2279,7 +2277,7 @@ func (r *Runtime) sealNetwork(ctx context.Context, j *job, reason, note string, 
 		// keeps the bytes, but the server never heard the final state.
 		r.syncLiveTranscript(j.capsuleDir)
 		crashpoint.At("seal.committing")
-		_, _, _, perr := gitops.CommitPush(j.git, "seal: "+reason)
+		_, _, _, perr := gitops.CommitPush(context.Background(), j.git, "seal: "+reason)
 		for i := 0; i < 2 && perr != nil; i++ {
 			_, perr = gitops.Push(j.git)
 		}
@@ -2410,7 +2408,7 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job) error {
 // the SessionEnd error.
 func (r *Runtime) pauseNetwork(j *job) error {
 	r.syncLiveTranscript(j.capsuleDir)
-	_, _, _, perr := gitops.CommitPush(j.git, "seal: "+protocol.FinishPaused)
+	_, _, _, perr := gitops.CommitPush(context.Background(), j.git, "seal: "+protocol.FinishPaused)
 	for i := 0; i < 2 && perr != nil; i++ {
 		_, perr = gitops.Push(j.git)
 	}
