@@ -540,17 +540,16 @@ func (r *Runtime) killAgentTree(j *job) {
 }
 
 // restartExemptCause reports whether a recovery cause is a daemon
-// restart, an operator attach or an operator resume — a process-
-// lifecycle event, not a failure, so the consecutive-failures ledger
-// ignores it.
+// restart, an operator attach or an operator resume.
 //
-// This is deliberately a DIFFERENT rule from the bridge's
-// interruptedFromCause (internal/polyforge/bridge): this one is about the
-// consecutive-failures budget; that one decides which interruptions are
-// archived in execution.json attempts[] as audit-only records (everything
-// except the operator-shutdown attach). The driver's failure counting
-// skips those audit records (driver/supervision.go trailingCause), so the
-// lists need not match.
+// Destination: the consecutive-recovery-failures budget is spent only by
+// failures — a process-lifecycle event neither counts nor resets it, so a
+// deploy or a restart loop cannot bounded-fail a healthy work item.
+//
+// The bridge's interruptedFromCause is a different list with a different
+// destination (every derivation that ended without a result is recorded
+// in attempts[] as audit); a daemon restart is exempt here and recorded
+// there, so the two do not merge.
 func restartExemptCause(cause string) bool {
 	return cause == causeDaemonRestart || cause == causeOperatorAttach || cause == causeOperatorResume
 }

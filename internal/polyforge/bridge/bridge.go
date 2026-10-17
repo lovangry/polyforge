@@ -119,20 +119,21 @@ type Config struct {
 const causeOperatorShutdown = rt.CauseOperatorAttach
 
 // interruptedFromCause maps the recovery lane's cause onto the driver's
-// interrupted-dispatch archive. An empty cause or an operator shutdown
-// archives nothing; every other cause is archived verbatim as an
-// audit-only attempt (it is never model-class, so it never advances the
-// candidate pointer).
+// interrupted-dispatch archive.
 //
-// This is deliberately NOT the same list as runtime's restartExemptCause
-// (recover.go). That rule decides which recovery causes do not count
-// against the consecutive-failures budget (daemon_restart, the operator
-// attach, the operator resume). This one decides which interruptions are
-// written to execution.json attempts[] as audit-only records (every cause
-// except the operator-shutdown attach). An audit record for a
-// driver_relaunch / daemon_restart interruption is skipped by the driver's
-// own failure counting (driver/supervision.go trailingCause), so the two
-// lists need not match.
+// Destination: execution.json's attempts[] records every derivation that
+// ended without a result — an audit entry, never counted as a step
+// failure and never model-class, so it neither blocks the step nor moves
+// the candidate pointer (driver/supervision.go trailingCause skips it).
+// An empty cause or an operator-shutdown attach is a deliberate stop, not
+// an interruption of the step, and records nothing; every other cause is
+// archived verbatim.
+//
+// runtime's restartExemptCause (recover.go) is a different list with a
+// different destination — the consecutive-recovery-failures budget is
+// spent by failures only — so the two do not merge: a daemon restart is
+// exempt from that budget yet is recorded here, because the derivation
+// it killed still ended without a result.
 func interruptedFromCause(cause string) *driver.InterruptedDispatch {
 	if cause == "" || cause == causeOperatorShutdown {
 		return nil
