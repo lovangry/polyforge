@@ -469,10 +469,7 @@ func New(cfg Config) (*Daemon, error) {
 		if err := d.modes.SetAuto(*cfg.Auto); err != nil {
 			return nil, fmt.Errorf("daemon: initial auto: %w", err)
 		}
-		// The flag override must survive the restart it rode in on:
-		// without this persist, `-auto=false` over a persisted auto-on
-		// would be undone by the NEXT boot (the fx3 gap).
-		d.persistModeQuietly()
+		// Run persists the override once it holds daemon.lock.
 	}
 	return d, nil
 }
@@ -536,6 +533,12 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// Same for the carrier lane's pf-carrier-* temporary bare repos.
 	if err := gitops.SweepCarrierTemps(filepath.Join(d.cfg.DataDir, "git")); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon: carrier temp sweep: %v\n", err)
+	}
+	// An explicit -auto must survive the restart it rode in on: without
+	// this persist, `-auto=false` over a persisted auto-on would be undone
+	// by the NEXT boot (the fx3 gap). Only the lock holder writes it.
+	if d.cfg.Auto != nil {
+		d.persistModeQuietly()
 	}
 	lst, err := d.listenUDS()
 	if err != nil {

@@ -4,7 +4,7 @@ package daemon
 // from flags, the shared CLI config chain (PF_SERVER / PF_API_KEY /
 // PF_DAEMON_SOCKET, claude_bin), POLYFORGE_DATA_DIR and the documented
 // defaults, then runs the daemon with SIGTERM/SIGINT wired to the
-// graceful shutdown sequence.
+// shutdown.
 //
 // Production starts the daemon only through `pf daemon ensure`, whose
 // argv carries only the fixed launch flags. The five production knobs

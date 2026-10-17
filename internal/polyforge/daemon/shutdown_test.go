@@ -237,3 +237,33 @@ func TestRefusedStartLeavesTheRunningDaemonsGitFiles(t *testing.T) {
 		}
 	}
 }
+
+// An explicit -auto is persisted only by the data-dir lock holder: a
+// second start the lock refuses leaves the running daemon's state file as
+// it was.
+func TestRefusedStartLeavesTheRunningDaemonsStateFile(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.persistModeQuietly()
+	before, err := os.ReadFile(td.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := td.cfg
+	cfg.SocketPath = filepath.Join(t.TempDir(), "second.sock")
+	flip := !td.modes.Auto()
+	cfg.Auto = &flip
+	d2, err := New(cfg)
+	if err != nil {
+		t.Fatalf("second New: %v", err)
+	}
+	if err := d2.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "data-dir lock") {
+		t.Fatalf("second Run = %v, want the data-dir lock refusal", err)
+	}
+	after, err := os.ReadFile(td.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("the refused start rewrote the running daemon's state file:\n%s\n->\n%s", before, after)
+	}
+}
