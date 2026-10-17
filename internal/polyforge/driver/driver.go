@@ -383,10 +383,8 @@ func (d *Driver) Run(ctx context.Context) error {
 			// a failed dispatch like any other — classified, counted,
 			// retried or blocked.
 			cause, code, detail := classifyWaitFailure(fmt.Errorf("driver: step %s spawn %d failed: %w", stepID, n, err))
-			if blocked, ferr := d.failDispatch(ctx, stepID, n, dispatchedAt, cause, code, detail); ferr != nil {
-				return ferr
-			} else if blocked {
-				return nil
+			if stop, err := d.failDispatch(ctx, stepID, n, dispatchedAt, cause, code, detail); stop {
+				return err
 			}
 			continue
 		}
@@ -409,10 +407,8 @@ func (d *Driver) Run(ctx context.Context) error {
 			d.emit("step_dead", map[string]any{
 				"step": stepID, "spawn_n": n, "cause": verdict.Cause, "evidence": verdict.Evidence,
 			})
-			if blocked, ferr := d.failDispatch(ctx, stepID, n, dispatchedAt, verdictCause(*verdict), -1, verdict.Evidence); ferr != nil {
-				return ferr
-			} else if blocked {
-				return nil
+			if stop, err := d.failDispatch(ctx, stepID, n, dispatchedAt, verdictCause(*verdict), -1, verdict.Evidence); stop {
+				return err
 			}
 			continue
 		}
@@ -429,10 +425,8 @@ func (d *Driver) Run(ctx context.Context) error {
 				return fmt.Errorf("driver: step %s dispatch %d ended without a result: %w", stepID, n, werr)
 			}
 			cause, code, detail := classifyWaitFailure(werr)
-			if blocked, ferr := d.failDispatch(ctx, stepID, n, dispatchedAt, cause, code, detail); ferr != nil {
-				return ferr
-			} else if blocked {
-				return nil
+			if stop, err := d.failDispatch(ctx, stepID, n, dispatchedAt, cause, code, detail); stop {
+				return err
 			}
 			continue
 		}
@@ -527,20 +521,15 @@ func (d *Driver) settle(stepID string, n int64, res *StepResult, run StepRun) (s
 			// with the result_invalid cause code — no driver relaunch
 			// through the recovery lane, no on_fail routing (rewind stays
 			// reserved for review FAIL verdicts).
+			// The death-cause table always blocks result_invalid, so a
+			// landed write is a clean stop: not relaunchable.
 			if err := d.transition(TransitionRequest{
 				Kind: TransStepFailed, StepID: stepID, SpawnN: n,
 				Failure: &StepFailure{Cause: FailResultInvalid, Detail: verr.Error()},
 			}); err != nil {
 				return true, fmt.Errorf("driver: step %s result-invalid block failed: %w", stepID, err)
 			}
-			d.mu.Lock()
-			blocked := d.exec.WorkflowStatus == StatusBlocked
-			d.mu.Unlock()
-			if blocked {
-				return true, nil // blocked, not relaunchable: a clean stop
-			}
-			return true, fmt.Errorf("driver: step %s dispatch %d result rejected (%d consecutive rejections, limit %d) but the block did not land: %w",
-				stepID, n, count, maxEnvelopeRejects, verr)
+			return true, nil
 		}
 		return false, nil // in-process re-dispatch: the step is still in_progress
 	}
