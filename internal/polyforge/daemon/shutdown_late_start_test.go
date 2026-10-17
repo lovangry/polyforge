@@ -1,9 +1,9 @@
 package daemon
 
-// shutdown_late_start_test.go — an agent start that outlives the
-// shutdown's wait for it (claimAbortWait) leaves no agent process
-// behind: whether it binds before the sequence's final check or after
-// Run returned, it is torn down.
+// shutdown_late_start_test.go — an agent start still binding when the
+// shutdown latches (the shutdown does not wait for it) leaves no agent
+// process behind: whether it binds shortly after or only once Run
+// returned, its binder tears it down.
 
 import (
 	"context"
@@ -69,8 +69,6 @@ func TestShutdownLateAgentStartLeavesNoProcess(t *testing.T) {
 			bound := make(chan *procAgent, 1)
 			var once sync.Once
 			td := newTestDaemon(t, func(c *Config) {
-				// claimAbortWait = a quarter of what is left: ~500ms
-				c.ShutdownBudget = 2 * time.Second
 				c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
 					once.Do(func() { close(entered) })
 					if delay >= 0 {

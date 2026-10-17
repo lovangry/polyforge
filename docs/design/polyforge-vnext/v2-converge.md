@@ -260,7 +260,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 - **重启时 aihub 不可达（repo review 2026-10-16 B-2 裁定，取代未成文的 "C6 audit-subtraction" 姿态）**：重启时 SessionVerify 的**传输错误**（连不上、超时、5xx）不是裁决，**不做任何 hub 转换**：保留本地记录（它持有 session 秘钥的唯一副本和尚未推送的 capsule 提交），先回收孤儿 step 进程（单写者），把在跑的 job 登记为 `recovering`（`pf status` 可见；其间 `pf wrap`/`pf pause` 答 DAEMON-409），并在 `goRetry` 退避车道上重试 verify；首个应答走普通对账路径——WI 无需 `pf resume` 即在原 capsule 里续跑，不丢提交。aihub 的 typed 拒绝（4xx）是应答：走原有路径（blocked 并写明原因）。sealing/paused 记录保持其状态，verify 应答后照常对账。关停停止重试，记录持久化，下次重启重新 verify。
 - **end_pending 先推链再收尾（同一裁定）**：bounded-fail 在裁决前 commit 脏 capsule；若当时 push 失败（多半正是让 SessionEnd 失败的同一次中断），end_pending 车道的每次重试**先用 session 凭证推送本地链，再发 SessionEnd(blocked)**，push 失败即整体重试；仅当 verify 表明 session 已不再持有该 WI（凭证已死，推不上去）时不带推送收尾。
 - **终态关闭的 SessionEnd 失败（同一评审 B-4）**：job 停在 SEALING 时，`goRetry("seal:"+wi)` 在该 WI 的锁下以记录的结论重跑与重启收尾器相同的 `stopOp(alreadySealing)`；typed `STALE_SESSION` 停止重试并本地收尾（job 本地 Done，事件 `seal_finished_locally` 注明 hub 状态以管理员/先前已落地的关闭为准）。
-- **领取的克隆不持任何锁（repo review 2026-10-16 B-8）**：`Start` 在该 WI 的锁下做准入检查、写 claiming journal、领取，并把 job 以 **CLAIMING** 占位放进表（占槽、拒绝重复 Start，不写 state.json——journal 即其持久形态）；capsule 克隆与 materialize（含 task-repo 克隆）不持锁运行，装 agent / 落定时再取该 WI 的锁。dispatcher 每个领取一个 goroutine，队列把未落定的领取计入并发上限。CLAIMING 期间 `pf wrap`/`--fail` 取消克隆、隔离半成品 capsule，并以该结论 SessionEnd，**不做 seal 推送**（未跑过 agent，capsule 链未变）；hub 拒绝该关闭时退回 blocked 收尾（后台重试至落地）。`pf pause` 无可保留的现场，同样取消、隔离后以 **blocked** 收尾并写事件 `claim_paused_ended_blocked`——继续走 `pf resume`（resume-blocked 门：owner/maintainer/admin）重新领取。关停先落下关停闩（`BeginShutdown`），取消所有在途领取并**延后**：不 SessionEnd、不置 blocked，journal 与队列条目保留，下次启动按 B1 重放同一领取；只等已处于 CLAIMING 的领取与已在途的 agent 启动，且最多 min(30s, 剩余预算/4)，还在领取前步骤上的 Start 遇闩自行延后、不被等待（WIP 快照保有预算）。
+- **领取的克隆不持任何锁（repo review 2026-10-16 B-8）**：`Start` 在该 WI 的锁下做准入检查、写 claiming journal、领取，并把 job 以 **CLAIMING** 占位放进表（占槽、拒绝重复 Start，不写 state.json——journal 即其持久形态）；capsule 克隆与 materialize（含 task-repo 克隆）不持锁运行，装 agent / 落定时再取该 WI 的锁。dispatcher 每个领取一个 goroutine，队列把未落定的领取计入并发上限。CLAIMING 期间 `pf wrap`/`--fail` 取消克隆、隔离半成品 capsule，并以该结论 SessionEnd，**不做 seal 推送**（未跑过 agent，capsule 链未变）；hub 拒绝该关闭时退回 blocked 收尾（后台重试至落地）。`pf pause` 无可保留的现场，同样取消、隔离后以 **blocked** 收尾并写事件 `claim_paused_ended_blocked`——继续走 `pf resume`（resume-blocked 门：owner/maintainer/admin）重新领取。关停先落下关停闩（`BeginShutdown`），取消所有在途领取并**延后**：不 SessionEnd、不置 blocked，journal 与队列条目保留，下次启动按 B1 重放同一领取；关停不等任何领取或 agent 启动：在途领取遇闩自行延后，仍在装入的 agent 启动由装入方自行拆除。
 - **每张票一把状态锁，全局锁只护共享数据（polyforge#178，取代 B-8 的 busy / starting / ending 标记与 opMu）**：runtime 对每个 WI（按 canonical id）有一把状态锁；任务表的插入、删除、替换与 job 的状态迁移都只由持有该 WI 锁的一方做。关闭（`pf wrap`/`--fail`/`pf pause` 及 seal 重试、重启收尾器）的 seal 推送、task-repo WIP 推送与 SessionEnd，恢复的 commit-dirty 推送，bounded-fail 的推送与 blocked 关闭，失败领取的补偿 SessionEnd 与 CLAIMING 期间关闭的 SessionEnd，`pf resume` 的 verify 与 attach，延后 verify 重试，end_pending 与补偿 SessionEnd 的重试，都在该 WI 的锁下一路做完网络步骤（状态边照旧先迁移并持久化）。同一 WI 已有操作在进行时，新的冲突操作**立即拒绝**：`pf wrap`/`pf pause`/`pf resume` 答 `DAEMON-409`，Start 答 `DAEMON-503`（dispatcher 退避重试），重试稍后再试；其他 WI 的任何入口都不等它。daemon 的 wrap/pause 遇到表中还没有 job 的 WI 时，先按 hub 判断（parked blocked 答 409、终态答 already_terminal），否则只要该 WI 的 canonical id 的锁被占着（Start 已过探测、正在 journal verify / SessionClaim，或探测时用的写法本身就是 canonical id 或 runtime 已登记的别名——daemon 提交时登记）就答 `DAEMON-409`，不再答 404；Start 用 runtime 尚不认识的 slug 写法、还在探测时，canonical id 的锁空着，按 canonical id 发来的 wrap/pause 照旧答 404（探测答出 id 之前无法知道两种写法是同一张票）。任务表锁只护任务表、别名、锁表、关停闩、agent 启动计数与重启标记，持有期间不做任何网络或磁盘 I/O，`pf ops status`/`pf watch` 只取它和 job 自己的互斥量；`persist` 在它下面取快照并编代号、在自己的互斥量下写盘，旧快照永远不会最后落盘。锁序：WI 锁（同一时刻最多一把）→ I/O 叶子锁（gitops 的 per-WI 锁、claiming journal、manual-models、写盘）→ 任务表锁 → job 的互斥量。**领取**：`Start` 先在提交写法的锁下探测（runtime 已知该别名时即 canonical id 的锁；daemon 提交时登记别名），探测答出 id 后换到 canonical id 的锁（绝不同时持两把），只做一次准入检查（关停闩、`restarting`、journal 条目带 `ending`、表中已有活跃 job；保留的 paused 记录可被替换），再 journal verify、写 journal、SessionClaim（**统一用 canonical id 发送**，journal 以 canonical id 记键）、放占位；探测答不出 id 即拒绝、什么也不领取。slug 与 id 两种写法落到同一把锁上，进程内绝不会被领取两次。B-1 语义不变：答案丢失保留 journal、重试用同一 secret/key 重放、重放遭 typed <500 拒绝即 abandonClaim。补偿 SessionEnd 失败时 journal 条目标记 `ending` 并在后台重试：期间同一 WI 的 Start 答 `DAEMON-503`（不再重放正被结束的领取）；**重启时带 `ending` 的条目直接以 blocked 结束，不再重放领取**。**关停**：关停闩（`down`）与 agent 启动令牌（`admit`）——每个让 agent 活起来的动作（装 claim 的 agent、恢复的重新派生，含重启与 `pf resume` 走到的）先取令牌；闩落下后任何 agent 都起不来，`BeginShutdown` 只等 CLAIMING 领取与已在途的启动，此后的活 job 快照即最终集合；不再等重启 lane 的在途步骤、不再二次持久化，最后的 agent 清扫只保留为打日志的断言（扫到即 bug）。**OB 消息**在消息循环里按派生计数过栅，恢复 / 被接管处理各起一个 goroutine 在该 WI 的锁下进行：恢复等锁（不丢死亡信号）并在锁下重核栅栏（同一派生的重复信号被丢弃），被接管处理遇锁被占即退让（monitor 会再发）；一张票的恢复推送卡住不再拖延其他票的消息。**重启对账**：对账在一条 lane 上进行：先在各 WI 的锁下把记录种进表并标 `restartPending`（未对账：对它的 close/resume 答 `DAEMON-409`，Start `DAEMON-503`），lane 等某 WI 的锁时（持锁的只会是该 WI 卡在 aihub 上的后台重试）按它自己的 hub 调用计时；再 journal 重放（verify 与 SessionClaim 不持锁，`restarting` 挡住所有 Start；采纳某 WI 时在其锁下丢弃尚未对账的种入记录并占位 CLAIMING，克隆在全部记录对账、持久化之后以 goroutine 进行），再逐条记录在该 WI 的锁下 verify、attach 及其推送 / 关闭。lane 运行期间 `restarting` 闩保持：所有 Start 答 `DAEMON-503`，延后 verify 重试等待。Restart 等 lane 跑完，只有当 lane 的某个 hub 调用 `RestartHubWait`（默认 5s）仍未回答时才提前返回——lane 的上下文带标记，lane 运行期间经它发出的每个 hub 调用都计时（verify、重放的 SessionClaim、attach，以及 seal 的 SessionEnd、blocked 关闭的 SessionEnd/verify、恢复补 work-item 的查询、重放的补偿 SessionEnd）；lane 结束后的延后 verify 不再计入。本地与 git 工作（慢推送、重新派生）照旧让启动等待，结果与同步对账完全一致。提前返回时（只取任务表锁）socket 开始服务：verify 尚未回答的记录在各自互斥量下按延后 verify 的姿态显示（`awaiting_hub`，running 记为 RECOVERING，发 `session_verify_deferred` 事件，只发一次；end_pending 记录不改）。Restart 无论何时返回都在任务表锁下记下此刻有活 agent 的 job：它们由 daemon 的启动 reattach 交给 observe（`RestartAttach`），之后由 lane 或延后 verify 恢复出活 agent 的 job 由 runtime 自己发 RTStarted——每个 job 只挂一次；daemon 的桥只丢弃既无 monitor、其 RTStarted 也不在途的 job 的 RTRecovered。关停闩落下后 lane 不再开始新步骤，在途步骤遇令牌失败不再派生；Restart 尚在等待时关停闩落下则立即返回（无可服务），未对账的记录与 journal 条目原样保留，journal 重放占位延后。提前返回之后 daemon 的提交队列重放跳过逐条的"仍在 queued 吗"探测（`GetWorkItem` 会在服务前卡在同一个 hub 上）：条目直接入队，其 Start 在对账结束前答 `DAEMON-503`，之后由领取自身的探测与 hub CAS 裁决。已知差异（仅在提前返回之后）：提交队列重放在 journal 重放落定前看不到该 WI，其条目会先得 `DAEMON-503` 再以"already active"作为 submit_rejected 落定（同步路径是 dropReplay 事件），已不再 queued 的条目同理以领取的拒绝落定；延后 verify 重试在 lane 运行期间按退避等待，lane 结束后最多再晚一个退避间隔（≤ EndRetryMax）。end_pending 的"推送被永久拒绝、不再推送"与"等待 aihub（延后 verify）"两个标记随 job 记录持久化，重启后仍有效（后者在 hub 回答 verify 时清除）。
 - **不加租约**（保留 v1.5 裁决：领取永不驱逐活着的持有者，接管是单独的特权操作）。改为 WI 级"失联"提示：**WI 失联 = 其持有 daemon 的心跳超时（统一一个阈值，替代 aihub 展示层的 5 分钟与本文早先的 15 分钟两套），或该 WI 从该 daemon 心跳上报的在跑列表中消失**；在 `pf queue`/`pf watch` 提示"可接管"并发事件。
 - 同一步失败计数上限（2.3）；driver 异常退出界（2.3）。
@@ -447,7 +447,9 @@ blocked→resume 等重新认领从上游 clone 后按 carrier ref 恢复任务�
 carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改动。补充一条 WIP ref `refs/pf-wip/<name>`（`gitops.PushTaskWIP`）：
 
 - **何时写**：只在步骤进程已退出的关闭点——bounded-fail（blocked，SessionEnd 之前）、`stopOp` 收尾（failed / blocked 等非 wrapped）、
-  operator pause（`pauseOp`）、daemon 正常关停（杀掉 agent 树之后）。observe 的常规发布不写。
+  operator pause（`pauseOp`）、daemon 关停（杀掉 agent 树之后）、以及每个 step 结束时（driver 在该次派发的进程退出后、写入其结果或失败之前
+  调用 `StepEnded`，即 `runtime.SaveTaskWIP`，上限 30 秒（因此可能把该 step 结果的写入推迟至多 30 秒）；失败不影响该 step，不持任何 runtime 锁），所以 kill -9 至多丢掉当前 step
+  尚未结束的改动。observe 的常规发布不写。
   先按 §14.2 镜像每个仓库的 HEAD 到 `refs/pf-task/<name>`，再对每个仓库：有未提交改动（已跟踪修改、删除与未跟踪文件）→ 生成一个
   WIP 提交（唯一父提交 = HEAD）并强推到 `refs/pf-wip/<name>`；干净或 wrapped 关闭 → 直接推 `:refs/pf-wip/<name>` 删除
   （hub 上没有该 ref 时静默）。本次 WIP 生成/推送失败时**保留** hub 上较旧的 WIP ref：它只在父提交等于恢复后的 HEAD（即它被拍下时
@@ -476,9 +478,9 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
     `unable to index file` 行。
   - `add` 之后兜底剔除：属性为 lfs/git-crypt filter 的改动文件；单个超过 blob 上限的；改动总量超过上限时先剔除最大的。
   被剔除的已跟踪路径在快照里保持 HEAD 的内容（不会变成删除），未跟踪路径直接不收。
-- **关停**：每个 job 的快照分到剩余关停预算的一份（上限 2 分钟），作为 `gitops.Opts.Deadline`：carrier 通道每次 git 调用的超时都
-  截到该时刻，到点杀掉整个 git 进程组，不会有推送活过 daemon 进程；到点后剩下的仓库不再尝试，`carrier_push_failed` 写明
-  `deadline exceeded`（而不是误导的仓库布局拒绝原因）。
+- **关停与 step 结束**：快照在一个 context 下运行（`gitops.Opts.Ctx`；关停：所有 job 并行、共用一个 30 秒期限；step 结束：driver 的
+  context 加 30 秒期限）：carrier 通道每次 git 调用的超时都截到其期限，context 结束（到期或取消）即杀掉整个 git 进程组并释放
+  per-WI 锁；之后剩下的仓库不再尝试，`carrier_push_failed` 写明 `deadline exceeded` 或 `cancelled`（而不是误导的仓库布局拒绝原因）。
 - **hook**：`refs/pf-wip/*` 是草稿 ref，允许删除与 non-fast-forward；只检查新对象（`rev-list --objects <new> --not --all`）的
   blob 上限，用 carrier 的 100 MiB；不做 seq / gitlink 检查。其余 ref 的规则不变（`refs/pf-task/*` 仍禁止删除与非快进）。
 - **恢复**（`runtime.restoreTaskWIP`，在 `restoreTaskRepoState` 之后，只对新 clone）：取 `refs/pf-wip/<name>`；若其唯一父提交等于
@@ -597,8 +599,8 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `session_superseded` | observe `session.go`；runtime `runtime.go` | 周期 session 校验发现另一 daemon 持有该 WI（载荷只有公开指纹） |
 | `session_verify_failed` | observe `session.go` | 周期 session 校验连不上 aihub（只记录，不采取行动） |
 | `queue_fetch_denied` | daemon `daemon.go`（`wi=""`） | auto-pull 的 ready 队列拉取被 401/403/404 拒绝；每个"健康→拒绝"周期一次 |
-| `submit_rejected` / `submit_dropped` | daemon `restartsignal.go`、`daemon.go` | 已应答 accepted 的 submit 在派发时失败 / 重启后不再重放（body 写原因） |
-| `daemon_restarted` | daemon `restartsignal.go` | 写入每个重启对账恢复或停放的 WI；body 带上次停机原因（`last-shutdown.json`，否则 `unknown`） |
+| `submit_rejected` / `submit_dropped` | daemon `restartsignal.go`、`modes.go`、`daemon.go` | 已应答 accepted 的 submit 在派发时失败 / 重启后不再重放（body 写原因） |
+| `daemon_restarted` | daemon `restartsignal.go` | 写入每个重启对账恢复或停放的 WI；body 带该 job 的状态 |
 | `capsule_missing` / `project_unmapped` / `session_verify_outage` | runtime `restart.go` | 重启对账把 WI 置 blocked 的原因（同时是 blocked 原因码） |
 | `session_verify_deferred` | runtime `restart.go` | 重启时的 session 校验连不上 aihub，记录保留、稍后重试 |
 | `session_released` | runtime `restart.go` | 重启时发现 WI 已被别的 session 持有：杀进程树、隔离 capsule、丢弃记录 |
@@ -635,7 +637,6 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `daemon.log` | `pf daemon ensure` 的重启循环 | daemon 输出，超过 10 MiB 轮转为 `.1` |
 | `daemon-state.json` | daemon `modes.go` | auto 开关与并发上限 |
 | `submit-queue.json` | daemon `modes.go` | 已接受、待派发的 submit 队列（重启后重放） |
-| `last-shutdown.json` | daemon `restartsignal.go` | 上次停机原因，供 `daemon_restarted` 使用 |
 | `runtime-state.json` | runtime `runtime.go` | runtime 的 job 记录（旧文档称作 `state.json`） |
 | `claiming.json` | runtime `claiming.go` | 领取前的持久化意图日志（B1，`reference.md#§3.5`），崩溃后重放 |
 | `manual-models.json` | runtime `manualmodels.go` | 每个 WI 的 `pf submit --models` 列表（只在本机有效） |

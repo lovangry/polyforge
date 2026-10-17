@@ -7,6 +7,7 @@ package gitops
 // runs anything the agent-controlled repo config names.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -395,7 +396,9 @@ func TestPushTaskWIPHonoursDeadline(t *testing.T) {
 	o, repo, _ := wipEnv(t, "wi_wip9")
 	events := captureEvents(&o)
 	writeT(t, filepath.Join(repo, "new.txt"), "x\n")
-	o.Deadline = time.Now().Add(-time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	o.Ctx = ctx
 	start := time.Now()
 	PushTaskWIP(o, true, true)
 	if _, ok := bareRefSHA(t, o.RemoteURL, TaskWIPRefName("demo-src")); ok {
@@ -465,5 +468,68 @@ func TestPushTaskWIPInfoAttributesAndIgnoredEmbedded(t *testing.T) {
 	}
 	if strings.Contains(sk, "build") {
 		t.Fatalf("an embedded repo under an ignored dir was reported: %q", sk)
+	}
+}
+
+// A cancelled WIP lane (the driver or job context ending mid-push) kills
+// its hung git call's process group and releases the per-WI lock at once,
+// so the work item's next close does not wait out the lane's deadline; it
+// raises no carrier_push_failed and keeps the once-per-ref alert.
+func TestPushTaskWIPStopsPromptlyOnCancel(t *testing.T) {
+	o, repo, _ := wipEnv(t, "wi_wip_cancel")
+	events := captureEvents(&o)
+	o.CarrierAlerts = &CarrierAlerts{}
+	writeT(t, filepath.Join(repo, "new.txt"), "x\n")
+	marker := filepath.Join(t.TempDir(), "push-entered")
+	if err := os.MkdirAll(filepath.Join(o.RemoteURL, "hooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(o.RemoteURL, "hooks", "pre-receive"), []byte("#!/bin/sh\ntouch '"+marker+"'\nsleep 120\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	o.Ctx = ctx
+	done := make(chan struct{})
+	go func() { PushTaskWIP(o, true, true); close(done) }()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the lane's push never reached the hub")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	start := time.Now()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the cancelled lane did not return")
+	}
+	locked := make(chan func())
+	go func() { locked <- Lock(o.WorkItemID) }()
+	select {
+	case release := <-locked:
+		release()
+	case <-time.After(5 * time.Second):
+		t.Fatal("the per-WI lock is still held after the cancelled lane returned")
+	}
+	if el := time.Since(start); el > 2*time.Second {
+		t.Fatalf("the cancelled lane released the lock after %s, want about at once", el)
+	}
+	// a cancellation is not a failure: no carrier_push_failed, and the
+	// once-per-ref alert stays for a real failure
+	for _, e := range events() {
+		if e["kind"] == EventCarrierPushFailed {
+			t.Fatalf("a cancelled lane raised %v", e)
+		}
+	}
+	for _, ref := range []string{TaskRefName("demo-src"), TaskWIPRefName("demo-src")} {
+		if !o.CarrierAlerts.first(ref) {
+			t.Fatalf("the cancelled lane consumed the alert for %s", ref)
+		}
 	}
 }

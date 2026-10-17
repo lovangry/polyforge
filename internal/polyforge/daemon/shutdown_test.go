@@ -1,14 +1,16 @@
 package daemon
 
-// shutdown_test.go + restart wiring: the graceful shutdown sequence
-// (state.json on disk, the socket closing) and the daemon-start Restart
-// reconciliation wiring.
+// shutdown_test.go + restart wiring: the shutdown (state.json on disk,
+// the socket closing, the jobs torn down in parallel) and the daemon-start
+// Restart reconciliation wiring.
 
 import (
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -139,29 +141,13 @@ func TestRestartWiring(t *testing.T) {
 	}
 }
 
-// slowSweepAgent is a fake agent whose liveness probe after its
-// teardown — the shutdown's final check, after the face is closed — takes
-// a while.
-type slowSweepAgent struct {
-	fakeAgent
-}
-
-func (a *slowSweepAgent) Alive() bool {
-	if a.isDone() {
-		time.Sleep(500 * time.Millisecond)
-		return false
-	}
-	return true
-}
-
-// repo review 2026-10-16 B-16: closing the face (shutdown step 5) makes
-// Serve return ErrServerClosed; Run must still wait for the rest of the
-// sequence (runtime drain, final check) before it returns and the
-// process exits.
+// repo review 2026-10-16 B-16: closing the face makes Serve return
+// ErrServerClosed; Run must still wait for the rest of the shutdown
+// before it returns and the process exits.
 func TestRunReturnsOnlyAfterTheShutdownSequence(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) {
 		c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
-			return &slowSweepAgent{}, nil
+			return &fakeAgent{}, nil
 		}
 	})
 	td.submitClaim(t, "wi_sweep")
@@ -175,5 +161,109 @@ func TestRunReturnsOnlyAfterTheShutdownSequence(t *testing.T) {
 	case <-td.shutDone:
 	default:
 		t.Fatal("Run returned before the shutdown sequence finished")
+	}
+}
+
+// slowTermAgent takes a while to terminate.
+type slowTermAgent struct{ fakeAgent }
+
+func (a *slowTermAgent) Terminate(b time.Duration) error {
+	time.Sleep(1500 * time.Millisecond)
+	return a.fakeAgent.Terminate(b)
+}
+
+// The shutdown terminates (and WIP-saves) the live jobs in parallel: three
+// agents that take 1.5s each to terminate cost the shutdown ~1.5s, not
+// 4.5s.
+func TestShutdownTerminatesJobsInParallel(t *testing.T) {
+	var mu sync.Mutex
+	var agents []*slowTermAgent
+	td := newTestDaemon(t, func(c *Config) {
+		c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
+			a := &slowTermAgent{}
+			mu.Lock()
+			agents = append(agents, a)
+			mu.Unlock()
+			return a, nil
+		}
+	})
+	for _, wi := range []string{"wi_par1", "wi_par2", "wi_par3"} {
+		td.submitClaim(t, wi)
+	}
+	start := time.Now()
+	if err := td.Shutdown(context.Background(), DirectShutdownCause()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	if el := time.Since(start); el > 3500*time.Millisecond {
+		t.Fatalf("shutdown took %v: the agents were terminated one after another", el)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i, a := range agents {
+		if !a.isDone() {
+			t.Fatalf("agent %d was not terminated", i)
+		}
+	}
+}
+
+// Only the data-dir lock holder sweeps crash residue: a second start the
+// lock refuses leaves the running daemon's askpass scripts and carrier
+// temp repos alone (a push of the running daemon may be using them).
+func TestRefusedStartLeavesTheRunningDaemonsGitFiles(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	gitRoot := filepath.Join(td.cfg.DataDir, "git")
+	askpass := filepath.Join(gitRoot, "askpass", "askpass-live")
+	carrier := filepath.Join(gitRoot, "pf-carrier-live")
+	for _, dir := range []string{filepath.Dir(askpass), carrier} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(askpass, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := td.cfg
+	cfg.SocketPath = filepath.Join(t.TempDir(), "second.sock")
+	d2, err := New(cfg)
+	if err != nil {
+		t.Fatalf("second New: %v", err)
+	}
+	if err := d2.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "data-dir lock") {
+		t.Fatalf("second Run = %v, want the data-dir lock refusal", err)
+	}
+	for _, p := range []string{askpass, carrier} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("the refused start removed the running daemon's %s: %v", p, err)
+		}
+	}
+}
+
+// An explicit -auto is persisted only by the data-dir lock holder: a
+// second start the lock refuses leaves the running daemon's state file as
+// it was.
+func TestRefusedStartLeavesTheRunningDaemonsStateFile(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.persistModeQuietly()
+	before, err := os.ReadFile(td.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := td.cfg
+	cfg.SocketPath = filepath.Join(t.TempDir(), "second.sock")
+	flip := !td.modes.Auto()
+	cfg.Auto = &flip
+	d2, err := New(cfg)
+	if err != nil {
+		t.Fatalf("second New: %v", err)
+	}
+	if err := d2.Run(context.Background()); err == nil || !strings.Contains(err.Error(), "data-dir lock") {
+		t.Fatalf("second Run = %v, want the data-dir lock refusal", err)
+	}
+	after, err := os.ReadFile(td.statePath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("the refused start rewrote the running daemon's state file:\n%s\n->\n%s", before, after)
 	}
 }

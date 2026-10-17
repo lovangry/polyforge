@@ -107,7 +107,7 @@ const (
 	EvSubmitDropped = "submit_dropped"
 	// EvDaemonRestarted (v2 §6): written into every WI the daemon
 	// recovered or parked after restart reconciliation; body carries the
-	// previous shutdown cause when known (#110) else "unknown".
+	// job's state.
 	EvDaemonRestarted = "daemon_restarted"
 )
 

@@ -4,7 +4,7 @@ package daemon
 // from flags, the shared CLI config chain (PF_SERVER / PF_API_KEY /
 // PF_DAEMON_SOCKET, claude_bin), POLYFORGE_DATA_DIR and the documented
 // defaults, then runs the daemon with SIGTERM/SIGINT wired to the
-// graceful shutdown sequence.
+// shutdown.
 //
 // Production starts the daemon only through `pf daemon ensure`, whose
 // argv carries only the fixed launch flags. The five production knobs
@@ -204,7 +204,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return ExitNeedsOperator
 	}
 
-	// SIGTERM/SIGINT run the same bounded graceful sequence the
+	// SIGTERM/SIGINT run the same shutdown the
 	// POST /shutdown route triggers. The signal VALUE is observed via a
 	// Notify channel (polyforge#110): a NotifyContext cancellation
 	// reports only "context canceled", so the cause record could never
@@ -217,9 +217,11 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	go func() {
 		sig := <-sigCh
 		signal.Stop(sigCh) // one shot: a second signal aborts waits hard
-		if err := d.Shutdown(context.Background(), SignalShutdownCause(sig)); err != nil {
-			fmt.Fprintf(stderr, "pf daemon: shutdown: %v\n", err)
+		cause := fmt.Sprintf("signal: %v", sig)
+		if s, ok := sig.(syscall.Signal); ok {
+			cause = fmt.Sprintf("signal: %s (signal %d)", s, int(s))
 		}
+		_ = d.Shutdown(context.Background(), cause)
 	}()
 
 	if err := d.Run(context.Background()); err != nil {
