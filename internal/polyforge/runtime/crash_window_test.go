@@ -158,20 +158,28 @@ func TestCarrierFetchBlipDoesNotBlock(t *testing.T) {
 	defer func() { fetchTaskRefFn, carrierFetchBackoff = origFetch, origWait }()
 	carrierFetchBackoff = time.Millisecond
 	calls := 0
+	var first error
 	fetchTaskRefFn = func(context.Context, gitops.Opts, string, string) (string, error) {
 		calls++
 		if calls == 1 {
-			return "", fmt.Errorf("ls-remote: connection reset by peer")
+			return "", first
 		}
 		return "", nil
 	}
 	r := &Runtime{}
 	j := &job{wi: "wi_cr10"}
+	first = fmt.Errorf("git ls-remote: fatal: unable to access 'http://hub/wi.git/': Failed to connect to hub port 80: Connection refused")
 	if _, err := r.restoreTaskRepoState(context.Background(), j, "app", t.TempDir()); err != nil {
 		t.Fatalf("one hub blip failed the carrier restore: %v", err)
 	}
 	if calls != 2 {
 		t.Fatalf("the blip must be retried once, got %d reads", calls)
+	}
+	// a refusal is not a blip: no retry, the claim fails at once
+	calls = 0
+	first = fmt.Errorf("git ls-remote: fatal: unable to access 'http://hub/wi.git/': The requested URL returned error: 403")
+	if _, err := r.restoreTaskRepoState(context.Background(), j, "app", t.TempDir()); err == nil || calls != 1 {
+		t.Fatalf("a permanent refusal must fail without a retry: err=%v reads=%d", err, calls)
 	}
 }
 

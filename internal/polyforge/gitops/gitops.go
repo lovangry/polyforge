@@ -1442,6 +1442,29 @@ func IsPermanentPushRejection(err error) bool {
 		IsNonFastForward(err, "")
 }
 
+// IsTransientRemoteFailure reports a remote git call that failed for a
+// reason a retry can change: the hub unreachable, the connection cut, a
+// timeout, or a 5xx answer. An answer the server gave on purpose (auth
+// refused, ref or repository not found, any other 4xx) and a local
+// failure are not transient. Matches git's C-locale output (callers run
+// git under CEnv).
+func IsTransientRemoteFailure(err error) bool {
+	var text string
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		text += " " + strings.ToLower(e.Error())
+	}
+	for _, m := range []string{
+		"timed out", "could not resolve host", "connection refused", "connection reset",
+		"failed to connect", "couldn't connect", "early eof", "remote end hung up",
+		"empty reply from server", "recv failure", "send failure", "returned error: 5",
+	} {
+		if strings.Contains(text, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsNonFastForward reports a push refused because the remote ref is not an
 // ancestor of the pushed commit. It matches git's C-locale output
 // ("! [rejected] HEAD -> main (non-fast-forward)" / "(fetch first)"), so
