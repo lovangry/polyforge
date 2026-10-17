@@ -867,7 +867,7 @@ func (s *Server) hReadyQueue(w http.ResponseWriter, r *http.Request, idn *identi
 const defaultMachinesStaleAfter = 5 * time.Minute
 
 // authorizeMachineRegistration gates the FIRST-registration branch of the
-// heartbeat path (the M3 folded finding): minting a machine identity — a
+// heartbeat path (the M3 folded finding): creating a machine identity — a
 // machine_id with no machines row — is a privileged act, reserved for the
 // global admin or a maintainer of a configured project (the heartbeat body
 // carries no project context, so any project_members row with the

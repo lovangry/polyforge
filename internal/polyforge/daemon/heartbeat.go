@@ -64,9 +64,7 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) {
 
 // sendHeartbeat posts one heartbeat with the daemon's current liveness
 // projection. Errors are returned (log-only at the caller); a first
-// registration is noted — WITHOUT the issued key: the registration
-// response carries the machine identity's plaintext api key once, and the
-// daemon runs on its operator-issued credential instead.
+// registration is noted.
 func (d *Daemon) sendHeartbeat() error {
 	res, err := d.hub.Heartbeat(aihubclient.MachineHeartbeat{
 		MachineID:      d.cfg.MachineID,

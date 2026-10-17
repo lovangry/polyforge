@@ -185,7 +185,7 @@ compose service (`deploy/docker-compose.yml`, `restart: unless-stopped`).
 
 Heartbeat body `{machine_id, runtime_version, display_name, mode, live_wi_ids}` (`core/admin.go`);
 server-stamped `last_heartbeat_at`. A new `machine_id` creates (one transaction) a `mac_` machine user,
-the machines row and a first API key returned once; the daemon does not keep it. Daemon cadence
+and the machines row; no API key is issued (the daemon runs on its operator-issued key). Daemon cadence
 `-heartbeat-every` 60s (`daemon/heartbeat.go`), log-only failures with backoff. `GET /machines`
 returns `{machines:[{id,user_id,runtime_version,mode,live_wi_ids,last_heartbeat_at,heartbeat_age_seconds,stale}], stale_after_seconds, count}`, oldest first.
 The daemon id is the machine id: default `m-<hostname>`, persisted in `<data-dir>/daemon-id`

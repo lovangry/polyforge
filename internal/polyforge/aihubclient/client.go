@@ -398,11 +398,8 @@ type MachineHeartbeat struct {
 	LiveWIIDs      []string `json:"live_wi_ids"`
 }
 
-// MachineHeartbeatResult is the heartbeat response. On first registration
-// the server also issues the machine identity's api key (plaintext shown
-// once, JSON field api_key) — this struct deliberately does not carry it:
-// the daemon heartbeats with its OPERATOR-issued credential, so a key it
-// never asked for must not flow through the client surface.
+// MachineHeartbeatResult is the heartbeat response (the daemon heartbeats
+// with its operator-issued credential; registration issues no key).
 type MachineHeartbeatResult struct {
 	Registered bool   `json:"registered"` // true only on the first call
 	MachineID  string `json:"machine_id"`
