@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
@@ -171,5 +172,73 @@ func TestCarrierFetchBlipDoesNotBlock(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("the blip must be retried once, got %d reads", calls)
+	}
+}
+
+// TestCrashMidPauseReplaysThePause (CR-11): the operator pause persisted
+// its Paused record, then the daemon died before SessionEnd(paused). The
+// hub still says running; the restart finishes the pause instead of
+// resuming the work item against the operator's intent.
+func TestCrashMidPauseReplaysThePause(t *testing.T) {
+	hub := newFakeHub()
+	sp := &scriptedSpawner{}
+	r, _, _ := newTestRuntime(t, hub, sp)
+	wi := "wi_cr11_pause"
+	rec := matrixRecord(r, wi, 0, "")
+	rec.State = string(StatePaused)
+	rec.StopReason = protocol.FinishPaused
+	rec.CleanPause = true
+	hub.hold(wi, rec.SessionID, api.StatusRunning)
+	if err := os.MkdirAll(rec.CapsuleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeStateFile(t, r, []*jobRecord{rec})
+
+	if err := r.Restart(context.Background()); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if sp.callCount() != 0 {
+		t.Fatal("the operator's pause must not be resumed by a restart")
+	}
+	if hub.endCount() != 1 || hub.lastEnd().Status != api.StatusPaused || !hub.lastEnd().CleanPause {
+		t.Fatalf("the pending pause must land at the hub: %d ends, last %+v", hub.endCount(), hub.lastEnd())
+	}
+	if recs := loadRecords(t, r); len(recs) != 1 || recs[0].State != string(StatePaused) {
+		t.Fatalf("the paused record must be retained: %+v", recs)
+	}
+}
+
+// TestAttachClearsCleanPauseBeforeTheHubFlips (CR-11): the attach of a
+// retained pause the operator resumed mirrors the cleared clean_pause on
+// disk before SessionAttach runs, so a crash after the hub flipped to
+// running resumes the work item instead of re-pausing it.
+func TestAttachClearsCleanPauseBeforeTheHubFlips(t *testing.T) {
+	hub := newFakeHub()
+	sp := &scriptedSpawner{}
+	r, _, _ := newTestRuntime(t, hub, sp)
+	wi := "wi_cr11_attach"
+	rec := matrixRecord(r, wi, 0, "")
+	rec.State = string(StatePaused)
+	rec.StopReason = protocol.FinishPaused
+	rec.CleanPause = true
+	hub.hold(wi, rec.SessionID, api.StatusPaused) // the operator's pf resume cleared clean_pause
+	if err := os.MkdirAll(rec.CapsuleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeStateFile(t, r, []*jobRecord{rec})
+	gate := hub.hangCall(t, "attach", wi)
+	done := make(chan error, 1)
+	go func() { done <- r.Restart(context.Background()) }()
+	gate.waitEntered(t, "the attach")
+	recs := loadRecords(t, r)
+	gate.open()
+	if err := <-done; err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if len(recs) != 1 || recs[0].CleanPause || pausePending(recs[0]) {
+		t.Fatalf("at the attach the record must no longer read as a pending pause: %+v", recs)
+	}
+	if j := r.jobOf(wi); j != nil {
+		terminateJobAgent(r, wi)
 	}
 }

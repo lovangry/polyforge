@@ -2352,11 +2352,10 @@ func (r *Runtime) sealNetwork(ctx context.Context, j *job, reason, note string, 
 //	stay so the holder daemon's restart can attach once the operator
 //	clears clean_pause (M3).
 //
-// A SessionEnd failure leaves the record PAUSED against a hub that
-// still says running: the restart reconciliation self-heals exactly
-// that shape (verify matches + running + a local Paused record →
-// resume through the recovery engine), so the error is loud but never
-// a dangling half-close.
+// A SessionEnd failure (or a crash before it) leaves the record PAUSED
+// against a hub that still says running: the restart reconciliation
+// replays the pause (replayPause), so the operator's pause is never lost
+// and the error is loud but never a dangling half-close.
 func (r *Runtime) pauseOp(ctx context.Context, j *job) error {
 	if err := j.transition(StatePaused); err != nil {
 		return err
