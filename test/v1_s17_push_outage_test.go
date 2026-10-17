@@ -1,31 +1,25 @@
 package test
 
 import (
-	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 )
 
-// v1_s17: the push-backpressure STEPS trigger, end to end with the REAL
-// daemon riding PRODUCTION defaults, driver/envelope edition. The daemon
-// CLI exposes no backpressure flags (no injection seam exists, none is
-// added), so the scenario lets the real ladder run itself out: 5
-// consecutive failed pushes spaced by the 10s PushRetryBackoff = ~40-50s
-// to the event.
-//
-// The version stream that drives the ladder is the DRIVER's own write
-// face: each owner answer is a transition (the D9 archive-and-clear write
-// plus the re-dispatch's step_start), so the parked question/answer cycle
-// keeps execution.json's Version climbing through the outage window —
-// every bump re-arms the observe push round. The outage is a REAL stopped
-// aihub process; the push path is the real git-over-HTTP lane. The
-// degradation event (reason "steps", failed_pushes >= 5) must land while
-// the driver keeps working — no recovery/respawn signal fires. After the
-// aihub returns, the chain catches up (the versions written during the
-// outage reach the server-side bare repo) and a fresh published event
-// lands.
-func TestV1S17BackpressureSteps(t *testing.T) {
+// v1_s17: an aihub outage during a run, end to end with the REAL daemon
+// riding PRODUCTION defaults, driver/envelope edition. The version
+// stream is the DRIVER's own write face: each owner answer is a
+// transition (the D9 archive-and-clear write plus the re-dispatch's
+// step_start), so the parked question/answer cycle keeps execution.json's
+// Version climbing through the outage window — every new Version is
+// pushed at once. The outage is a REAL stopped aihub process; the push
+// path is the real git-over-HTTP lane. Every failed push writes
+// push_failed while the driver keeps working — no recovery/respawn
+// signal fires. After the aihub returns, the chain catches up (the
+// versions written during the outage reach the server-side bare repo)
+// and a fresh published event lands. (The backoff cap's degradation
+// event is pinned in v1_s18 with a shrunk ladder.)
+func TestV1S17PushOutageKeepsDriverAndCatchesUp(t *testing.T) {
 	inst := newV1Install(t)
 	// The plan: a long parked question/answer ladder (the version stream),
 	// then the completion tail. Each answer consumes exactly one ordinal:
@@ -51,7 +45,7 @@ func TestV1S17BackpressureSteps(t *testing.T) {
 		map[string]any{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true},
 		map[string]any{"do": "envelope", "id": "verification", "outcome": "completed"},
 	)
-	wi := inst.newWI(t, "s17: push backpressure (steps trigger, aihub outage)", actions, nil)
+	wi := inst.newWI(t, "s17: push failures during an aihub outage", actions, nil)
 	d := newV1Daemon(t, inst)
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
@@ -70,57 +64,23 @@ func TestV1S17BackpressureSteps(t *testing.T) {
 	// version reached the aihub's bare repo.
 	waitForEvent(t, d, wi, "published", 30*time.Second)
 
-	// The outage: stop the REAL aihub mid-run. Pushes fail (one
-	// push_failed per retry), the ladder climbs on the production 10s
-	// backoff, and after 5 consecutive failures the degradation event
-	// fires with reason "steps".
+	// The outage: stop the REAL aihub mid-run. Every boundary's push
+	// fails (one push_failed per attempt).
 	inst.stopAihub()
 	// The outage's first boundary is the next answer's transition (the
-	// parked version's wave already landed): one round re-arms the push
-	// round against the dead aihub and the failure ladder begins.
+	// parked version's wave already landed).
 	advance(30 * time.Second)
 	waitForEvent(t, d, wi, "push_failed", 60*time.Second)
-	// The same-error retry cap writes its own reason="same_error" event at
-	// the same failure count (the versions the answers keep producing
-	// re-arm the round each boundary, so the failure ladder itself is
-	// unaffected) — wait for the STEPS event specifically, not whichever
-	// degradation event lands first. Each answer round keeps the driver
-	// writing versions, feeding the ladder; the bound covers the full
-	// production ladder several times over.
-	deadline := time.Now().Add(150 * time.Second)
-	var body struct {
-		Reason       string `json:"reason"`
-		FailedPushes int    `json:"failed_pushes"`
+	// Every outage round keeps the driver writing versions, each pushed
+	// at once against the dead aihub.
+	for round < outageRounds {
+		advance(30 * time.Second)
 	}
-	for {
-		for _, e := range d.eventsOf(t, wi) {
-			if e.Kind != "push_backpressure" {
-				continue
-			}
-			body.Reason = ""
-			_ = json.Unmarshal(e.Body, &body)
-			if body.Reason == "steps" {
-				break
-			}
-		}
-		if body.Reason == "steps" || time.Now().After(deadline) {
-			break
-		}
-		// Keep the version stream alive through the outage window.
-		if questionIDOf(statusQuiet(d), wi) != "" && round < outageRounds {
-			advance(30 * time.Second)
-			continue
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	if body.Reason != "steps" {
-		t.Fatalf("no steps-reason backpressure event in bound (last reason %q)", body.Reason)
-	}
-	if body.FailedPushes < 5 {
-		t.Fatalf("failed_pushes %d, want >= 5 (the production default threshold)", body.FailedPushes)
-	}
+	waitUntil(t, 60*time.Second, "five push_failed events during the outage", func() bool {
+		return countOf(d.eventKinds(t, wi), "push_failed") >= 5
+	})
 
-	// Degradation never kills the driver: no recovery/respawn signal, no
+	// Push failures never kill the driver: no recovery/respawn signal, no
 	// new attempt instance, and the work item is still running.
 	kinds := d.eventKinds(t, wi)
 	for _, bad := range []string{"wi_agent_rederived", "needs_recovery", "job_stopped"} {

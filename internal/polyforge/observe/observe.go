@@ -75,11 +75,10 @@ type Config struct {
 	ModelErrorGrace time.Duration
 	// DriverStall is N: the driver between steps for longer than this,
 	// not waiting on a human, is stalled (10m; negative disables).
-	DriverStall       time.Duration
-	PushRetryBackoff  time.Duration // async push retry spacing after a failure (10s)
-	BackpressureSteps int           // N consecutive failed pushes before the degradation event (5)
-	BackpressureAfter time.Duration // T without a successful push before the degradation event (30min)
-	PushBound         time.Duration // per-push bound (protocol.PushTimeout, 60s)
+	DriverStall      time.Duration
+	PushRetryBackoff time.Duration // first retry delay after a failed push (10s); doubles per failure
+	PushBackoffMax   time.Duration // the longest retry delay (5m); reaching it writes push_backpressure
+	PushBound        time.Duration // per-push bound (protocol.PushTimeout, 60s)
 }
 
 func (c *Config) fill() {
@@ -95,11 +94,8 @@ func (c *Config) fill() {
 	if c.PushRetryBackoff == 0 {
 		c.PushRetryBackoff = 10 * time.Second
 	}
-	if c.BackpressureSteps == 0 {
-		c.BackpressureSteps = 5
-	}
-	if c.BackpressureAfter == 0 {
-		c.BackpressureAfter = 30 * time.Minute
+	if c.PushBackoffMax == 0 {
+		c.PushBackoffMax = 5 * time.Minute
 	}
 	if c.PushBound == 0 {
 		c.PushBound = protocol.PushTimeout
@@ -254,9 +250,9 @@ func (o *Observe) setMonitor(wi string, m *Monitor) {
 	o.monitors[wi] = m
 }
 
-// MarkClosing arms the expected-death suppression for a daemon-initiated
-// close: the agent's imminent death raises no recovery (the monitor's
-// sealing flag). No monitor (never monitored) is a no-op.
+// MarkClosing turns the work item's monitor quiet for a daemon-initiated
+// close: the agent's imminent exit raises no recovery and writes no
+// needs_recovery event. No monitor (never monitored) is a no-op.
 func (o *Observe) MarkClosing(wi string) {
 	if m := o.lookup(wi); m != nil {
 		m.markClosing()
@@ -282,17 +278,16 @@ func (o *Observe) newMonitor(at Attach, info WIInfo) *Monitor {
 	m := &Monitor{
 		wi: info,
 		cfg: monitorCfg{
-			PollInterval:      o.cfg.PollInterval,
-			ModelErrorGrace:   o.cfg.ModelErrorGrace,
-			DriverStall:       o.cfg.DriverStall,
-			PushRetryBackoff:  o.cfg.PushRetryBackoff,
-			BackpressureSteps: o.cfg.BackpressureSteps,
-			BackpressureAfter: o.cfg.BackpressureAfter,
-			PushBound:         o.cfg.PushBound,
-			revalidate:        o.cfg.SessionRevalidateEvery,
-			verify:            o.cfg.SessionVerify,
-			push:              o.cfg.PushFunc,
-			locateLive:        o.cfg.LocateLive,
+			PollInterval:     o.cfg.PollInterval,
+			ModelErrorGrace:  o.cfg.ModelErrorGrace,
+			DriverStall:      o.cfg.DriverStall,
+			PushRetryBackoff: o.cfg.PushRetryBackoff,
+			PushBackoffMax:   o.cfg.PushBackoffMax,
+			PushBound:        o.cfg.PushBound,
+			revalidate:       o.cfg.SessionRevalidateEvery,
+			verify:           o.cfg.SessionVerify,
+			push:             o.cfg.PushFunc,
+			locateLive:       o.cfg.LocateLive,
 		},
 		log:    o.log,
 		ob:     o.cfg.OB,

@@ -1,7 +1,7 @@
 package test
 
 // v1_inproc_harness_test.go: the in-process runtime+observe rig for
-// scenarios that need an injectable observe config (the backpressure
+// scenarios that need an injectable observe config (the push backoff
 // ladder, the long-run leak probes). It assembles the SAME production
 // components — runtime.New (lifecycle + recovery engine), observe.New
 // (the per-WI supervisor), runtime.DefaultSpawner (the real pi-spawner
@@ -46,22 +46,18 @@ type inprocRig struct {
 // (the rig's whole point: production components, injectable windows).
 type inprocObsTune func(*observe.Config)
 
-// optBackpressure tunes the observe backpressure ladder: after is the
-// TIME trigger's window (production default 30min), steps the
-// consecutive-failure trigger's threshold (production default 5).
-// The time-trigger scenario shrinks after to seconds and raises steps
-// so the time bound always fires first.
-func optBackpressure(after time.Duration, steps int) inprocObsTune {
+// optPushBackoff tunes the observe push retry ladder: first is the
+// first retry delay (production default 10s), max the cap whose reaching
+// writes push_backpressure (production default 5m).
+func optPushBackoff(first, max time.Duration) inprocObsTune {
 	return func(c *observe.Config) {
-		c.BackpressureAfter = after
-		if steps != 0 {
-			c.BackpressureSteps = steps
-		}
+		c.PushRetryBackoff = first
+		c.PushBackoffMax = max
 	}
 }
 
 // newInprocRig assembles and runs the rig. obsTune carries observe.Config
-// tweaks (e.g. the backpressure windows), so a scenario extends the
+// tweaks (e.g. the push backoff ladder), so a scenario extends the
 // assembly instead of forking the helper.
 func newInprocRig(t *testing.T, inst *v1Install, obsTune ...inprocObsTune) *inprocRig {
 	t.Helper()

@@ -90,27 +90,13 @@ func TestRevalidateMismatchSupersedes(t *testing.T) {
 		t.Fatalf("OBSuperseded detail must carry the current holder fingerprint: %+v", msg)
 	}
 
-	// Finding 1(b) (v1.5 review): the emission is RETRYABLE. While the
-	// latch is set the revalidation KEEPS RUNNING and every unmatched
-	// verdict re-emits OBSuperseded — the old contract fired exactly
-	// once, so a delivery fenced out
-	// at the runtime's spawn counter was lost forever and the agent of
-	// a WI held elsewhere ran unsupervised. The re-emissions keep
-	// arriving until the runtime's release (RTFinished, Finding 4)
-	// stops this loop — nothing releases this monitor, so they must
-	// keep coming.
-	for range 3 {
-		remsg := waitOB(t, ob, "a re-emitted OBSuperseded")
-		if remsg.Kind != protocol.OBSuperseded {
-			t.Fatalf("only OBSuperseded re-emissions may arrive, got %+v", remsg)
-		}
-	}
-
-	// The event face stays ONCE: the supersession VERDICT is latched
-	// (the PUBLIC fingerprint — never the secret); only the OB emission
-	// repeats.
+	// One emission and one verdict event (the PUBLIC fingerprint —
+	// never the secret): the OB queue never drops and the runtime fences
+	// OBSuperseded on the session fingerprint, so nothing re-emits. The
+	// monitor is quiet from here: no further verify.
+	expectNoOB(t, ob, 150*time.Millisecond, "a re-emitted OBSuperseded")
 	if evs := eventsOf(m, EvSessionSuperseded); len(evs) != 1 {
-		t.Fatalf("session_superseded events: %d, want exactly 1 (the verdict latches once)", len(evs))
+		t.Fatalf("session_superseded events: %d, want exactly 1", len(evs))
 	} else {
 		if !contains(string(evs[0].Body), "ab12cd34ef56aa00") {
 			t.Fatalf("event must carry the current fingerprint: %s", evs[0].Body)
@@ -119,16 +105,12 @@ func TestRevalidateMismatchSupersedes(t *testing.T) {
 			t.Fatalf("event must NEVER carry the session secret: %s", evs[0].Body)
 		}
 	}
-
-	// The revalidation really is still running: the verify calls grew
-	// past one (the old contract asserted exactly 1 here — the fire-once
-	// shape the review's Finding 1 deleted).
-	if verifier.calls.Load() < 2 {
-		t.Fatalf("verify calls after supersession: %d, want >= 2 (the re-emission engine)", verifier.calls.Load())
+	if n := verifier.calls.Load(); n != 1 {
+		t.Fatalf("verify calls after supersession: %d, want 1 (a superseded monitor is quiet)", n)
 	}
-
-	// The superseded monitor's protective surface is the server-side
-	// push fencing, not a local refusal.
+	// and it raises no recovery for the agent the runtime now kills
+	m.link.Fact(supervise.StepStarted{Step: "s", SpawnN: 1, StartedAt: time.Now(), Thresholds: supervise.Thresholds{Silence: 10 * time.Millisecond}})
+	expectNoVerdict(t, m, 100*time.Millisecond, "a superseded monitor judges nothing")
 }
 
 // TestRevalidateMatchIsQuiet: matches=true → no OB message, no event,

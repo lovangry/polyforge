@@ -71,13 +71,12 @@ func (a *agentTable) lookup(wi string) (Handle, WIInfo, bool) {
 
 func testCfg() monitorCfg {
 	return monitorCfg{
-		PollInterval:      5 * time.Millisecond,
-		ModelErrorGrace:   40 * time.Millisecond,
-		DriverStall:       time.Hour, // inert unless a test shrinks it
-		PushRetryBackoff:  2 * time.Millisecond,
-		BackpressureSteps: 5,
-		BackpressureAfter: 30 * time.Minute,
-		PushBound:         time.Second,
+		PollInterval:     5 * time.Millisecond,
+		ModelErrorGrace:  40 * time.Millisecond,
+		DriverStall:      time.Hour, // inert unless a test shrinks it
+		PushRetryBackoff: 2 * time.Millisecond,
+		PushBackoffMax:   20 * time.Millisecond,
+		PushBound:        time.Second,
 		push: func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
 			return "sha_default", true, gitops.PushTimings{}, nil
 		},

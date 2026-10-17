@@ -442,50 +442,6 @@ func TestTranscriptSourceFollowsLatestStepStarted(t *testing.T) {
 	}
 }
 
-func TestDriverExitFlushesLastCommitBoundaryBeforeReporting(t *testing.T) {
-	// the terminal wrap trusts that the driver's last Version was published
-	// (it does not push on its own): the supervisor publishes FIRST, then
-	// reports the exit
-	h := newFakeHandle("att_1")
-	release := make(chan struct{})
-	pushes := make(chan struct{}, 4)
-	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
-			pushes <- struct{}{}
-			<-release
-			return "sha", true, gitops.PushTimings{}, nil
-		}
-	})
-	m.writeExec(t, 7, "release") // the terminal commit boundary
-	soon(t, time.Second, "the push started", func() bool { return len(pushes) == 1 })
-
-	h.die() // the driver returned while its last Version is still being published
-	expectNoOB(t, ob, 150*time.Millisecond, "the exit must wait for the in-flight publish")
-	close(release)
-	msg := waitOB(t, ob, "the exit report after the publish")
-	if msg.Reason != protocol.RecoverDeath {
-		t.Fatalf("reason %q", msg.Reason)
-	}
-	if len(eventsOf(m, EvPublished)) == 0 {
-		t.Fatal("the last Version must be published before the exit is reported")
-	}
-}
-
-func TestDriverExitFlushIsBoundedWhenThePushFails(t *testing.T) {
-	h := newFakeHandle("att_1")
-	m, ob := newTestMonitor(t, h, func(c *monitorCfg) {
-		c.push = func(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
-			return "", false, gitops.PushTimings{}, context.DeadlineExceeded
-		}
-	})
-	m.writeExec(t, 3, "code")
-	soon(t, time.Second, "a failed push", func() bool { return len(eventsOf(m, EvPushFailed)) >= 1 })
-	h.die()
-	if msg := waitOB(t, ob, "the exit report despite a failing push"); msg.Reason != protocol.RecoverDeath {
-		t.Fatalf("reason %q", msg.Reason)
-	}
-}
-
 func TestLiveProgressFaceReadsTheCurrentDispatch(t *testing.T) {
 	h := newFakeHandle("att_1")
 	m, _ := newTestMonitor(t, h, nil)

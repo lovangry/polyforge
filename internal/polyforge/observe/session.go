@@ -13,18 +13,11 @@ package observe
 // verdict splits on the answer class:
 //
 //   - matches == false → the session was superseded (force-end
-//     landed on another daemon). The monitor emits OBSuperseded to the
-//     runtime channel — the runtime kills the tree, quarantines the
-//     capsule and releases the record — and stops supervising the work
-//     item locally: detection and pushes are suppressed. The daemon
-//     makes NO hub transition: superseded is not terminal, and the work
-//     item belongs to the new owner. The supersession VERDICT is
-//     latched once, but the EMISSION is retryable (Finding 1(b), v1.5
-//     review): the revalidation KEEPS RUNNING while the latch is set
-//     and every unmatched verdict re-emits OBSuperseded (a full OB
-//     channel dropped the first delivery; the runtime's RTFinished
-//     release — Finding 4 — is what stops the loop), at a bounded retry
-//     cadence.
+//     landed on another daemon). The monitor emits OBSuperseded once —
+//     the runtime kills the tree, quarantines the capsule and releases
+//     the record — and turns quiet. The daemon makes NO hub transition:
+//     superseded is not terminal, and the work item belongs to the new
+//     owner.
 //
 //   - verify error (transport) → LOG ONLY, never act. A dead network
 //     must not kill a live job: the check retries after a bounded
@@ -79,16 +72,6 @@ type verifyResult struct {
 	err                error
 }
 
-// checkRevalidate is the M4 tick rider: at most one verify in flight,
-// only for unsuperseded jobs (every suppressed state is outside the
-// "per RUNNING job" contract), only when the attachment carried a
-// session id and the config bound a verifier. The call runs in a
-// sub-goroutine — the select loop never blocks on the network.
-//
-// Finding 1(b) (v1.5 review): a SUPERSEDED job stays in the revalidation
-// set — its latch suppresses detection/push, but the periodic
-// verify must keep running so the OBSuperseded emission stays retryable
-// until the runtime's release (RTFinished, Finding 4) stops the loop.
 // sessionFingerprint derives the PUBLIC handle of this monitor's
 // session secret (NEW-1 fence payload; stateMu-guarded read of the
 // in-process secret — the fingerprint itself is public).
@@ -102,6 +85,10 @@ func (m *Monitor) sessionFingerprint() string {
 	return api.SessionFingerprint(id)
 }
 
+// checkRevalidate is the M4 tick rider: at most one verify in flight,
+// never while quiet, only when the attachment carried a session id and
+// the config bound a verifier. The call runs in a sub-goroutine — the
+// select loop never blocks on the network.
 func (m *Monitor) checkRevalidate() {
 	if m.cfg.verify == nil || m.cfg.revalidate <= 0 || m.verifyInFlight {
 		return
@@ -109,11 +96,7 @@ func (m *Monitor) checkRevalidate() {
 	if m.sessionID == "" {
 		return // attachment carries no session: nothing to verify
 	}
-	m.stateMu.Lock()
-	// superseded is deliberately ABSENT: see the doc comment above.
-	active := !m.recovering && !m.sealing
-	m.stateMu.Unlock()
-	if !active {
+	if m.isQuiet() {
 		return
 	}
 	if !m.lastVerifyAt.IsZero() && time.Since(m.lastVerifyAt) < m.cfg.revalidate {
@@ -172,49 +155,30 @@ func (m *Monitor) onVerifyResult(res verifyResult) {
 	if res.matches {
 		return // still the holder: nothing to do
 	}
-	// matches == false: superseded. Latch the verdict (the session-level
-	// judgment is made exactly once) and hand the kill+quarantine+release
-	// to the runtime.
+	// matches == false: superseded. The monitor turns quiet (no judging,
+	// no recovery request, no further verify) and hands the
+	// kill+quarantine+release to the runtime; Observe makes NO hub
+	// transition (the new owner owns it). One emission suffices: the OB
+	// queue never drops, and the runtime fences OBSuperseded on the
+	// session fingerprint, not on the derivation counter, so a recovery
+	// racing the verify cannot lose it.
 	m.stateMu.Lock()
-	already := m.superseded
-	m.superseded = true
+	m.quiet = true
 	m.stateMu.Unlock()
-	if !already {
-		_ = m.log.Append(m.wi.WorkItem, EvSessionSuperseded, map[string]any{
-			"current_fingerprint": res.currentFingerprint,
-			"detail": "session revalidation learned this session no longer holds the work item (force-ended or claimed elsewhere); " +
-				"local supervision stopped, runtime notified (no hub transition — superseded is not terminal)",
-			"spawn_n": m.currentSpawn(),
-		})
-	}
-	// Finding 1(b) (v1.5 review): the emission is RETRYABLE. The old
-	// contract emitted exactly once — a verify in flight while a
-	// recovery bumped spawn N→N+1 carried the OLD counter, the runtime's
-	// derivation fence dropped it, and the freshly-derived agent of a WI
-	// held elsewhere ran unsupervised forever. The emission now repeats
-	// on every unmatched verdict while latched (the event face above
-	// stays once — the verdict is already recorded) until the runtime's
-	// release stops this monitor: supersedeOp sends RTFinished(superseded)
-	// (Finding 4), which lands as the loop's stop signal. sendOB's
-	// full-channel drop is covered by the same loop: the next retry
-	// re-emits.
+	_ = m.log.Append(m.wi.WorkItem, EvSessionSuperseded, map[string]any{
+		"current_fingerprint": res.currentFingerprint,
+		"detail": "session revalidation learned this session no longer holds the work item (force-ended or claimed elsewhere); " +
+			"local supervision stopped, runtime notified (no hub transition — superseded is not terminal)",
+		"spawn_n": m.currentSpawn(),
+	})
 	m.sendOB(protocol.OBMsg{
 		Kind: protocol.OBSuperseded, SpawnN: m.currentSpawn(),
 		WorkItem: m.wi.WorkItem,
 		Reason:   "session_superseded",
 		Detail: "periodic session-verify answered matches=false; the current holder fingerprint is " +
 			res.currentFingerprint,
-		// NEW-1 (delta review): carry the SUPERSEDED session's public
-		// fingerprint so the runtime can fence a stale buffered message
-		// against a successor job of the same WI (re-claim race).
+		// NEW-1: the SUPERSEDED session's public fingerprint, so the
+		// runtime never kills a successor job of the same WI with it.
 		SessionFP: m.sessionFingerprint(),
 	})
-	// Bound the retry cadence like the transport-error path: the next
-	// re-verify fires after verifyErrorBackoff (never longer than the
-	// configured interval).
-	backoff := verifyErrorBackoff
-	if m.cfg.revalidate < backoff {
-		backoff = m.cfg.revalidate
-	}
-	m.lastVerifyAt = time.Now().Add(backoff - m.cfg.revalidate)
 }

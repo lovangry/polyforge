@@ -392,9 +392,9 @@ carrier ref 与 WIP ref 这三项**现行**机制的唯一设计记录。§14.2�
   提交不带序号 trailer：step 在 capsule 根自己 `git commit` 的提交就是链上一个普通快进提交，随下一次发布原样推送。
 - **会话围栏**：推送经 aihub git 代理，Basic 口令必须是该 WI **当前活会话**的 secret（一次性 `GIT_ASKPASS` 传递，不进 argv）；被取代或已
   结束的会话被拒（`GIT-401`）。
-- **异步推送的重试调度**（`observe/observe.go`、`observe/monitor.go`）：失败后每 10s 重试；连续 5 次失败或 30 分钟无成功推送发一次
-  `push_backpressure` 降级事件；同一错误连续 5 次即停止本轮重试（`reason=same_error`），直到下一个提交边界（`execution.json`
-  Version 前进）或一次成功推送重新武装。每次推送上界 60s（`protocol.PushTimeout`）。
+- **异步推送的重试调度**（`observe/observe.go`、`observe/monitor.go`）：每次失败一条 `push_failed`，同一 Version 按指数退避重试
+  （10s 起，每次翻倍，上限 5 分钟）；退避触顶时发一次 `push_backpressure` 降级事件。新的 Version（提交边界）立即推送并把退避归零，
+  一次成功推送结束本轮。每次推送上界 60s（`protocol.PushTimeout`）。
 - **再认领 = 重新 clone**：blocked→`pf resume` 等再认领从 aihub 链 clone capsule，再按 §14.2 的 carrier ref 与 §14.3 的 WIP ref 恢复任务仓库；
   已有发布进度的 WI clone 失败时拒绝本地初始化（`DAEMON-516`，否则会从第 1 步重跑）；由另一台 daemon 续跑 blocked WI 而 aihub 链头不等于
   封存时记录的 head 时拒绝（`DAEMON-518`）。

@@ -26,9 +26,11 @@ package observe
 // step_started, dropped on step_ended. Between steps (and not waiting on
 // a human) the supervisor also times the DRIVER: driver_stalled.
 //
-// RECOVERING: after WINeedsRecovery is sent (driver exit / stall) the
-// monitor suppresses every further recovery signal of the same
-// derivation (the recovery lane) until RTRecovered arrives.
+// QUIET: after WINeedsRecovery is sent (driver exit / stall), a
+// daemon-initiated close (MarkClosing) or a superseded session, the
+// monitor neither judges nor raises recovery until RTRecovered adopts a
+// new derivation. Pushes go on: the runtime fences what may reach the
+// hub.
 
 import (
 	"context"
@@ -36,7 +38,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 	"time"
 
@@ -47,16 +48,6 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/sessionjsonl"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
-
-// sameErrorCap is the V8-repair retry bound: after this many consecutive
-// async push failures carrying the IDENTICAL error, the retry round is
-// halted (one degraded push_backpressure event with reason "same_error")
-// until the next commit boundary — an execution.json Version bump — or a
-// successful push re-arms it. The pilot's poison-chain storm (#48) was
-// 185 consecutive identical failures at a ~10s cadence with no bound;
-// the cap turns every such deterministic-failure shape into at most
-// sameErrorCap attempts per round.
-const sameErrorCap = 5
 
 // PushFunc is the injectable capsule commit+push operation (the seam the
 // tests use; production binds gitops.CommitPush). ctx bounds the call;
@@ -98,11 +89,12 @@ type monitorCfg struct {
 	ModelErrorGrace time.Duration
 	// DriverStall is N: the driver between steps (not waiting on a
 	// human) for longer than this is stalled. <= 0 disables the clock.
-	DriverStall       time.Duration
-	PushRetryBackoff  time.Duration
-	BackpressureSteps int
-	BackpressureAfter time.Duration
-	PushBound         time.Duration
+	DriverStall time.Duration
+	// PushRetryBackoff is the first retry delay after a failed push; each
+	// further failure doubles it up to PushBackoffMax.
+	PushRetryBackoff time.Duration
+	PushBackoffMax   time.Duration
+	PushBound        time.Duration
 	// revalidate is the v1.5 M4 session-verify cadence (0 = disabled:
 	// no verifier, no checks — the unit-test default).
 	revalidate time.Duration
@@ -170,29 +162,17 @@ type Monitor struct {
 	// the single-in-flight push gate.
 	gate     chan struct{}
 	pushDone chan pushResult
-	// exitFlush: the driver returned while capsule state was not yet
-	// published. The recovery/terminal path assumes the commit boundary's
-	// push already landed (a completed workflow wraps without a push of its
-	// own), so the supervisor publishes the last Version FIRST and only then
-	// reports the exit — exitFlushDeadline bounds the wait.
-	exitFlush         bool
-	exitFlushDeadline time.Time
-	exitFlushReason   string
-	exitFlushDetail   string
 
-	// backpressure bookkeeping (monitor goroutine only).
-	failedPushes int
-	firstFailAt  time.Time
-	lastPushOK   time.Time
-	pushDegraded bool
-	timeDegraded bool
-	retryAt      time.Time
-	// same-error retry-cap bookkeeping (V8 repair; monitor goroutine
-	// only).
-	lastPushErr   string
-	sameErrStreak int
-	retryHalted   bool
-	retryHaltedAt int64
+	// push retry backoff (monitor goroutine only): after a failure the
+	// same Version is retried at retryAt; the delay doubles per failure
+	// up to PushBackoffMax. A newer Version is pushed at once, and it or
+	// a success resets the delay. backpressured: the episode's one
+	// push_backpressure event (the delay reached its cap) was written.
+	failedPushes  int
+	failedVersion int64
+	backoff       time.Duration
+	retryAt       time.Time
+	backpressured bool
 
 	// live-transcript sync state (F3; monitor goroutine only — the push
 	// sub-goroutines receive the values as arguments, never over m).
@@ -205,22 +185,15 @@ type Monitor struct {
 
 	// stateMu guards the fields every goroutine (HTTP view, push
 	// sub-goroutines) reads.
-	stateMu    sync.Mutex
-	pending    *protocol.PendingView
-	sealing    bool
-	recovering bool
+	stateMu sync.Mutex
+	pending *protocol.PendingView
+	// quiet: a recovery was requested, a close is under way or the
+	// session was superseded — no judging, no recovery request, no
+	// revalidation until RTRecovered (see the file comment).
+	quiet bool
 	// act is the published activity copy of the current dispatch (the
 	// ops status face reads it): nil outside a dispatch.
 	act *dispatchState
-	// superseded is the v1.5 M4 state: the periodic session-verify
-	// answered matches=false — another daemon holds the work item. The
-	// monitor stops supervising (detection and pushes are suppressed) but keeps
-	// draining its channels and KEEPS REVALIDATING until Runtime's
-	// release (RTFinished, sent by supersedeOp — v1.5 review Finding 4)
-	// stops the loop: the OBSuperseded emission is retryable (Finding
-	// 1(b)), so the periodic verify is the re-emission engine. Observe
-	// makes NO hub transition (the new owner owns it).
-	superseded bool
 
 	// revalidation bookkeeping (M4; monitor goroutine only except where
 	// noted). verifyDone is created with the monitor (never nil) so the
@@ -307,14 +280,20 @@ func (m *Monitor) awaitPushInFlight() {
 func (m *Monitor) requestStop() { m.stop.Do(func() { close(m.stopCh) }) }
 
 // onTick is the heartbeat: judge the dispatch (or the driver), retry a
-// push whose backoff elapsed, check backpressure, M4 revalidation.
+// push whose backoff elapsed, M4 revalidation.
 func (m *Monitor) onTick() {
 	m.drainFacts() // belt and braces: a wake-up can coalesce
 	m.judge()
 	m.schedulePush()
-	m.maybeFinishExitFlush()
-	m.checkBackpressure()
 	m.checkRevalidate()
+}
+
+// isQuiet reads the quiet state (markClosing sets it from another
+// goroutine).
+func (m *Monitor) isQuiet() bool {
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	return m.quiet
 }
 
 // ---------------------------------------------------------------------------
@@ -431,10 +410,7 @@ func (m *Monitor) execPath() string { return m.execJSONPath() }
 // judge applies the rules to the current dispatch (one verdict, then
 // silence until step_ended) or times the driver between steps.
 func (m *Monitor) judge() {
-	m.stateMu.Lock()
-	suppressed := m.recovering || m.sealing || m.superseded
-	m.stateMu.Unlock()
-	if suppressed {
+	if m.isQuiet() {
 		return
 	}
 	now := m.now()
@@ -510,70 +486,27 @@ func (m *Monitor) liveProgress() LiveProgress {
 // ---------------------------------------------------------------------------
 // detection: driver death
 
-// onExit handles the CONFIRMED driver-exit signal (the handle adapter
-// already waited on the driver — this is the confirmation). An expected
-// exit (a daemon-initiated close, or a signal already sent for this
-// attempt) is silent.
+// onExit handles the CONFIRMED driver-exit signal (the handle already
+// waited on the driver). An expected exit (a daemon-initiated close, or a
+// recovery already requested for this derivation) is silent. A terminal
+// exit needs no publish first: the runtime's close seal-pushes the
+// capsule itself.
 func (m *Monitor) onExit() {
 	m.exitCh = nil // fires once per handle
 	m.drainFacts() // the driver's final commit-boundary facts may still be queued
-	m.stateMu.Lock()
-	suppressed := m.recovering || m.sealing || m.superseded
-	m.stateMu.Unlock()
-	if suppressed {
-		return
-	}
-	// Publish the driver's last commit boundary before telling the runtime:
-	// the terminal wrap trusts that push (see exitFlush).
-	if m.dirtyVersion > m.pushedVersion || m.pushInFlight() {
-		m.exitFlush = true
-		m.exitFlushDeadline = time.Now().Add(m.cfg.PushBound + time.Second)
-		m.exitFlushReason, m.exitFlushDetail = protocol.RecoverDeath, "agent process exited"
-		m.retryAt = time.Time{} // the flush push is not held back by a failed round's backoff
-		m.retryHalted = false
-		m.schedulePush()
-		m.maybeFinishExitFlush()
-		return
-	}
 	m.needRecovery(protocol.RecoverDeath, "agent process exited")
 }
 
-// pushInFlight reports whether a capsule push is running right now.
-func (m *Monitor) pushInFlight() bool { return len(m.gate) > 0 }
-
-// maybeFinishExitFlush reports the pending driver exit once the last
-// Version is published (or the push failed, or the bound passed).
-func (m *Monitor) maybeFinishExitFlush() {
-	if !m.exitFlush {
-		return
-	}
-	if m.pushInFlight() && time.Now().Before(m.exitFlushDeadline) {
-		return // wait for the in-flight push's result
-	}
-	if m.dirtyVersion > m.pushedVersion && !m.pushInFlight() && m.failedPushes == 0 &&
-		time.Now().Before(m.exitFlushDeadline) {
-		m.schedulePush() // a newer Version arrived behind the push that just ended
-		if m.pushInFlight() {
-			return
-		}
-	}
-	m.exitFlush = false
-	m.needRecovery(m.exitFlushReason, m.exitFlushDetail)
-}
-
-// needRecovery is the single choke point for the recovery lane's dedupe:
-// after one
-// WINeedsRecovery is sent for an attempt, every further signal of the
-// SAME attempt is suppressed ("已发后静默到恢复完成") — the select keeps
-// draining, the Runtime sees exactly one message. SEALING likewise drops
-// same-attempt signals (§三).
+// needRecovery sends the derivation's one WINeedsRecovery and turns the
+// monitor quiet until RTRecovered ("已发后静默到恢复完成"); a quiet
+// monitor sends nothing.
 func (m *Monitor) needRecovery(reason, detail string) {
 	m.stateMu.Lock()
-	if m.recovering || m.sealing || m.superseded {
+	if m.quiet {
 		m.stateMu.Unlock()
 		return
 	}
-	m.recovering = true
+	m.quiet = true
 	m.stateMu.Unlock()
 	_ = m.log.Append(m.wi.WorkItem, EvNeedsRecovery, map[string]any{
 		"reason": reason, "detail": detail, "spawn_n": m.currentSpawn(),
@@ -614,7 +547,7 @@ func (m *Monitor) onRecovered(at Attach) {
 	m.trHarness, m.trSession = "", ""
 	m.stateMu.Lock()
 	m.transcriptWarned = false
-	m.recovering = false
+	m.quiet = false
 	m.spawnN = at.Msg.SpawnN
 	m.sessionID = at.Msg.SessionID
 	m.stateMu.Unlock()
@@ -756,36 +689,17 @@ func (m *Monitor) syncTranscript(s transcriptSnapshot) {
 }
 
 // schedulePush starts one async commit+push sub-goroutine when a newer
-// execution Version exists, the retry backoff has elapsed, and the
-// single-in-flight gate is free. It is event-triggered: the driver's
-// exec_committed facts raise dirtyVersion and the loop calls it right
-// after draining them (the tick only serves the retry backoff).
+// execution Version exists, the gate is free and — for the Version that
+// just failed — the retry delay has elapsed. It is event-triggered: the
+// driver's exec_committed facts raise dirtyVersion and the loop calls it
+// right after draining them (the tick serves the retry delay).
 func (m *Monitor) schedulePush() {
-	m.stateMu.Lock()
-	superseded := m.superseded
-	m.stateMu.Unlock()
-	if superseded {
-		return // M4: a superseded daemon's pushes are fenced server-side;
-		// observe does not keep offering them either
-	}
 	if m.dirtyVersion <= m.pushedVersion {
 		return
 	}
-	if !m.retryAt.IsZero() && !time.Now().After(m.retryAt) {
+	newer := m.dirtyVersion > m.failedVersion
+	if !newer && time.Now().Before(m.retryAt) {
 		return
-	}
-	// Same-error retry cap (V8 repair): a halted round stays halted
-	// until the next commit boundary — an execution.json Version the
-	// round did NOT already see — re-arms it. dirtyVersion only moves
-	// forward on a fresh driver commit, so a frozen poisoned tree cannot
-	// spin the retry loop.
-	if m.retryHalted {
-		if m.dirtyVersion <= m.retryHaltedAt {
-			return
-		}
-		m.retryHalted = false
-		m.sameErrStreak = 0
-		m.lastPushErr = ""
 	}
 	// try-acquire the gate: at most ONE push in flight per WI.
 	select {
@@ -793,7 +707,9 @@ func (m *Monitor) schedulePush() {
 	default:
 		return // one already in flight; the next tick retries
 	}
-	m.retryAt = time.Time{}
+	if newer {
+		m.backoff = 0 // a new commit boundary restarts the retry ladder
+	}
 	version := m.dirtyVersion
 	tr := m.transcriptSnapshot() // captured BEFORE the spawn: no shared-field reads
 	go func() {
@@ -810,14 +726,13 @@ func (m *Monitor) schedulePush() {
 }
 
 func (m *Monitor) onPushResult(res pushResult) {
-	defer m.maybeFinishExitFlush()
 	<-m.gate // release the single-in-flight slot
 	// 兜底: an honest gitops result is either (pushed, nil) or a non-nil
 	// error — a clean-tree CommitPush pushes the standing HEAD, so a
 	// failed push always carries its error. Should a PushFunc ever
 	// report (nil error, pushed=false) anyway, publishing it would mark
-	// the version server-reached when it was not and silence the §九
-	// backpressure episode forever; classify it retry-worthy instead.
+	// the version server-reached when it was not; classify it
+	// retry-worthy instead.
 	if res.err == nil && !res.pushed {
 		res.err = fmt.Errorf("push reported success without pushing (sha=%q)", res.sha)
 	}
@@ -825,101 +740,49 @@ func (m *Monitor) onPushResult(res pushResult) {
 		if res.version > m.pushedVersion {
 			m.pushedVersion = res.version
 		}
-		m.lastPushOK = time.Now()
-		m.failedPushes = 0
-		m.firstFailAt = time.Time{}
-		m.pushDegraded = false
-		m.timeDegraded = false
-		m.lastPushErr = ""
-		m.sameErrStreak = 0
-		m.retryHalted = false
+		m.failedPushes, m.backoff, m.retryAt, m.backpressured = 0, 0, time.Time{}, false
 		_ = m.log.Append(m.wi.WorkItem, EvPublished, map[string]any{
 			"version": res.version, "local_commit": res.sha, "pushed": res.pushed,
 			"commit_ms": res.timings.CommitMS, "push_ms": res.timings.PushMS,
 		})
 		return
 	}
+	// Exponential retry: a deterministic failure (dead server config,
+	// poisoned tree) costs at most one attempt per PushBackoffMax once the
+	// delay has climbed — the pilot's #48 storm was 185 identical
+	// failures at a fixed 10s cadence.
 	m.failedPushes++
-	if m.firstFailAt.IsZero() {
-		m.firstFailAt = time.Now()
-	}
-	m.retryAt = time.Now().Add(m.cfg.PushRetryBackoff)
-	// Same-error streak (V8 repair): identical error text N times in a
-	// row halts this round's async retries (one degraded event) — a
-	// deterministic failure (dead server config, poisoned tree) answers
-	// every retry with the same words, and no backoff cadence can bound
-	// that on its own (#48: 185 identical failures, ~1h).
-	if key := res.err.Error(); key == m.lastPushErr {
-		m.sameErrStreak++
-	} else {
-		m.lastPushErr = key
-		m.sameErrStreak = 1
-	}
-	if m.sameErrStreak >= sameErrorCap && !m.retryHalted {
-		m.retryHalted = true
-		m.retryHaltedAt = m.dirtyVersion
-		_ = m.log.Append(m.wi.WorkItem, EvPushBackpressure, map[string]any{
-			"reason": "same_error", "failed_pushes": m.failedPushes,
-			"streak": m.sameErrStreak, "error": m.lastPushErr,
-			"note": "async push retry halted for this round (" +
-				strconv.Itoa(sameErrorCap) + " consecutive identical errors); " +
-				"resumes at the next execution.json Version bump (commit boundary) or a successful push",
-		})
-	}
-	// V8 classification: the LOCAL gitlink precheck refusal is its own
-	// event kind — see EvPushPoisonedLocal for why it stays out of the
-	// push_failed family. It still feeds the bookkeeping above (the
-	// streak, the backoff, the steps ladder): a poisoned tree is a
-	// persistent failure and the same-error cap must bound its retries
-	// exactly like any other deterministic shape.
+	m.failedVersion = res.version
+	m.backoff = min(max(2*m.backoff, m.cfg.PushRetryBackoff), m.cfg.PushBackoffMax)
+	m.retryAt = time.Now().Add(m.backoff)
 	if gitops.IsLocalGitlink(res.err) {
+		// V8: the LOCAL gitlink precheck refused to create the commit —
+		// its own kind (see EvPushPoisonedLocal), retried like any
+		// persistent failure.
 		_ = m.log.Append(m.wi.WorkItem, EvPushPoisonedLocal, map[string]any{
 			"version": res.version, "error": res.err.Error(),
 			"detail": "local gitlink precheck refused to create the commit (GIT-412 LOCAL_GITLINK_DETECTED); " +
 				"not an occurred boundary-sync failure — excluded from push_failed and the M8 read-through by design",
 		})
-		return
+	} else {
+		_ = m.log.Append(m.wi.WorkItem, EvPushFailed, map[string]any{
+			"version": res.version, "error": res.err.Error(),
+		})
 	}
-	_ = m.log.Append(m.wi.WorkItem, EvPushFailed, map[string]any{
-		"version": res.version, "error": res.err.Error(),
-	})
+	if m.backoff >= m.cfg.PushBackoffMax && !m.backpressured {
+		// §九 degradation: never kills the agent — local commits keep
+		// accumulating and the next success ends the episode.
+		m.backpressured = true
+		_ = m.log.Append(m.wi.WorkItem, EvPushBackpressure, map[string]any{
+			"failed_pushes": m.failedPushes, "error": res.err.Error(),
+			"note": "push retries reached their longest delay; agent continues, commits accumulate locally",
+		})
+	}
 	if gitops.IsCredentialRefused(res.err) {
 		// the git face refused the session credential — this session may
 		// no longer hold the work item: revalidate at the next tick, not
 		// at the next interval (a superseded work item stops at once)
 		m.lastVerifyAt = time.Time{}
-	}
-}
-
-// checkBackpressure writes the DEGRADATION events (§九): N consecutive
-// failed pushes, or T since the last successful push. Degradation never
-// kills the agent — the events are the whole story; local commits keep
-// accumulating and the next success resets the episode.
-func (m *Monitor) checkBackpressure() {
-	if m.failedPushes == 0 {
-		return
-	}
-	if !m.pushDegraded && m.failedPushes >= m.cfg.BackpressureSteps {
-		m.pushDegraded = true
-		_ = m.log.Append(m.wi.WorkItem, EvPushBackpressure, map[string]any{
-			"reason": "steps", "failed_pushes": m.failedPushes,
-			"note": "agent continues; commits accumulate locally",
-		})
-	}
-	if !m.timeDegraded {
-		now := time.Now()
-		overTime := !m.lastPushOK.IsZero() && now.Sub(m.lastPushOK) >= m.cfg.BackpressureAfter
-		if !overTime && m.lastPushOK.IsZero() &&
-			now.Sub(m.firstFailAt) >= m.cfg.BackpressureAfter {
-			overTime = true // never pushed successfully since this episode began
-		}
-		if overTime {
-			m.timeDegraded = true
-			_ = m.log.Append(m.wi.WorkItem, EvPushBackpressure, map[string]any{
-				"reason": "time", "failed_pushes": m.failedPushes,
-				"note": "agent continues; commits accumulate locally",
-			})
-		}
 	}
 }
 
@@ -934,10 +797,10 @@ func (m *Monitor) currentSpawn() int {
 	return m.spawnN
 }
 
-// markClosing arms the expected-exit suppression (the daemon-initiated
-// close path; see Observe.MarkClosing).
+// markClosing turns the monitor quiet for a daemon-initiated close (see
+// Observe.MarkClosing): the agent's imminent exit is expected.
 func (m *Monitor) markClosing() {
 	m.stateMu.Lock()
-	m.sealing = true
+	m.quiet = true
 	m.stateMu.Unlock()
 }
