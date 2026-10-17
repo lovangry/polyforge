@@ -123,7 +123,7 @@ frontmatter 不声明 step 间输入 wiring、`cwd` 或排序键：上游产物�
 1. **`grill`**（spec 之前）：对模糊需求逐项发问，非 gate；问答记录写入 capsule `artifacts/grill-qa.md`。
 2. **`grill-review`**（spec 之后）：对 spec 做一次总结性确认，`requires_human_answer: true` 且 `gate: true`；PASS 推进 `plan`；FAIL 触发 `on_fail: {target: spec}`，问答追加进同一份 `artifacts/grill-qa.md`。
 
-驱动引擎不区分判定来源，`grill-review` 的 FAIL 与其余 gate 走同一路径。**交互渠道**：step 以 `needs_input` 结果提问，driver 把问题写进 `execution.json` 的 `steps.<id>.pending_question`；人经 `pf answer` → daemon `POST /jobs/{wi}/answer` → driver bridge 回答，driver 原地续跑同一 step（`reference.md#§7.3`、`v2-converge.md#§3`）。agent 不得代答：daemon 拒绝来自 step 进程树的 answer 请求（DAEMON-403）。
+驱动引擎不区分判定来源，`grill-review` 的 FAIL 与其余 gate 走同一路径。**交互渠道**：step 以 `needs_input` 结果提问，driver 把问题写进 `execution.json` 的 `steps.<id>.pending_question`；人经 `pf answer` → daemon `POST /jobs/{wi}/answer` → driver 回答，driver 原地续跑同一 step（`reference.md#§7.3`、`v2-converge.md#§3`）。agent 不得代答：daemon 拒绝来自 step 进程树的 answer 请求（DAEMON-403）。
 
 ### 4.4 step 定义文件 <!-- §4.4 -->
 
@@ -155,7 +155,7 @@ frontmatter 字段——**driver 只读 `output`**：
 | `model` | 禁止 | 模型选择只在 workflow.md frontmatter（INV-1g），`model` 不被读取 |
 | `tools` | 已删除（G10） | 从未被读取；旧快照里残留的被忽略 |
 
-**输出契约（INV-1h）**：release bundle 的 `release`、`deploy` 两步**强制**（`driver/outputschema.go` 的 `outputSchemaEnforced`）：不合格即信封被拒（同一进程内重试车道），不算基础设施失败、不推进候选。其余 step 为**只记录模式**：不合格只记持久事件 `output_schema_violation`，不拒信封、不算基础设施失败、不推进候选。声明了却无法加载的 schema 记 `output_schema_unloadable` 并写 stderr。
+**输出契约（INV-1h）**：release bundle 的 `release`、`deploy` 两步**强制**（`driver/outputschema.go` 的 `outputSchemaEnforced`）：不合格即信封被拒（同一进程内重试车道），不算基础设施失败、不推进候选。其余 step 为**只记录模式**：不合格只记持久事件 `output_schema_violation`，不拒信封、不算基础设施失败、不推进候选。声明了却无法加载的 schema 记 `output_schema_unloadable` 并写 stderr；在 `release`/`deploy` 上，schema 缺失或无法加载时结果一律被拒（判定契约就在 schema 里）。
 
 ### 4.4a step 间上下文传递：`context_policy` 与 `handoff`（polyforge#147） <!-- §4.4a -->
 
@@ -165,7 +165,7 @@ frontmatter 字段——**driver 只读 `output`**：
 - **`context_policy: fresh`**：不注入交接正文；上游产物按路径约定自取。`gate: true` 的 step 一律 `fresh`（解析器强制）。
 - **`handoff: true`**（只在某个下游 inherit step 以本 step 为最近交接源时才声明；2026-10-16 裁定 G10 删除了 7 处无读者的声明）：本 step 收尾前必须写 `artifacts/handoff-<step-id>.md`。
 
-**结果信封是最小契约**——`outcome` + `output`（`needs_input` 另带 `question_id` + `question`）加派发身份围栏，没有 `handoff_ref`、sha256、artifacts 清单（`v2-converge.md#§2.6`）。driver 在最小契约之外的机械门禁：V4 命令取证（声明 `requires_command_evidence: true` 的 step 的 completed 结果带 `command_evidence: [{argv, exit_code, duration_ms}]`，至少一条、argv 非空、`duration_ms > 0`，被接受的取证由 driver 写入 `output.commands`）；已提交测试文件门禁（`output.test_files` 的每条路径必须在其所在 task repo 的 HEAD 已提交，polyforge#156）；已写测试不可改（polyforge#164 H4）；release/deploy verdict 绑定。违者信封被拒，带拒绝原因在同一进程内重试；第 4 次连续被拒（`maxEnvelopeRejects` = 3 次重试）→ step blocked `result_invalid`。另有：needs_input 问题形状、pre_existing 失败的边界、deliver 绑定、人工 gate 拒绝、release/deploy 的 `fail_reason` 必填与 `defer` 只在 deploy 合法（`driver/result.go`、`driver/deliver.go`）。
+**结果信封是最小契约**——`outcome` + `output`（`needs_input` 另带 `question_id` + `question`）加派发身份围栏，没有 `handoff_ref`、sha256、artifacts 清单（`v2-converge.md#§2.6`）。driver 在最小契约之外的机械门禁：V4 命令取证（声明 `requires_command_evidence: true` 的 step 的 completed 结果带 `command_evidence: [{argv, exit_code, duration_ms}]`，至少一条、argv 非空、`duration_ms > 0`，被接受的取证由 driver 写入 `output.commands`）；已提交测试文件门禁（`output.test_files` 的每条路径必须在其所在 task repo 的 HEAD 已提交，polyforge#156）；已写测试不可改（polyforge#164 H4）；`defer` 判定只允许出现在 `deploy`（release/deploy 的其余判定规则在其强制的 output schema 里）。违者信封被拒，带拒绝原因在同一进程内重试；第 4 次连续被拒（`maxEnvelopeRejects` = 3 次重试）→ step blocked `result_invalid`。另有：needs_input 问题形状、pre_existing 失败的边界、deliver 绑定、人工 gate 拒绝、release/deploy 的 `fail_reason` 必填与 `defer` 只在 deploy 合法（`driver/result.go`、`driver/deliver.go`）。
 
 ### 4.5 bundle 引用 <!-- §4.5 -->
 

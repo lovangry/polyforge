@@ -11,8 +11,9 @@ below as a blocking finding.
 - **Resumable capsules.** Every work item has a complete capsule and can resume
   from any stage. Shutdown is designed as crash-equals-shutdown; the kill -9
   chaos tests must keep passing.
-- **Runtime locking.** One state lock per work item. The global lock only
-  guards shared data and no I/O happens while it is held.
+- **Runtime locking.** One actor (mailbox + goroutine) per work item owns
+  its state. The job-table lock only guards shared data and no I/O happens
+  while it is held.
 - **No aihub credentials in step agents.** Memory reads and writes go through
   the daemon. A new daemon or aihub entry point states whether a step agent
   can reach it; an unstated one is a finding.

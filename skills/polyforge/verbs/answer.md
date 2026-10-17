@@ -1,8 +1,8 @@
 # answer — answer a pending needs_input question
 
 Execution-plane verb: routed to the local daemon (the answer route). The
-daemon hands the payload to the work item's Go driver over the in-process
-driver bridge; it never parses or rewrites the answer.
+daemon hands the payload to the work item's in-process Go driver; it never
+parses or rewrites the answer.
 
 ## Triggers
 

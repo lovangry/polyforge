@@ -238,18 +238,17 @@ One row per sub-package, exactly as `internal/` exists today:
 | `internal/aihub/server` | The AIHub HTTP face: business endpoints, the admin face, and the `/git/{wi}.git/...` proxy mount; Bearer API key auth, typed `api.Error` envelope. |
 | `internal/polyforge/aihubclient` | Shared HTTP client for the aihub server, used by runtime, observe and the CLI verbs; decodes the typed error envelope back into `*api.Error`. |
 | `internal/polyforge/cli` | The `pf` client CLI: the routing verbs (file, queue, cancel, recall, remember, memory, submit, `watch`, answer, pause, resume, wrap, ops), `chat`, the management face (users, api-keys, projects, machines, backup), the daemon client over the UDS socket, and config resolution. |
-| `internal/polyforge/daemon` | Assembly of the local work machine: the UDS HTTP face, runtime, observe lane and driver wired together, the auto switch, the pending-job dispatcher, the auto-pull loop and the graceful shutdown sequence. |
+| `internal/polyforge/daemon` | Assembly of the local work machine: the UDS HTTP face, runtime, observe lane and driver wired together, the auto switch, the pending-job dispatcher, the auto-pull loop, the driver start (a running `Driver.Run` is the job's agent handle) and the shutdown. |
 | `internal/polyforge/gitops` | Shared capsule-git operations layer used by Runtime (clone at start, dirty-commit at recover) and Observe (async commit+push); owns the per-WI git mutex. |
-| `internal/polyforge/bridge` | Connects the runtime's job machinery to the Go driver: a running `Driver.Run` is the job's agent handle for supervision. |
 | `internal/polyforge/mapping` | The workspace→projects plan read from cli.toml's `[workspace]` sections, and its validated inverse (project → workspace). |
 | `internal/polyforge/sessionjsonl` | The single parser of the harness session-jsonl format (live transcript tail extraction). |
 | `internal/polyforge/supervisor` | The daemon's own supervision on a work machine: the `polyforge-daemon` tmux restart loop shared by `pf daemon ensure` and `pf doctor`. |
 | `internal/polyforge/supervise` | The driver↔supervisor contract: facts, verdicts and the per-WI link (v2-converge §2.2–2.5). |
 | `internal/polyforge/workspace` | The `.polyforge.yaml` loader (`steps.<project>.<default\|step-id>.models`), read and validated by the daemon before every claim and by `pf doctor` (an invalid file refuses the claim without claiming). |
-| `internal/polyforge/observe` | Observe lane: the events log, per-WI monitor goroutines, live-transcript streaming, session verification, and the live activity / pending-question / progress views the daemon reads. |
+| `internal/polyforge/observe` | Observe lane: the per-work-item events files, per-WI monitor goroutines fed by the runtime's lifecycle queue, the capsule push loop, live-transcript streaming, session revalidation, and the live activity / progress views the daemon reads. |
 | `internal/polyforge/driver` | The Go execution driver: owns `runtime-state/execution.json`, spawns one step process per workflow step and validates each result envelope (needs_input rules; the human gate — a `requires_human_answer: true` step can neither complete nor gate-fail without a human answer in the current attempt, such an envelope is rejected; the command-evidence gate). |
 | `internal/polyforge/watcher` | The `pf watch` engine: decision classification (fixed-template wake-up lines) and the resident per-chat watcher with its progress file. |
-| `internal/polyforge/runtime` | Runtime lane: the WI lifecycle manager (Start/Stop/Recover/Restart), the pi-harness agent spawner, the layered (L1–L5) process cleanup and the recovery engine. |
+| `internal/polyforge/runtime` | Runtime lane: the WI lifecycle manager (one actor per work item: Start/Stop/Recover/Restart), the pi-harness agent spawner, the layered (L1–L5) process cleanup and the recovery engine. |
 
 Binaries: `cmd/aihub` (server binary) and `cmd/pf` (work-machine binary:
 CLI verbs + `pf daemon`).
@@ -269,9 +268,9 @@ credential is unavailable, with `DAEMON-403` (polyforge#122 accident guard).
 | POST | `/jobs/{wi}/resume-paused` | The live-holder half of `pf resume` on a paused WI (the CLI clears `clean_pause` at aihub first; this makes the online holder re-attach). | user |
 | POST | `/jobs/{wi}/pause` | CLI close path: seal the job with reason `paused`. | user |
 | POST | `/jobs/{wi}/wrap` | CLI close path: seal the job with reason `wrap` or `fail`. | user |
-| GET | `/status` | Machine status: jobs (with the needs-input projection), queue stats, auto switch. | user |
+| GET | `/status` | Machine status: jobs (a pending question read from the capsule's `execution.json`), queue stats, auto switch and cap. | user |
 | POST | `/ops/config` | `pf ops auto on\|off` / `pf ops max N`: body `{"auto":bool,"max":N}` (either or both). | user |
-| POST | `/shutdown` | Trigger the bounded graceful shutdown sequence. | user |
+| POST | `/shutdown` | Shut the daemon down: stop the agents, save each job's task-repo WIP, exit (≤30s). | user |
 | POST | `/chat/init` | `pf chat init`: the chat id of a harness session (created on first use). | user |
 | GET | `/jobs/{wi}/watch` | `pf watch <wi> --once`: per-WI snapshot (status, step, pending question, events). | user |
 | GET | `/chats/{id}/subscriptions` | A chat's daemon-held subscriptions. | user |
@@ -425,8 +424,8 @@ maintainer or an admin.
 
 ## `pf daemon` flags
 
-`pf daemon` runs the local work machine (runtime, driver and watcher over
-the UDS face).
+`pf daemon` runs the local work machine (runtime, driver and supervisor
+behind the UDS face).
 
 Exit status 78 means the daemon refused to start for a reason only an
 operator can fix — configuration, the recorded daemon id, the workspace
@@ -533,7 +532,7 @@ resolved (stderr, a `retired_env_ignored` event, `env_warnings` in
 | `--server URL` | `server` / `PF_SERVER` | — | aihub base URL the daemon talks to. |
 | `--api-key KEY` | `api_key` / `PF_API_KEY` | — | Machine aihub credential (never reaches an agent env). |
 | `--machine-id ID` | ensure (recorded id, else `m-<short hostname>`) | `m-<short hostname>` | Machine identity claims and leases are recorded under; recorded in `<data-dir>/daemon-id` on first start, after which that file wins (a differing value refuses to start). |
-| `--data-dir DIR` | ensure (`POLYFORGE_DATA_DIR`) | `~/.local/share/polyforge` | Daemon state, events log and derived data. |
+| `--data-dir DIR` | ensure (`POLYFORGE_DATA_DIR`) | `~/.local/share/polyforge` | Daemon state, the per-work-item events files and the capsules' external git dirs. |
 | `--workflows-dir DIR` | ensure | `./workflows` | Workflow-bundle checkout the in-process Go driver loads step definitions from (`pf daemon ensure` passes `<data-dir>/release/current/workflows`). |
 | `--claude-bin PATH` | `claude_bin` | `claude` | Claude Code binary for steps whose harness is `claude` (run as `claude -p --bare`). The daemon never manages its credentials: the `<harness-root>/claude-config/settings.json` env block is the authority layer. |
 | `--operator-agent-dir DIR` | `[daemon] operator_agent_dir` | `~/.pi/agent` | SOURCE of the dedicated step agent dir — a credential surface: the daemon copies the minimal set (`auth.json`, `models.json`, `agents/`, `extensions/subagent/`) from here into `<harness-root>/step-agent`, and every pi step runs against that copy — the operator's own packages and settings never reach a step. A configured source without a readable `auth.json` refuses the start. |
@@ -695,7 +694,7 @@ and an old bundle that still carries them has them silently ignored.
 | `--step-timeout D` | `[daemon] step_timeout` | `90m` | T: cumulative step runtime across all its dispatches (`step_timeout_long_task` / `step_timeout_slow_model`). |
 | `--stall-window D` | `[daemon] stall_window` | `10m` | N: the driver between steps (not waiting on a human) for longer than this is `driver_stalled`; a negative value disables it. |
 | `--model-error-grace D` | test/dev-only | `1m` | Grace after a turn ENDS with no result file: ended on a model error is `model_error` (switch candidate); ended normally is `ended_without_result` (same-model retry). |
-| `--revalidate-every D` | test/dev-only | `5m` | M4 periodic session-revalidation cadence for RUNNING jobs; `0`/omitted keeps the 5m default, a negative value disables revalidation. |
+| `--revalidate-every D` | test/dev-only | `30s` | M4 periodic session-revalidation cadence for RUNNING jobs; `0`/omitted keeps the 30s default, a negative value disables revalidation. |
 
 Before starting ANY implementation or review lane: recall the v0 lessons
 ledger (`docs/design/polyforge-vnext/v0-lessons-ledger.md`, now including

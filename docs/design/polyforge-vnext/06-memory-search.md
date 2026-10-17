@@ -98,7 +98,7 @@ rowid 与 rank，再沿 rank 顺序分批读取条目元数据，直到下界 (1
   `[workspace]` 映射中；以 `excerpt=120` 调 search，缺省 `match=all`，`--any` 改用 `match=any`。`pf remember --project P --type T [--title] [--visibility project]
   [--tags] [--work-item] <content|-|@file>`。`pf memory show <id> [--max-bytes 262144] [--json]`。
   （`cli/verbs_aihub.go`；fragment：`skills/polyforge/verbs/{recall,remember,memory}.md`。）
-- 领取时 daemon 以 WI 的 goal + content 的前 1500 字符为查询，用 `match=any`、限定该 WI 的项目，取前 10 条（`-recall-topk`，上限 50）写入
+- 领取时 daemon 以 WI 的 goal + labels 为查询（不带 content），用 `match=any`、限定该 WI 的项目，取前 10 条（`-recall-topk`，上限 50）写入
   capsule `runtime-state/recalled-memories.json`（`{work_item_id, query, top_k, items[{id,type,title,excerpt}], notice,
   created_at}`，摘录 1200 字符）；出错或无命中时写空列表 + notice，从不让领取失败（`runtime/recall.go`、
   `daemon/memface.go`）。driver 把它作为「非约束性历史」注入每个 step 的 prompt（`v2-converge.md#§1`）——每条只渲染一行
@@ -106,8 +106,8 @@ rowid 与 rank，再沿 rank 顺序分批读取条目元数据，直到下界 (1
   （`^Verification Report — \S+$`、`^Controller-sink artifact`），至多 10 行，无条目则不加该节（`driver/spawn.go`）。
   部署顺序：先升级 aihub 再升级 daemon——旧 aihub 忽略 `match=`、按 AND 检索，长查询于是没有命中，快照为空。
 - step agent 不持有 aihub 凭据路径，记忆访问全部由 daemon 代理（owner 裁决 option C，2026-10-17 简化）。step 进程带
-  `PF_WI_ID` / `PF_DAEMON_ID` 标记（与 step-origin 守卫、reaper 用的是同一组；其余 `PF_*` / `POLYFORGE_*` 被剥掉），
-  两者同时存在时 `pf` 进入 step 模式（`cli/stepctx.go`）：`pf recall` / `pf memory show` 走
+  `PF_WI_ID` / `PF_DAEMON_ID` 标记（与 step-origin 守卫、reaper 用的是同一组），另带 `PF_DAEMON_SOCKET`（本 daemon 的 socket）；其余 `PF_*` / `POLYFORGE_*` 被剥掉。
+  `PF_WI_ID` 与 `PF_DAEMON_ID` 同时存在时 `pf` 进入 step 模式（`cli/stepctx.go`）：`pf recall` / `pf memory show` 走
   `GET /step/memories/search`、`GET /step/memories/{id}`，`pf remember` 同步走 `POST /step/memories`
   （`daemon/stepmem.go`；step-origin 守卫唯一放行的 step 写请求）。work item 不取自请求、也不取自调用方的环境变量：
   沿 UDS 对端 pid 的祖先链（含进程组长）找本 daemon 派生的 step 进程（某个活跃 job 的 spawn journal 任一条目的 pid，
