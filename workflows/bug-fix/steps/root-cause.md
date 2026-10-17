@@ -80,6 +80,12 @@ The gate machinery does not know whether your `pass` is earned; `fix`,
 `fix` "fixes" produces a fix that papers over the symptom — the classic bug this lane
 exists to prevent. If you cannot prove it, fail honestly.
 
+## Principles
+
+Every link of the causal chain rests on evidence, not inference. The fix guidance names the simplest change that removes the cause and whether it alters any existing behavior.
+
+{{principles}}
+
 ## Output
 
 Emit the final JSON object per the schema above: the verdict (`pass`/`fail`), the causal

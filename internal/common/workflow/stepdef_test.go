@@ -55,3 +55,35 @@ func TestRenderStepVars(t *testing.T) {
 		t.Fatalf("non-placeholder braces must pass through: %q, %v", got, err)
 	}
 }
+
+// ReadStepDefinition renders {{principles}} from the shared principles
+// file without a declared var, refuses a step entry declaring that var,
+// and needs no principles file for a definition that does not use it.
+func TestReadStepDefinitionPrinciples(t *testing.T) {
+	root := t.TempDir()
+	bundle := filepath.Join(root, "b")
+	write := func(p, s string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(bundle, "steps", "plain.md"), "no principles {{x}}")
+	if got, err := ReadStepDefinition(bundle, "plain", map[string]string{"x": "1"}); err != nil || string(got) != "no principles 1" {
+		t.Fatalf("plain = %q, %v", got, err)
+	}
+	write(filepath.Join(bundle, "steps", "code.md"), "use them:\n{{principles}}\n{{x}}")
+	if _, err := ReadStepDefinition(bundle, "code", map[string]string{"x": "1"}); err == nil || !strings.Contains(err.Error(), PrinciplesFile) {
+		t.Fatalf("missing principles file: %v", err)
+	}
+	write(filepath.Join(root, SharedDir, PrinciplesFile), "1. Simple.\n")
+	if got, err := ReadStepDefinition(bundle, "code", map[string]string{"x": "1"}); err != nil || string(got) != "use them:\n1. Simple.\n1" {
+		t.Fatalf("code = %q, %v", got, err)
+	}
+	if _, err := ReadStepDefinition(bundle, "plain", map[string]string{"x": "1", PrinciplesVar: "mine"}); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("declared principles var: %v", err)
+	}
+}
