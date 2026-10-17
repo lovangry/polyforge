@@ -67,10 +67,9 @@ func (r *Runtime) claimingPath() string {
 // (NOTE 6, v1.5 review): a torn/corrupt pre-registration journal is
 // LOST — D5's window, which requires fs corruption to hit at all —
 // and pretending nothing happened would hide it. The entries it
-// carried cannot be replayed, but the session fence (restart
-// reconciliation) still closes whatever aihub knows as ours, so a
-// quarantined journal never blocks a start and never orphans a session
-// the hub can still name.
+// carried cannot be replayed, and a session such an entry may have opened
+// is not closed by this daemon. A quarantined journal never blocks a
+// start.
 func (r *Runtime) loadClaiming() map[string]*claimingRec {
 	raw, err := os.ReadFile(r.claimingPath())
 	if err != nil {

@@ -313,7 +313,12 @@ type job struct {
 	claimClose  *claimClose
 	// retryIn is the backoff of the actor's next retry (retry).
 	retryIn time.Duration
-	mu      sync.Mutex
+	// verified: the hub confirmed, since this process holds the job, that
+	// its session holds the work item (the claim, or a matching verify). A
+	// record restored at restart starts unverified: nothing pushes or ends
+	// under it before a verify (fence).
+	verified bool
+	mu       sync.Mutex
 }
 
 // claimClose is an operator close requested while the claim was still
@@ -385,8 +390,8 @@ func (r *Runtime) Run(ctx context.Context) error {
 // job has no monitor, so any message for it is stale.
 func (r *Runtime) applyOB(msg protocol.OBMsg) {
 	j := r.jobOf(msg.WorkItem)
-	if j == nil {
-		return
+	if j == nil || r.ctx.Err() != nil {
+		return // after the shutdown nothing recovers: the record waits for the next start
 	}
 	j.mu.Lock()
 	state, spawn, fp := j.state, j.spawnN, j.sessionFingerprint
@@ -464,10 +469,15 @@ func (r *Runtime) persist() error {
 }
 
 // persistLog is persist whose failure is only logged.
-func (r *Runtime) persistLog(wi string) {
+func (r *Runtime) persistLog(wi string) { r.persistLogged(wi) }
+
+// persistLogged is persistLog reporting whether the write landed.
+func (r *Runtime) persistLogged(wi string) bool {
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", wi, err)
+		return false
 	}
+	return true
 }
 
 // writeStateFn is persist's file write; persistSnapped, when set, runs
@@ -652,7 +662,13 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 		return claimDeferredError(wi)
 	}
 	if j := r.resolveJob(wi); j != nil {
-		if st, _ := j.snapshot(); st != StatePaused {
+		// a paused record is re-claimable, and a restart's journal
+		// placeholder (CLAIMING, no clone under way) may be dropped by its
+		// replay — the claim re-checks once it is its turn
+		j.mu.Lock()
+		st, cloning := j.state, j.claimCancel != nil
+		j.mu.Unlock()
+		if st != StatePaused && (st != StateClaiming || cloning) {
 			return alreadyActive(j.wi, st)
 		}
 	}
@@ -671,7 +687,11 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 			return err
 		}
 	}
-	return r.call(probe.ID, func() error { return r.claim(ctx, wi, probe.ID, manual) })
+	err = r.call(ctx, probe.ID, func() error { return r.claim(ctx, wi, probe.ID, manual) })
+	if errors.Is(err, errAbandoned) {
+		return claimDeferredError(wi) // the shutdown came while it waited its turn
+	}
+	return err
 }
 
 // probeWorkItem is Start's read-only work-item probe: the canonical id
@@ -866,6 +886,7 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, spelling, sessionID stri
 		sessionID:          sessionID,
 		sessionFingerprint: fp,
 		state:              StateClaiming,
+		verified:           true,
 		git: gitops.Opts{
 			WorkItemID: id,
 			// §1.6 fencing-on-use backup layer: the PUBLIC fingerprint.
@@ -1010,8 +1031,9 @@ func (r *Runtime) finishClaim(ctx context.Context, j *job, sceneErr error, note 
 	if err := j.transition(StateRunning); err != nil {
 		return err // unreachable: only the claim leaves CLAIMING
 	}
-	r.persistLog(j.wi)
-	r.clearClaiming(j.wi) // the start settled: the journal entry has done its job
+	if r.persistLogged(j.wi) {
+		r.clearClaiming(j.wi) // the start settled: the journal entry has done its job
+	}
 	// the secret rides in-process to the observe lane only (its M4
 	// session revalidation needs it); never a log, never the capsule
 	r.send(protocol.RTMsg{Kind: protocol.RTStarted, SpawnN: spawnN, WorkItem: j.wi, AgentPID: pid, SessionID: j.sessionID})
@@ -1134,7 +1156,9 @@ func (r *Runtime) abandonClaim(j *job, origErr error, note string) error {
 	err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{SessionID: j.sessionID, Status: api.StatusBlocked, Note: note})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: session-end(blocked) after failed start failed (kept end_pending, retrying): %v\n", j.wi, err)
-		r.pendingClose(j, note)
+		if !r.pendingClose(j, note) {
+			return origErr // the secret is not durable elsewhere: the journal keeps it
+		}
 	}
 	r.clearClaimingSession(j.wi, j.sessionID)
 	return origErr
@@ -1142,15 +1166,15 @@ func (r *Runtime) abandonClaim(j *job, origErr error, note string) error {
 
 // pendingClose keeps a claim's session whose blocked close the hub has
 // not taken: the job turns end_pending (nothing of it is pushed), is
-// persisted before the claiming journal entry goes, and its actor retries
-// the close.
-func (r *Runtime) pendingClose(j *job, note string) {
+// persisted, and its actor retries the close. It reports whether the
+// record is durable — only then may the claiming journal entry go.
+func (r *Runtime) pendingClose(j *job, note string) bool {
 	j.mu.Lock()
 	j.state, j.endNote, j.endPushGaveUp, j.agent = StateEndPending, note, true, nil
 	j.mu.Unlock()
 	r.putJob(j)
-	r.persistLog(j.wi)
 	r.retry(j)
+	return r.persistLogged(j.wi)
 }
 
 // verifySealedHead is the cross-daemon continue guard (v2-converge §7): a
@@ -1188,7 +1212,7 @@ func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 	if j := r.jobOf(id); j != nil {
 		cc = j.requestClaimClose(reason)
 	}
-	return r.call(id, func() error {
+	return r.call(ctx, id, func() error {
 		if cc != nil && cc.settled {
 			return cc.err
 		}
@@ -1205,6 +1229,9 @@ func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 		case st == StateClaiming:
 			return &api.Error{Code: api.ErrDaemonHubUnavailable,
 				Detail: fmt.Sprintf("%s: the claim of this work item is still waiting for aihub; retry later", id)}
+		}
+		if err := r.fence(j); err != nil {
+			return err
 		}
 		return r.stopOp(ctx, j, reason, false, "")
 	})
@@ -1248,8 +1275,9 @@ func (r *Runtime) closeClaim(j *job, reason string) error {
 	}
 	if err := r.hub.SessionEnd(j.wi, api.SessionEndRequest{SessionID: j.sessionID, Status: status, Note: note}); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: session-end(%s) of the claim failed (kept end_pending, retrying a blocked close): %v\n", j.wi, status, err)
-		r.pendingClose(j, note)
-		r.clearClaimingSession(j.wi, j.sessionID)
+		if r.pendingClose(j, note) {
+			r.clearClaimingSession(j.wi, j.sessionID)
+		}
 		return fmt.Errorf("runtime: %s: the claim was stopped but its session-end failed (retrying a blocked close in the background): %w", j.wi, err)
 	}
 	r.clearClaimingSession(j.wi, j.sessionID)

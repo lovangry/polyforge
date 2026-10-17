@@ -606,6 +606,7 @@ func seedJob(r *Runtime, wi string) *job {
 		transcript:         sessionPathFor(capDir, fp),
 		bundleName:         "demo-bundle",
 		spawnN:             1,
+		verified:           true, // a live claimed job
 	}
 	r.mu.Lock()
 	r.jobs[wi] = j
@@ -954,7 +955,7 @@ func newProc(cmd *exec.Cmd, stdin io.WriteCloser, stdout io.ReadCloser, taps ...
 // underLock runs fn as a message of wi's actor, as the runtime's own
 // doors run the job operations, and waits for it.
 func underLock(r *Runtime, wi string, fn func()) {
-	_ = r.call(wi, func() error { fn(); return nil })
+	_ = r.call(context.Background(), wi, func() error { fn(); return nil })
 }
 
 // settleReplays waits for the restart's journal replays (and every other
@@ -1010,13 +1011,13 @@ func restartSettled(t testing.TB, r *Runtime) error {
 // handleOB applies one OB message through its work item's actor and
 // waits for it.
 func (r *Runtime) handleOB(_ context.Context, msg protocol.OBMsg) {
-	_ = r.call(msg.WorkItem, func() error { r.applyOB(msg); return nil })
+	_ = r.call(context.Background(), msg.WorkItem, func() error { r.applyOB(msg); return nil })
 }
 
 // recoverOp runs one recovery of j's current derivation through its work
 // item's actor (a job that settled meanwhile, or left RUNNING, drops it).
 func (r *Runtime) recoverOp(_ context.Context, j *job, cause, detail string) {
-	_ = r.call(j.wi, func() error {
+	_ = r.call(context.Background(), j.wi, func() error {
 		if r.jobOf(j.wi) == j && stateOf(j) == StateRunning {
 			r.recoverCore(r.ctx, j, cause, detail)
 		}

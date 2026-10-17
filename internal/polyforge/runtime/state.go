@@ -32,10 +32,10 @@ type JobState string
 //	CLAIMING → RUNNING                        (the claim's agent started)
 //
 // CLAIMING is the in-memory placeholder of a start whose claim landed and
-// whose capsule clone/materialize runs with no lock held.
-// It occupies the work item's slot and refuses a second
-// start, but it is never persisted: the claiming journal is its durable
-// form, and every way out of it other than RUNNING drops the record.
+// whose capsule clone/materialize is still running on its actor. It
+// shows in status and lets a close cancel the clone, but it is never
+// persisted: the claiming journal is its durable form, and every way out
+// of it other than RUNNING drops the record.
 //
 // Every other edge is illegal and transition() refuses it.
 const (

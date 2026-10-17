@@ -13,7 +13,12 @@ package runtime
 // mu, then a job's mu. Neither of the last two is held across hub, git or
 // disk I/O, an EventTap call or a send.
 
-import "time"
+import (
+	"context"
+	"errors"
+	"sync/atomic"
+	"time"
+)
 
 // mailbox is one work item's queue of messages; its goroutine drains it.
 type mailbox struct{ q []func() }
@@ -47,18 +52,39 @@ func (r *Runtime) post(wi string, fn func()) {
 }
 
 // call posts fn on wi's mailbox and waits for its answer: a door gets the
-// final answer once the operations queued before it settled.
-func (r *Runtime) call(wi string, fn func() error) error {
+// final answer once the operations queued before it settled. A caller
+// whose ctx ends while fn still waits its turn gets errAbandoned and fn
+// never runs; once fn runs, call waits for it.
+func (r *Runtime) call(ctx context.Context, wi string, fn func() error) error {
 	done := make(chan error, 1)
-	r.post(wi, func() { done <- fn() })
-	return <-done
+	var turn atomic.Int32 // 0 waiting, 1 running, 2 abandoned
+	r.post(wi, func() {
+		if turn.CompareAndSwap(0, 1) {
+			done <- fn()
+		}
+	})
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		if turn.CompareAndSwap(0, 2) {
+			return errAbandoned
+		}
+		return <-done
+	}
 }
+
+// errAbandoned answers a call whose caller gave up before its turn.
+var errAbandoned = errors.New("runtime: the caller gave up before the work item's queued operations settled; nothing was done")
 
 // retry reconciles j's work item again after a backoff — the one retry
 // every pending hub step (a close, a verify, a claim replay) shares: the
 // first after EndRetryBase, each next one twice as long, up to
 // EndRetryMax. The shutdown stops it. Only j's actor calls it.
 func (r *Runtime) retry(j *job) {
+	if r.ctx.Err() != nil {
+		return
+	}
 	j.retryIn = min(max(2*j.retryIn, r.cfg.EndRetryBase), r.cfg.EndRetryMax)
 	time.AfterFunc(j.retryIn, func() {
 		if r.ctx.Err() == nil {

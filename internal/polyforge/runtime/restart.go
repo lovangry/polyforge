@@ -11,9 +11,10 @@ package runtime
 // whose session the hub no longer holds (ended or taken over while the
 // daemon was down) is never acted on:
 //
-//	a claiming-journal entry (a start under way) → finish the start
-//	  (claim: the journaled session still holds the WI → the same claim
-//	  replays; it does not → a fresh claim).
+//	a claiming-journal entry (a start under way) → its journaled session
+//	  still holds the WI → the same claim replays and the start finishes;
+//	  it does not → the entry goes (the submit queue's replay, which kept
+//	  the accepted submit, claims afresh).
 //	any other record → reconcileRecord: verify, then by the hub's answer
 //	  recover a crash mid-run, finish a recorded close, retry a blocked
 //	  close, replay a pending pause or terminal close, keep an operator
@@ -211,7 +212,9 @@ func (r *Runtime) reconcile(wi string) {
 	}
 	if _, err := r.reconcileRecord(j, causeOperatorAttach); hubUnavailable(err) {
 		r.retry(j)
+		return
 	}
+	j.retryIn = 0 // the hub answered: a later episode backs off afresh
 }
 
 // replayable verifies a claiming-journal entry's session: nil when it
@@ -384,13 +387,41 @@ func (r *Runtime) closeBlocked(j *job, push bool) bool {
 	return r.endBlockedAtHub(j.wi, secret, note, head)
 }
 
-// settleEndPending drops an end_pending job whose close is settled.
+// settleEndPending drops an end_pending job whose close is settled (and
+// a claiming-journal entry of its session a failed persist kept).
 func (r *Runtime) settleEndPending(j *job) {
 	if err := j.transition(StateDone); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: end_pending job could not reach DONE: %v\n", j.wi, err)
 	}
 	r.dropJob(j)
 	r.persistLog(j.wi)
+	r.clearClaimingSession(j.wi, j.sessionID)
+}
+
+// fence verifies a job's session before a door pushes or ends under it,
+// once per process for a record restored at restart (a claimed or
+// verified job passes at once). A mismatch settles the job locally and
+// answers DAEMON-409; an unanswered verify answers DAEMON-503 — nothing
+// was done either way.
+func (r *Runtime) fence(j *job) error {
+	j.mu.Lock()
+	ok := j.verified
+	j.mu.Unlock()
+	if ok {
+		return nil
+	}
+	v, err := r.hub.SessionVerify(j.wi, j.sessionID)
+	switch {
+	case err != nil:
+		return &api.Error{Code: api.ErrDaemonHubUnavailable, Detail: fmt.Sprintf("%s: the restart has not verified this work item's session yet (aihub: %v); nothing was done", j.wi, err)}
+	case !v.Matches:
+		r.notOurs(j, v)
+		return conflict("the session no longer holds %s (current holder %q); the local record was released", j.wi, v.CurrentFingerprint)
+	}
+	j.mu.Lock()
+	j.verified = true
+	j.mu.Unlock()
+	return nil
 }
 
 // finishBlocked is boundedFail's tail once the blocked close went out
@@ -516,13 +547,24 @@ func (r *Runtime) reconcileRecord(j *job, attachCause string) (string, error) {
 		return "", &api.Error{Code: api.ErrDaemonHubUnavailable, Detail: fmt.Sprintf("%s: session verify failed (nothing was resumed; retrying): %v", rec.WorkItemID, err)}
 	}
 	if !v.Matches {
-		if rec.State == string(StateEndPending) {
+		switch rec.State {
+		case string(StateEndPending):
 			r.settleEndPending(j) // our close landed with its answer lost, or another session took over
+			return "", nil
+		case string(StateSealing):
+			reason := rec.StopReason
+			if !isTerminalStopReason(reason) {
+				reason = protocol.FinishBlocked
+			}
+			r.finishSealLocally(j, reason, fmt.Errorf("session verify: the session no longer holds the work item (hub says %s)", v.Status))
 			return "", nil
 		}
 		r.notOurs(j, v)
 		return "", conflict("the session no longer holds %s (current holder %q); the local record was released", rec.WorkItemID, v.CurrentFingerprint)
 	}
+	j.mu.Lock()
+	j.verified = true
+	j.mu.Unlock()
 	if r.ctx.Err() != nil {
 		// the shutdown came while the verify was on the wire: the record
 		// stays as it is for the next start
@@ -636,7 +678,7 @@ func (r *Runtime) attach(j *job) error {
 func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 	id := r.CanonicalID(wi)
 	var out string
-	err := r.call(id, func() error {
+	err := r.call(ctx, id, func() error {
 		j := r.jobOf(id)
 		if j == nil {
 			return &api.Error{Code: api.ErrDaemonNotFound, Detail: fmt.Sprintf("no paused work item %s held by this daemon", id)}
@@ -653,6 +695,9 @@ func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 		out, err = r.reconcileRecord(j, causeOperatorResume)
 		return err
 	})
+	if errors.Is(err, errAbandoned) {
+		err = &api.Error{Code: api.ErrDaemonGone, Detail: fmt.Sprintf("%s: the daemon is shutting down; nothing was resumed", id)}
+	}
 	return out, err
 }
 
