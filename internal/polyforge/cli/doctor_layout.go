@@ -14,28 +14,23 @@ import (
 	"github.com/silgrid/polyforge/internal/polyforge/supervisor"
 )
 
-// doctor_layout.go (polyforge#174): the install-layout half of the
-// harness family plus the daemon supervision check.
+// doctor_layout.go: the install-layout half of the harness family plus
+// the daemon supervision check.
 //
-//   - pi install layout: tools/install.sh references the local release
-//     checkout (<data-dir>/release/current) as a pi package — no git
-//     clone; anything else is a warn naming the fix.
-//   - claude install layout: ~/.claude/skills/polyforge is a symlink to
-//     release/current/skills/polyforge; a copied directory (the old
-//     layout) or another target is a warn.
-//   - v1 harness leftovers: the v1 aihub bridge (pi package from
-//     GMISWE/ieops-aihub, ~/.pi/agent/extensions/polyforge), v1 Claude
-//     skills (using-polyforge, pf-*) and v1 Claude plugins. Warn only,
-//     with copy-paste cleanup commands that back up first; nothing is
-//     ever removed by the doctor. Migration hygiene only: this check is
-//     removed at v3.0 (decision 2026-10-16 G18) — delete docChV1Leftovers,
-//     the v1* vars and their check then.
+//   - pi / claude install layout: pi references the local release
+//     checkout (<data-dir>/release/current) as a package, and
+//     ~/.claude/skills/polyforge is a symlink into it — the layout
+//     tools/install.sh sets up; anything else warns with the fix.
+//   - v1 harness leftovers: v1 polyforge artifacts still hooked into pi
+//     or Claude Code warn with backup-first cleanup commands; the doctor
+//     never removes anything. Migration hygiene only: removed at v3.0
+//     (decision 2026-10-16 G18) — delete docChV1Leftovers, the v1* vars
+//     and their check then.
 //   - daemon supervision: a live daemon under the tmux restart loop (or
-//     an active systemd unit) passes; a live unsupervised daemon warns
-//     with the fix; a dead daemon is the "daemon socket" fail.
+//     an active systemd unit) passes, an unsupervised one warns with the
+//     fix; a dead daemon is the "daemon socket" fail.
 //
-// Like the display checks these never fail (presentation/migration, not
-// health): pass, warn or skip.
+// Like the display checks these never fail: pass, warn or skip.
 
 const (
 	docChClaudeLayout = "claude install layout"
@@ -77,18 +72,32 @@ type piSettings struct {
 
 // readPiSettings loads <agentDir>/settings.json (exists=false when absent).
 func readPiSettings(agentDir string) (cfg piSettings, exists bool, err error) {
-	path := filepath.Join(agentDir, "settings.json")
+	exists, err = readJSONFile(filepath.Join(agentDir, "settings.json"), &cfg)
+	return cfg, exists, err
+}
+
+// readJSONFile decodes a harness settings file into v: exists=false when
+// it is absent; a read error as is; a parse error naming the file.
+func readJSONFile(path string, v any) (exists bool, err error) {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return cfg, false, nil
+		return false, nil
 	}
 	if err != nil {
-		return cfg, true, err
+		return true, err
 	}
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return cfg, true, fmt.Errorf("%s does not parse as a settings object: %v", path, err)
+	if err := json.Unmarshal(raw, v); err != nil {
+		return true, fmt.Errorf("%s does not parse as a settings object: %v", path, err)
 	}
-	return cfg, true, nil
+	return true, nil
+}
+
+// notSetUp answers the skip detail when a harness's dir is absent.
+func notSetUp(dir, harness string) (string, bool) {
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return "no " + dir + ": " + harness + " is not set up here", true
+	}
+	return "", false
 }
 
 // pkgSource answers a packages entry's source (a string, or an object's
@@ -129,8 +138,8 @@ func piLocalPath(src, agentDir, home string) string {
 // <data-dir>/release/current.
 func piLayoutCheck(agentDir, home string) doctorCheck {
 	c := doctorCheck{Name: docChPiLayout}
-	if st, err := os.Stat(agentDir); err != nil || !st.IsDir() {
-		c.Status, c.Detail = "skip", "no "+agentDir+": pi is not set up here"
+	if skip, ok := notSetUp(agentDir, "pi"); ok {
+		c.Status, c.Detail = "skip", skip
 		return c
 	}
 	rel := releaseCurrent(home)
@@ -184,8 +193,8 @@ func piLayoutCheck(agentDir, home string) doctorCheck {
 func claudeLayoutCheck(home string) doctorCheck {
 	c := doctorCheck{Name: docChClaudeLayout}
 	dir := filepath.Join(home, ".claude")
-	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
-		c.Status, c.Detail = "skip", "no "+dir+": Claude Code is not set up here"
+	if skip, ok := notSetUp(dir, "Claude Code"); ok {
+		c.Status, c.Detail = "skip", skip
 		return c
 	}
 	want := filepath.Join(releaseCurrent(home), "skills", "polyforge")
@@ -295,24 +304,21 @@ func v1ClaudePlugins(claudeDir string) []string {
 			seen[key] = true
 		}
 	}
-	if raw, err := os.ReadFile(filepath.Join(claudeDir, "plugins", "installed_plugins.json")); err == nil {
-		var doc struct {
-			Plugins map[string]json.RawMessage `json:"plugins"`
-		}
-		if json.Unmarshal(raw, &doc) == nil {
-			for k := range doc.Plugins {
-				match(k)
-			}
-		}
+	var installed struct {
+		Plugins map[string]json.RawMessage `json:"plugins"`
 	}
-	if raw, err := os.ReadFile(filepath.Join(claudeDir, "settings.json")); err == nil {
-		var doc struct {
-			EnabledPlugins map[string]json.RawMessage `json:"enabledPlugins"`
-		}
-		if json.Unmarshal(raw, &doc) == nil {
-			for k := range doc.EnabledPlugins {
-				match(k)
-			}
+	var settings struct {
+		EnabledPlugins map[string]json.RawMessage `json:"enabledPlugins"`
+	}
+	if _, err := readJSONFile(filepath.Join(claudeDir, "plugins", "installed_plugins.json"), &installed); err != nil {
+		installed.Plugins = nil
+	}
+	if _, err := readJSONFile(filepath.Join(claudeDir, "settings.json"), &settings); err != nil {
+		settings.EnabledPlugins = nil
+	}
+	for _, m := range []map[string]json.RawMessage{installed.Plugins, settings.EnabledPlugins} {
+		for k := range m {
+			match(k)
 		}
 	}
 	out := make([]string, 0, len(seen))
