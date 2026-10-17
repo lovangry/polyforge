@@ -194,7 +194,9 @@ WHERE waiting_on = 'gate' OR waiting_on LIKE 'runtime:%';
 
 `core.Open` never rewrites an existing database: the DDL is
 `CREATE TABLE/INDEX IF NOT EXISTS` — a missing table or index is created,
-nothing existing is altered (no column is added or changed). An old-schema
+nothing existing is altered (no column is added or changed; the one
+exception is `memories.content`, added by the memory content migration at
+aihub start — see "Memories move into the database" below). An old-schema
 database is not repaired at boot, and the new server cannot create
 projects on it (the dead `projects.identifier_hash NOT NULL` column has
 no default). The upgrade is always the deploy.sh window SQL described
@@ -1190,3 +1192,63 @@ it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
 - The claim-time recall section of the step prompt is now `[type] title`
   lines only (at most 10, id-only noise titles dropped); ids and excerpts
   stay in `runtime-state/recalled-memories.json`.
+
+## Memories move into the database (polyforge#186)
+
+- Each memory's document (frontmatter + body) now lives in the new
+  `memories.content` column; create and redact are one transaction each
+  and no memory file is read while serving (files are still written, see
+  the write-through below). `pf recall`,
+  `pf remember`, `pf memory show` and the search / read / redact faces
+  answer exactly as before (`content_sha` / `content_len` still describe
+  the same document bytes).
+- **One-time migration at aihub start**, after the listener binds and
+  before it serves (clients wait in the listen backlog): the column is
+  added when missing, and every row without content gets the bytes of its
+  former file `memory/<project>/[_redacted/]<id>/memory.md`. A file whose
+  digest differs from `content_sha` wins (the old rule) and the row's
+  digest, length and index follow it; an active row whose file sits only
+  under `_redacted/` (an interrupted redact) is redacted; a row without a
+  file keeps no content, is not served (MEM-404), and is retried on every
+  start. The same pass derives the title of every active row whose title
+  is blank from its document (the rule create uses: an explicit
+  frontmatter title, else the body's first usable line) and removes
+  `memory.md.tmp` leftovers. One log line counts copied / adopted /
+  redact-completed / missing rows, derived titles and swept tmp files,
+  followed by the ids of every row that needed more than a copy. The
+  migration is idempotent: once done, a start reads no memory file and
+  writes nothing. Measured on a copy of the production backup: 3,810
+  documents in ~1.5 s. deploy.sh's `UP_WAIT_SECS` default (the switch
+  window's HTTP poll, counted from the stop, drain included) is 120 s so
+  the first start's migration fits.
+- **The memory files are not deleted, and this release still writes them**
+  (transitional write-through): create places `memory.md` (same path and
+  format as before) and only then commits the row; redact commits the row
+  and then moves the file to `_redacted/`. aihub never reads them while
+  serving. They are still copied by the deploy backup's rsync.
+  The release after every deployment has run this one drops the
+  write-through, the files, the `authority_path` column and the
+  `fs_mtime_ns` / `fs_size` columns (unused here, kept in the schema so a
+  fresh install of this release can still roll back).
+- **Deploy gate (step 4)**: on a database with `memories.content`, every
+  active memories row in the snapshot must carry its content or have its
+  `memory.md` in the backup (a row an older aihub wrote after a rollback
+  has no content; the new aihub fills it from the file at start).
+  Redacted rows never block. An active row with neither has no copy
+  anywhere: restore its `memory.md` under the data dir's `memory/` from an
+  older backup and restart aihub. A snapshot that
+  predates the column — the deploy that brings this release — is still
+  checked the old way (rows == `memory.md` files in the backup).
+- `pf backup` (`VACUUM INTO`) now holds every memory; it still does not
+  include the git repos.
+- **Rollback** to v2.11 (also deploy.sh's automatic rollback): every
+  memory stays and keeps serving. Rows written by this release have their
+  file in the active place (or, redacted, are kept redacted whatever their
+  file position), so v2.11's startup reconcile neither deletes nor
+  resurrects any of them, and it ignores `content`. Rows v2.11 writes have
+  no content; redeploying this release fills them from their files. Two
+  crash residues stay harmless: a file placed by a create that crashed
+  before its commit is no memory here (the caller never got a 201) and
+  v2.11 adopts it as one; a redact that crashed before its file move is
+  redacted in both. A fresh install of this release keeps the columns
+  v2.11 reads, so it can roll back too.

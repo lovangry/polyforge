@@ -5,10 +5,9 @@ package memory
 // prefer the fresher of two comparable matches without letting age bury
 // a clearly better one.
 //
-// Per entry, with age_days = now - memories.updated_at (the authority
-// document's last revision: the create time unless the file was revised
-// since — memories have no update endpoint, so for API-written entries
-// it equals created_at):
+// Per entry, with age_days = now - memories.updated_at (the stored
+// document's last revision — memories have no update endpoint, so it
+// equals created_at):
 //
 //	w     = exp(-age_days / stability_days)       ∈ [0, 1]; 1 for a non-decaying type
 //	score = rank × (1 + freshnessBoost × w)       (rank: FTS5 bm25, negative = better)

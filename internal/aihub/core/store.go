@@ -28,7 +28,9 @@ type DB struct {
 
 // DDL is the Core schema. First boot installs it as-is; Open runs no
 // column migrations (existing databases already carry every column) —
-// an index added later is created on the next Open (IF NOT EXISTS). Seq is
+// an index added later is created on the next Open (IF NOT EXISTS). The
+// one exception is memories.content, added by the memory store's
+// startup content migration (memory/migrate.go), not by Open. Seq is
 // numbered per project: UNIQUE(project_id, seq). Ownership lives ON the
 // work_items row itself (the session model — session_hash/
 // session_fingerprint/clean_pause).
@@ -171,6 +173,9 @@ CREATE TABLE IF NOT EXISTS memories (
   type         TEXT NOT NULL,
   title        TEXT,
   visibility   TEXT NOT NULL,
+  -- memory/<project>/<id>: the directory of the row's memory.md file —
+  -- read once by the content migration, written through on create and
+  -- redact (memory/writethrough.go), never read while serving.
   authority_path TEXT NOT NULL,
   content_sha  TEXT NOT NULL,
   content_len  INTEGER NOT NULL,
@@ -180,14 +185,13 @@ CREATE TABLE IF NOT EXISTS memories (
   status       TEXT NOT NULL DEFAULT 'active',
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL,
-  -- polyforge#129 freshness stamp: the authority file's observed state
-  -- (Stat mtime in nanoseconds + byte size) at the moment the row was
-  -- written, recorded by the write path in the same transaction as the
-  -- row. The reconcile consults it before any per-entry work — stamp
-  -- match ⇒ skip (no read, no hash, no FTS write); mismatch ⇒ verify by
-  -- content sha. NULL means "unverified" (pre-#129 rows, backfills
-  -- awaiting their batched index write): the next reconcile pass
-  -- verifies the row against the file and stamps it.
+  -- The stored document (frontmatter + body); content_sha/content_len
+  -- describe it. NULL only on a row the memory content migration could
+  -- not fill (memory/migrate.go): such a row is never served.
+  content      TEXT,
+  -- Transitional (memory/writethrough.go): unused here, kept so a fresh
+  -- install can roll back to v2.11, whose memory store reads and writes
+  -- them. Remove with the write-through.
   fs_mtime_ns  INTEGER,
   fs_size      INTEGER
 );

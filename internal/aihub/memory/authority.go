@@ -1,23 +1,19 @@
-// Package memory is the v1 Core-side memory store: FTS5-trigram search,
-// authoritative memory.md files and the reconcile procedure.
+// Package memory is the v1 Core-side memory store: FTS5-trigram search
+// over memories kept entirely in the Core database.
 //
-// Semantics are ported from the pilot-validated v0 implementation
-// (v0/internal/memory in git history, design authority 06-memory-search.md): the
-// three-step write order (tmp+fsync → Core tx → rename), the INV-7f
-// serving gate (row content_sha verified against the live file before
-// anything is served), file-wins reconciliation (INV-7c) and the
-// delete-then-insert FTS invariant. v1 drops the derived-HTML chain and
-// the share links; the reconcile scenarios kept are exactly the three the
-// lane requires: orphan-row rollback, authority-file backfill and
-// redacted forward-completion.
+// Each memory is one memories row whose content column holds the stored
+// document — a YAML frontmatter block mirroring the row's columns, then
+// the body verbatim. content_sha and content_len describe that document;
+// search reads the memory_fts row written in the same transaction
+// (delete-then-insert). Semantics of the search face are ported from the
+// pilot-validated v0 implementation (design authority
+// 06-memory-search.md).
 package memory
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -50,7 +46,7 @@ var visibilities = map[string]bool{"admin": true, "private": true, "project": tr
 const maxContentBytes = 1 << 20
 
 // frontmatter is the §4.2 field set, one-to-one mirror of the memories
-// columns, serialized in this exact order (deterministic authority bytes).
+// columns, serialized in this exact order (deterministic document bytes).
 type frontmatter struct {
 	ID             string   `yaml:"id"`
 	Type           string   `yaml:"type"`
@@ -66,7 +62,7 @@ type frontmatter struct {
 	UpdatedAt      string   `yaml:"updated_at"`
 }
 
-// splitFrontmatter splits an authority document at its leading YAML
+// splitFrontmatter splits a stored document at its leading YAML
 // frontmatter block. A leading "---" that never closes is a thematic
 // break, not frontmatter: the whole content is the body.
 func splitFrontmatter(content string) (fmBlock, body string, ok bool) {
@@ -85,7 +81,7 @@ func splitFrontmatter(content string) (fmBlock, body string, ok bool) {
 	return content[4:end], rest, true
 }
 
-// Body answers the memory body of a stored authority document: the
+// Body answers the memory body of a stored document: the
 // leading frontmatter block and its closing delimiter line are dropped,
 // everything after is returned verbatim (a "---" line inside the body is
 // content, never a second delimiter). A document without a closed
@@ -111,11 +107,11 @@ func parseFrontmatterBlock(block string) (map[string]any, error) {
 	return raw, nil
 }
 
-// buildAuthorityFile renders the full authority document.
-func buildAuthorityFile(fm *frontmatter, body string) ([]byte, error) {
+// buildDocument renders the stored document: frontmatter, then body.
+func buildDocument(fm *frontmatter, body string) (string, error) {
 	y, err := yaml.Marshal(fm)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	var sb strings.Builder
 	sb.WriteString("---\n")
@@ -125,7 +121,7 @@ func buildAuthorityFile(fm *frontmatter, body string) ([]byte, error) {
 	}
 	sb.WriteString("---\n")
 	sb.WriteString(body)
-	return []byte(sb.String()), nil
+	return sb.String(), nil
 }
 
 // extractBody derives the searchable text (06 §5.1): strip frontmatter,
@@ -191,39 +187,6 @@ func isFenceLine(trimmed, fence string) bool {
 		}
 	}
 	return true
-}
-
-// writeTmpSync is write-order step ①: temp file + fsync + dir fsync. No
-// rename here — the authority path is untouched until step ③.
-func writeTmpSync(tmp string, body []byte) error {
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o640)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(body); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return syncDir(filepath.Dir(tmp))
-}
-
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	if err := d.Sync(); err != nil {
-		d.Close()
-		return err
-	}
-	return d.Close()
 }
 
 func shaHex(b []byte) string {

@@ -71,9 +71,9 @@ func benchCorpus(b testing.TB, n int) (*Store, string) {
 		id := fmt.Sprintf("mem_bench%06d", i)
 		ts := now.Add(-time.Duration(rng.Intn(2*365*24)) * time.Hour).Format(time.RFC3339Nano)
 		if _, err := tx.Exec(`INSERT INTO memories(id, project_id, owner_user_id, type, visibility,
-			authority_path, content_sha, content_len, created_at, updated_at)
-			VALUES (?1, ?2, ?3, ?4, 'project', 'memory/x', 'sha', ?5, ?6, ?6)`,
-			id, p.ID, u.ID, types[i%len(types)], sb.Len(), ts); err != nil {
+			authority_path, content_sha, content_len, created_at, updated_at, content)
+			VALUES (?1, ?2, ?3, ?4, 'project', '', 'sha', ?5, ?6, ?6, ?7)`,
+			id, p.ID, u.ID, types[i%len(types)], sb.Len(), ts, sb.String()); err != nil {
 			b.Fatal(err)
 		}
 		if _, err := tx.Exec(`INSERT INTO memory_fts(mem_id, body) VALUES (?1, ?2)`, id, sb.String()); err != nil {

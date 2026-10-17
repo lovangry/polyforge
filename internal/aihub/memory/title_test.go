@@ -1,14 +1,9 @@
 package memory
 
-// title_test.go: the derived row title — the derivation itself, create
-// filling a blank title while keeping an explicit one, and the startup
-// backfill of rows written without one (idempotent, kept by the
-// reconcile afterwards).
+// title_test.go: the derived row title — the derivation itself and
+// create filling a blank title while keeping an explicit one.
 
 import (
-	"database/sql"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -78,114 +73,6 @@ func TestCreateDerivesBlankTitle(t *testing.T) {
 	if got.Title == nil || *got.Title != " Explicit " {
 		t.Fatalf("explicit title = %v, want kept verbatim", deref(got.Title))
 	}
-	// The derived title is a projection of the file: a forced
-	// re-verification pass must not correct it away.
-	nullAllStamps(t, e)
-	if _, err := e.store.RebuildIndex(); err != nil {
-		t.Fatal(err)
-	}
-	var blank int
-	if err := e.db.QueryRow(`SELECT count(*) FROM memories WHERE title IS NULL OR title=''`).Scan(&blank); err != nil {
-		t.Fatal(err)
-	}
-	if blank != 0 {
-		t.Fatalf("%d rows lost their title after a verifying reconcile", blank)
-	}
-}
-
-func TestBackfillTitlesIdempotent(t *testing.T) {
-	e := newEnv(t)
-	a := e.create(t, "- legacy lesson one\nmore")
-	b := e.create(t, "### 遗留记忆二\n正文")
-	kept, err := e.store.Create(CreateRequest{
-		Project: "alpha", Type: "fact.note", Visibility: "project",
-		Title: sp("Keep me"), Content: "# not this",
-	}, e.user)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Rows written before titles were derived: empty or NULL titles.
-	if _, err := e.db.Exec(`UPDATE memories SET title=NULL WHERE id=?1`, a.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.db.Exec(`UPDATE memories SET title='  ' WHERE id=?1`, b.ID); err != nil {
-		t.Fatal(err)
-	}
-	titles := func() map[string]string {
-		out := map[string]string{}
-		for _, id := range []string{a.ID, b.ID, kept.ID} {
-			got, err := e.store.Get(id)
-			if err != nil {
-				t.Fatal(err)
-			}
-			out[id] = deref(got.Title)
-		}
-		return out
-	}
-	if _, err := e.store.RebuildIndex(); err != nil {
-		t.Fatal(err)
-	}
-	want := map[string]string{a.ID: "legacy lesson one", b.ID: "遗留记忆二", kept.ID: "Keep me"}
-	first := titles()
-	for id, w := range want {
-		if first[id] != w {
-			t.Fatalf("after backfill %s title = %q, want %q", id, first[id], w)
-		}
-	}
-	// Second run: nothing left to select, nothing written.
-	var pending int
-	if err := e.db.QueryRow(`SELECT count(*) FROM memories WHERE status='active'
-		AND (title IS NULL OR trim(title) = '')`).Scan(&pending); err != nil {
-		t.Fatal(err)
-	}
-	if pending != 0 {
-		t.Fatalf("%d rows still selected after the backfill", pending)
-	}
-	var before int64
-	if err := e.db.QueryRow(`SELECT total_changes()`).Scan(&before); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.store.backfillTitles(); err != nil {
-		t.Fatal(err)
-	}
-	var after int64
-	if err := e.db.QueryRow(`SELECT total_changes()`).Scan(&after); err != nil {
-		t.Fatal(err)
-	}
-	if after != before {
-		t.Fatalf("second backfill wrote %d rows, want 0", after-before)
-	}
-	if second := titles(); second[a.ID] != first[a.ID] || second[b.ID] != first[b.ID] {
-		t.Fatalf("second pass changed titles: %v → %v", first, second)
-	}
-}
-
-func TestBackfillRowRedactedKeepsNoTitle(t *testing.T) {
-	e := newEnv(t)
-	var alphaID string
-	if err := e.db.QueryRow(`SELECT id FROM projects WHERE name='alpha'`).Scan(&alphaID); err != nil {
-		t.Fatal(err)
-	}
-	placeAuthority(t, e, alphaID, "mem_redactedtitle", "# would be a title")
-	src := filepath.Join(e.store.dataDir, "memory", alphaID, "mem_redactedtitle")
-	dst := filepath.Join(e.store.dataDir, "memory", alphaID, "_redacted", "mem_redactedtitle")
-	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(src, dst); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := e.store.RebuildIndex(); err != nil {
-		t.Fatal(err)
-	}
-	var status string
-	var title sql.NullString
-	if err := e.db.QueryRow(`SELECT status, title FROM memories WHERE id='mem_redactedtitle'`).Scan(&status, &title); err != nil {
-		t.Fatal(err)
-	}
-	if status != "redacted" || title.Valid {
-		t.Fatalf("redacted backfill: status %q title %v, want redacted with no title", status, title)
-	}
 }
 
 func sp(s string) *string { return &s }
@@ -195,4 +82,11 @@ func deref(p *string) string {
 		return "<nil>"
 	}
 	return *p
+}
+
+func strPtrEq(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
 }

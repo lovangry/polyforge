@@ -366,10 +366,10 @@ func projectsMembers(ctx *Context, client *aihubclient.Client, args []string) er
 var cmdBackup = &Command{
 	Name:    "backup",
 	Group:   GroupMgmt,
-	Summary: "Write a DB-only snapshot on the server (M4, admin only; not a full backup)",
+	Summary: "Write a database snapshot on the server (M4, admin only; every memory, no git repos)",
 	Usage: "pf backup\n" +
-		"  Writes a consistent DB-only snapshot (VACUUM INTO) under the server's data dir backups/, on the same disk.\n" +
-		"  It does NOT include memory content (the memory text lives only as files under memory/) nor the git repos (git/).\n" +
+		"  Writes a consistent snapshot of the database (VACUUM INTO) under the server's data dir backups/, on the same disk.\n" +
+		"  Memories live in the database, so it holds every memory; it does NOT include the git repos (git/).\n" +
 		"  For a full backup use the backup steps of .polyforge/deploy.sh, or copy the whole data dir.",
 	Setup: func(fs *flag.FlagSet) {},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
