@@ -219,6 +219,34 @@ func TestWatchSnapshotReadsFinishedWIFromTheCapsule(t *testing.T) {
 	}
 }
 
+// A chat poll of a subscribed work item the daemon holds no job for
+// reads aihub at most once per snapshot, by id or by slug: the id
+// resolution's record is the snapshot's record, and the live-progress
+// lookup reads no hub.
+func TestWatchSnapshotOfNonLiveWIReadsTheHubOnce(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.hub.mu.Lock()
+	td.hub.slugs = map[string]string{"wi_gone": "proj#9"}
+	td.hub.canonical = map[string]string{"proj#9": "wi_gone"}
+	td.hub.mu.Unlock()
+	td.seedPendingQuestion(t, "wi_gone", "q-9", "s1", "x")
+	gets := func() int {
+		td.hub.mu.Lock()
+		defer td.hub.mu.Unlock()
+		return td.hub.gets["wi_gone"]
+	}
+	for _, spelling := range []string{"wi_gone", "proj#9"} {
+		base := gets()
+		snap, err := td.client.WatchSnapshot(spelling, 0)
+		if err != nil || snap.WorkItem != "wi_gone" || snap.Slug != "proj#9" || snap.Execution == nil {
+			t.Fatalf("snapshot by %s: %+v %v", spelling, snap, err)
+		}
+		if n := gets() - base; n != 1 {
+			t.Fatalf("snapshot by %s read the hub %d times, want 1", spelling, n)
+		}
+	}
+}
+
 // A watcher's start subscribes its chat to the held WIs the chat
 // submitted or its owner owns (origin owner, else the reporter), once; a
 // new subscription's cursor sits just before the WI's newest decision

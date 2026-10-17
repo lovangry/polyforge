@@ -346,7 +346,10 @@ func (d *Daemon) submitRoute() http.HandlerFunc {
 		// calls by it resolve without another aihub round-trip. An
 		// unresolvable spelling passes through unchanged — the claim
 		// path resolves (or refuses) server-side, exactly as before.
-		canonical := d.canonWI(wi)
+		canonical, resolved := d.resolveWI(wi)
+		if canonical == "" {
+			canonical = wi
+		}
 		d.rt.NoteAlias(wi, canonical)
 		// The live check is the runtime's own job set (the queue's slot
 		// marks are accounting, reconciled a tick later); a pending
@@ -374,10 +377,14 @@ func (d *Daemon) submitRoute() http.HandlerFunc {
 		// backstop. A failed probe refuses nothing here (the submit is
 		// durable-queued; the dispatcher retries the probe at Start). A
 		// resume skips it: its Start answers the same refusals directly.
+		// The record the resolution read serves as the probe.
 		var probe *api.WorkItem
 		if !body.Resume {
-			if p, err := d.hub.GetWorkItem(canonical); err == nil {
-				probe = p
+			probe = resolved
+			if probe == nil {
+				if p, err := d.hub.GetWorkItem(canonical); err == nil {
+					probe = p
+				}
 			}
 		}
 		if probe != nil && probe.ProjectName != "" {
