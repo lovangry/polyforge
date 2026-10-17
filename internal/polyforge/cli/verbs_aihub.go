@@ -241,12 +241,9 @@ func fileCreate(ctx *Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx.finish(raw, func() {
-		var wi WIView
-		if err := json.Unmarshal(raw, &wi); err == nil {
-			fmt.Fprintln(ctx.Stdout)
-			renderWIDetail(ctx.Stdout, &wi)
-		}
+	finishAs(ctx, raw, func(wi *WIView) {
+		fmt.Fprintln(ctx.Stdout)
+		renderWIDetail(ctx.Stdout, wi)
 	})
 	return nil
 }
@@ -314,12 +311,9 @@ func fileDep(ctx *Context, args []string) error {
 	default:
 		return fmt.Errorf("file dep: unknown action %q (expected add|rm|list)", sub)
 	}
-	ctx.finish(raw, func() {
-		var d depsView
-		if err := json.Unmarshal(raw, &d); err == nil {
-			fmt.Fprintf(ctx.Stdout, "%s\n", self)
-			renderDeps(ctx.Stdout, &d)
-		}
+	finishAs(ctx, raw, func(d *depsView) {
+		fmt.Fprintf(ctx.Stdout, "%s\n", self)
+		renderDeps(ctx.Stdout, d)
 	})
 	return nil
 }
@@ -408,12 +402,9 @@ func fileEdit(ctx *Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx.finish(raw, func() {
-		var wi WIView
-		if err := json.Unmarshal(raw, &wi); err == nil {
-			fmt.Fprintln(ctx.Stdout)
-			renderWIDetail(ctx.Stdout, &wi)
-		}
+	finishAs(ctx, raw, func(wi *WIView) {
+		fmt.Fprintln(ctx.Stdout)
+		renderWIDetail(ctx.Stdout, wi)
 	})
 	return nil
 }
@@ -445,13 +436,10 @@ func fileShow(ctx *Context, args []string) error {
 			return fmt.Errorf("file show: dependencies: %w", err)
 		}
 	}
-	ctx.finish(raw, func() {
-		var wi WIView
-		if err := json.Unmarshal(raw, &wi); err == nil {
-			fmt.Fprintln(ctx.Stdout)
-			renderWIDetail(ctx.Stdout, &wi)
-			renderDeps(ctx.Stdout, deps)
-		}
+	finishAs(ctx, raw, func(wi *WIView) {
+		fmt.Fprintln(ctx.Stdout)
+		renderWIDetail(ctx.Stdout, wi)
+		renderDeps(ctx.Stdout, deps)
 	})
 	return nil
 }
@@ -563,14 +551,9 @@ var cmdQueue = &Command{
 			return err
 		}
 		// Both faces render the items segment; --json is the raw server body.
-		ctx.finish(raw, func() {
-			var l struct {
-				Items []WIView `json:"items"`
-			}
-			if err := json.Unmarshal(raw, &l); err == nil {
-				fmt.Fprintf(ctx.Stdout, "%d work item(s)\n", len(l.Items))
-				renderWITable(ctx.Stdout, l.Items)
-			}
+		finishAs(ctx, raw, func(l *itemList[WIView]) {
+			fmt.Fprintf(ctx.Stdout, "%d work item(s)\n", len(l.Items))
+			renderWITable(ctx.Stdout, l.Items)
 		})
 		return nil
 	},
@@ -595,9 +578,7 @@ func queueMerged(ctx *Context, ready bool, status string, limit int) error {
 		if err != nil {
 			return fmt.Errorf("queue: project %s: %w", p, err)
 		}
-		var l struct {
-			Items []WIView `json:"items"`
-		}
+		var l itemList[WIView]
 		if err := json.Unmarshal(raw, &l); err != nil {
 			return fmt.Errorf("queue: project %s: %w", p, err)
 		}
@@ -637,11 +618,8 @@ var cmdCancel = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.finish(raw, func() {
-			var wi api.WorkItem
-			if err := json.Unmarshal(raw, &wi); err == nil {
-				fmt.Fprintf(ctx.Stdout, "cancelled %s (status %s)\n", wi.Slug, wi.Status)
-			}
+		finishAs(ctx, raw, func(wi *api.WorkItem) {
+			fmt.Fprintf(ctx.Stdout, "cancelled %s (status %s)\n", wi.Slug, wi.Status)
 		})
 		return nil
 	},
@@ -703,14 +681,9 @@ var cmdRecall = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.finish(raw, func() {
-			var l struct {
-				Items []memorySearchHit `json:"items"`
-			}
-			if err := json.Unmarshal(raw, &l); err == nil {
-				fmt.Fprintf(ctx.Stdout, "%d hit(s)\n", len(l.Items))
-				renderMemories(ctx.Stdout, l.Items)
-			}
+		finishAs(ctx, raw, func(l *itemList[memorySearchHit]) {
+			fmt.Fprintf(ctx.Stdout, "%d hit(s)\n", len(l.Items))
+			renderMemories(ctx.Stdout, l.Items)
 		})
 		return nil
 	},
@@ -818,9 +791,8 @@ var cmdRemember = &Command{
 		if err := ctx.aihub().Do("POST", "/api/v1/memories", body, &raw); err != nil {
 			return err
 		}
-		ctx.finish(raw, func() {
-			var m api.Memory
-			if err := json.Unmarshal(raw, &m); err == nil && m.ID != "" {
+		finishAs(ctx, raw, func(m *api.Memory) {
+			if m.ID != "" {
 				fmt.Fprintf(ctx.Stdout, "stored %s (type %s, visibility %s)\n", m.ID, m.Type, m.Visibility)
 			}
 		})

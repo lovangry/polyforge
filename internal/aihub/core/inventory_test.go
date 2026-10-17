@@ -129,7 +129,7 @@ func TestWIRepoInventoryWellFormedCreatePersistsAndServes(t *testing.T) {
 	if want := `[{"name":"lib"},{"name":"app"}]`; stored != want {
 		t.Fatalf("stored inventory\n got %s\nwant %s (names only)", stored, want)
 	}
-	view, err := env.WIs.View(wi)
+	view, err := env.WIs.Get(wi.ID, GetOptions{})
 	if err != nil {
 		t.Fatalf("view: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestWIRepoInventoryWellFormedCreatePersistsAndServes(t *testing.T) {
 	if err := env.DB.QueryRow(`SELECT repo_inventory FROM work_items WHERE id=?1`, plain).Scan(&col); err != nil || col != nil {
 		t.Fatalf("plain WI column = %v (%v), want NULL", col, err)
 	}
-	pv, err := env.WIs.View(&api.WorkItem{ID: plain})
+	pv, err := env.WIs.Get(plain, GetOptions{})
 	if err != nil {
 		t.Fatalf("plain view: %v", err)
 	}

@@ -102,11 +102,19 @@ func repoInventoryOf(q queryRower, wiID string) ([]RepoDecl, error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, Fail(api.ErrCoreNotFound, "", "work item %s", wiID)
 	}
-	if err != nil || !raw.Valid || raw.String == "" {
+	if err != nil {
 		return nil, err
 	}
+	return parseInventory(raw.String)
+}
+
+// parseInventory decodes a stored inventory column ("" = none: nil).
+func parseInventory(raw string) ([]RepoDecl, error) {
+	if raw == "" {
+		return nil, nil
+	}
 	var inv []RepoDecl
-	if err := json.Unmarshal([]byte(raw.String), &inv); err != nil {
+	if err := json.Unmarshal([]byte(raw), &inv); err != nil {
 		return nil, err
 	}
 	return inv, nil
@@ -151,11 +159,8 @@ func claimReposTx(tx *sql.Tx, wiID, projectID string) ([]api.ProjectRepo, error)
 // ready projection leaves it out (like an unfinished blocks edge) until
 // the repo is restored or the WI is canceled.
 func inventoryRepoGone(raw string, inProject map[string]bool) (bool, error) {
-	if raw == "" {
-		return false, nil
-	}
-	var inv []RepoDecl
-	if err := json.Unmarshal([]byte(raw), &inv); err != nil {
+	inv, err := parseInventory(raw)
+	if err != nil {
 		return false, err
 	}
 	for _, r := range inv {

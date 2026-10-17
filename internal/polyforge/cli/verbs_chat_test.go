@@ -3,6 +3,8 @@ package cli
 import (
 	"strings"
 	"testing"
+
+	"github.com/silgrid/polyforge/internal/common/protocol"
 )
 
 func TestChatInitPrintsIDAndSendsHarnessSession(t *testing.T) {
@@ -63,7 +65,7 @@ func TestStatusRendersDaemonNameAndOrigin(t *testing.T) {
 	var b strings.Builder
 	renderStatus(&b, &StatusResponse{
 		MachineID: "m-h", DisplayName: "laptop",
-		Jobs: []StatusJob{{WorkItemID: "wi_1", Status: "running", Origin: &JobOrigin{Kind: "chat", ChatID: "chat_z"}}},
+		Jobs: []StatusJob{{WorkItemID: "wi_1", Status: "running", Origin: &protocol.Origin{Kind: "chat", ChatID: "chat_z"}}},
 	})
 	for _, want := range []string{"daemon: m-h (laptop)", "ORIGIN", "chat:chat_z"} {
 		if !strings.Contains(b.String(), want) {

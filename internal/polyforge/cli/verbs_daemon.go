@@ -50,13 +50,12 @@ var cmdSubmit = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.finish(raw, func() {
-			var sr SubmitResponse
-			if err := json.Unmarshal(raw, &sr); err == nil && sr.Accepted {
-				fmt.Fprintf(ctx.Stdout, "submitted %s (accepted by the local daemon)\n", name)
-			} else {
-				printJSON(ctx.Stdout, raw)
+		finishOrRaw(ctx, raw, func(sr *SubmitResponse) bool {
+			if !sr.Accepted {
+				return false
 			}
+			fmt.Fprintf(ctx.Stdout, "submitted %s (accepted by the local daemon)\n", name)
+			return true
 		})
 		return nil
 	},
@@ -145,9 +144,7 @@ var cmdAnswer = &Command{
 		if ans.QuestionID == "" {
 			ans.QuestionID = payload.QuestionID
 		}
-		ctx.finish(raw, func() {
-			fmt.Fprintf(ctx.Stdout, "answer delivered for question %s\n", ans.QuestionID)
-		})
+		ctx.finishLine(raw, "answer delivered for question %s\n", ans.QuestionID)
 		return nil
 	},
 }
@@ -178,9 +175,7 @@ var cmdPause = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.finish(raw, func() {
-			fmt.Fprintf(ctx.Stdout, "pause requested for %s (clean_pause set on the hub; restart will not auto-resume it)\n", closeName(raw, args[0]))
-		})
+		ctx.finishLine(raw, "pause requested for %s (clean_pause set on the hub; restart will not auto-resume it)\n", closeName(raw, args[0]))
 		return nil
 	},
 }
@@ -399,9 +394,7 @@ var cmdWrap = &Command{
 			}
 			return err
 		}
-		ctx.finish(raw, func() {
-			fmt.Fprintf(ctx.Stdout, "%s requested for %s\n", reason, closeName(raw, args[0]))
-		})
+		ctx.finishLine(raw, "%s requested for %s\n", reason, closeName(raw, args[0]))
 		return nil
 	},
 }
@@ -434,13 +427,9 @@ var cmdOps = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.finish(raw, func() {
-				var s StatusResponse
-				if err := json.Unmarshal(raw, &s); err == nil {
-					renderStatus(ctx.Stdout, &s)
-				} else {
-					printJSON(ctx.Stdout, raw)
-				}
+			finishOrRaw(ctx, raw, func(s *StatusResponse) bool {
+				renderStatus(ctx.Stdout, s)
+				return true
 			})
 			return nil
 		case "auto":
@@ -452,9 +441,7 @@ var cmdOps = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.finish(raw, func() {
-				fmt.Fprintln(ctx.Stdout, "graceful shutdown requested; the daemon quiesces and exits")
-			})
+			ctx.finishLine(raw, "graceful shutdown requested; the daemon quiesces and exits\n")
 			return nil
 		default:
 			return fmt.Errorf("ops: unknown action %q", args[0])
@@ -468,13 +455,9 @@ func opsShow(ctx *Context, d *DaemonClient, render func(s *StatusResponse) strin
 	if err != nil {
 		return err
 	}
-	ctx.finish(raw, func() {
-		var s StatusResponse
-		if err := json.Unmarshal(raw, &s); err == nil {
-			fmt.Fprintln(ctx.Stdout, render(&s))
-		} else {
-			printJSON(ctx.Stdout, raw)
-		}
+	finishOrRaw(ctx, raw, func(s *StatusResponse) bool {
+		fmt.Fprintln(ctx.Stdout, render(s))
+		return true
 	})
 	return nil
 }

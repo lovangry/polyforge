@@ -268,57 +268,16 @@ func (c *Client) GetMemoryContent(id string) ([]byte, error) {
 	return c.send("GET", "/api/v1/memories/"+url.PathEscape(id)+"?format=content", nil)
 }
 
-// UserCreateRequest is the M1 create body. v1 field: user_type
-// (human|machine), not v0's "kind".
-type UserCreateRequest struct {
-	DisplayName string `json:"display_name"`
-	Email       string `json:"email,omitempty"` // required for human users (CORE-400 otherwise)
-	UserType    string `json:"user_type,omitempty"`
-	Role        string `json:"role,omitempty"` // writer|admin
-}
-
-// UserPatchRequest is the M1 PATCH body.
-type UserPatchRequest struct {
-	DisplayName string `json:"display_name,omitempty"`
-	Role        string `json:"role,omitempty"`
-}
-
-// ApiKeyCreateRequest is the M2 mint body (plaintext returned exactly
-// once by the server).
-type ApiKeyCreateRequest struct {
-	UserID    string  `json:"user_id"`
-	ProjectID *string `json:"project_id,omitempty"`
-}
-
-// ProjectCreateRequest is the M3 create body.
-type ProjectCreateRequest struct {
-	Name        string            `json:"name"`
-	Description string            `json:"description,omitempty"`
-	Repos       []api.ProjectRepo `json:"repos,omitempty"` // task-repo inventory (served back on every claim)
-	Visible     *bool             `json:"visible,omitempty"`
-}
-
-// ProjectMember is one membership row (role: viewer|writer|maintainer).
-type ProjectMember struct {
-	UserID string `json:"user_id"`
-	Role   string `json:"role"`
-}
-
-// ProjectPatchRequest is the M3 PATCH body: member upserts plus the
-// physical remove list, mirroring the v0 wire contract.
-type ProjectPatchRequest struct {
-	Description   *string          `json:"description,omitempty"`
-	Members       *[]ProjectMember `json:"members,omitempty"`
-	RemoveMembers *[]string        `json:"remove_members,omitempty"`
-	Visible       *bool            `json:"visible,omitempty"`
-	Repos         *[]RepoRef       `json:"repos,omitempty"`
-}
-
-// RepoRef is one task-repo inventory entry (name + clone URL).
-type RepoRef struct {
-	Name string `json:"name"`
-	URL  string `json:"url"`
-}
+// The admin request bodies are the shared common/api wire types.
+type (
+	UserCreateRequest    = api.UserCreateRequest
+	UserPatchRequest     = api.UserPatchRequest
+	ApiKeyCreateRequest  = api.APIKeyCreateRequest
+	ProjectCreateRequest = api.ProjectCreateRequest
+	ProjectMember        = api.ProjectMember
+	ProjectPatchRequest  = api.ProjectPatchRequest
+	RepoRef              = api.ProjectRepo
+)
 
 // CreateUser issues a user (M1).
 func (c *Client) CreateUser(req UserCreateRequest) (json.RawMessage, error) {
@@ -383,27 +342,13 @@ func (c *Client) Backup() (json.RawMessage, error) {
 // ---------------------------------------------------------------------------
 // Machines faces (M3 heartbeat wiring).
 
-// MachineHeartbeat is the POST /api/v1/machines/heartbeat body: machine
-// identity plus the daemon's live projection. No client timestamp — the
-// server stamps last_heartbeat_at itself (single clock, no skew).
-// live_wi_ids carries NO omitempty: every heartbeat restates the full
-// projection (an idle daemon sends []), because the server treats an
-// absent field as keep-old and a held-back empty list would leave ghost
-// WI ids in the machines read face forever.
-type MachineHeartbeat struct {
-	MachineID      string   `json:"machine_id"`
-	RuntimeVersion string   `json:"runtime_version,omitempty"`
-	Mode           string   `json:"mode,omitempty"`
-	LiveWIIDs      []string `json:"live_wi_ids"`
-}
-
-// MachineHeartbeatResult is the heartbeat response (the daemon heartbeats
-// with its operator-issued credential; registration issues no key).
-type MachineHeartbeatResult struct {
-	Registered bool   `json:"registered"` // true only on the first call
-	MachineID  string `json:"machine_id"`
-	UserID     string `json:"user_id"`
-}
+// The machines bodies are the shared common/api wire types.
+type (
+	MachineHeartbeat       = api.MachineHeartbeat
+	MachineHeartbeatResult = api.MachineHeartbeatResult
+	MachineStatus          = api.MachineStatus
+	MachinesList           = api.MachinesList
+)
 
 // Heartbeat posts one machine heartbeat (upsert: first call registers).
 func (c *Client) Heartbeat(req MachineHeartbeat) (*MachineHeartbeatResult, error) {
@@ -412,26 +357,6 @@ func (c *Client) Heartbeat(req MachineHeartbeat) (*MachineHeartbeatResult, error
 		return nil, err
 	}
 	return &out, nil
-}
-
-// MachineStatus is one GET /api/v1/machines row (admin read face): the
-// stored liveness projection plus the server-computed stale boolean.
-type MachineStatus struct {
-	ID                  string   `json:"id"`
-	UserID              string   `json:"user_id"`
-	RuntimeVersion      string   `json:"runtime_version,omitempty"`
-	Mode                string   `json:"mode,omitempty"`
-	LiveWIIDs           []string `json:"live_wi_ids"`
-	LastHeartbeatAt     string   `json:"last_heartbeat_at"`
-	HeartbeatAgeSeconds *int64   `json:"heartbeat_age_seconds,omitempty"`
-	Stale               bool     `json:"stale"`
-}
-
-// MachinesList is the GET /api/v1/machines response.
-type MachinesList struct {
-	Machines          []MachineStatus `json:"machines"`
-	StaleAfterSeconds int64           `json:"stale_after_seconds"`
-	Count             int             `json:"count"`
 }
 
 // ListMachinesRaw reads the machines liveness face undecoded (--json

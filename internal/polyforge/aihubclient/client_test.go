@@ -187,3 +187,29 @@ func TestForceEndSessionPinsRouteAndBody(t *testing.T) {
 		t.Fatalf("refusal envelope must surface as an error")
 	}
 }
+
+// TestCreateApiKeySendsName: the mint body carries the key name the
+// server stores (an unnamed key keeps the field off the wire).
+func TestCreateApiKeySendsName(t *testing.T) {
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var b map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		bodies = append(bodies, b)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "k")
+	if _, err := c.CreateApiKey(ApiKeyCreateRequest{UserID: "usr_1", Name: "ci"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.CreateApiKey(ApiKeyCreateRequest{UserID: "usr_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(bodies) != 2 || bodies[0]["name"] != "ci" || bodies[0]["user_id"] != "usr_1" {
+		t.Fatalf("named mint body = %v", bodies)
+	}
+	if _, ok := bodies[1]["name"]; ok {
+		t.Fatalf("unnamed mint body carries name: %v", bodies[1])
+	}
+}

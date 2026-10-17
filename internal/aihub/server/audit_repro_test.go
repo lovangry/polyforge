@@ -124,8 +124,7 @@ func TestReproB11NonMemberMemoryReadIs404(t *testing.T) {
 }
 
 // B12: a database error while resolving a work item's dependencies must
-// surface as a typed 5xx error, not an empty 200 list. Before the fix
-// depsView swallowed the error from WIs.Dependencies.
+// surface as a typed 5xx error, not an empty 200 list.
 func TestReproB12DepsDBErrorReturns5xx(t *testing.T) {
 	e := newSrvEnv(t)
 

@@ -642,8 +642,8 @@ func TestSessionPauseCleanFlagDistinction(t *testing.T) {
 }
 
 // TestWorkItemCarriesPublicSessionBlockNeverHash: the m4 read surface —
-// View carries the public audit fields, and no view anywhere contains
-// session_hash.
+// the work item view carries the public audit fields, and no view
+// anywhere contains session_hash.
 func TestWorkItemCarriesPublicSessionBlockNeverHash(t *testing.T) {
 	env, m := sessionEnv(t)
 	secret := "1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f"
@@ -654,7 +654,7 @@ func TestWorkItemCarriesPublicSessionBlockNeverHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	view, err := env.WIs.View(wi)
+	view, err := env.WIs.Get(wi.ID, GetOptions{})
 	if err != nil {
 		t.Fatalf("view: %v", err)
 	}
@@ -673,7 +673,7 @@ func TestWorkItemCarriesPublicSessionBlockNeverHash(t *testing.T) {
 	// A second WI keeps a zero block.
 	id2 := mustCreateExecWI(t, env, "unheld view", nil, "")
 	wi2, _ := env.WIs.Get(id2, GetOptions{})
-	view2, err := env.WIs.View(wi2)
+	view2, err := env.WIs.Get(wi2.ID, GetOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -774,7 +774,7 @@ func TestDependencyOnlyWrappedBlockerReleases(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		v, err := env.WIs.View(wi)
+		v, err := env.WIs.Get(wi.ID, GetOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -25,6 +25,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/polyforge/cli"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
@@ -70,13 +71,8 @@ type chatsDoc struct {
 	Chats   map[string]string `json:"chats"` // "<harness>:<session>" -> chat id
 }
 
-// chatRecord is the POST /chat/init answer.
-type chatRecord struct {
-	ChatID         string `json:"chat_id"`
-	Harness        string `json:"harness"`
-	HarnessSession string `json:"harness_session"`
-	Created        bool   `json:"created"`
-}
+// chatRecord is the POST /chat/init answer (the CLI's wire type).
+type chatRecord = cli.ChatRecord
 
 func newChatID() (string, error) {
 	b := make([]byte, 8)
@@ -151,11 +147,9 @@ func (d *Daemon) chatInitRoute(w http.ResponseWriter, r *http.Request) {
 }
 
 // reqOrigin is the optional "origin" a submit-family body carries: the
-// caller's chat id (PF_CHAT_ID) and owner (PF_USER_ID / config user).
-type reqOrigin struct {
-	ChatID string `json:"chat_id,omitempty"`
-	Owner  string `json:"owner,omitempty"`
-}
+// caller's chat id (PF_CHAT_ID) and owner (PF_USER_ID / config user) —
+// the CLI's wire type.
+type reqOrigin cli.SubmitOrigin
 
 // origin maps the request to the recorded origin: every interactive
 // submit is a chat origin — the ChatID labels the harness chat when

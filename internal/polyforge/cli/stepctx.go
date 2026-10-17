@@ -112,11 +112,8 @@ func stepRemember(ctx *Context, fs *flag.FlagSet, memType, proj, content string)
 	if err != nil {
 		return fmt.Errorf("remember: not stored (the step goes on): %w", err)
 	}
-	ctx.finish(raw, func() {
-		var m api.Memory
-		if json.Unmarshal(raw, &m) == nil {
-			fmt.Fprintf(ctx.Stdout, "stored %s (type %s, visibility %s)\n", m.ID, m.Type, m.Visibility)
-		}
+	finishAs(ctx, raw, func(m *api.Memory) {
+		fmt.Fprintf(ctx.Stdout, "stored %s (type %s, visibility %s)\n", m.ID, m.Type, m.Visibility)
 	})
 	return nil
 }
