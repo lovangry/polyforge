@@ -917,8 +917,9 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, spelling, sessionID stri
 	return j, cctx, nil
 }
 
-// claimScene lays the claimed capsule out: a fresh clone, the cross-daemon sealed-head guard, the spawn
-// counter seed and the materialize (task-repo clones included). A failure
+// claimScene lays the claimed capsule out: a fresh clone, the
+// cross-daemon sealed-head guard and the materialize (task-repo clones
+// included). A failure
 // answers the error and the close note.
 func (r *Runtime) claimScene(ctx context.Context, j *job, c api.SessionClaim) (note string, err error) {
 	if err := ctx.Err(); err != nil {
@@ -930,14 +931,6 @@ func (r *Runtime) claimScene(ctx context.Context, j *job, c api.SessionClaim) (n
 	if err := r.verifySealedHead(j, c); err != nil {
 		return err.Error(), err
 	}
-	// B2 spawn_n source: a FRESHLY CLAIMED capsule may carry another
-	// session's spawn journal (the re-claim clone path — the journal rides
-	// capsule git), so the derivation counter continues where the
-	// capsule's history left off; a brand-new capsule answers 0.
-	seed := spawnJournalMaxN(j.capsuleDir) // disk read: outside the job's mutex
-	j.mu.Lock()
-	j.spawnN = seed
-	j.mu.Unlock()
 	if err := r.materialize(ctx, j); err != nil {
 		// A typed task-repo clone failure (DAEMON-507) keeps its detail as
 		// the close note; every other materialization failure names itself.
@@ -978,42 +971,24 @@ func (r *Runtime) finishClaim(ctx context.Context, j *job, sceneErr error, note 
 		r.dropJob(j)
 		return r.abandonClaim(j, sceneErr, note)
 	}
-	starter := r.cfg.AgentStarter
-	if starter == nil {
+	if r.cfg.AgentStarter == nil {
 		err := fmt.Errorf("runtime misassembly: no execution engine bound (Config.AgentStarter is nil) — the legacy in-package WI-Agent engine was deleted (polyforge#106); the daemon binds the driver bridge starter unconditionally at assembly")
 		r.dropJob(j)
 		return r.abandonClaim(j, err, err.Error())
 	}
-	// The derivation IS a derivation (B2): advance the counter so the
-	// RTStarted emission carries SpawnN ≥ 1 (observe refuses to monitor
-	// SpawnN ≤ 0, and the driver's step ordinals seed from it).
-	j.mu.Lock()
-	j.spawnN++
-	spawnN := j.spawnN
-	j.mu.Unlock()
-	h, err := starter(ctx, AgentStartInput{
-		WI:            j.wi,
-		Project:       j.project,
-		CapsuleDir:    j.capsuleDir,
-		BundleName:    j.bundleName,
-		SessionHandle: j.sessionFingerprint,
-		SpawnN:        int64(spawnN),
-		Spawner:       r.spawner,
-		StepEnded:     r.stepEnded(j.wi),
-		// polyforge#79: the claim-time compose rides to the driver
-		StepCandidates: j.stepCandidates,
-	})
+	// polyforge#79: the claim-time compose rides to the driver; the
+	// derivation advances the counter so RTStarted carries SpawnN ≥ 1
+	// (observe refuses to monitor SpawnN ≤ 0).
+	_, err := r.startEngine(ctx, j, j.stepCandidates, "")
+	if errors.Is(err, errEngineStopped) {
+		// nothing runs behind the shutdown: the claim is deferred like
+		// any the shutdown caught
+		r.dropJob(j)
+		return claimDeferredError(j.wi)
+	}
 	if err != nil {
 		r.dropJob(j)
 		return r.abandonClaim(j, err, "driver start: "+err.Error())
-	}
-	pid := r.bindAgent(j, h)
-	if r.stopped(ctx) {
-		// the shutdown came while the engine started: nothing runs behind
-		// it — the claim is deferred like any the shutdown caught
-		r.killAgentTree(j)
-		r.dropJob(j)
-		return claimDeferredError(j.wi)
 	}
 	if err := j.transition(StateRunning); err != nil {
 		return err // unreachable: only the claim leaves CLAIMING
@@ -1023,24 +998,11 @@ func (r *Runtime) finishClaim(ctx context.Context, j *job, sceneErr error, note 
 	}
 	// the secret rides in-process to the observe lane only (its M4
 	// session revalidation needs it); never a log, never the capsule
+	j.mu.Lock()
+	spawnN, pid := j.spawnN, j.agentPID
+	j.mu.Unlock()
 	r.send(protocol.RTMsg{Kind: protocol.RTStarted, SpawnN: spawnN, WorkItem: j.wi, AgentPID: pid, SessionID: j.sessionID})
 	return nil
-}
-
-// bindAgent makes h the job's agent and answers the pid recorded for it.
-// A bridge handle fronts no child process group (its PID() answers the
-// hosting daemon's own pid — never signalable), so its pid is recorded as
-// 0; a scripted test engine's real child pid is recorded verbatim for the
-// tree killer.
-func (r *Runtime) bindAgent(j *job, h AgentHandle) int {
-	pid := h.PID()
-	if pid == os.Getpid() {
-		pid = 0
-	}
-	j.mu.Lock()
-	j.agent, j.agentPID, j.agentStartedAt = h, pid, h.StartedAt()
-	j.mu.Unlock()
-	return pid
 }
 
 // unmappedProjectError is the typed DAEMON-412 placement refusal.

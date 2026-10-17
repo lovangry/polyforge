@@ -16,6 +16,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -176,8 +177,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// The engine binding is the driver or NOTHING (polyforge#106): there
 	// is no other engine, so a nil starter is a misassembled runtime, not
 	// an engine choice — refused loudly, never fallen back from.
-	starter := r.cfg.AgentStarter
-	if starter == nil {
+	if r.cfg.AgentStarter == nil {
 		r.boundedFail(ctx, j, "runtime misassembly: no execution engine bound (Config.AgentStarter is nil) — the legacy in-package WI-Agent engine was deleted (polyforge#106); the daemon binds the driver bridge starter unconditionally at assembly")
 		return
 	}
@@ -200,17 +200,9 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	stepCandidates := r.effectiveCandidatesForRecovery(j)
 	interruptedCause := cause
 	for {
-		// Driver WI: restart the Go Driver via the bound engine starter
-		// (it reads execution.json and continues from the current step;
-		// the recovery steps above — killTree, commitDirty — already ran).
-		// The relaunch is a fresh derivation (B2): advance the counter.
-		// The seed is the CAPSULE SPAWN JOURNAL max, not the job's counter
-		// (the #99 verification lesson): the driver's internal step ordinals
-		// run ahead of the relaunch counter without ever writing back, so a
-		// job-counter seed re-derives an ordinal the dead driver already
-		// used — two step processes on one drop path, the fence defeated.
-		// The journal is the one ledger every derivation appends to;
-		// seeding past its max restores the fence.
+		// Restart the Go Driver via the bound engine starter (it reads
+		// execution.json and continues from the current step; the
+		// recovery steps above — killTree, commitDirty — already ran).
 		if r.stopped(ctx) {
 			// the shutdown: no agent starts behind it. The job stays
 			// RECOVERING with no agent; the next daemon start recovers
@@ -219,38 +211,13 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 			fmt.Fprintf(os.Stderr, "runtime: %s: recovery stopped by the shutdown before its relaunch (the next start recovers it)\n", j.wi)
 			return
 		}
-		m := spawnJournalMaxN(j.capsuleDir) // disk read: outside the job's mutex
-		j.mu.Lock()
-		if m > j.spawnN {
-			j.spawnN = m
+		h, err := r.startEngine(ctx, j, stepCandidates, interruptedCause)
+		if errors.Is(err, errEngineStopped) {
+			// the record stays RECOVERING for the next start
+			r.persistLog(j.wi)
+			return
 		}
-		j.spawnN++
-		ordinal := int64(j.spawnN)
-		j.mu.Unlock()
-		h, err := starter(ctx, AgentStartInput{
-			WI:            j.wi,
-			Project:       j.project,
-			CapsuleDir:    j.capsuleDir,
-			BundleName:    j.bundleName,
-			SessionHandle: j.sessionFingerprint,
-			SpawnN:        ordinal,
-			Spawner:       r.spawner,
-			StepEnded:     r.stepEnded(j.wi),
-			// polyforge#79: the effective lists this re-derivation
-			// dispatches under, and the archive signal for the dispatch
-			// the recovery cause interrupted.
-			StepCandidates:   stepCandidates,
-			InterruptedCause: interruptedCause,
-		})
 		if err == nil {
-			r.bindAgent(j, h)
-			if r.stopped(ctx) {
-				// the shutdown came while the engine started: torn down,
-				// the record stays RECOVERING for the next start
-				r.killAgentTree(j)
-				r.persistLog(j.wi)
-				return
-			}
 			r.persistLog(j.wi) // persisted with the advanced counter (crash-safe)
 			r.recovered(j, h, cause)
 			return
@@ -260,15 +227,64 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		j.recoverFails++
 		fails := j.recoverFails
 		j.mu.Unlock()
-		if perr := r.persist(); perr != nil {
-			fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
-		}
+		r.persistLog(j.wi)
 		if fails >= r.cfg.MaxRecoveries {
 			r.boundedFail(ctx, j, fmt.Sprintf("recovery budget exhausted (%d consecutive recovery failures, cause %q)", fails, cause))
 			return
 		}
 		fmt.Fprintf(os.Stderr, "runtime: %s: recovery failed (%d/%d), retrying the ladder\n", j.wi, fails, r.cfg.MaxRecoveries)
 	}
+}
+
+// errEngineStopped is startEngine's answer when the shutdown came while
+// the engine started: it was torn down again and nothing runs.
+var errEngineStopped = errors.New("runtime: the shutdown came while the engine started")
+
+// startEngine starts the execution engine for j as a fresh derivation
+// (B2) and binds its handle. The counter continues past the capsule
+// spawn journal's max, not just the job's own counter (the #99
+// verification lesson): the driver's step ordinals run ahead of the job
+// counter without writing back, and the journal — the one ledger every
+// derivation appends to, carried across sessions by the capsule — is
+// what keeps a new ordinal off a drop path an earlier driver used. A
+// shutdown that lands while the engine starts tears it down again.
+func (r *Runtime) startEngine(ctx context.Context, j *job, stepCandidates map[string][]string, interruptedCause string) (AgentHandle, error) {
+	m := spawnJournalMaxN(j.capsuleDir) // disk read: outside the job's mutex
+	j.mu.Lock()
+	j.spawnN = max(j.spawnN, m) + 1
+	spawnN := j.spawnN
+	j.mu.Unlock()
+	h, err := r.cfg.AgentStarter(ctx, AgentStartInput{
+		WI:               j.wi,
+		Project:          j.project,
+		CapsuleDir:       j.capsuleDir,
+		BundleName:       j.bundleName,
+		SessionHandle:    j.sessionFingerprint,
+		SpawnN:           int64(spawnN),
+		Spawner:          r.spawner,
+		StepEnded:        r.stepEnded(j.wi),
+		StepCandidates:   stepCandidates,
+		InterruptedCause: interruptedCause,
+	})
+	if err != nil {
+		return nil, err
+	}
+	// A bridge handle fronts no child process group (its PID() answers
+	// the hosting daemon's own pid — never signalable), so its pid is
+	// recorded as 0; a scripted test engine's real child pid is recorded
+	// verbatim for the tree killer.
+	pid := h.PID()
+	if pid == os.Getpid() {
+		pid = 0
+	}
+	j.mu.Lock()
+	j.agent, j.agentPID, j.agentStartedAt = h, pid, h.StartedAt()
+	j.mu.Unlock()
+	if r.stopped(ctx) {
+		r.killAgentTree(j)
+		return nil, errEngineStopped
+	}
+	return h, nil
 }
 
 // effectiveCandidatesForRecovery answers the per-step candidate lists a
