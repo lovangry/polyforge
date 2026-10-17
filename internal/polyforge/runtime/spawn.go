@@ -205,6 +205,9 @@ func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 		// reaps another daemon's step process for the same WI id.
 		"PF_DAEMON_ID=" + s.cfg.MachineID,
 	}
+	if s.cfg.DaemonSocket != "" {
+		additions = append(additions, "PF_DAEMON_SOCKET="+s.cfg.DaemonSocket)
+	}
 	// addendum 2 (owner ruling A): the step process's harness identity is
 	// the DEDICATED agent directory — not the operator's — plus its own
 	// session store. Only a real runtime (DataDir set) redirects: a bare

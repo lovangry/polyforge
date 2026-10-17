@@ -23,7 +23,7 @@ const testSession = "0b9f6a52-3c1d-4e8f-9a7b-1c2d3e4f5a6b"
 func TestClaudeBuildCmdArgvEnv(t *testing.T) {
 	t.Setenv("ANTHROPIC_AUTH_TOKEN", "")
 	os.Unsetenv("ANTHROPIC_AUTH_TOKEN")
-	sp := &claudeSpawner{cfg: &Config{ClaudeBin: "/opt/claude", MachineID: "m-1"}}
+	sp := &claudeSpawner{cfg: &Config{ClaudeBin: "/opt/claude", MachineID: "m-1", DaemonSocket: "/d/daemon.sock"}}
 	cmd, err := sp.buildCmd(SpawnParams{WorkItemID: "wi_1", CapsuleDir: "/caps", Model: "claude-opus-5-5", HarnessSession: testSession})
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +57,7 @@ func TestClaudeBuildCmdArgvEnv(t *testing.T) {
 		}
 	}
 	env := strings.Join(cmd.Env, "\n")
-	for _, kv := range []string{"PF_WI_ID=wi_1", "PF_DAEMON_ID=m-1", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1", "DISABLE_AUTOUPDATER=1", "CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"} {
+	for _, kv := range []string{"PF_WI_ID=wi_1", "PF_DAEMON_ID=m-1", "PF_DAEMON_SOCKET=/d/daemon.sock", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1", "DISABLE_AUTOUPDATER=1", "CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"} {
 		if !strings.Contains(env, kv) {
 			t.Fatalf("env lacks %s", kv)
 		}

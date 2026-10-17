@@ -555,7 +555,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 ## 附录 C：已知缺口（集成分支，2026-10-12） <!-- §C -->
 
 - **(a) bundle digest**：已不存在——digest 链随 polyforge#149 B9 删除，`internal/` 中没有 `Digest` / `FileEntry`；`internal/common/workflow` 只读 frontmatter 的模型候选字段。`01-workflow-skills.md#§4.5` 的 digest 描述已归档。
-- **(b) 人工确认保证是事故护栏，不是对抗性防御**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证；step agent 可写 capsule，蓄意绕过不在 2026-10-14 信任模型的防御范围内（#135 冻结）。daemon 的 UDS 面（polyforge#122 起于 answer 路由，#164 并入；repo review 2026-10-16 V-1 扩到全部变更路由）按 UDS 对端 SO_PEERCRED pid 拒绝来自本 daemon step 进程树的一切非读请求（DAEMON-403）：对端、其祖先或其进程组 leader 带有 `PF_WI_ID` + `PF_DAEMON_ID=<本 daemon>` 标记即拒；取不到对端凭据也拒（fail closed）。拒绝面是一个包住整张路由表的中间件：`/jobs/{wi}/answer|claim|resume-blocked|resume-paused|pause|wrap`、`/ops/config`、`/shutdown`、`/chat/init`、`/chats/{id}/subscribe|unsubscribe|ack|heartbeat|attention/ack`，以及带 `mark=1` 或 `ack=1` 的 `GET /chats/{id}/attention`（它记录投递状态——标为已显示或待 ack——step 若能调用便可藏掉人的提醒；repo review 2026-10-16 B-25 WA-4）；开放的只有纯读：`GET /status`、`/jobs/{wi}/watch`、`/chats/{id}/subscriptions`、不带 `mark`/`ack` 的 `/chats/{id}/attention`。answer 路由保留其 #122 拒绝文案。残余：`setsid` 脱离进程组且清空环境的进程不在此检查内——这只能是蓄意行为，按信任模型不再追加防御（#135 冻结）。（曾有的 abandon-repair 路由随 repair_pending 一并删除，此实例已不存在。）
+- **(b) 人工确认保证是事故护栏，不是对抗性防御**：driver 的 `requires_human_answer` 与 needs_input 校验是进程内的机械保证；step agent 可写 capsule，蓄意绕过不在 2026-10-14 信任模型的防御范围内（#135 冻结）。daemon 的 UDS 面（polyforge#122 起于 answer 路由，#164 并入；repo review 2026-10-16 V-1 扩到全部变更路由）按 UDS 对端 SO_PEERCRED pid 拒绝来自本 daemon step 进程树的一切非读请求（DAEMON-403）：对端、其祖先或其进程组 leader 带有 `PF_WI_ID` + `PF_DAEMON_ID=<本 daemon>` 标记即拒；取不到对端凭据也拒（fail closed）。拒绝面是一个包住整张路由表的中间件：`/jobs/{wi}/answer|claim|resume-paused|pause|wrap`、`/ops/config`、`/shutdown`、`/chat/init`、`/chats/{id}/subscribe|unsubscribe|ack|heartbeat|attention/ack`，以及带 `mark=1` 或 `ack=1` 的 `GET /chats/{id}/attention`（它记录投递状态——标为已显示或待 ack——step 若能调用便可藏掉人的提醒；repo review 2026-10-16 B-25 WA-4）；开放的只有纯读：`GET /status`、`/jobs/{wi}/watch`、`/chats/{id}/subscriptions`、不带 `mark`/`ack` 的 `/chats/{id}/attention`。answer 路由保留其 #122 拒绝文案。残余：`setsid` 脱离进程组且清空环境的进程不在此检查内——这只能是蓄意行为，按信任模型不再追加防御（#135 冻结）。（曾有的 abandon-repair 路由随 repair_pending 一并删除，此实例已不存在。）
 - **(c) `pf watch` 进展字段**：已随监督重写合入——daemon watch 路由从 `Observe.Progress(wi)` 填充命令、命令时长、最近文件、工具调用数（见附录 D）。
 
 ## 附录 D：监督替换落地对照（第 9 节步骤 2–3，分支 `v2/a-supervision`） <!-- §D -->
@@ -568,7 +568,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 
 **规则 ① 与 T 的后续修订（集成分支）**：规则 ① 扩展到正常结束的轮次（`ended_without_result`，见 2.3 表）；T 取 `max(3 × wall_minutes, 全局默认)`（见 2.4）。
 
-**阈值配置名**：旗标 `--silence-window`（X）、`--tool-window`（Y）、`--step-timeout`（T）、`--stall-window`（N）、`--model-error-grace`（规则 ① 宽限）；step 级覆盖在 workflow.md 只剩 `budget.wall_minutes`（T）——polyforge#147 C5 删除了从未被 bundle 使用的 `silence_minutes` / `tool_minutes` 键，X、Y 只有全局默认。旧旗标 `--hang-window/--idle-window/--probe-timeout/--wall-window` 已删，传入即解析失败。生产中 daemon 只经 `pf daemon ensure` 启动：T、N 来自 cli.toml `[daemon]` 表的 `step_timeout` / `stall_window`，由 daemon 从 `--config` 自行读取，ensure 的 argv 保持固定（2026-10-16 G2；优先级：显式命令行旗标 > `[daemon]` 表 > 内建默认；同表还有 `harness_root`、`operator_agent_dir`、`max_concurrent_jobs`——显式 `pf ops max N` 持久化并优先，`pf ops max --reset` 回到配置值）；X、Y、规则 ① 宽限及其余旗标只供测试/开发。
+**阈值配置名**：旗标 `--silence-window`（X）、`--tool-window`（Y）、`--step-timeout`（T）、`--stall-window`（N）、`--model-error-grace`（规则 ① 宽限）；step 级覆盖在 workflow.md 只剩 `budget.wall_minutes`（T）——polyforge#147 C5 删除了从未被 bundle 使用的 `silence_minutes` / `tool_minutes` 键，X、Y 只有全局默认。旧旗标 `--hang-window/--idle-window/--probe-timeout/--wall-window` 已删，传入即解析失败。生产中 daemon 只经 `pf daemon ensure` 启动：T、N 来自 cli.toml `[daemon]` 表的 `step_timeout` / `stall_window`，由 daemon 从 `--config` 自行读取，ensure 的 argv 保持固定（2026-10-16 G2；优先级：显式命令行旗标 > `[daemon]` 表 > 内建默认；同表还有 `harness_root`、`operator_agent_dir`、`max_concurrent_jobs`——`pf ops max N` 即时生效、不持久化，daemon 重启后回到配置值）；X、Y、规则 ① 宽限及其余旗标只供测试/开发。
 
 **与正文的实现差异（均为补充，不改契约语义）**
 - 事实集合多一条 `exec_committed{version}`：事件触发推送需要"driver 提交了新 Version"的提示，否则只能回到轮询 `execution.json`。
@@ -632,7 +632,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `daemon-id` | daemon `identity.go` | 首次启动记录的 daemon id；之后与 flag/env 不一致即拒绝启动 |
 | `daemon.lock` / `ensure.lock` | daemon `daemon.go` / `ensure.go` | 单 daemon flock / `pf daemon ensure` 与安装器互斥 |
 | `daemon.log` | `pf daemon ensure` 的重启循环 | daemon 输出，超过 10 MiB 轮转为 `.1` |
-| `daemon-state.json` | daemon `modes.go` | auto 开关与并发上限 |
+| `daemon-state.json` | daemon `modes.go` | auto 开关 |
 | `submit-queue.json` | daemon `modes.go` | 已接受、待派发的 submit 队列（重启后重放） |
 | `runtime-state.json` | runtime `runtime.go` | runtime 的 job 记录（旧文档称作 `state.json`） |
 | `claiming.json` | runtime `claiming.go` | 领取前的持久化意图日志（B1，`reference.md#§3.5`），崩溃后重放 |

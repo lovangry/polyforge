@@ -80,6 +80,36 @@ func TestHarnessRootPassThrough(t *testing.T) {
 	}
 }
 
+// TestBareStartMachineID: a daemon started with no -machine-id and no
+// recorded daemon-id records the id ensure derives (m-<short host>).
+func TestBareStartMachineID(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "cli.toml")
+	ws := filepath.Join(t.TempDir(), "ws")
+	if err := os.MkdirAll(filepath.Join(ws, "capsules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "server = \"http://127.0.0.1:1\"\n[workspace.\"" + ws + "\"]\nprojects = [\"e2e\"]\n"
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data := filepath.Join(t.TempDir(), "data")
+	// an explicit operator agent dir without auth.json refuses the start
+	// in New, after the id is recorded
+	var stderr bytes.Buffer
+	code := Main([]string{"--config", cfgPath, "-data-dir", data, "-operator-agent-dir", t.TempDir()}, nil, &bytes.Buffer{}, &stderr)
+	if code != ExitNeedsOperator {
+		t.Fatalf("exit = %d, want %d; stderr %q", code, ExitNeedsOperator, stderr.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(data, daemonIDFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(raw)); got != hostMachineID() {
+		t.Fatalf("recorded daemon id %q, want ensure's derivation %q", got, hostMachineID())
+	}
+
+}
+
 // TestApplyDaemonTablePrecedence (decision 2026-10-16 G2): an explicit
 // command-line flag > the cli.toml [daemon] table > the built-in default.
 func TestApplyDaemonTablePrecedence(t *testing.T) {

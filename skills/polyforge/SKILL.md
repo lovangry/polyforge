@@ -20,7 +20,7 @@ Nothing else. The split between the target faces is fixed (the architecture's ro
 - **Execution-plane verbs** (`submit`, `watch`, `answer`,
   `pause`, `resume`, `wrap`, `ops`): semantically bound to this machine's local
   execution scene. The `pf` CLI talks to the **local daemon over its unix
-  domain socket** (default `/run/polyforge.sock`); the daemon translates each
+  domain socket** (default `daemon.sock` in `$POLYFORGE_DATA_DIR`, else `~/.local/share/polyforge`); the daemon translates each
   route into its Runtime (lifecycle) and Observe (supervision) modules.
 - **Delivery** is not a verb — the workflow's own `deliver` step (`verbs/ship.md`).
 
@@ -268,7 +268,8 @@ pf [global flags] <verb> [verb flags] [positional args]
 - **Config precedence**, strictest wins: command-line flag > environment
   (`PF_SERVER`, `PF_API_KEY`, `PF_DAEMON_SOCKET`, `PF_USER_ID`)
   > config file > built-in defaults (`http://localhost:8420`,
-  `/run/polyforge.sock`). The config file default path is
+  `daemon.sock` in `$POLYFORGE_DATA_DIR`, else `~/.local/share/polyforge`).
+  The config file default path is
   `~/.config/polyforge/cli.toml`: the five flat string keys `server`,
   `api_key`, `daemon_socket`, `user_id`, `claude_bin` (the daemon's Claude
   Code binary, default `claude`), plus one `[workspace."<path>"]`

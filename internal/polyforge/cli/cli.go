@@ -156,7 +156,7 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	cfg := Config{
 		Server:       defaultServer,
-		DaemonSocket: defaultDaemonSocket,
+		DaemonSocket: defaultDaemonSocket(),
 		Mapping:      &mapping.Plan{},
 	}
 	if !cmd.NoConfigLoad {

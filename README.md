@@ -265,8 +265,7 @@ credential is unavailable, with `DAEMON-403` (polyforge#122 accident guard).
 | Method | Path | Role | Face |
 | --- | --- | --- | --- |
 | POST | `/jobs/{wi}/answer` | Answer a pending agent question. | user |
-| POST | `/jobs/{wi}/claim` | Submit family: enqueue a claim of a queued work item (optional body `models`: the manual candidate list of `pf submit --models`). | user |
-| POST | `/jobs/{wi}/resume-blocked` | The claim/start half of `pf resume` on a blocked WI (the CLI lands aihub's resume-blocked door with the human's own key first). | user |
+| POST | `/jobs/{wi}/claim` | Start a queued work item: enqueue its claim (`pf submit`; optional body `models`: the manual candidate list of `--models`), or with `{"resume":true}` claim and start it now — the daemon half of `pf resume` on a blocked WI (the CLI lands aihub's resume-blocked door with the human's own key first). | user |
 | POST | `/jobs/{wi}/resume-paused` | The live-holder half of `pf resume` on a paused WI (the CLI clears `clean_pause` at aihub first; this makes the online holder re-attach). | user |
 | POST | `/jobs/{wi}/pause` | CLI close path: seal the job with reason `paused`. | user |
 | POST | `/jobs/{wi}/wrap` | CLI close path: seal the job with reason `wrap` or `fail`. | user |
@@ -509,15 +508,10 @@ the file, the line and the key (`config …: line N: [daemon] step_timeout:
 78. Edit the table, then restart the daemon (`pf ops shutdown`, wait,
 `pf daemon ensure`) for it to apply.
 
-Job cap: an explicit `pf ops max N` applies at once and is persisted in
-`<data-dir>/daemon-state.json`; it wins over `max_concurrent_jobs` until
-`pf ops max --reset`, which returns to the configured cap (an explicit
-`--max-concurrent-jobs`, else the table, else 4) and clears the persisted
-value. Nothing else persists the cap. A cap an older daemon persisted (it
-wrote one at every graceful shutdown) counts as persisted too: the daemon
-logs once at boot when a persisted cap overrides a different configured
-one, and `pf ops max` shows `(persisted cap — pf ops max --reset …)`
-while one is in force.
+Job cap: `pf ops max N` applies at once and lasts until the daemon
+restarts; every start takes the configured cap (an explicit
+`--max-concurrent-jobs`, else the table, else 4). The cap is never
+persisted; `pf ops max` and `pf ops status` show the one in force.
 
 Every other flag is test/dev-only: nothing in production sets it. The
 table lists the production flags; `pf help daemon` lists every flag,
@@ -536,16 +530,16 @@ resolved (stderr, a `retired_env_ignored` event, `env_warnings` in
 | Flag | Production source | Default | Controls |
 | --- | --- | --- | --- |
 | `--config PATH` | ensure | `~/.config/polyforge/cli.toml` | Shared CLI config file: the `PF_*` fallbacks, `claude_bin` and the `[workspace]` mapping. |
-| `--socket PATH` | ensure (`daemon_socket` / `PF_DAEMON_SOCKET`) | `/run/polyforge.sock` | Unix socket the daemon's UDS HTTP face listens on. |
+| `--socket PATH` | ensure (`daemon_socket` / `PF_DAEMON_SOCKET`) | `daemon.sock` in `$POLYFORGE_DATA_DIR`, else `~/.local/share/polyforge` (`--data-dir` does not move it) | Unix socket the daemon's UDS HTTP face listens on. |
 | `--server URL` | `server` / `PF_SERVER` | — | aihub base URL the daemon talks to. |
 | `--api-key KEY` | `api_key` / `PF_API_KEY` | — | Machine aihub credential (never reaches an agent env). |
-| `--machine-id ID` | ensure (recorded id, else `m-<short hostname>`) | `m-<hostname>` | Machine identity claims and leases are recorded under; recorded in `<data-dir>/daemon-id` on first start, after which that file wins (a differing value refuses to start). |
+| `--machine-id ID` | ensure (recorded id, else `m-<short hostname>`) | `m-<short hostname>` | Machine identity claims and leases are recorded under; recorded in `<data-dir>/daemon-id` on first start, after which that file wins (a differing value refuses to start). |
 | `--data-dir DIR` | ensure (`POLYFORGE_DATA_DIR`) | `~/.local/share/polyforge` | Daemon state, events log and derived data. |
 | `--workflows-dir DIR` | ensure | `./workflows` | Workflow-bundle checkout the in-process Go driver loads step definitions from (`pf daemon ensure` passes `<data-dir>/release/current/workflows`). |
 | `--claude-bin PATH` | `claude_bin` | `claude` | Claude Code binary for steps whose harness is `claude` (run as `claude -p --bare`). The daemon never manages its credentials: the `<harness-root>/claude-config/settings.json` env block is the authority layer. |
 | `--operator-agent-dir DIR` | `[daemon] operator_agent_dir` | `~/.pi/agent` | SOURCE of the dedicated step agent dir — a credential surface: the daemon copies the minimal set (`auth.json`, `models.json`, `agents/`, `extensions/subagent/`) from here into `<harness-root>/step-agent`, and every pi step runs against that copy — the operator's own packages and settings never reach a step. A configured source without a readable `auth.json` refuses the start. |
 | `--harness-root DIR` | `[daemon] harness_root` | `<data-dir>` | Parent root of the step harness dirs: `<DIR>/step-agent` (dedicated agent dir), `/step-agent-sessions` (pi sessions) and `/claude-config` (claude config dir; its settings.json env block is the credential authority layer). The former `--harness-sessions-root` was renamed — old deployments fail loudly at startup. |
-| `--max-concurrent-jobs N` | `[daemon] max_concurrent_jobs` | `4` | Configured cap on concurrently running jobs; an explicit `pf ops max N` wins until `pf ops max --reset` (see above). |
+| `--max-concurrent-jobs N` | `[daemon] max_concurrent_jobs` | `4` | Configured cap on concurrently running jobs; `pf ops max N` overrides it until the daemon restarts (see above). |
 
 The workspace mapping (polyforge#113) replaces the retired workspace and
 project launch surfaces: the `[workspace."<path>"]` sections of the
