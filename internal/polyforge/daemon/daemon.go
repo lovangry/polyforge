@@ -201,6 +201,9 @@ type Daemon struct {
 	claudeVer versionCache
 	chats     *chatStore
 	subs      *subStore // pf watch: chat subscriptions, cursors, watcher liveness
+	// reporters caches wi → WI reporter, the owner of a WI without an
+	// origin owner (ownerOf).
+	reporters sync.Map
 	cfg       Config
 	hub       Hub
 	modes     *ModeCtl

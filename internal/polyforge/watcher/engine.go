@@ -17,8 +17,9 @@ type API interface {
 	Snapshot(wi string, after int64) (*protocol.WatchSnapshot, error)
 	Ack(a protocol.ChatAck) error
 	// SubscribeOwned subscribes the chat to every work item the daemon
-	// holds that this chat submitted or owner owns, and answers the
-	// subscriptions it added.
+	// holds that this chat submitted or owner owns and the chat has no
+	// subscription for, and answers the subscriptions it added. It is
+	// idempotent: a WI already subscribed is never added again.
 	SubscribeOwned(owner string) ([]protocol.ChatSub, error)
 }
 
@@ -74,14 +75,16 @@ func (o *Options) defaults() {
 // ErrParentGone ends a run whose harness process disappeared.
 var ErrParentGone = errors.New("parent process gone")
 
-// Run is the resident watcher. It starts by subscribing the chat to the
-// work items it or its owner holds; then every cycle it lists the chat's
-// subscriptions and — per WI — reconciles the authoritative state BEFORE
-// it replays events after the daemon-held cursor (so a WI that ended
+// Run is the resident watcher. Every cycle it first subscribes the chat
+// to the work items it or its owner holds (so a WI that becomes the
+// owner's while the watcher runs is picked up within one cycle; a failed
+// call is reported and retried next cycle, it does not stop the cycle),
+// then lists the chat's subscriptions and — per WI — reconciles the
+// authoritative state BEFORE it replays events after the daemon-held cursor (so a WI that ended
 // while the watcher was down is reported, never missed, and a reconnect
 // after a daemon restart needs no special case). Decisions print as
-// fixed-template lines on Out — those of the work items the start
-// subscribed fold into one "N WIs need you" line; progress goes to the
+// fixed-template lines on Out — those of the work items the first
+// cycle subscribed fold into one "N WIs need you" line; progress goes to the
 // status file. With WaitDecision the first non-empty batch is printed,
 // acked and Run returns nil.
 //
@@ -97,15 +100,20 @@ func Run(ctx context.Context, api API, opts Options) error {
 		backoff    = time.Second
 		paused     bool
 		lastNotice time.Time
-		// owned: the start's subscribe-owned call landed; fresh holds the
+		// owned: the first subscribe-owned call landed; fresh holds the
 		// work items it added, until their first decisions are acked.
+		// Work items a later call adds are not fresh: their decisions
+		// print one by one.
 		owned bool
 		fresh map[string]bool
-		// unacked holds the lines already printed whose ack failed:
-		// the daemon still holds the old cursor,
-		// so the next cycle re-derives the same decisions — they are not
-		// printed again, only their acks retried, until an ack round
-		// fully succeeds.
+		// ownedFailing: the last subscribe-owned call failed and said so;
+		// the cycle went on with the subscriptions the chat already has.
+		ownedFailing bool
+		// unacked holds the keys (outLine.key) of the lines already
+		// printed whose ack failed: the daemon still holds the old
+		// cursor, so the next cycle re-derives the same decisions —
+		// they are not printed again, only their acks retried, until an
+		// ack round fully succeeds.
 		unacked = map[string]bool{}
 	)
 	for {
@@ -120,18 +128,14 @@ func Run(ctx context.Context, api API, opts Options) error {
 			b     batch
 			err   error
 		)
-		if !owned {
-			var added []protocol.ChatSub
-			if added, err = api.SubscribeOwned(opts.Owner); err == nil {
-				owned, fresh = true, map[string]bool{}
-				for _, sub := range added {
-					fresh[sub.WI] = true
-				}
+		added, ownErr := api.SubscribeOwned(opts.Owner)
+		if ownErr == nil && !owned {
+			owned, fresh = true, map[string]bool{}
+			for _, sub := range added {
+				fresh[sub.WI] = true
 			}
 		}
-		if err == nil {
-			lines, b, err = cycle(api, &opts, fresh)
-		}
+		lines, b, err = cycle(api, &opts, fresh)
 		if err != nil {
 			if !paused || opts.Now().Sub(lastNotice) >= time.Minute {
 				fmt.Fprintf(opts.Err, "polyforge watch: %s (%s); retrying in %s\n", pausedText(err), shortErr(err), backoff)
@@ -149,14 +153,20 @@ func Run(ctx context.Context, api API, opts Options) error {
 			fmt.Fprintln(opts.Err, "polyforge watch: daemon reachable again; reconciled")
 			paused = false
 		}
+		// A failed subscribe-owned only delays picking up newly owned
+		// work items: the subscribed ones keep delivering meanwhile.
+		if ownErr != nil && !ownedFailing {
+			fmt.Fprintf(opts.Err, "polyforge watch: cannot subscribe the owner's work items (%s); retrying every poll\n", shortErr(ownErr))
+		}
+		ownedFailing = ownErr != nil
 		backoff = time.Second
 		writeStatus(&opts, lines)
 		printed := 0
 		for _, l := range b.out {
-			if unacked[l] {
+			if unacked[l.key] {
 				continue
 			}
-			if _, werr := fmt.Fprintln(opts.Out, l); werr != nil {
+			if _, werr := fmt.Fprintln(opts.Out, l.text); werr != nil {
 				return werr // stdout gone: nobody is listening
 			}
 			printed++
@@ -174,7 +184,7 @@ func Run(ctx context.Context, api API, opts Options) error {
 				fmt.Fprintf(opts.Err, "polyforge watch: ack failed (%s); retrying without re-printing\n", shortErr(ackErr))
 			}
 			for _, l := range b.out {
-				unacked[l] = true
+				unacked[l.key] = true
 			}
 		} else {
 			unacked = map[string]bool{}
@@ -204,8 +214,14 @@ func sleepChecked(ctx context.Context, o *Options, d time.Duration) {
 }
 
 type batch struct {
-	out  []string
+	out  []outLine
 	acks []protocol.ChatAck
+}
+
+// outLine is one line to print; key names the event it reports, so two
+// events whose lines read the same are still two lines.
+type outLine struct {
+	key, text string
 }
 
 func pausedText(err error) string {
@@ -276,7 +292,7 @@ func cycle(d API, o *Options, fresh map[string]bool) ([]string, batch, error) {
 			}
 		} else {
 			for _, dec := range res.Decisions {
-				b.out = append(b.out, dec.Line())
+				b.out = append(b.out, outLine{key: dec.id(), text: dec.Line()})
 			}
 		}
 		if len(res.Decisions) > 0 || res.Cursor != sub.Cursor || res.Done || !sameKeys(res.Notified, sub.Notified) {
@@ -284,7 +300,10 @@ func cycle(d API, o *Options, fresh map[string]bool) ([]string, batch, error) {
 		}
 	}
 	if len(needYou) > 0 {
-		b.out = append([]string{AttentionLine(needYou)}, b.out...)
+		// keyed by its text: the WI list is in it, so a reminder that
+		// grew while its ack failed is printed again
+		l := AttentionLine(needYou)
+		b.out = append([]outLine{{key: "attention " + l, text: l}}, b.out...)
 	}
 	return lines, b, nil
 }

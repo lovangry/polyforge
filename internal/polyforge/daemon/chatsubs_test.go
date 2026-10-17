@@ -118,6 +118,65 @@ func mustSubs(t *testing.T, td *testDaemon, chat string) []protocol.ChatSub {
 	return s.Subscriptions
 }
 
+// forgetSub drops a subscription the way a chat that never had one looks
+// (no unsubscribe mark), so the owner routing adds it again.
+func forgetSub(td *testDaemon, chat, wi string) {
+	td.subs.mu.Lock()
+	defer td.subs.mu.Unlock()
+	if c := td.subs.chatLocked(chat, false); c != nil {
+		delete(c.Subs, wi)
+	}
+}
+
+// An explicit unsubscribe from an owned WI sticks across watcher cycles
+// (each calls subscribe-owned) and across a daemon restart; an explicit
+// subscribe lifts it.
+func TestUnsubscribedOwnedWIStaysUnsubscribed(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.client.Origin = &cli.SubmitOrigin{ChatID: "chat_a", Owner: "alice"}
+	td.submitClaim(t, "wi_own")
+	td.waitMonitored(t, "wi_own")
+	td.client.Origin = nil
+	if _, err := td.client.ChatSubscribeOwned("chat_b", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	for _, chat := range []string{"chat_a", "chat_b"} {
+		if len(mustSubs(t, td, chat)) != 1 {
+			t.Fatalf("%s must start subscribed", chat)
+		}
+		if _, err := td.client.ChatSubscribe(chat, "wi_own", false); err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 3; i++ {
+			if added, err := td.client.ChatSubscribeOwned(chat, "alice"); err != nil || len(added) != 0 {
+				t.Fatalf("%s cycle %d re-added %+v (err %v)", chat, i, added, err)
+			}
+		}
+		if subs := mustSubs(t, td, chat); len(subs) != 0 {
+			t.Fatalf("%s after unsubscribe: %+v", chat, subs)
+		}
+	}
+	reloaded, err := newSubStore(td.subs.path)
+	if err != nil || reloaded.Settled("chat_b", "wi_own") != true || len(reloaded.List("chat_b")) != 0 {
+		t.Fatalf("the unsubscribe must persist: err %v", err)
+	}
+	if _, err := td.client.ChatSubscribe("chat_b", "wi_own", true); err != nil {
+		t.Fatal(err)
+	}
+	if subs := mustSubs(t, td, "chat_b"); len(subs) != 1 || subs[0].WI != "wi_own" {
+		t.Fatalf("an explicit subscribe must lift the unsubscribe: %+v", subs)
+	}
+	if _, err := td.client.ChatSubscribe("chat_b", "wi_own", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := td.client.ChatSubscribe("chat_b", "wi_own", true); err != nil {
+		t.Fatal(err)
+	}
+	if added, _ := td.client.ChatSubscribeOwned("chat_b", "alice"); len(added) != 0 || len(mustSubs(t, td, "chat_b")) != 1 {
+		t.Fatalf("re-subscribed WI must be held once: %+v", added)
+	}
+}
+
 func TestWatchSnapshotRoute(t *testing.T) {
 	td := newTestDaemon(t, nil)
 	// not registered yet: a normal, empty answer (the watcher shows queued/preparing)
@@ -196,7 +255,7 @@ func TestSubscribeOwnedRoutingAndOwnerFallback(t *testing.T) {
 	if got := owned("chat_z", ""); len(got) != 0 {
 		t.Fatalf("a stranger chat with no owner: %v", got)
 	}
-	_, _ = td.subs.Unsubscribe("chat_a", "wi_chat") // the submit's own subscription
+	forgetSub(td, "chat_a", "wi_chat") // the submit's own subscription
 	before := ev.LastSeq("wi_chat")
 	if got := owned("chat_a", ""); len(got) != 1 || got["wi_chat"] < before || got["wi_chat"] > ev.LastSeq("wi_chat") {
 		t.Fatalf("origin chat: %v, want wi_chat from its current seq (%d)", got, before)
@@ -218,6 +277,42 @@ func TestSubscribeOwnedRoutingAndOwnerFallback(t *testing.T) {
 	}
 	if subs := mustSubs(t, td, "chat_z"); len(subs) != 1 || subs[0].WI != "wi_auto" || subs[0].Cursor != deadSeq-1 {
 		t.Fatalf("chat_z subscriptions: %+v", subs)
+	}
+}
+
+// Every watcher cycle calls subscribe-owned, so a repeated call costs no
+// hub read: a WI's reporter is fetched once, and a WI the chat already
+// holds a subscription for is skipped before any owner lookup.
+func TestSubscribeOwnedRepeatedCallReadsTheHubOnce(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.hub.mu.Lock()
+	td.hub.reporters = map[string]string{"wi_auto": "bob"}
+	td.hub.mu.Unlock()
+	td.submitClaim(t, "wi_auto") // no origin: the owner is the reporter
+	td.waitMonitored(t, "wi_auto")
+	gets := func() int {
+		td.hub.mu.Lock()
+		defer td.hub.mu.Unlock()
+		return td.hub.gets["wi_auto"]
+	}
+	for _, owner := range []string{"carol", "carol", "bob"} {
+		if _, err := td.client.ChatSubscribeOwned("chat_c", owner); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := gets()
+	for i := 0; i < 3; i++ {
+		for _, chat := range []string{"chat_c", "chat_d"} {
+			if _, err := td.client.ChatSubscribeOwned(chat, "carol"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if n := gets(); n != base {
+		t.Fatalf("repeated subscribe-owned read the hub %d more times, want 0", n-base)
+	}
+	if subs := mustSubs(t, td, "chat_c"); len(subs) != 1 || subs[0].WI != "wi_auto" {
+		t.Fatalf("chat_c subscriptions: %+v", subs)
 	}
 }
 
@@ -269,7 +364,7 @@ func TestLastSeqAndOwnedCursorPastHistoryCap(t *testing.T) {
 	wi := "wi_" + "longlog"
 	td.submitClaim(t, wi)
 	td.waitMonitored(t, wi)
-	_, _ = td.subs.Unsubscribe("chat_long", wi)
+	forgetSub(td, "chat_long", wi)
 	ev := td.obs.Events()
 	for i := 0; i < observe.HistoryCap+10; i++ {
 		if err := ev.Append(wi, "t_event", nil); err != nil {

@@ -24,6 +24,7 @@ type fakeAPI struct {
 	owned     []string // the WIs subscribe-owned adds when the chat lacks them
 	ownedN    int      // SubscribeOwned calls
 	down      error    // returned by Subscriptions and SubscribeOwned while set
+	ownedErr  error    // returned by SubscribeOwned alone while set
 	acks      []protocol.ChatAck
 	snapCalls []int64
 	ackFails  int   // the next ackFails Ack calls fail
@@ -78,6 +79,9 @@ func (f *fakeAPI) SubscribeOwned(string) ([]protocol.ChatSub, error) {
 	f.ownedN++
 	if f.down != nil {
 		return nil, f.down
+	}
+	if f.ownedErr != nil {
+		return nil, f.ownedErr
 	}
 	var added []protocol.ChatSub
 	for _, wi := range f.owned {
@@ -531,9 +535,9 @@ func TestWatcherStartListsWIsThatNeedYou(t *testing.T) {
 	}
 }
 
-// The owned subscriptions are taken once per start; a decision arriving
-// later on one of them prints as its own line.
-func TestOwnedWIsAreSubscribedOnceThenDecideOneByOne(t *testing.T) {
+// Every cycle calls subscribe-owned; a WI it already added is not added
+// again, and a decision arriving later on it prints as its own line, once.
+func TestOwnedWIsAreSubscribedEveryCycleThenDecideOneByOne(t *testing.T) {
 	api := &fakeAPI{
 		snaps: map[string]*protocol.WatchSnapshot{"wi_7": running("wi_7", "s1")},
 		owned: []string{"wi_7"},
@@ -552,11 +556,121 @@ func TestOwnedWIsAreSubscribedOnceThenDecideOneByOne(t *testing.T) {
 			cancel()
 		}
 	}})
-	if api.ownedN != 1 {
-		t.Fatalf("subscribe-owned called %d times, want once per start", api.ownedN)
+	if api.ownedN != 4 || len(api.subs.Subscriptions) != 1 {
+		t.Fatalf("subscribe-owned called %d times (want once per cycle), subscriptions %+v", api.ownedN, api.subs.Subscriptions)
 	}
-	if got := strings.TrimSpace(out.String()); !strings.Contains(got, "wi_7 blocked") || strings.Contains(got, "need you") || strings.Contains(got, "needs you") {
-		t.Fatalf("out = %q, want wi_7's own blocked line", got)
+	if got := strings.TrimSpace(out.String()); strings.Count(got, "wi_7 blocked") != 1 || strings.Contains(got, "need you") || strings.Contains(got, "needs you") {
+		t.Fatalf("out = %q, want wi_7's own blocked line once", got)
+	}
+}
+
+// A WI that becomes the owner's after the watcher started (an auto-pull
+// claim, a submit from another chat) is subscribed by the next cycle and
+// its decision printed as its own line, once.
+func TestWIOwnedAfterStartDecidesWithinOneCycle(t *testing.T) {
+	api := &fakeAPI{
+		snaps: map[string]*protocol.WatchSnapshot{"wi_7": running("wi_7", "s1"), "wi_8": blocked("wi_8")},
+		owned: []string{"wi_7"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	polls := 0
+	var out bytes.Buffer
+	var afterOne string
+	_ = Run(ctx, api, Options{Out: &out, Sleep: func(context.Context, time.Duration) {
+		switch polls++; polls {
+		case 1:
+			api.mu.Lock()
+			api.owned = append(api.owned, "wi_8")
+			api.mu.Unlock()
+		case 2:
+			afterOne = out.String()
+		case 4:
+			cancel()
+		}
+	}})
+	want := "[polyforge] wi_8 blocked — the workflow is blocked and needs a human; " + suffix + "\n"
+	if afterOne != want {
+		t.Fatalf("one cycle after wi_8 became owned: out = %q, want %q", afterOne, want)
+	}
+	if out.String() != want {
+		t.Fatalf("out = %q, want wi_8's line exactly once", out.String())
+	}
+}
+
+// A failing subscribe-owned does not pause the watcher: decisions of the
+// work items already subscribed keep printing, the failure is said once,
+// and the owned WIs are picked up once the call works again.
+func TestSubscribeOwnedFailureDoesNotStopDelivery(t *testing.T) {
+	snap := running("wi_1", "s1")
+	snap.Events = []protocol.EventEntry{ev(1, "step_dead")}
+	snap.LastSeq = 1
+	api := &fakeAPI{
+		subs:     protocol.ChatSubscriptions{Subscriptions: []protocol.ChatSub{sub("wi_1", 0)}},
+		snaps:    map[string]*protocol.WatchSnapshot{"wi_1": snap, "wi_8": blocked("wi_8")},
+		owned:    []string{"wi_8"},
+		ownedErr: errors.New("daemon error DAEMON-500"),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	polls := 0
+	var out, errOut bytes.Buffer
+	var afterFail string
+	_ = Run(ctx, api, Options{Out: &out, Err: &errOut, Sleep: func(context.Context, time.Duration) {
+		switch polls++; polls {
+		case 3:
+			afterFail = out.String()
+			api.mu.Lock()
+			api.ownedErr = nil
+			api.mu.Unlock()
+		case 5:
+			cancel()
+		}
+	}})
+	if strings.Count(afterFail, "wi_1 step_dead") != 1 || strings.Contains(afterFail, "wi_8") {
+		t.Fatalf("while subscribe-owned fails: out = %q, want wi_1's decision only", afterFail)
+	}
+	if n := strings.Count(errOut.String(), "cannot subscribe the owner's work items"); n != 1 || strings.Contains(errOut.String(), "paused") {
+		t.Fatalf("stderr = %q, want the failure said once and no pause", errOut.String())
+	}
+	if !strings.Contains(out.String(), "1 WI needs you: wi_8") {
+		t.Fatalf("out = %q, want wi_8 picked up after the call recovered", out.String())
+	}
+}
+
+// R7: two events whose lines read the same are two decisions: while an
+// ack keeps failing, the first is not printed again but the second is.
+func TestSameTextEventsWhileAckFailsBothPrint(t *testing.T) {
+	snap := running("wi_1", "s1")
+	snap.Events = []protocol.EventEntry{ev(1, "step_dead")}
+	snap.LastSeq = 1
+	api := &fakeAPI{
+		subs:     protocol.ChatSubscriptions{Subscriptions: []protocol.ChatSub{sub("wi_1", 0)}},
+		snaps:    map[string]*protocol.WatchSnapshot{"wi_1": snap},
+		ackFails: 2,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	polls := 0
+	var out bytes.Buffer
+	_ = Run(ctx, api, Options{Out: &out, Sleep: func(context.Context, time.Duration) {
+		switch polls++; polls {
+		case 1:
+			api.mu.Lock()
+			s := *api.snaps["wi_1"]
+			s.Events = []protocol.EventEntry{ev(1, "step_dead"), ev(2, "step_dead")}
+			s.LastSeq = 2
+			api.snaps["wi_1"] = &s
+			api.mu.Unlock()
+		case 5:
+			cancel()
+		}
+	}})
+	if n := strings.Count(out.String(), "wi_1 step_dead"); n != 2 {
+		t.Fatalf("step_dead printed %d times, want once per event (2): %q", n, out.String())
+	}
+	if api.subs.Subscriptions[0].Cursor != 2 {
+		t.Fatalf("cursor = %d, want both events acked", api.subs.Subscriptions[0].Cursor)
 	}
 }
 

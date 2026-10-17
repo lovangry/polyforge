@@ -130,14 +130,16 @@ proactive face, and it carries exactly two kinds of signal:
 **Subscription is the whole ownership model.** A chat (`PF_CHAT_ID`) is
 subscribed to the work items it submits (`pf submit` does it); it subscribes to
 others with `pf watch subscribe <wi>` and drops them with `pf watch
-unsubscribe <wi>` (`pf watch list` shows them). The subscriptions and the
+unsubscribe <wi>` (`pf watch list` shows them; an unsubscribed work item stays
+out until you subscribe it again). The subscriptions and the
 per-chat read cursors live in the daemon, not in any file you can write. There
 is no arming, no script copying and no adoption prompt: a new session simply
-subscribes to the work items it wants. A watcher's start also subscribes its
-chat to every work item the daemon holds that the chat submitted or its owner
-(`PF_USER_ID`; the reporter when the job has no owner) owns; decisions those
-work items already hold are kept by the daemon and surface then — as
-`[polyforge] N WIs need you: ...`.
+subscribes to the work items it wants. A running watcher also subscribes its
+chat, every poll, to every work item the daemon holds that the chat submitted
+or its owner (`PF_USER_ID`; the reporter when the job has no owner) owns;
+decisions the work items found at its start already hold surface as
+`[polyforge] N WIs need you: ...`, those of a work item that becomes the
+owner's later as their own lines.
 
 ### Rules for you (every harness)
 
