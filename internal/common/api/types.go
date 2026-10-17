@@ -152,6 +152,98 @@ type ListResponse[T any] struct {
 }
 
 // ---------------------------------------------------------------------------
+// Admin and machines wire bodies: the aihub client encodes and the server
+// decodes (requests), or the reverse (answers), the same type.
+
+// UserCreateRequest is the M1 create body. v1 field: user_type
+// (human|machine), not v0's "kind".
+type UserCreateRequest struct {
+	DisplayName string `json:"display_name"`
+	Email       string `json:"email,omitempty"` // required for human users (CORE-400 otherwise)
+	UserType    string `json:"user_type,omitempty"`
+	Role        string `json:"role,omitempty"` // writer|admin
+}
+
+// UserPatchRequest is the M1 PATCH body.
+type UserPatchRequest struct {
+	DisplayName string `json:"display_name,omitempty"`
+	Role        string `json:"role,omitempty"`
+}
+
+// APIKeyCreateRequest is the M2 mint body (plaintext returned exactly
+// once by the server).
+type APIKeyCreateRequest struct {
+	UserID    string  `json:"user_id"`
+	Name      string  `json:"name,omitempty"`
+	ProjectID *string `json:"project_id,omitempty"`
+}
+
+// ProjectCreateRequest is the M3 create body.
+type ProjectCreateRequest struct {
+	Name        string        `json:"name"`
+	Description string        `json:"description,omitempty"`
+	Repos       []ProjectRepo `json:"repos,omitempty"` // task-repo inventory (served back on every claim)
+	Visible     *bool         `json:"visible,omitempty"`
+}
+
+// ProjectPatchRequest is the PATCH /api/v1/projects/{id} body:
+// `members` is an explicit UPSERT list (not a wholesale replacement),
+// `remove_members` an explicit remove list, and `repos` replaces the
+// whole task-repo inventory (every entry named by the caller).
+type ProjectPatchRequest struct {
+	Description   *string          `json:"description,omitempty"`
+	Members       *[]ProjectMember `json:"members,omitempty"`
+	RemoveMembers *[]string        `json:"remove_members,omitempty"`
+	Visible       *bool            `json:"visible,omitempty"`
+	Repos         *[]ProjectRepo   `json:"repos,omitempty"`
+}
+
+// MachineHeartbeat is the POST /api/v1/machines/heartbeat body: machine
+// identity plus the daemon's live projection. No client timestamp — the
+// server stamps last_heartbeat_at itself (single clock, no skew).
+// live_wi_ids carries NO omitempty: every heartbeat restates the full
+// projection (an idle daemon sends []), because the server treats an
+// absent field as keep-old and a held-back empty list would leave ghost
+// WI ids in the machines read face forever.
+type MachineHeartbeat struct {
+	MachineID      string   `json:"machine_id"`
+	RuntimeVersion string   `json:"runtime_version,omitempty"`
+	DisplayName    string   `json:"display_name,omitempty"`
+	Mode           string   `json:"mode,omitempty"`
+	LiveWIIDs      []string `json:"live_wi_ids"`
+}
+
+// MachineHeartbeatResult is the heartbeat answer (the daemon heartbeats
+// with its operator-issued credential; registration issues no key).
+type MachineHeartbeatResult struct {
+	Registered bool   `json:"registered"` // true only on the first call
+	MachineID  string `json:"machine_id"`
+	UserID     string `json:"user_id"`
+}
+
+// MachineStatus is one GET /api/v1/machines row (admin read face): the
+// stored liveness projection plus the server-computed stale boolean and
+// age. An unparseable last_heartbeat_at reports stale=false with no age
+// — "cannot judge" is not "dead".
+type MachineStatus struct {
+	ID                  string   `json:"id"`
+	UserID              string   `json:"user_id"`
+	RuntimeVersion      string   `json:"runtime_version,omitempty"`
+	Mode                string   `json:"mode,omitempty"`
+	LiveWIIDs           []string `json:"live_wi_ids"`
+	LastHeartbeatAt     string   `json:"last_heartbeat_at"`
+	HeartbeatAgeSeconds *int64   `json:"heartbeat_age_seconds,omitempty"`
+	Stale               bool     `json:"stale"`
+}
+
+// MachinesList is the GET /api/v1/machines answer.
+type MachinesList struct {
+	Count             int             `json:"count"`
+	Machines          []MachineStatus `json:"machines"`
+	StaleAfterSeconds int64           `json:"stale_after_seconds"`
+}
+
+// ---------------------------------------------------------------------------
 // Session model wire types (docs/design/polyforge-vnext/reference.md §3).
 
 // SessionClaim is the v1.5 claim/attach response envelope. The

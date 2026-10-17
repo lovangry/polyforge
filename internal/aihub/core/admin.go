@@ -269,20 +269,10 @@ func (m *AdminManager) ListAPIKeys() ([]APIKeyInfo, error) {
 // trusted for liveness. Mode/liveWIIDs are the M3 daemon liveness
 // projection (mode empty = keep the stored value; live_wi_ids nil = keep,
 // non-nil including empty = replace).
-type MachineHeartbeat struct {
-	MachineID      string   `json:"machine_id"`
-	RuntimeVersion string   `json:"runtime_version,omitempty"`
-	DisplayName    string   `json:"display_name,omitempty"`
-	Mode           string   `json:"mode,omitempty"`
-	LiveWIIDs      []string `json:"live_wi_ids,omitempty"`
-}
+type MachineHeartbeat = api.MachineHeartbeat
 
 // HeartbeatResult is the heartbeat response.
-type HeartbeatResult struct {
-	Registered bool   `json:"registered"` // first call created the identity
-	MachineID  string `json:"machine_id"`
-	UserID     string `json:"user_id"`
-}
+type HeartbeatResult = api.MachineHeartbeatResult
 
 func (m *AdminManager) Heartbeat(req MachineHeartbeat) (*HeartbeatResult, error) {
 	return m.HeartbeatAuthorized(req, nil)
@@ -404,12 +394,7 @@ func nullableJSON(ids []string) any {
 var projectNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-_]{0,39}$`)
 
 // CreateProjectRequest is the projects create body.
-type CreateProjectRequest struct {
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	Repos       []api.ProjectRepo `json:"repos"`
-	Visible     *bool             `json:"visible"`
-}
+type CreateProjectRequest = api.ProjectCreateRequest
 
 // CreateProject inserts a project.
 func (m *AdminManager) CreateProject(req CreateProjectRequest) (*api.Project, error) {
@@ -538,20 +523,8 @@ func upsertMember(ex interface {
 // ---------------------------------------------------------------------------
 // Project patch (M3): description/visible plus membership management.
 
-// ProjectPatchRequest is the PATCH /api/v1/projects/{id} body. The wire
-// shape is pinned by the client (aihubclient.ProjectPatchRequest):
-// `members` is an explicit UPSERT list (not a wholesale replacement) and
-// `remove_members` is an explicit remove list.
-type ProjectPatchRequest struct {
-	Description   *string              `json:"description,omitempty"`
-	Members       *[]api.ProjectMember `json:"members,omitempty"`
-	RemoveMembers *[]string            `json:"remove_members,omitempty"`
-	Visible       *bool                `json:"visible,omitempty"`
-	// Repos replaces the whole task-repo inventory (explicit full
-	// replacement; every entry is named by the caller, same tradeoff as
-	// the membership rows below).
-	Repos *[]api.ProjectRepo `json:"repos,omitempty"`
-}
+// ProjectPatchRequest is the PATCH /api/v1/projects/{id} body.
+type ProjectPatchRequest = api.ProjectPatchRequest
 
 // PatchProject applies a project patch. Membership CAS tradeoff vs v0:
 // v0 guarded a wholesale member-list replacement with members_version

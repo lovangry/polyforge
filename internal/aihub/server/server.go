@@ -923,21 +923,6 @@ func (s *Server) machinesStaleAfter() time.Duration {
 	return s.StaleAfter
 }
 
-// machineStatus is one machines read-face row: the stored liveness
-// projection plus the server-computed stale boolean and age. An
-// unparseable last_heartbeat_at reports stale=false with no age —
-// "cannot judge" is not "dead".
-type machineStatus struct {
-	ID                  string   `json:"id"`
-	UserID              string   `json:"user_id"`
-	RuntimeVersion      string   `json:"runtime_version,omitempty"`
-	Mode                string   `json:"mode,omitempty"`
-	LiveWIIDs           []string `json:"live_wi_ids"`
-	LastHeartbeatAt     string   `json:"last_heartbeat_at"`
-	HeartbeatAgeSeconds *int64   `json:"heartbeat_age_seconds,omitempty"`
-	Stale               bool     `json:"stale"`
-}
-
 // hListMachines is the operators' liveness read face (admin): every
 // registered machine with its last_heartbeat_at and the stale projection
 // computed against StaleAfter. This is the read half the M3 gate metric
@@ -950,9 +935,9 @@ func (s *Server) hListMachines(w http.ResponseWriter, r *http.Request, idn *iden
 	}
 	staleAfter := s.machinesStaleAfter()
 	now := time.Now()
-	out := make([]machineStatus, 0, len(rows))
+	out := make([]api.MachineStatus, 0, len(rows))
 	for _, m := range rows {
-		st := machineStatus{
+		st := api.MachineStatus{
 			ID:              m.ID,
 			UserID:          m.UserID,
 			RuntimeVersion:  m.RuntimeVersion,
@@ -970,10 +955,10 @@ func (s *Server) hListMachines(w http.ResponseWriter, r *http.Request, idn *iden
 		}
 		out = append(out, st)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"machines":            out,
-		"stale_after_seconds": int64(staleAfter.Seconds()),
-		"count":               len(out),
+	writeJSON(w, http.StatusOK, api.MachinesList{
+		Count:             len(out),
+		Machines:          out,
+		StaleAfterSeconds: int64(staleAfter.Seconds()),
 	})
 }
 
@@ -1281,12 +1266,7 @@ func firstRunes(s string, n int) string {
 // Admin face
 
 func (s *Server) hCreateUser(w http.ResponseWriter, r *http.Request, idn *identity) {
-	var req struct {
-		DisplayName string `json:"display_name"`
-		Email       string `json:"email"`
-		Role        string `json:"role"`
-		UserType    string `json:"user_type"`
-	}
+	var req api.UserCreateRequest
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, err)
 		return
@@ -1309,11 +1289,7 @@ func (s *Server) hListUsers(w http.ResponseWriter, r *http.Request, idn *identit
 }
 
 func (s *Server) hCreateAPIKey(w http.ResponseWriter, r *http.Request, idn *identity) {
-	var req struct {
-		UserID    string  `json:"user_id"`
-		Name      string  `json:"name"`
-		ProjectID *string `json:"project_id,omitempty"`
-	}
+	var req api.APIKeyCreateRequest
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, err)
 		return
@@ -1380,10 +1356,7 @@ func (s *Server) hGetUser(w http.ResponseWriter, r *http.Request, idn *identity)
 }
 
 func (s *Server) hPatchUser(w http.ResponseWriter, r *http.Request, idn *identity) {
-	var req struct {
-		DisplayName string `json:"display_name"`
-		Role        string `json:"role"`
-	}
+	var req api.UserPatchRequest
 	if err := decodeBody(r, &req); err != nil {
 		writeErr(w, err)
 		return

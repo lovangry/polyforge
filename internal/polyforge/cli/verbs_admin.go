@@ -123,7 +123,7 @@ var cmdApiKeys = &Command{
 	Name:    "api-keys",
 	Group:   GroupMgmt,
 	Summary: "API key management (M2, admin only; plaintext shown exactly once)",
-	Usage: "pf api-keys create --user U [--project-scope P]\n" +
+	Usage: "pf api-keys create --user U [--name N] [--project-scope P]\n" +
 		"pf api-keys list\n" +
 		"pf api-keys revoke <id>",
 	Setup: func(fs *flag.FlagSet) {},
@@ -138,6 +138,7 @@ var cmdApiKeys = &Command{
 			f := subFlags(ctx, "api-keys create")
 			user := f.String("user", "", "user id to mint the key for (required)")
 			scope := f.String("project-scope", "", "optional project scope (narrows, never grants)")
+			name := f.String("name", "", "optional key name")
 			rest, err := parseCommandArgs(f, rest)
 			if err != nil {
 				return err
@@ -145,7 +146,7 @@ var cmdApiKeys = &Command{
 			if len(rest) != 0 || *user == "" {
 				return fmt.Errorf("api-keys create: --user is required")
 			}
-			req := aihubclient.ApiKeyCreateRequest{UserID: *user}
+			req := aihubclient.ApiKeyCreateRequest{UserID: *user, Name: *name}
 			if *scope != "" {
 				req.ProjectID = strPtr(*scope)
 			}
