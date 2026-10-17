@@ -602,7 +602,7 @@ func seedJob(r *Runtime, wi string) *job {
 		sessionFingerprint: fp,
 		state:              StateRunning,
 		capsuleDir:         capDir,
-		git:                gitops.Opts{WorkItemID: wi, Fingerprint: fp, Username: wi, Secret: sess, CapsuleDir: capDir, GitDir: filepath.Join(r.cfg.DataDir, "git", wi+".git")},
+		git:                gitops.Opts{WorkItemID: wi, Username: wi, Secret: sess, CapsuleDir: capDir, GitDir: filepath.Join(r.cfg.DataDir, "git", wi+".git")},
 		transcript:         sessionPathFor(capDir, fp),
 		bundleName:         "demo-bundle",
 		spawnN:             1,

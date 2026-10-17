@@ -1128,13 +1128,11 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, wi, journalKey, sessionI
 		state:              StateClaiming,
 		git: gitops.Opts{
 			WorkItemID: id,
-			// §1.6 fencing-on-use backup layer: the PUBLIC fingerprint.
-			Fingerprint: fp,
-			GitDir:      r.gitDirFor(id),
-			RemoteURL:   r.remoteURLFor(id),
-			Username:    id,
-			Secret:      sessionID, // v1.5: the session secret IS the push password
-			EventSink:   r.gitEventSink(id),
+			GitDir:     r.gitDirFor(id),
+			RemoteURL:  r.remoteURLFor(id),
+			Username:   id,
+			Secret:     sessionID, // v1.5: the session secret IS the push password
+			EventSink:  r.gitEventSink(id),
 			// once-per-repo carrier_push_failed state: per job, so a
 			// re-claim (a new job) alerts afresh.
 			CarrierAlerts: &gitops.CarrierAlerts{},

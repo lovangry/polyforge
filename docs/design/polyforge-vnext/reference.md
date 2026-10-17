@@ -111,10 +111,8 @@ longer live → `CORE-403 STALE_SESSION`. Idempotency rows are kept forever (`v2
 
 `/git/<wi>.git` (`internal/aihub/git/proxy.go`, `core/owner.go` `CheckSessionCredential`): Basic user
 must be the WI id, password the live session secret. No session → `GIT-401 NO_SESSION`; mismatch →
-`GIT-401 BAD_CREDENTIAL` (message names the current holder fingerprint); stored fingerprint not the
-secret's → `GIT-401 BAD_FINGERPRINT`; status ≠ running → `GIT-403 PAUSED` (checked on every smart-HTTP
-request, so fetch/clone are refused too). Backup layer: the push must carry `--push-option=session-fingerprint=<fp>` and the
-pre-receive hook compares it with the proxy-derived fingerprint (`git/hook.go`). Fencing covers the
+`GIT-401 BAD_CREDENTIAL` (message names the current holder fingerprint); status ≠ running →
+`GIT-403 PAUSED` (checked on every smart-HTTP request, so fetch/clone are refused too). Fencing covers the
 aihub proxy only — pushes a step makes to an external origin are not fenced.
 
 ### 3.5 Daemon-side session state <!-- §3.5 -->
@@ -214,7 +212,7 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 | `AUTH-401` | Missing/invalid API key |
 | `AUTH-403` | Not admin; key scoped to another project; not a writer |
 | `GIT-400` | Wrong smart-HTTP method/target |
-| `GIT-401` | `NO_SESSION`, `BAD_CREDENTIAL`, `BAD_FINGERPRINT`; client side "no push remote" |
+| `GIT-401` | `NO_SESSION`, `BAD_CREDENTIAL`; client side "no push remote" |
 | `GIT-403` | `PAUSED`: any git request while the WI is not running |
 | `GIT-404` | Bad path / traversal / repo missing |
 | `GIT-412` | Local staged gitlink refused by `pf` before commit (the hook rejects gitlinks with text only) |

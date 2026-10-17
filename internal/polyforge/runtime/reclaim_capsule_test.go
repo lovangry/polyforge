@@ -23,12 +23,11 @@ func reclaimJob(t *testing.T, wi, fp string) *job {
 	j := &job{wi: wi, sessionFingerprint: fp}
 	j.capsuleDir = filepath.Join(base, "capsules", wi)
 	j.git = gitops.Opts{
-		WorkItemID:  wi,
-		Fingerprint: fp,
-		CapsuleDir:  j.capsuleDir,
-		GitDir:      filepath.Join(base, "git", wi+".git"),
-		Username:    wi,
-		Secret:      "push-secret",
+		WorkItemID: wi,
+		CapsuleDir: j.capsuleDir,
+		GitDir:     filepath.Join(base, "git", wi+".git"),
+		Username:   wi,
+		Secret:     "push-secret",
 	}
 	return j
 }
@@ -75,7 +74,6 @@ func TestPrepareCapsuleReclaimQuarantinesGitDirAndPushes(t *testing.T) {
 	}
 
 	j2 := &job{wi: j.wi, capsuleDir: j.capsuleDir, git: j.git, sessionFingerprint: "fp-new"}
-	j2.git.Fingerprint = "fp-new"
 	if err := r.prepareCapsule(context.Background(), j2); err != nil {
 		t.Fatalf("prepareCapsule: %v", err)
 	}

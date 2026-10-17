@@ -409,33 +409,9 @@ func TestCommitPushFirstCommitOnUnbornBranch(t *testing.T) {
 	}
 }
 
-// TestPushOptionSessionFingerprintReachedServer (reference.md §3.4): when the
-// opts carry the PUBLIC session fingerprint, the push option becomes
-// session-fingerprint=<fp> — the fencing-on-use backup layer.
-func TestPushOptionSessionFingerprintReachedServer(t *testing.T) {
-	setIdentity(t)
-	o, barePath := testOpts(t, "wi_fp")
-	bare := mkBare(t, barePath, true)
-	mkCapsule(t, o)
-	o.Fingerprint = "ab12cd34ef56aa00"
-
-	writeDirty(t, o, "a.txt", "a\n")
-	if _, pushed, _, err := CommitPush(context.Background(), o, "one"); err != nil || !pushed {
-		t.Fatalf("CommitPush = (%v, %v)", pushed, err)
-	}
-	seen := bare.pushesSeen(t)
-	if len(seen) != 1 {
-		t.Fatalf("hook invocations: %d, want 1", len(seen))
-	}
-	if seen[0] != "1|session-fingerprint=ab12cd34ef56aa00" {
-		t.Fatalf("push options seen: %q, want count=1 option session-fingerprint=ab12cd34ef56aa00", seen[0])
-	}
-}
-
-// TestPushOptionAbsentFingerprintSendsNoOption: with no fingerprint
-// set (a pre-session push of a non-WI repo, or a local push the hook
-// must not fence), the push carries NO push option at all.
-func TestPushOptionAbsentFingerprintSendsNoOption(t *testing.T) {
+// A push carries no push option: session fencing is the hub proxy's
+// credential check.
+func TestPushCarriesNoPushOption(t *testing.T) {
 	setIdentity(t)
 	o, barePath := testOpts(t, "wi_popt")
 	bare := mkBare(t, barePath, true)

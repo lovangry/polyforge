@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -109,33 +108,8 @@ func (e *gitEnv) credURL(wiID, secret string) string {
 	return strings.Replace(base, "http://", "http://"+wiID+":"+secret+"@", 1)
 }
 
-// runGit runs git in dir. A push to a credentialed proxy URL carries the
-// session-fingerprint push option the way the daemon's gitops layer does
-// (the hook requires it); runGitRaw sends exactly the given args.
+// runGit runs git in dir with exactly the given args.
 func runGit(t *testing.T, dir string, args ...string) (string, error) {
-	t.Helper()
-	if len(args) > 1 && args[0] == "push" {
-		hasOpt := false
-		var fp string
-		for _, a := range args[1:] {
-			if strings.HasPrefix(a, "--push-option=") {
-				hasOpt = true
-			}
-			if u, err := url.Parse(a); err == nil && u.User != nil {
-				if pw, ok := u.User.Password(); ok {
-					fp = api.SessionFingerprint(pw)
-				}
-			}
-		}
-		if !hasOpt && fp != "" {
-			args = append([]string{"push", "--push-option=session-fingerprint=" + fp}, args[1:]...)
-		}
-	}
-	return runGitRaw(t, dir, args...)
-}
-
-// runGitRaw runs git in dir with exactly the given args.
-func runGitRaw(t *testing.T, dir string, args ...string) (string, error) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
@@ -179,7 +153,7 @@ func push(t *testing.T, dir, remote string) error {
 // claimSessionWI creates a queued execution ticket and CAS-claims it
 // under the v1.5 session model with the given CLIENT-MINTED secret,
 // installing the bare repo. Returns the WI id and the session's PUBLIC
-// fingerprint (the push-option backup fence's expected value).
+// fingerprint.
 func (e *gitEnv) claimSessionWI(t *testing.T, secret string) (wiID, fingerprint string) {
 	t.Helper()
 	wi, err := e.wis.Create(core.CreateRequest{
@@ -201,84 +175,31 @@ func (e *gitEnv) claimSessionWI(t *testing.T, secret string) (wiID, fingerprint 
 	return wi.ID, claim.SessionFingerprint
 }
 
-// pushWithFingerprint pushes HEAD:main carrying
-// --push-option=session-fingerprint=<fp>, exactly the way the v1.5 pf
-// gitops choke point does (reference.md §3.4 backup layer).
-func pushWithFingerprint(t *testing.T, dir, remote, fp string) (string, error) {
-	t.Helper()
-	return runGit(t, dir, "push", "--push-option=session-fingerprint="+fp, remote, "HEAD:refs/heads/main")
-}
-
-// TestPushOptionAdvertisedAndFenced (§1.6 backup layer): the bare repo
-// advertises push options (without the advertisement git rejects every
-// push that carries one — and the gitops choke point now always does), a
-// push whose session-fingerprint option matches the credential's session
-// succeeds, and one with a foreign fingerprint is rejected by the
-// pre-receive hook.
-func TestPushOptionAdvertisedAndFenced(t *testing.T) {
+// A daemon older than this hub still sends
+// --push-option=session-fingerprint=<fp>: the repo keeps advertising push
+// options (git refuses an option-carrying push to a repo that does not)
+// and the hook ignores the option — fencing is the proxy's credential
+// check, so even a value that is not the session's is harmless.
+func TestOldDaemonPushOptionIsHarmless(t *testing.T) {
 	e := newGitEnv(t)
 	secret := "0123456789abcdef0123456789abcdef"
 	wiID, fp := e.claimSessionWI(t, secret)
-	if fp == "" {
-		t.Fatalf("claim result carries no session fingerprint")
-	}
-	// A freshly created bare repo advertises push options.
-	out := mustGit(t, e.mgr.RepoDir(wiID), "config", "receive.advertisePushOptions")
-	if strings.TrimSpace(out) != "true" {
+	if out := mustGit(t, e.mgr.RepoDir(wiID), "config", "receive.advertisePushOptions"); strings.TrimSpace(out) != "true" {
 		t.Fatalf("receive.advertisePushOptions = %q, want true", strings.TrimSpace(out))
 	}
-
 	cred := e.credURL(wiID, secret)
 	wt := newWorktree(t)
 	commitPlain(t, wt, "a.txt", "one\n")
-	// A push WITHOUT the option is refused through the proxy: the option
-	// is required whenever the proxy vouches for a session.
-	out, err := runGitRaw(t, wt, "push", cred, "HEAD:refs/heads/main")
-	if err == nil || !strings.Contains(out, "no session-fingerprint push option") {
-		t.Fatalf("option-less push through the proxy accepted or wrongly rejected: %v (%s)", err, out)
+	if out, err := runGit(t, wt, "push", "--push-option=session-fingerprint="+fp, cred, "HEAD:refs/heads/main"); err != nil {
+		t.Fatalf("push with the session's option rejected: %v (%s)", err, out)
 	}
-	// The matching session-fingerprint option succeeds (same commit).
 	commitPlain(t, wt, "b.txt", "two\n")
-	if out, err := pushWithFingerprint(t, wt, cred, fp); err != nil {
-		t.Fatalf("push with the matching session-fingerprint option failed: %v (%s)", err, out)
+	if out, err := runGit(t, wt, "push", "--push-option=session-fingerprint=deadbeefdeadbeef", cred, "HEAD:refs/heads/main"); err != nil {
+		t.Fatalf("push with another option value rejected: %v (%s)", err, out)
 	}
-	// A foreign fingerprint is rejected by the pre-receive hook.
 	commitPlain(t, wt, "c.txt", "three\n")
-	out, err = pushWithFingerprint(t, wt, cred, "deadbeefdeadbeef")
-	if err == nil {
-		t.Fatalf("push with a foreign session-fingerprint accepted: %s", out)
-	}
-	if !strings.Contains(out, "does not match the credential's session fingerprint") {
-		t.Fatalf("wrong rejection: %s", out)
-	}
-	// The rejected push moved nothing: the remote tip still ends at b.txt,
-	// and a corrected push (same commits, right fingerprint) lands cleanly.
-	second := filepath.Join(t.TempDir(), "second")
-	mustGit(t, t.TempDir(), "clone", cred, second)
-	if _, err := os.Stat(filepath.Join(second, "c.txt")); !os.IsNotExist(err) {
-		t.Fatalf("rejected push leaked c.txt into the bare repo: %v", err)
-	}
-	if out, err := pushWithFingerprint(t, wt, cred, fp); err != nil {
-		t.Fatalf("corrected push failed: %v (%s)", err, out)
-	}
-}
-
-// TestPushOptionFenceAbsentExpected: when PF_EXPECTED_FINGERPRINT is
-// absent (a push that never traveled through the proxy — e.g. a direct
-// local push against the bare repo for testing) the hook must NOT fence,
-// even though the push carries a session-fingerprint option: there is
-// nothing to compare against.
-func TestPushOptionFenceAbsentExpected(t *testing.T) {
-	e := newGitEnv(t)
-	wiID, fp := e.claimSessionWI(t, "abcdef0123456789abcdef0123456789")
-	wt := newWorktree(t)
-	commitPlain(t, wt, "a.txt", "one\n")
-	// Direct push to the bare repo path (no proxy, no
-	// PF_EXPECTED_FINGERPRINT) carrying a session-fingerprint option:
-	// accepted.
-	out, err := pushWithFingerprint(t, wt, e.mgr.RepoDir(wiID), fp)
-	if err != nil {
-		t.Fatalf("local option-carrying push rejected: %v (%s)", err, out)
+	if out, err := runGit(t, wt, "push", cred, "HEAD:refs/heads/main"); err != nil {
+		t.Fatalf("option-less push rejected: %v (%s)", err, out)
 	}
 }
 
@@ -667,7 +588,8 @@ func commitPlain(t *testing.T, dir, name, content string) {
 // TestTaskCarrierRefAccepted (polyforge#108): the refs/pf-task/<repo>
 // namespace is the task-repo durability lane — the daemon mirrors a task
 // repo's local head there so a bounded-fail re-claim can restore it. The
-// history is the TASK repo's own: submodules allowed. The hook must accept exactly that shape (while the chain
+// history is the TASK repo's own: submodules allowed. The hook must
+// accept exactly that shape (while the chain
 // invariants stay enforced on refs/heads/* — pinned by the dedicated
 // tests above).
 func TestTaskCarrierRefAccepted(t *testing.T) {

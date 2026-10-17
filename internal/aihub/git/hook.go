@@ -11,14 +11,10 @@ package git
 //   - blob size ≤ MaxBlobBytes (via the GIT_PF_MAX_BLOB env the proxy
 //     sets; the default matches capsule.MaxBlobBytes) — for the
 //     refs/pf-task/* carrier refs the limit is MaxTaskBlobBytes instead
-//     (GIT_PF_MAX_TASK_BLOB; default capsule.MaxTaskBlobBytes);
-//   - the session-fingerprint push option must be present and equal
-//     PF_EXPECTED_FINGERPRINT whenever the push came through the proxy,
-//     which sets that variable (session fencing: the proxy
-//     derives it from the session the Basic credential authenticated
-//     against, so a superseded session's fingerprint can never push even
-//     with a leaked secret). A direct local push with no
-//     PF_EXPECTED_FINGERPRINT has nothing to compare and is not fenced.
+//     (GIT_PF_MAX_TASK_BLOB; default capsule.MaxTaskBlobBytes).
+//
+// Session fencing is the proxy's: only the work item's live session
+// secret authenticates a push (core.CheckSessionCredential).
 //
 // The refs/pf-task/<repo> namespace is the task-repo durability lane
 // (polyforge#108): the daemon's publish boundary mirrors each task
@@ -59,38 +55,6 @@ MAXBLOB="${GIT_PF_MAX_BLOB:-%d}"
 MAXTASKBLOB="${GIT_PF_MAX_TASK_BLOB:-%d}"
 zero=0000000000000000000000000000000000000000
 reject() { echo "aihub: $*" >&2; exit 1; }
-
-# Session fencing (reference.md §3.4): the proxy exports
-# PF_EXPECTED_FINGERPRINT — the public session fingerprint the Basic
-# credential authenticated against — and git exposes the push's options
-# as GIT_PUSH_OPTION_COUNT + GIT_PUSH_OPTION_0..N (only when the repo
-# advertises push options; note git spells the counter env in UPPERCASE).
-# Find session-fingerprint=<value> among them and compare it STRICTLY
-# with the expected fingerprint.
-#
-# A push that travelled through the proxy (PF_EXPECTED_FINGERPRINT set)
-# MUST carry the option and it MUST match: a missing option, like a
-# mismatch, rejects the WHOLE push. A push that did not travel through
-# the proxy (e.g. a direct local test push against the bare repo) has
-# nothing to compare against and the gate stays open: the proxy is the
-# only party that can vouch for which session a credential belongs to.
-if [ -n "${PF_EXPECTED_FINGERPRINT:-}" ]; then
-  poptcount="${GIT_PUSH_OPTION_COUNT:-0}"
-  case "$poptcount" in ''|*[!0-9]*) poptcount=0 ;; esac
-  sent_fp=""
-  i=0
-  while [ "$i" -lt "$poptcount" ]; do
-    eval "opt=\"\${GIT_PUSH_OPTION_$i:-}\""
-    case "$opt" in
-      session-fingerprint=*) sent_fp="${opt#session-fingerprint=}" ;;
-    esac
-    i=$((i+1))
-  done
-  [ -n "$sent_fp" ] || reject "push carries no session-fingerprint push option (required)"
-  if [ "$sent_fp" != "$PF_EXPECTED_FINGERPRINT" ]; then
-    reject "session-fingerprint push option '$sent_fp' does not match the credential's session fingerprint '$PF_EXPECTED_FINGERPRINT'"
-  fi
-fi
 
 while read -r old new ref; do
   # Task-repo WIP namespace (polyforge#167): a scratch snapshot of a task

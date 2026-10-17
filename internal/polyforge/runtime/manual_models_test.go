@@ -184,8 +184,12 @@ func TestManualModelsReclaimIsDaemonLocal(t *testing.T) {
 	if got := r.effectiveCandidatesForRecovery(rj); strings.Join(got["fix"], ",") != "pi:m/one,pi:m/two" {
 		t.Fatalf("reconstructed job candidates %v, want the manual list", got["fix"])
 	}
-	// a blocked end (the harness has no push remote, so Stop degrades to
+	// a blocked end (the hub refuses the final push, so Stop degrades to
 	// blocked) keeps the record for the re-claim
+	refuse := filepath.Join(hub.capsuleRepoBase, "wi_rc.git", "hooks", "pre-receive")
+	if err := os.WriteFile(refuse, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := r.Stop(context.Background(), "wi_rc", protocol.FinishWrapped); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}

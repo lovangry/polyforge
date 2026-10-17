@@ -24,48 +24,38 @@ func NewOwnerManager(db *DB) *OwnerManager { return &OwnerManager{db: db} }
 // CheckSessionCredential validates a git-face Basic pair: username must be
 // the work-item id, the password is the session secret — validated as
 // hex(sha256(password)) == work_items.session_hash AND status == running
-// (M3: pushes are refused while paused). The returned handle is the
-// session's PUBLIC fingerprint, which the proxy hands the pre-receive
-// hook as the push-option backup fence's expected value.
+// (M3: pushes are refused while paused).
 // A WI with no live session answers GIT-401: only a session claim can
 // make a push valid.
-func (m *OwnerManager) CheckSessionCredential(wiID, username, secret string) (string, error) {
+func (m *OwnerManager) CheckSessionCredential(wiID, username, secret string) error {
 	if wiID == "" || username != wiID || secret == "" {
-		return "", Fail(api.ErrGitUnauthorized, "BAD_CREDENTIAL", "credential rejected")
+		return Fail(api.ErrGitUnauthorized, "BAD_CREDENTIAL", "credential rejected")
 	}
 	var hash, fp sql.NullString
 	var status string
 	err := m.db.QueryRow(`SELECT session_hash, session_fingerprint, status FROM work_items WHERE id=?1`, wiID).
 		Scan(&hash, &fp, &status)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", Fail(api.ErrGitUnauthorized, "NO_SESSION", "credential rejected: no live session")
+		return Fail(api.ErrGitUnauthorized, "NO_SESSION", "credential rejected: no live session")
 	}
 	if err != nil {
-		return "", err
+		return err
 	}
 	if !hash.Valid || hash.String == "" {
-		return "", Fail(api.ErrGitUnauthorized, "NO_SESSION", "credential rejected: no live session")
+		return Fail(api.ErrGitUnauthorized, "NO_SESSION", "credential rejected: no live session")
 	}
 	// Fencing-on-use: a mismatch names the CURRENT holder's public
 	// fingerprint so a superseded daemon can self-diagnose from the
 	// rejection alone.
 	if api.SessionHashHex(secret) != hash.String {
-		return "", Fail(api.ErrGitUnauthorized, "BAD_CREDENTIAL",
+		return Fail(api.ErrGitUnauthorized, "BAD_CREDENTIAL",
 			"credential rejected: the work item is held by session %s", fp.String)
 	}
-	// Fail closed: the handle the proxy hands the pre-receive fence must be
-	// the secret's own fingerprint. An empty or divergent stored value would
-	// reach the hook as an empty PF_EXPECTED_FINGERPRINT, which skips the
-	// fence (the hook's no-proxy branch) — refuse the push instead.
-	if fp.String != api.SessionFingerprint(secret) {
-		return "", Fail(api.ErrGitUnauthorized, "BAD_FINGERPRINT",
-			"credential rejected: the session's fingerprint is missing or invalid")
-	}
 	if status != api.StatusRunning {
-		return "", Fail(api.ErrGitForbidden, "PAUSED",
+		return Fail(api.ErrGitForbidden, "PAUSED",
 			"pushes are refused while the work item is %s (session holder %s)", status, fp.String)
 	}
-	return fp.String, nil
+	return nil
 }
 
 // unfinishedBlockers is the shared query (owner must not depend on the

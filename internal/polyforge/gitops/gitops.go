@@ -9,11 +9,6 @@
 //     git HTTP proxy; the credential travels via a one-shot GIT_ASKPASS
 //     helper (never in argv, never in persistent env) and reaches both
 //     http:// and https:// remotes;
-//   - pushes carry --push-option=session-fingerprint=<fp> (reference.md §3.4
-//     fencing-on-use backup layer: Opts.Fingerprint, the PUBLIC
-//     session handle). The runtime always sets it; the aihub hook
-//     REQUIRES the option on every push that travels through its git
-//     proxy;
 //   - an index.lock that has outlived the stale bound is removed at
 //     acquisition (see cleanStaleLocks for why age, not PID, is the only
 //     safe signal while step processes may run); once they are reaped,
@@ -80,17 +75,11 @@ func Lock(workItemID string) func() {
 // Opts describe one capsule worktree + its external git-dir.
 type Opts struct {
 	WorkItemID string // mutex key and push identity
-	// Fingerprint is the v1.5 PUBLIC session fingerprint
-	// (hex(sha256(session_id))[:16]); rides pushes as
-	// --push-option=session-fingerprint=<fp> (§1.6 fencing-on-use
-	// backup layer). The runtime sets it from the claim answer; empty
-	// sends no push option at all.
-	Fingerprint string
-	CapsuleDir  string // worktree root (agent-writable)
-	GitDir      string // external git-dir (e.g. <data>/git/wi_xxx.git)
-	RemoteURL   string // aihub git proxy URL, e.g. http://host:8420/git/wi_xxx.git
-	Username    string // push credential username (= work item id)
-	Secret      string // push credential secret (v1.5: the session id; askpass only — never argv, never env)
+	CapsuleDir string // worktree root (agent-writable)
+	GitDir     string // external git-dir (e.g. <data>/git/wi_xxx.git)
+	RemoteURL  string // aihub git proxy URL, e.g. http://host:8420/git/wi_xxx.git
+	Username   string // push credential username (= work item id)
+	Secret     string // push credential secret (v1.5: the session id; askpass only — never argv, never env)
 	// EventSink receives the durable error events the gitops lanes raise
 	// (e.g. EventTaskRefDiverged), already bound to this work item by the
 	// runtime. nil drops them.
@@ -488,15 +477,7 @@ func pushLocked(ctx context.Context, o Opts) (bool, int64, error) {
 	if o.RemoteURL == "" {
 		return false, 0, &api.Error{Code: api.ErrGitUnauthorized, Detail: "no push remote configured"}
 	}
-	args := []string{"push"}
-	if o.Fingerprint != "" {
-		// reference.md §3.4 fencing-on-use backup layer: the push option carries
-		// the PUBLIC session fingerprint; the pre-receive hook rejects a
-		// push whose option differs from the credential's fingerprint,
-		// naming the CURRENT holder so a superseded daemon self-diagnoses.
-		args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
-	}
-	args = append(args, o.RemoteURL, "HEAD:refs/heads/main")
+	args := []string{"push", o.RemoteURL, "HEAD:refs/heads/main"}
 	additions, cleanup, err := credentialEnv(o)
 	if err != nil {
 		return false, 0, err
@@ -849,15 +830,11 @@ func carrierProtocolFlags(o Opts) []string {
 // carrierPush runs the credentialed push of one refspec from the
 // temporary repo tmp: the carrier env plus the credential additions, a
 // protocol allow-list of the remote's own scheme, no submodule
-// recursion, the session fingerprint push option, the push timeout. A
+// recursion, the push timeout. A
 // failure is the caller's; the next close or publish pushes again.
 func carrierPush(o Opts, env []string, tmp, refspec string, credAdditions []string) (string, error) {
 	args := append(append(carrierTmpFlags(tmp), carrierProtocolFlags(o)...),
-		"push", "--no-recurse-submodules")
-	if o.Fingerprint != "" {
-		args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
-	}
-	args = append(args, o.RemoteURL, refspec)
+		"push", "--no-recurse-submodules", o.RemoteURL, refspec)
 	return o.gitT(carrierPushTimeout, append(env, credAdditions...), tmp, args...)
 }
 
@@ -1261,7 +1238,7 @@ func (a *CarrierAlerts) clear(repo string) {
 
 // IsPermanentPushRejection reports a push the server answered and refused
 // for a reason no retry can change: the pre-receive hook declined it
-// (gitlink, blob size limit, session fence) or the ref moved
+// (gitlink, blob size limit) or the ref moved
 // non-fast-forward. A transport failure (unreachable, timeout, auth
 // against a down proxy) is NOT permanent, nor is a lost ref-transaction
 // race (refCasRejected). Matches git's C-locale output

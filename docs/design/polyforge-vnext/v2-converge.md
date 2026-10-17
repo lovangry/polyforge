@@ -391,7 +391,7 @@ carrier ref 与 WIP ref 这三项**现行**机制的唯一设计记录。§14.2�
   强制：只能快进、不得删除 ref（`refs/pf-wip/*` 除外）、提交树中不得有 gitlink（`GIT-412`；daemon 在本地 commit 前预检同一规则并拒绝提交，`repos/`、`artifacts/release-*` 下的 gitlink 指引是恢复 capsule `.gitignore`，绝不删任务仓库的 `.git`）、blob ≤ 16 MiB（`capsule.MaxBlobBytes`）。
   提交不带序号 trailer：step 在 capsule 根自己 `git commit` 的提交就是链上一个普通快进提交，随下一次发布原样推送。
 - **会话围栏**：推送经 aihub git 代理，Basic 口令必须是该 WI **当前活会话**的 secret（一次性 `GIT_ASKPASS` 传递，不进 argv）；被取代或已
-  结束的会话被拒（`GIT-401`）。推送另带 `--push-option=session-fingerprint=<fp>`，hook 比对代理按凭证推出的公开指纹（备份层）。
+  结束的会话被拒（`GIT-401`）。
 - **异步推送的重试调度**（`observe/observe.go`、`observe/monitor.go`）：失败后每 10s 重试；连续 5 次失败或 30 分钟无成功推送发一次
   `push_backpressure` 降级事件；同一错误连续 5 次即停止本轮重试（`reason=same_error`），直到下一个提交边界（`execution.json`
   Version 前进）或一次成功推送重新武装。每次推送上界 60s（`protocol.PushTimeout`）。
@@ -429,7 +429,7 @@ blocked→resume 等重新认领从上游 clone 后按 carrier ref 恢复任务�
   2. 在任务仓库之外（WI 裸仓库目录旁，`pf-carrier-*` 临时目录）建一个 daemon 自有的临时裸仓库，`objects/info/alternates`
      指向 `<repo>/.git/objects`，`update-ref refs/pf-carrier/tmp <sha>`；推送完即删除。
   3. 从临时仓库推送：
-     `git --git-dir=<tmp> -c core.hooksPath=/dev/null -c core.fsmonitor=false -c credential.helper= -c http.proxy= -c protocol.allow=never -c protocol.<RemoteURL 的 scheme>.allow=always push --no-recurse-submodules [--push-option=session-fingerprint=<fp>] <RemoteURL> <sha>:refs/pf-task/<name>`。
+     `git --git-dir=<tmp> -c core.hooksPath=/dev/null -c core.fsmonitor=false -c credential.helper= -c http.proxy= -c protocol.allow=never -c protocol.<RemoteURL 的 scheme>.allow=always push --no-recurse-submodules <RemoteURL> <sha>:refs/pf-task/<name>`。
   carrier 通道上每一次 git 调用（校验与推送）用同一个环境：daemon 环境去掉全部 `GIT_*`，加 `GIT_CONFIG_NOSYSTEM=1`、
   `GIT_CONFIG_GLOBAL=/dev/null`、`GIT_CEILING_DIRECTORIES=<解析 symlink 后的 repos 目录>`（校验与推送用同一个值）；推送另加一次性 askpass（`GIT_ASKPASS`、`GIT_TERMINAL_PROMPT=0`）。
   于是任务仓库里的 `credential.helper`、`url.*.insteadOf`/`pushInsteadOf`、`remote.<url>.vcs`（remote helper）、
