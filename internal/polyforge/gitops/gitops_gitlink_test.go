@@ -10,6 +10,7 @@ package gitops
 // the documented cleanup must genuinely unblock the next CommitPush.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,14 +57,14 @@ func TestCommitPushRefusesLocalGitlinkNoCommit(t *testing.T) {
 
 	// A healthy chain first: one ordinary commit must land.
 	writeDirty(t, o, "clean.txt", "one\n")
-	if _, pushed, _, err := CommitPush(o, "observe: execution v1"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(context.Background(), o, "observe: execution v1"); err != nil || !pushed {
 		t.Fatalf("healthy CommitPush: pushed=%v err=%v", pushed, err)
 	}
 
 	// The poison: an embedded repo plus more ordinary work in the tree.
 	mkEmbedded(t, o.CapsuleDir, "poison")
 	writeDirty(t, o, "more.txt", "two\n")
-	sha, pushed, _, err := CommitPush(o, "observe: execution v2")
+	sha, pushed, _, err := CommitPush(context.Background(), o, "observe: execution v2")
 	if err == nil {
 		t.Fatal("CommitPush over an embedded repository must be refused")
 	}
@@ -113,7 +114,7 @@ func TestCommitPushRefusesLocalGitlinkNoCommit(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(o.CapsuleDir, "poison", ".git")); err != nil {
 		t.Fatal(err)
 	}
-	sha2, pushed2, _, err2 := CommitPush(o, "observe: execution v2 (cleaned)")
+	sha2, pushed2, _, err2 := CommitPush(context.Background(), o, "observe: execution v2 (cleaned)")
 	if err2 != nil || !pushed2 {
 		t.Fatalf("CommitPush after cleanup: pushed=%v err=%v", pushed2, err2)
 	}
@@ -148,12 +149,15 @@ func TestCommitPushRefusesUnbornEmbeddedRepo(t *testing.T) {
 		t.Fatalf("git init (embedded): %v: %s", err, out)
 	}
 	writeDirty(t, o, "clean.txt", "one\n")
-	_, pushed, _, err := CommitPush(o, "observe: execution v1")
+	_, pushed, _, err := CommitPush(context.Background(), o, "observe: execution v1")
 	if err == nil || pushed {
 		t.Fatalf("CommitPush over an unborn embedded repo must be refused (err=%v pushed=%v)", err, pushed)
 	}
 	if !IsLocalGitlink(err) {
 		t.Fatalf("error must be the typed local gitlink refusal, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "`git rm --cached poison2`") {
+		t.Fatalf("the refusal must name the embedded repository in its cleanup recipe: %v", err)
 	}
 	// Still no commit in local history (unborn HEAD: rev-parse fails,
 	// which is itself the proof nothing was committed).
@@ -168,7 +172,7 @@ func TestCommitPushRefusesUnbornEmbeddedRepo(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(dir, ".git")); err != nil {
 		t.Fatal(err)
 	}
-	if _, pushed2, _, err2 := CommitPush(o, "observe: execution v1 (cleaned)"); err2 != nil || !pushed2 {
+	if _, pushed2, _, err2 := CommitPush(context.Background(), o, "observe: execution v1 (cleaned)"); err2 != nil || !pushed2 {
 		t.Fatalf("CommitPush after cleanup: pushed=%v err=%v", pushed2, err2)
 	}
 }
@@ -202,14 +206,15 @@ func asAPIError(err error, target **api.Error) bool {
 // capsule .gitignore lost its line; the refusal must point there and
 // never tell anyone to delete a task repo's .git (its only history).
 func TestGitlinkRemedyNeverDeletesATaskRepo(t *testing.T) {
-	r := gitlinkRemedy("repos/app")
+	remedy := func(path string) string { return refuseGitlink(nil, t.TempDir(), "x", path).Error() }
+	r := remedy("repos/app")
 	if !strings.Contains(r, "/repos/") || !strings.Contains(r, ".gitignore") || !strings.Contains(r, "Do NOT delete") {
 		t.Fatalf("task-repo remedy = %q", r)
 	}
 	if strings.Contains(r, "git rm --cached") || strings.Contains(r, "delete its .git") {
 		t.Fatalf("task-repo remedy must not offer the destructive recipe: %q", r)
 	}
-	if g := gitlinkRemedy("poison"); !strings.Contains(g, "git rm --cached") || !strings.Contains(g, "disposable") {
+	if g := remedy("poison"); !strings.Contains(g, "git rm --cached") || !strings.Contains(g, "disposable") {
 		t.Fatalf("residue remedy = %q", g)
 	}
 }

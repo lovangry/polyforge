@@ -228,17 +228,10 @@ var git = func(env []string, dir string, args ...string) (string, error) {
 	return runGit(0, env, dir, args...)
 }
 
-// gitTimed is git bounded by timeout: on expiry the whole git process
-// group is killed (git spawns remote helpers and pack-objects), so a
-// hung remote cannot hold the per-WI lock forever. A var for the same
-// test seam as git.
-var gitTimed = func(timeout time.Duration, env []string, dir string, args ...string) (string, error) {
-	return runGit(timeout, env, dir, args...)
-}
-
-// gitTimedCtx is gitTimed under a caller context too (the claim lane's
-// carrier fetches, B-8): cancelling ctx kills the process group. A var
-// for the same test seam.
+// gitTimedCtx is git bounded by timeout (0 = none) and ctx: when either
+// ends the whole git process group is killed (git spawns remote helpers
+// and pack-objects), so a hung remote cannot hold the per-WI lock
+// forever. A var for the same test seam as git.
 var gitTimedCtx = func(ctx context.Context, timeout time.Duration, env []string, dir string, args ...string) (string, error) {
 	return runGitCtx(ctx, timeout, env, dir, args...)
 }
@@ -246,10 +239,11 @@ var gitTimedCtx = func(ctx context.Context, timeout time.Duration, env []string,
 // gitT runs one carrier-lane git call: its timeout cut by o.bound, and
 // killed with its process group when o.Ctx ends.
 func (o Opts) gitT(timeout time.Duration, env []string, dir string, args ...string) (string, error) {
-	if o.Ctx == nil {
-		return gitTimed(o.bound(timeout), env, dir, args...)
+	ctx := o.Ctx
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return gitTimedCtx(o.Ctx, o.bound(timeout), env, dir, args...)
+	return gitTimedCtx(ctx, o.bound(timeout), env, dir, args...)
 }
 
 // runGit runs git once; timeout 0 = unbounded.
@@ -269,7 +263,7 @@ func runGitCtx(ctx context.Context, timeout time.Duration, env []string, dir str
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = CEnv(env)
 	cmd.Dir = dir
-	if timeout > 0 {
+	if timeout > 0 || ctx.Done() != nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 		cmd.WaitDelay = 5 * time.Second
@@ -330,18 +324,9 @@ func IsLocalGitlink(err error) bool {
 }
 
 // checkLocalGitlink scans the staged index for gitlink (mode 160000)
-// entries and, when any exist, unstages everything (best-effort `git
-// reset -q` — the worktree is untouched, only the index is dropped, and
-// the next healthy CommitPush re-stages it) and answers the typed
-// GIT-412 LOCAL_GITLINK_DETECTED refusal (an *api.Error, so observe's
-// IsLocalGitlink classification sees the code + sentinel pair): the
-// error names the polluted paths and the cleanup recipe (gitlinkRemedy:
-// under repos/ restore the capsule .gitignore and never delete the task
-// repo's .git; elsewhere move the embedded repository out or ignore it,
-// deleting its .git only if its history is disposable) so the operator
-// can act on it. Repos
-// under the capsule's ignored trees (repos/, artifacts/release-*/)
-// never reach the index, so ANY staged gitlink is poison by definition.
+// entries and refuses them (refuseGitlink). Repos under the capsule's
+// ignored trees (repos/, artifacts/release-*/) never reach the index,
+// so ANY staged gitlink is poison by definition.
 func checkLocalGitlink(env []string, dir string) error {
 	out, err := git(env, dir, "ls-files", "--stage")
 	if err != nil {
@@ -350,44 +335,50 @@ func checkLocalGitlink(env []string, dir string) error {
 	var paths []string
 	for _, line := range strings.Split(out, "\n") {
 		meta, path, ok := strings.Cut(line, "\t")
-		if !ok {
-			continue
-		}
-		fields := strings.Fields(meta)
-		if len(fields) > 0 && fields[0] == "160000" {
+		if f := strings.Fields(meta); ok && len(f) > 0 && f[0] == "160000" {
 			paths = append(paths, path)
 		}
 	}
 	if len(paths) == 0 {
 		return nil
 	}
-	// Drop the index so the poison does not linger staged for any other
-	// commit path; a failure here is ignored — the refusal below is the
-	// load-bearing half either way.
-	_, _ = git(env, dir, "reset", "-q")
-	detail := localGitlinkPrefix + ": staged gitlink (mode 160000) at " +
-		strings.Join(paths, ", ") +
-		" — an embedded git repository would poison the capsule chain (aihub's pre-receive rejects mode 160000 on every push, forever). " +
-		"No commit was created. " + gitlinkRemedy(paths[0])
-	return &api.Error{Code: api.ErrGitGitlink, Detail: detail}
+	return refuseGitlink(env, dir, "staged gitlink (mode 160000) at "+strings.Join(paths, ", "), paths[0])
 }
 
-// gitlinkRemedy is the cleanup recipe of a GIT-412 refusal for path. A
-// path under an ignored capsule tree (a task repo under repos/) only
-// reaches the index when the capsule .gitignore lost its line: the fix
-// is restoring it — deleting that repository's .git would destroy the
-// task repo's history. Anywhere else the embedded
-// repository is agent residue.
-func gitlinkRemedy(path string) string {
-	if strings.HasPrefix(path, "repos/") || strings.HasPrefix(path, "artifacts/release-") {
-		return "The capsule .gitignore no longer ignores " + path + ": restore it (it must contain " +
-			strings.ReplaceAll(strings.TrimSpace(capsule.GitignoreContent), "\n", " and ") +
-			") and retry. Do NOT delete " + filepath.Join(path, ".git") + " — that destroys the task repo's history."
-	}
-	return "Clean it: move the embedded repository out of the capsule (or add " + path + " to the capsule .gitignore); " +
+// refuseGitlink drops the staged index (best-effort `git reset -q`: the
+// worktree is untouched and the next healthy CommitPush re-stages it, so
+// the poison does not linger staged) and answers the typed GIT-412
+// LOCAL_GITLINK_DETECTED refusal (an *api.Error, so IsLocalGitlink sees
+// the code + sentinel pair) naming what was found and the cleanup recipe
+// for path. A path under an ignored capsule tree (a task repo under
+// repos/) only reaches the index when the capsule .gitignore lost its
+// line: the fix is restoring it — deleting that repository's .git would
+// destroy the task repo's history. Anywhere else the embedded repository
+// is agent residue.
+func refuseGitlink(env []string, dir, found, path string) error {
+	_, _ = git(env, dir, "reset", "-q")
+	remedy := "Clean it: move the embedded repository out of the capsule (or add " + path + " to the capsule .gitignore); " +
 		"if, and only if, its history is disposable, delete its .git directory (" + filepath.Join(path, ".git") + ") instead. " +
 		"Then `git rm --cached " + path + "` if it is still staged, and retry; " +
 		"verify with `git ls-files --stage | grep ^160000` (must be empty)."
+	if strings.HasPrefix(path, "repos/") || strings.HasPrefix(path, "artifacts/release-") {
+		remedy = "The capsule .gitignore no longer ignores " + path + ": restore it (it must contain " +
+			strings.ReplaceAll(strings.TrimSpace(capsule.GitignoreContent), "\n", " and ") +
+			") and retry. Do NOT delete " + filepath.Join(path, ".git") + " — that destroys the task repo's history."
+	}
+	return &api.Error{Code: api.ErrGitGitlink, Detail: localGitlinkPrefix + ": " + found +
+		" — an embedded git repository would poison the capsule chain (aihub's pre-receive rejects mode 160000 on every push, forever). " +
+		"No commit was created. " + remedy}
+}
+
+// uncheckedOutPath answers the path git's "error: '<path>/' does not
+// have a commit checked out" names ("" when it names none).
+func uncheckedOutPath(msg string) string {
+	before, _, ok := strings.Cut(msg, "' does not have a commit checked out")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSuffix(before[strings.LastIndex(before, "'")+1:], "/")
 }
 
 // PushTimings carries the wall-clock durations of the underlying git
@@ -411,9 +402,12 @@ type PushTimings struct {
 // including the retry-after-failed-push one a wrap/seal re-drive needs:
 // a commit that landed locally on a failed push finally reaches the
 // server HERE, and a still-dead server answers with its error, not a
-// fake success. Returns the local commit SHA, whether the push reached
-// the server, and the commit/push wall-clock timings.
-func CommitPush(o Opts, message string) (string, bool, PushTimings, error) {
+// fake success. ctx bounds the commit and the chain push: when it ends
+// the running git call's process group is killed, the task-repo lane is
+// skipped and the per-WI lock is released before CommitPush returns.
+// Returns the local commit SHA, whether the push reached the server, and
+// the commit/push wall-clock timings.
+func CommitPush(ctx context.Context, o Opts, message string) (string, bool, PushTimings, error) {
 	release := Lock(o.WorkItemID)
 	defer release()
 
@@ -423,6 +417,7 @@ func CommitPush(o Opts, message string) (string, bool, PushTimings, error) {
 		return "", false, timings, err
 	}
 	env := o.Env()
+	gitc := func(args ...string) (string, error) { return gitTimedCtx(ctx, 0, env, o.CapsuleDir, args...) }
 	// Auto-heal a foreign commit at the tip BEFORE anything else (both
 	// the dirty and the clean-tree path push HEAD, and aihub's hook
 	// rejects every pushed commit without an integer seq trailer).
@@ -433,66 +428,47 @@ func CommitPush(o Opts, message string) (string, bool, PushTimings, error) {
 	// on stdout, so the failure cannot be told apart from a real commit
 	// error by the error string. The porcelain listing is the honest
 	// signal: empty output means the standing HEAD is already the answer.
-	status, err := git(env, o.CapsuleDir, "status", "--porcelain")
+	status, err := gitc("status", "--porcelain")
 	if err != nil {
 		return "", false, timings, err
 	}
-	if strings.TrimSpace(status) == "" {
-		// Clean tree: the standing HEAD is the answer — and it is
-		// PUSHED, not presumed. Skipping the push here would let a
-		// clean-tree retry after a failed push fake success and
-		// silence §九 backpressure in the one scenario (persistent
-		// server unreachability) it exists for.
-		sha, serr := git(env, o.CapsuleDir, "rev-parse", "HEAD")
-		if serr != nil {
-			return "", false, timings, fmt.Errorf("%w: %v", ErrEmptyHistory, serr)
+	if strings.TrimSpace(status) != "" {
+		seq, err := nextSeq(env, o.CapsuleDir)
+		if err != nil {
+			return "", false, timings, err
 		}
-		localSHA := strings.TrimSpace(sha)
-		pushed, pushMS, perr := pushLocked(o)
-		timings.PushMS = pushMS
-		return localSHA, pushed, timings, perr
-	}
-	seq, err := nextSeq(env, o.CapsuleDir)
-	if err != nil {
-		return "", false, timings, err
-	}
-	if _, err := git(env, o.CapsuleDir, "add", "-A"); err != nil {
-		// An embedded repository with no commit checked out fails the add
-		// itself ("'x/' does not have a commit checked out") — the same
-		// poison shape one step earlier. Type it identically so the
-		// operator sees the actionable refusal, not a bare git error.
-		if strings.Contains(err.Error(), "does not have a commit checked out") {
-			_, _ = git(env, o.CapsuleDir, "reset", "-q")
-			return "", false, timings, &api.Error{
-				Code:   api.ErrGitGitlink,
-				Detail: localGitlinkPrefix + ": embedded git repository without a commit checked out — " + err.Error() + ". No commit was created. Clean it: move the embedded repository out of the capsule (or add it to the capsule .gitignore; under repos/ the capsule .gitignore lost its /repos/ line — restore it, never delete a task repo's .git), then retry.",
+		if _, err := gitc("add", "-A"); err != nil {
+			// An embedded repository with no commit checked out fails the
+			// add itself — the same poison shape one step earlier.
+			if strings.Contains(err.Error(), "does not have a commit checked out") {
+				return "", false, timings, refuseGitlink(env, o.CapsuleDir, "embedded git repository without a commit checked out at "+uncheckedOutPath(err.Error()), uncheckedOutPath(err.Error()))
 			}
+			return "", false, timings, err
 		}
-		return "", false, timings, err
+		// LOCAL gitlink precheck (BEFORE the commit is created): after
+		// `add -A`, so it catches both a standing poisoned index and the
+		// fresh nested .git the add just staged.
+		if err := checkLocalGitlink(env, o.CapsuleDir); err != nil {
+			return "", false, timings, err
+		}
+		msg := fmt.Sprintf("%s\n\n%s: %d", message, capsule.SeqTrailer, seq)
+		commitStart := time.Now()
+		_, cerr := gitc("commit", "-m", msg)
+		timings.CommitMS = time.Since(commitStart).Milliseconds()
+		if cerr != nil {
+			return "", false, timings, cerr
+		}
 	}
-	// LOCAL gitlink precheck (BEFORE the commit is created): an embedded
-	// git repository staged by the add above must never reach local
-	// history — see ErrLocalGitlink. Runs after `add -A` because
-	// ls-files reads the index: this placement catches both a standing
-	// poisoned index and the fresh nested .git the add just staged.
-	if err := checkLocalGitlink(env, o.CapsuleDir); err != nil {
-		return "", false, timings, err
+	// A clean tree's standing HEAD is the answer too — and it is PUSHED,
+	// not presumed: skipping the push would let a clean-tree retry after
+	// a failed push fake success and silence §九 backpressure.
+	sha, serr := git(env, o.CapsuleDir, "rev-parse", "HEAD")
+	if serr != nil {
+		return "", false, timings, fmt.Errorf("%w: %v", ErrEmptyHistory, serr)
 	}
-	msg := fmt.Sprintf("%s\n\n%s: %d", message, capsule.SeqTrailer, seq)
-	commitStart := time.Now()
-	_, cerr := git(env, o.CapsuleDir, "commit", "-m", msg)
-	timings.CommitMS = time.Since(commitStart).Milliseconds()
-	if cerr != nil {
-		return "", false, timings, cerr
-	}
-	sha, err := git(env, o.CapsuleDir, "rev-parse", "HEAD")
-	if err != nil {
-		return "", false, timings, err
-	}
-	localSHA := strings.TrimSpace(sha)
-	pushed, pushMS, perr := pushLocked(o)
+	pushed, pushMS, perr := pushLocked(ctx, o)
 	timings.PushMS = pushMS
-	return localSHA, pushed, timings, perr
+	return strings.TrimSpace(sha), pushed, timings, perr
 }
 
 // EventUntrailedCommitsFolded is the event kind raised when CommitPush
@@ -623,29 +599,18 @@ func nextSeq(env []string, dir string) (int64, error) {
 func Push(o Opts) (bool, error) {
 	release := Lock(o.WorkItemID)
 	defer release()
-	pushed, _, err := pushLocked(o)
+	pushed, _, err := pushLocked(context.Background(), o)
 	return pushed, err
 }
 
-// pushLocked is push under an already-held per-WI lock. The returned
-// pushMS is the wall-clock duration of the git push invocation,
-// measured honestly on failure too (the observed-only latency sample).
-// Besides the capsule chain (HEAD:refs/heads/main) it drives the
-// task-repo durability lane (pushTaskRefsLocked): best-effort, after
-// the chain push either way, never blocking it.
-//
-// Same-WI push idempotency (the shutdown-window push race): the receive
-// protocol compare-and-swaps every push against the ref value its
-// client saw at advertisement time, so a duplicate push of an
-// already-published commit — e.g. a recovery push of one work item
-// racing an overlapping push of the same WI across a stop+restart
-// boundary — is rejected with "cannot lock ref" even though the server
-// already holds the exact state being pushed. That rejection shape is
-// retried a bounded number of times: each retry re-advertises, and a
-// server already holding the standing HEAD answers "Everything
-// up-to-date" (success). Anything still failing — or failing for a
-// different reason — surfaces as the honest error.
-func pushLocked(o Opts) (bool, int64, error) {
+// pushLocked is push under an already-held per-WI lock: the chain push
+// (HEAD:refs/heads/main, bounded by ctx and chainRemoteTimeout), then
+// the task-repo durability lane (pushTaskRefsLocked) — best-effort,
+// after the chain push either way, never blocking it, and skipped once
+// ctx has ended. The returned pushMS is the wall-clock duration of the
+// git push invocation, measured on failure too (the observed-only
+// latency sample).
+func pushLocked(ctx context.Context, o Opts) (bool, int64, error) {
 	if o.RemoteURL == "" {
 		return false, 0, &api.Error{Code: api.ErrGitUnauthorized, Detail: "no push remote configured"}
 	}
@@ -663,40 +628,24 @@ func pushLocked(o Opts) (bool, int64, error) {
 		return false, 0, err
 	}
 	defer cleanup()
-	env := hubEnv(o, true, additions)
-	pushed, pushMS, perr := pushChainLocked(env, o.CapsuleDir, args)
-	// Task-repo durability lane: after the chain push either way, its
-	// own invocations, its own failures — never the chain's result. A
-	// carrier failure is raised as a human decision only when the chain
-	// push itself landed: a hub outage or a fenced session fails both,
-	// and that is not a "cannot be saved" decision (a still-failing
-	// carrier is reported on the next successful publish).
-	pushTaskRefsLocked(o, perr == nil)
-	return pushed, pushMS, perr
-}
-
-// pushChainLocked is the chain push itself (HEAD:refs/heads/main) with
-// the same-WI push idempotency retry, factored out so pushLocked can
-// append the task-repo carrier lane after it without entangling the
-// retry semantics.
-func pushChainLocked(env []string, capsuleDir string, args []string) (bool, int64, error) {
-	for attempt := 1; ; attempt++ {
-		pushStart := time.Now()
-		out, perr := gitTimed(chainRemoteTimeout, env, capsuleDir, args...)
-		pushMS := time.Since(pushStart).Milliseconds()
-		if perr == nil {
-			return true, pushMS, nil
-		}
-		detail := strings.TrimSpace(out) + ": " + perr.Error()
-		if !refCasRejected(detail) || attempt >= pushRaceAttempts {
-			return false, pushMS, &api.Error{Code: api.ErrGitInternal, Detail: detail}
-		}
-		// The ref moved (or appeared) between this push's advertisement
-		// and its ref transaction: re-advertise and try again — the
-		// winner of the overlap usually delivered this very commit, so
-		// the retry answers up-to-date.
-		time.Sleep(pushRaceBackoff)
+	pushStart := time.Now()
+	out, perr := gitTimedCtx(ctx, chainRemoteTimeout, hubEnv(o, true, additions), o.CapsuleDir, args...)
+	pushMS := time.Since(pushStart).Milliseconds()
+	if perr != nil {
+		perr = &api.Error{Code: api.ErrGitInternal, Detail: strings.TrimSpace(out) + ": " + perr.Error()}
 	}
+	if ctx.Err() != nil {
+		fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push skipped: the publish ended (%v)\n", o.WorkItemID, ctx.Err())
+		return perr == nil, pushMS, perr
+	}
+	// Task-repo durability lane: its own invocations, its own failures —
+	// never the chain's result. A carrier failure is raised as a human
+	// decision only when the chain push itself landed: a hub outage or a
+	// fenced session fails both, and that is not a "cannot be saved"
+	// decision (a still-failing carrier is reported on the next
+	// successful publish).
+	pushTaskRefsLocked(o, perr == nil)
+	return perr == nil, pushMS, perr
 }
 
 // TaskCarrierNamespace is the ref namespace, inside the work item's own
@@ -845,10 +794,8 @@ var (
 // chainRemoteTimeout bounds every git call of the chain lane that talks
 // to the hub — the chain push, the capsule clone, the carrier ls-remote
 // and fetch. Each runs under the per-WI lock; unbounded, a hung
-// remote would hold the lock forever (observe abandons a timed-out push
-// goroutine that still holds it, and the shutdown's WIP snapshot would
-// then block on Lock). On expiry the git process group is killed, like
-// the carrier lane's calls.
+// remote would hold the lock forever. On expiry the git process group is
+// killed, like the carrier lane's calls.
 var chainRemoteTimeout = 10 * time.Minute
 
 // carrierFlags lead every git call on the carrier lane: no hooks, no
@@ -1028,7 +975,8 @@ func carrierProtocolFlags(o Opts) []string {
 // carrierPush runs the credentialed push of one refspec from the
 // temporary repo tmp: the carrier env plus the credential additions, a
 // protocol allow-list of the remote's own scheme, no submodule
-// recursion, the session fingerprint push option, the push timeout.
+// recursion, the session fingerprint push option, the push timeout. A
+// failure is the caller's; the next close or publish pushes again.
 func carrierPush(o Opts, env []string, tmp, refspec string, credAdditions []string) (string, error) {
 	args := append(append(carrierTmpFlags(tmp), carrierProtocolFlags(o)...),
 		"push", "--no-recurse-submodules")
@@ -1036,16 +984,7 @@ func carrierPush(o Opts, env []string, tmp, refspec string, credAdditions []stri
 		args = append(args, "--push-option=session-fingerprint="+o.Fingerprint)
 	}
 	args = append(args, o.RemoteURL, refspec)
-	// The same ref-transaction CAS retry as the chain push (#46):
-	// an overlapping push of the same ref is a duplicate publish, not a
-	// carrier failure worth a human decision.
-	for attempt := 1; ; attempt++ {
-		out, err := o.gitT(carrierPushTimeout, append(env, credAdditions...), tmp, args...)
-		if err == nil || !refCasRejected(out+": "+err.Error()) || attempt >= pushRaceAttempts || o.expired() {
-			return out, err
-		}
-		time.Sleep(pushRaceBackoff)
-	}
+	return o.gitT(carrierPushTimeout, append(env, credAdditions...), tmp, args...)
 }
 
 // carrierFailed raises carrier_push_failed for repo — only when the
@@ -1139,22 +1078,14 @@ func fetchCarrierRef(ctx context.Context, o Opts, dir, ref string) (string, erro
 	return strings.TrimSpace(out), nil
 }
 
-// pushRaceAttempts bounds how many times a ref-transaction CAS rejection
-// is re-advertised before the push surfaces its error, and
-// pushRaceBackoff spaces the retries (the overlapping winner's
-// transaction needs a moment to land).
-const (
-	pushRaceAttempts = 3
-	pushRaceBackoff  = 250 * time.Millisecond
-)
-
 // refCasRejected reports whether a failed push's combined output is the
 // ref-transaction compare-and-swap rejection: git-receive-pack refuses
 // the whole push when the ref moved ("cannot lock ref ... is at X but
 // expected Y") or came into existence ("reference already exists")
 // after the client fixed its expected-old value at advertisement time.
-// Those shapes mean an overlapping push of the same ref won the race —
-// a duplicate-publish condition, not a wrong push.
+// Those shapes mean an overlapping push of the same ref (one left
+// running by an exited daemon) won the race: the next push re-advertises
+// and lands or answers up-to-date, so it is never a permanent rejection.
 func refCasRejected(out string) bool {
 	return strings.Contains(out, "cannot lock ref") && strings.Contains(out, "failed to update ref")
 }
@@ -1458,13 +1389,17 @@ func (a *CarrierAlerts) clear(repo string) {
 // for a reason no retry can change: the pre-receive hook declined it (seq
 // trailer, gitlink, blob size limit, session fence) or the ref moved
 // non-fast-forward. A transport failure (unreachable, timeout, auth
-// against a down proxy) is NOT permanent. Matches git's C-locale output
+// against a down proxy) is NOT permanent, nor is a lost ref-transaction
+// race (refCasRejected). Matches git's C-locale output
 // as carried in the push error (callers run git under CEnv).
 func IsPermanentPushRejection(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
+	if refCasRejected(msg) {
+		return false
+	}
 	return strings.Contains(msg, "[remote rejected]") ||
 		strings.Contains(msg, "pre-receive hook declined") ||
 		IsNonFastForward(err, "")

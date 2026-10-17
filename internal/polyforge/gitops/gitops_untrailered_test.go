@@ -6,6 +6,7 @@ package gitops
 // instead of pushing a chain aihub's REAL pre-receive hook rejects.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,7 +63,7 @@ func TestCommitPushFoldsUntrailedStepCommit(t *testing.T) {
 	events := eventRecorder(&o)
 
 	writeDirty(t, o, "base.txt", "base\n")
-	if _, pushed, _, err := CommitPush(o, "observe: v1"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(context.Background(), o, "observe: v1"); err != nil || !pushed {
 		t.Fatalf("seed CommitPush: pushed=%v err=%v", pushed, err)
 	}
 
@@ -71,7 +72,7 @@ func TestCommitPushFoldsUntrailedStepCommit(t *testing.T) {
 	stepCommit(t, o, "agent2.txt", "two\n")
 	writeDirty(t, o, "dirty.txt", "dirty\n")
 
-	if _, pushed, _, err := CommitPush(o, "observe: v2"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(context.Background(), o, "observe: v2"); err != nil || !pushed {
 		t.Fatalf("CommitPush after a step commit: pushed=%v err=%v", pushed, err)
 	}
 	if got := bare.tipSeq(t); got != 2 {
@@ -101,12 +102,12 @@ func TestCommitPushCleanTreeFoldsUntrailedStepCommit(t *testing.T) {
 	events := eventRecorder(&o)
 
 	writeDirty(t, o, "base.txt", "base\n")
-	if _, pushed, _, err := CommitPush(o, "observe: v1"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(context.Background(), o, "observe: v1"); err != nil || !pushed {
 		t.Fatalf("seed CommitPush: pushed=%v err=%v", pushed, err)
 	}
 	stepCommit(t, o, "agent.txt", "agent\n")
 
-	sha, pushed, _, err := CommitPush(o, "wrap: wrapped")
+	sha, pushed, _, err := CommitPush(context.Background(), o, "wrap: wrapped")
 	if err != nil || !pushed {
 		t.Fatalf("CommitPush on a clean tree over a step commit: pushed=%v err=%v", pushed, err)
 	}
@@ -124,7 +125,7 @@ func TestCommitPushCleanTreeFoldsUntrailedStepCommit(t *testing.T) {
 	}
 
 	// Steady state: nothing to fold, no further event.
-	if _, _, _, err := CommitPush(o, "again"); err != nil {
+	if _, _, _, err := CommitPush(context.Background(), o, "again"); err != nil {
 		t.Fatal(err)
 	}
 	if len(*events) != 1 {
@@ -153,7 +154,7 @@ func TestCommitPushFoldsUntrailedMergeCommit(t *testing.T) {
 	mkCapsule(t, o)
 	events := eventRecorder(&o)
 	writeDirty(t, o, "base.txt", "base\n")
-	if _, pushed, _, err := CommitPush(o, "observe: v1"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(context.Background(), o, "observe: v1"); err != nil || !pushed {
 		t.Fatalf("seed CommitPush: pushed=%v err=%v", pushed, err)
 	}
 	gitIn(t, o, "checkout", "-q", "-b", "side")
@@ -162,7 +163,7 @@ func TestCommitPushFoldsUntrailedMergeCommit(t *testing.T) {
 	stepCommit(t, o, "main.txt", "main\n")
 	gitIn(t, o, "merge", "-q", "--no-ff", "-m", "agent merge", "side")
 
-	if _, pushed, _, err := CommitPush(o, "observe: v2"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(context.Background(), o, "observe: v2"); err != nil || !pushed {
 		t.Fatalf("CommitPush over a merge: pushed=%v err=%v", pushed, err)
 	}
 	if got := bare.tipSeq(t); got != 2 {
@@ -189,7 +190,7 @@ func TestCommitPushLeavesFullyUntrailedHistoryAlone(t *testing.T) {
 	stepCommit(t, o, "agent.txt", "agent\n")
 	before, _ := run("git", "-C", o.CapsuleDir, "rev-parse", "HEAD")
 
-	_, pushed, _, err := CommitPush(o, "observe: v1")
+	_, pushed, _, err := CommitPush(context.Background(), o, "observe: v1")
 	if err == nil || pushed || !strings.Contains(err.Error(), "Polyforge-Seq") {
 		t.Fatalf("a fully untrailered chain must be refused by the hook: pushed=%v err=%v", pushed, err)
 	}

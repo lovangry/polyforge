@@ -2279,7 +2279,7 @@ func (r *Runtime) sealNetwork(ctx context.Context, j *job, reason, note string, 
 		// keeps the bytes, but the server never heard the final state.
 		r.syncLiveTranscript(j.capsuleDir)
 		crashpoint.At("seal.committing")
-		_, _, _, perr := gitops.CommitPush(j.git, "seal: "+reason)
+		_, _, _, perr := gitops.CommitPush(context.Background(), j.git, "seal: "+reason)
 		for i := 0; i < 2 && perr != nil; i++ {
 			_, perr = gitops.Push(j.git)
 		}
@@ -2410,7 +2410,7 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job) error {
 // the SessionEnd error.
 func (r *Runtime) pauseNetwork(j *job) error {
 	r.syncLiveTranscript(j.capsuleDir)
-	_, _, _, perr := gitops.CommitPush(j.git, "seal: "+protocol.FinishPaused)
+	_, _, _, perr := gitops.CommitPush(context.Background(), j.git, "seal: "+protocol.FinishPaused)
 	for i := 0; i < 2 && perr != nil; i++ {
 		_, perr = gitops.Push(j.git)
 	}

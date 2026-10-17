@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 )
 
@@ -44,13 +45,6 @@ func init() {
 			gitArgsProbe(args)
 		}
 		return wrappedTimedCtx(ctx, timeout, env, dir, args...)
-	}
-	wrappedTimed := gitTimed
-	gitTimed = func(timeout time.Duration, env []string, dir string, args ...string) (string, error) {
-		if gitArgsProbe != nil {
-			gitArgsProbe(args)
-		}
-		return wrappedTimed(timeout, env, dir, args...)
 	}
 }
 
@@ -224,7 +218,7 @@ func TestCommitPushSeqMonotonicAndPushLands(t *testing.T) {
 
 	for i := 1; i <= 3; i++ {
 		writeDirty(t, o, fmt.Sprintf("f%d.txt", i), fmt.Sprintf("round %d\n", i))
-		sha, pushed, _, err := CommitPush(o, fmt.Sprintf("observe: execution v%d", i))
+		sha, pushed, _, err := CommitPush(context.Background(), o, fmt.Sprintf("observe: execution v%d", i))
 		if err != nil || !pushed {
 			t.Fatalf("round %d: CommitPush = (%q, %v, %v)", i, sha, pushed, err)
 		}
@@ -250,7 +244,7 @@ func TestCommitPushRetryKeepsSeqConsistent(t *testing.T) {
 	dead := o
 	dead.RemoteURL = filepath.Join(t.TempDir(), "nowhere.git")
 	writeDirty(t, o, "a.txt", "a\n")
-	sha1, pushed, _, err := CommitPush(dead, "first")
+	sha1, pushed, _, err := CommitPush(context.Background(), dead, "first")
 	if err == nil || pushed {
 		t.Fatalf("push to a dead remote must fail: (%q, %v, %v)", sha1, pushed, err)
 	}
@@ -261,7 +255,7 @@ func TestCommitPushRetryKeepsSeqConsistent(t *testing.T) {
 	// above the standing commit, and the push carries BOTH commits
 	// through the hook's strict-increase check.
 	writeDirty(t, o, "b.txt", "b\n")
-	sha2, pushed, _, err := CommitPush(o, "second")
+	sha2, pushed, _, err := CommitPush(context.Background(), o, "second")
 	if err != nil || !pushed {
 		t.Fatalf("CommitPush = (%q, %v, %v)", sha2, pushed, err)
 	}
@@ -280,7 +274,7 @@ func TestCommitPushCleanTreePushesStandingHead(t *testing.T) {
 	mkCapsule(t, o)
 
 	writeDirty(t, o, "a.txt", "a\n")
-	sha, pushed, _, err := CommitPush(o, "one")
+	sha, pushed, _, err := CommitPush(context.Background(), o, "one")
 	if err != nil || !pushed {
 		t.Fatalf("CommitPush = (%q, %v, %v)", sha, pushed, err)
 	}
@@ -291,7 +285,7 @@ func TestCommitPushCleanTreePushesStandingHead(t *testing.T) {
 	// no-op ("Everything up-to-date": the hook saw nothing more), but
 	// pushed reports the truthful server-reached state, not a
 	// presumed one.
-	sha2, pushed, pt, err := CommitPush(o, "wrap: wrapped")
+	sha2, pushed, pt, err := CommitPush(context.Background(), o, "wrap: wrapped")
 	if err != nil {
 		t.Fatalf("clean tree must not error: %v", err)
 	}
@@ -330,7 +324,7 @@ func TestCommitPushCleanTreeRetryIsHonestAfterFailedPush(t *testing.T) {
 	dead := o
 	dead.RemoteURL = filepath.Join(t.TempDir(), "nowhere.git")
 	writeDirty(t, o, "a.txt", "a\n")
-	sha1, pushed, _, err := CommitPush(dead, "first")
+	sha1, pushed, _, err := CommitPush(context.Background(), dead, "first")
 	if err == nil || pushed {
 		t.Fatalf("push to a dead remote must fail: (%q, %v, %v)", sha1, pushed, err)
 	}
@@ -341,7 +335,7 @@ func TestCommitPushCleanTreeRetryIsHonestAfterFailedPush(t *testing.T) {
 	// Round 2: the tree is clean, the remote STILL dead — the retry
 	// must NOT fake success. It pushes the standing HEAD, fails, and
 	// reports the error.
-	sha2, pushed, _, err := CommitPush(dead, "retry on clean tree")
+	sha2, pushed, _, err := CommitPush(context.Background(), dead, "retry on clean tree")
 	if err == nil {
 		t.Fatal("a clean-tree retry against a dead remote must surface the push error")
 	}
@@ -357,7 +351,7 @@ func TestCommitPushCleanTreeRetryIsHonestAfterFailedPush(t *testing.T) {
 
 	// Round 3: the tree is still clean, the server is back — the retry
 	// pushes the standing HEAD through and reports pushed=true.
-	sha3, pushed, _, err := CommitPush(o, "retry once the server is back")
+	sha3, pushed, _, err := CommitPush(context.Background(), o, "retry once the server is back")
 	if err != nil || !pushed {
 		t.Fatalf("clean-tree retry against the live remote = (%q, %v, %v)", sha3, pushed, err)
 	}
@@ -379,7 +373,7 @@ func TestCommitPushCleanTreeWithNoHistoryIsTyped(t *testing.T) {
 	mkBare(t, barePath, false)
 	mkCapsule(t, o) // initialized, unborn branch, empty tree: clean porcelain
 
-	sha, pushed, _, err := CommitPush(o, "nothing anywhere")
+	sha, pushed, _, err := CommitPush(context.Background(), o, "nothing anywhere")
 	if err == nil {
 		t.Fatalf("clean tree with no history must error: (%q, %v)", sha, pushed)
 	}
@@ -395,7 +389,7 @@ func TestCommitPushFirstCommitIsSeqOneOnUnbornBranch(t *testing.T) {
 	mkCapsule(t, o)
 
 	writeDirty(t, o, "first.txt", "first\n")
-	if _, pushed, _, err := CommitPush(o, "first"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(context.Background(), o, "first"); err != nil || !pushed {
 		t.Fatalf("first CommitPush = (%v, %v)", pushed, err)
 	}
 	if got := bare.tipSeq(t); got != 1 {
@@ -414,7 +408,7 @@ func TestPushOptionSessionFingerprintReachedServer(t *testing.T) {
 	o.Fingerprint = "ab12cd34ef56aa00"
 
 	writeDirty(t, o, "a.txt", "a\n")
-	if _, pushed, _, err := CommitPush(o, "one"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(context.Background(), o, "one"); err != nil || !pushed {
 		t.Fatalf("CommitPush = (%v, %v)", pushed, err)
 	}
 	seen := bare.pushesSeen(t)
@@ -436,7 +430,7 @@ func TestPushOptionAbsentFingerprintSendsNoOption(t *testing.T) {
 	mkCapsule(t, o)
 
 	writeDirty(t, o, "a.txt", "a\n")
-	if _, pushed, _, err := CommitPush(o, "one"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(context.Background(), o, "one"); err != nil || !pushed {
 		t.Fatalf("CommitPush = (%v, %v)", pushed, err)
 	}
 	seen := bare.pushesSeen(t)
@@ -594,7 +588,7 @@ func TestPushArgsNeverCarrySecret(t *testing.T) {
 	t.Cleanup(func() { gitArgsProbe = nil })
 
 	writeDirty(t, o, "a.txt", "a\n")
-	if _, pushed, _, err := CommitPush(o, "one"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(context.Background(), o, "one"); err != nil || !pushed {
 		t.Fatalf("CommitPush = (%v, %v)", pushed, err)
 	}
 	var sawPush bool
@@ -649,7 +643,7 @@ func TestPushAndCloneOverHTTPWithCredential(t *testing.T) {
 		t.Fatalf("clone over http:// must receive the credential: %v", err)
 	}
 	writeDirty(t, o, "http.txt", "over http\n")
-	sha, pushed, _, err := CommitPush(o, "http push")
+	sha, pushed, _, err := CommitPush(context.Background(), o, "http push")
 	if err != nil || !pushed {
 		t.Fatalf("CommitPush over http:// = (%q, %v, %v)", sha, pushed, err)
 	}
@@ -755,7 +749,7 @@ func TestCleanStaleLocksAges(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeDirty(t, o, "a.txt", "a\n")
-	_, _, _, err := CommitPush(o, "one")
+	_, _, _, err := CommitPush(context.Background(), o, "one")
 	if err == nil {
 		t.Fatal("a live young lock must surface as a push failure, not be deleted")
 	}
@@ -769,7 +763,7 @@ func TestCleanStaleLocksAges(t *testing.T) {
 	if err := os.Chtimes(lock, past, past); err != nil {
 		t.Fatal(err)
 	}
-	sha, pushed, _, err := CommitPush(o, "one")
+	sha, pushed, _, err := CommitPush(context.Background(), o, "one")
 	if err != nil || !pushed {
 		t.Fatalf("CommitPush after stale-lock removal = (%q, %v, %v)", sha, pushed, err)
 	}
@@ -798,7 +792,7 @@ func TestCloneSeparatesGitDirOnMain(t *testing.T) {
 			seed.RemoteURL = barePath
 			mkCapsule(t, seed)
 			writeDirty(t, seed, "seed.txt", "seed\n")
-			if _, pushed, _, err := CommitPush(seed, "seed"); err != nil || !pushed {
+			if _, pushed, _, err := CommitPush(context.Background(), seed, "seed"); err != nil || !pushed {
 				t.Fatalf("seed push: %v", err)
 			}
 		}
@@ -845,7 +839,7 @@ func TestChainPushIsBounded(t *testing.T) {
 	chainRemoteTimeout = time.Second
 	defer func() { chainRemoteTimeout = old }()
 	start := time.Now()
-	_, pushed, _, err := CommitPush(o, "observe: hang")
+	_, pushed, _, err := CommitPush(context.Background(), o, "observe: hang")
 	if err == nil || pushed {
 		t.Fatalf("a hung remote must fail the push: pushed=%v err=%v", pushed, err)
 	}
@@ -875,30 +869,64 @@ func TestChainPushIsBounded(t *testing.T) {
 	}
 }
 
-// repo review 2026-10-16 B-17: a carrier/WIP push that loses the same
-// ref-transaction CAS race the chain push retries is retried too, not
-// raised as carrier_push_failed.
-func TestCarrierPushRetriesRefCasRejection(t *testing.T) {
-	old := gitTimed
-	defer func() { gitTimed = old }()
-	calls := 0
-	gitTimed = func(_ time.Duration, _ []string, _ string, args ...string) (string, error) {
-		calls++
-		if calls == 1 {
-			return "", errors.New("error: cannot lock ref 'refs/pf-task/r': is at 1 but expected 2\n ! [remote rejected] HEAD -> refs/pf-task/r (failed to update ref)")
+// The publish context bounds the chain push: when it ends, the hung git
+// process group is killed and the per-WI lock is free before CommitPush
+// returns — no push outlives its caller (chainRemoteTimeout stays at its
+// 10-minute default here).
+func TestCommitPushContextKillsTheHungPush(t *testing.T) {
+	setIdentity(t)
+	o, barePath := testOpts(t, "wi_ctxhang")
+	mkBare(t, barePath, false)
+	marker := filepath.Join(t.TempDir(), "hook-alive")
+	hook := "#!/bin/sh\necho $$ > " + marker + "\nexec sleep 300\n"
+	if err := os.WriteFile(filepath.Join(barePath, "hooks", "pre-receive"), []byte(hook), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mkCapsule(t, o)
+	writeDirty(t, o, "f.txt", "x\n")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	_, pushed, _, err := CommitPush(ctx, o, "observe: hang")
+	if err == nil || pushed {
+		t.Fatalf("an ended context must fail the push: pushed=%v err=%v", pushed, err)
+	}
+	if took := time.Since(start); took > 20*time.Second {
+		t.Fatalf("push took %s after its context ended", took)
+	}
+	done := make(chan struct{})
+	go func() { Lock(o.WorkItemID)(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the per-WI lock is still held after CommitPush returned")
+	}
+	raw, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("the hook never ran: %v", err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	deadline := time.Now().Add(5 * time.Second)
+	for pid > 0 && syscall.Kill(pid, 0) == nil {
+		if time.Now().After(deadline) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+			t.Fatalf("the hook's sleeper %d survived the ended context", pid)
 		}
-		return "", nil
+		time.Sleep(50 * time.Millisecond)
 	}
-	if _, err := carrierPush(Opts{RemoteURL: "/x.git"}, nil, t.TempDir(), "a:refs/pf-task/r", nil); err != nil || calls != 2 {
-		t.Fatalf("carrierPush = %v after %d calls, want success on the retry", err, calls)
+}
+
+// A lost ref-transaction race (an overlapping push of the same ref won)
+// is not permanent: the next push re-advertises and lands, so a close
+// must retry it rather than give the push up.
+func TestRefCasRejectionIsNotPermanent(t *testing.T) {
+	cas := &api.Error{Code: api.ErrGitInternal, Detail: "error: cannot lock ref 'refs/heads/main': is at 1 but expected 2\n ! [remote rejected] HEAD -> main (failed to update ref)"}
+	if IsPermanentPushRejection(cas) {
+		t.Fatal("a lost ref-transaction race must not classify as permanent")
 	}
-	calls = 0
-	gitTimed = func(_ time.Duration, _ []string, _ string, args ...string) (string, error) {
-		calls++
-		return "", errors.New("fatal: unreachable")
-	}
-	if _, err := carrierPush(Opts{RemoteURL: "/x.git"}, nil, t.TempDir(), "a:refs/pf-task/r", nil); err == nil || calls != 1 {
-		t.Fatalf("a non-CAS failure must not be retried: err=%v calls=%d", err, calls)
+	hook := &api.Error{Code: api.ErrGitInternal, Detail: " ! [remote rejected] HEAD -> main (pre-receive hook declined)"}
+	if !IsPermanentPushRejection(hook) {
+		t.Fatal("a hook refusal stays permanent")
 	}
 }
 
@@ -919,7 +947,7 @@ func TestChainPushIgnoresGlobalGitConfig(t *testing.T) {
 	t.Setenv("GIT_CONFIG_GLOBAL", gc) // the operator's global config
 	mkCapsule(t, o)
 	writeDirty(t, o, "f.txt", "x\n")
-	if _, pushed, _, err := CommitPush(o, "observe: v1"); err != nil || !pushed {
+	if _, pushed, _, err := CommitPush(context.Background(), o, "observe: v1"); err != nil || !pushed {
 		t.Fatalf("CommitPush: pushed=%v err=%v", pushed, err)
 	}
 	if got := bare.tipSeq(t); got < 1 {

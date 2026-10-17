@@ -106,33 +106,9 @@ func (c *Config) fill() {
 		c.SessionRevalidateEvery = defaultRevalidateEvery
 	}
 	if c.PushFunc == nil {
-		c.PushFunc = defaultPush
-	}
-}
-
-// defaultPush binds the shared gitops choke point with a ctx race: on
-// deadline the caller learns failure while the underlying git keeps
-// running — the per-WI git lock serializes any successor push. The seq
-// trailer is derived INSIDE gitops (single authority); nothing seq-wise
-// flows through here, and the commit/push timings ride the result path
-// out untouched (observed-only latency samples).
-func defaultPush(ctx context.Context, o gitops.Opts, message string) (string, bool, gitops.PushTimings, error) {
-	type res struct {
-		sha    string
-		pushed bool
-		t      gitops.PushTimings
-		err    error
-	}
-	done := make(chan res, 1)
-	go func() {
-		sha, pushed, t, err := gitops.CommitPush(o, message)
-		done <- res{sha, pushed, t, err}
-	}()
-	select {
-	case r := <-done:
-		return r.sha, r.pushed, r.t, r.err
-	case <-ctx.Done():
-		return "", false, gitops.PushTimings{}, ctx.Err()
+		// ctx (PushBound) bounds the commit and the chain push; on its end
+		// the git process group is killed and the per-WI lock released
+		c.PushFunc = gitops.CommitPush
 	}
 }
 

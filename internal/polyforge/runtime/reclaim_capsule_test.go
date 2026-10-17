@@ -58,7 +58,7 @@ func TestPrepareCapsuleReclaimQuarantinesGitDirAndPushes(t *testing.T) {
 	if err := writeSessionMarker(j.capsuleDir, "fp-old"); err != nil {
 		t.Fatal(err)
 	}
-	if _, pushed, _, err := gitops.CommitPush(j.git, "publish"); err != nil || !pushed {
+	if _, pushed, _, err := gitops.CommitPush(context.Background(), j.git, "publish"); err != nil || !pushed {
 		t.Fatalf("first publish: pushed=%v err=%v", pushed, err)
 	}
 	tip, err := exec.Command("git", "--git-dir", bare, "rev-parse", "refs/heads/main").Output()
@@ -91,7 +91,7 @@ func TestPrepareCapsuleReclaimQuarantinesGitDirAndPushes(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(j2.capsuleDir, "next.txt"), []byte("n\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, pushed, _, err := gitops.CommitPush(j2.git, "after re-claim"); err != nil || !pushed {
+	if _, pushed, _, err := gitops.CommitPush(context.Background(), j2.git, "after re-claim"); err != nil || !pushed {
 		t.Fatalf("push after re-claim: pushed=%v err=%v", pushed, err)
 	}
 }
@@ -104,7 +104,7 @@ func TestPrepareCapsuleCloneFailurePublishedRefusesInit(t *testing.T) {
 	if out, err := exec.Command("git", "--git-dir", bare, "symbolic-ref", "HEAD", "refs/heads/main").CombinedOutput(); err != nil {
 		t.Fatalf("bare HEAD: %v: %s", err, out)
 	}
-	if _, pushed, _, err := gitops.CommitPush(j.git, "publish"); err != nil || !pushed {
+	if _, pushed, _, err := gitops.CommitPush(context.Background(), j.git, "publish"); err != nil || !pushed {
 		t.Fatalf("publish: pushed=%v err=%v", pushed, err)
 	}
 	// ls-remote still sees refs/heads/main, but the clone cannot fetch objects.
