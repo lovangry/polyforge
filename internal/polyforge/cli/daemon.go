@@ -173,11 +173,14 @@ type SubmitResponse struct {
 
 // StatusResponse is the GET /status answer: local bookkeeping + auto switch +
 // queue counters. It is NOT workflow execution state (INV-1) — just
-// "what this machine is managing".
+// "what this machine is managing". The daemon serves this very type.
 type StatusResponse struct {
-	MachineID   string `json:"machine_id"`
+	MachineID string `json:"machine_id"`
+	// DisplayName is the display-only daemon name (default: hostname).
 	DisplayName string `json:"display_name,omitempty"`
-	Auto        bool   `json:"auto"`
+	// Auto is the auto-pull switch (v2-converge §5); the max-jobs number
+	// rides queue.max_concurrent.
+	Auto bool `json:"auto"`
 	// Workspaces is the mapped workspace set (#113): every [workspace]
 	// path the daemon routes capsules into, in mapping declaration
 	// order — a multi-workspace daemon never presents one workspace as
@@ -186,21 +189,25 @@ type StatusResponse struct {
 	// WorkflowsDir is the absolute workflows dir the daemon runs bundles
 	// from (pf doctor judges the workspace yaml's step-id keys by it).
 	WorkflowsDir string `json:"workflows_dir,omitempty"`
-	// EnvWarnings: retired POLYFORGE_* variables the daemon found set to
-	// a differing value at boot (decision 2026-10-16 G2).
-	EnvWarnings []string `json:"env_warnings,omitempty"`
-	// EnvNames: the NAMES (never values) of the daemon's environment
-	// (env hygiene; pf doctor's "daemon env" check).
-	EnvNames []string `json:"env_names,omitempty"`
-	// PiModelsEnvRefs: the variable NAMES the step agent dir's
-	// models.json interpolates (`$NAME` / `${NAME}`).
-	PiModelsEnvRefs []string `json:"pi_models_env_refs,omitempty"`
-	// Harnesses is the daemon's view of the step harness binaries, only
-	// on GET /status?harnesses=1 (polyforge#159).
+	// Harnesses is the daemon's view of the step harness binaries
+	// (polyforge#159): found, version, credential variables set/unset —
+	// never a value. Only on GET /status?harnesses=1 (it may run
+	// `claude --version`); pf doctor judges the claude harness by it.
 	Harnesses    map[string]HarnessStatus `json:"harnesses,omitempty"`
 	ShuttingDown bool                     `json:"shutting_down"`
-	Jobs         []StatusJob              `json:"jobs"`
-	Queue        QueueStats               `json:"queue"`
+	// EnvWarnings: retired POLYFORGE_* variables the daemon found set to
+	// a differing value at boot (no longer read; pf doctor relays them).
+	EnvWarnings []string `json:"env_warnings,omitempty"`
+	// EnvNames: the NAMES (never values) of the daemon's environment,
+	// sorted (env hygiene; pf doctor's "daemon env" check flags
+	// credential-looking names outside the ensure allow-list).
+	EnvNames []string `json:"env_names,omitempty"`
+	// PiModelsEnvRefs: the variable NAMES the step agent dir's
+	// models.json interpolates (`$NAME` / `${NAME}`); pf doctor warns on
+	// those no ensure-started daemon carries.
+	PiModelsEnvRefs []string    `json:"pi_models_env_refs,omitempty"`
+	Jobs            []StatusJob `json:"jobs"`
+	Queue           QueueStats  `json:"queue"`
 }
 
 // HarnessStatus is one harness's daemon-side status: binary, version,
@@ -245,28 +252,25 @@ type StatusJob struct {
 	SpawnN             int    `json:"spawn_n,omitempty"`
 	SessionFingerprint string `json:"session_fingerprint,omitempty"`
 	AgentPID           int    `json:"agent_pid,omitempty"`
-	// NeedsInput/QuestionID are the D6 owner face: a job presented as
-	// needs_input carries its pending question's id.
+	// NeedsInput/QuestionID carry the D6 owner face: the monitor's
+	// pending-question projection merged over the runtime state machine
+	// (a job the runtime calls running but the monitor holds a pending
+	// question for is presented as needs_input — an agent blocked on a
+	// human must never read as merely busy).
 	NeedsInput bool   `json:"needs_input,omitempty"`
 	QuestionID string `json:"question_id,omitempty"`
 	// StepAgeSec / LastWorkAgoSec are the owner liveness face: whole
 	// seconds since the current dispatch began and since its harness last
-	// did real work (nil = none — rendered "-" in the STEP-AGE and
-	// LAST-WORK columns).
+	// did REAL work (nil = none — rendered "-" in the STEP-AGE and
+	// LAST-WORK columns). UI-noise records never refresh the work clock,
+	// so a wedged-but-chattering job reads as stale, not fresh.
 	StepAgeSec     *int64 `json:"step_age_sec,omitempty"`
 	LastWorkAgoSec *int64 `json:"last_work_ago_sec,omitempty"`
 	// Candidate is the in-flight dispatch's `<harness>:<model>[:<effort>]`
 	// (polyforge#176; absent = none in flight or the harness default).
 	Candidate string `json:"candidate,omitempty"`
 	// Origin is how the job was submitted (may be absent).
-	Origin *JobOrigin `json:"origin,omitempty"`
-}
-
-// JobOrigin mirrors the daemon-side origin record.
-type JobOrigin struct {
-	Kind   string `json:"kind"`
-	ChatID string `json:"chat_id,omitempty"`
-	Owner  string `json:"owner,omitempty"`
+	Origin *protocol.Origin `json:"origin,omitempty"`
 }
 
 // QueueStats is the local job queue counters.
