@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -292,5 +293,69 @@ func TestPauseReplayFailureRetriesUntilItLands(t *testing.T) {
 	}
 	if !hub.lastEnd().CleanPause {
 		t.Fatalf("the landed pause must be clean: %+v", hub.lastEnd())
+	}
+}
+
+// orphanWatchSpawner records whether a watched orphan step process was
+// still alive when the runtime started a new step.
+type orphanWatchSpawner struct {
+	scriptedSpawner
+	orphan       int
+	aliveAtSpawn bool
+}
+
+func (s *orphanWatchSpawner) Spawn(ctx context.Context, p SpawnParams) (AgentHandle, error) {
+	if procExists(s.orphan) {
+		s.mu.Lock()
+		s.aliveAtSpawn = true
+		s.mu.Unlock()
+	}
+	return s.scriptedSpawner.Spawn(ctx, p)
+}
+
+// TestRestartReapsOrphanOfClaimingEntry: the daemon died between the
+// starter launching a step process and the record's persist — only the
+// claiming journal names the work item. The restart reaps that orphan
+// before the claim replay starts a new step (single writer, #99).
+func TestRestartReapsOrphanOfClaimingEntry(t *testing.T) {
+	setGitIdentity(t)
+	hub := newFakeHub()
+	sp := &orphanWatchSpawner{}
+	r, _, _ := newTestRuntime(t, hub, sp)
+	wi := runMarker("wi_claiming_orphan")
+	session := fakeSession(wi)
+	if err := r.noteClaiming(wi, session, nil); err != nil {
+		t.Fatal(err)
+	}
+	hub.hold(wi, session, api.StatusRunning)
+
+	orphan := exec.Command("sleep", "300")
+	orphan.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	orphan.Env = append(os.Environ(), "PF_WI_ID="+wi, "PF_DAEMON_ID="+r.cfg.MachineID)
+	if err := orphan.Start(); err != nil {
+		t.Fatal(err)
+	}
+	sp.orphan = orphan.Process.Pid
+	reaped := make(chan struct{})
+	go func() { _ = orphan.Wait(); close(reaped) }()
+	t.Cleanup(func() { _ = syscall.Kill(-sp.orphan, syscall.SIGKILL); <-reaped })
+
+	if err := restartSettled(t, r); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	t.Cleanup(func() { terminateJobAgent(r, wi) })
+	select {
+	case <-reaped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the crashed daemon's step process of a claiming work item survived the restart")
+	}
+	if sp.callCount() == 0 {
+		t.Fatal("test premise: the claim replay must start a step")
+	}
+	sp.mu.Lock()
+	alive := sp.aliveAtSpawn
+	sp.mu.Unlock()
+	if alive {
+		t.Fatal("a new step started while the orphan step process was still running (two writers)")
 	}
 }

@@ -155,8 +155,11 @@ func (r *Runtime) Restart(ctx context.Context) error {
 	for _, id := range ids {
 		r.post(id, func() {
 			// the crashed daemon's step processes go first, whatever the
-			// hub answers (single writer; local, no hub call)
-			if j := r.jobOf(id); j != nil && stateOf(j) != StateClaiming {
+			// hub answers (single writer; local, no hub call) — a claiming
+			// entry too: the crash may have hit between the starter
+			// launching a step and the record's persist (no capsule
+			// recorded yet: the env-marker sweep still finds them)
+			if j := r.jobOf(id); j != nil {
 				r.reapOrphans(id, j.capsuleDir)
 			}
 			r.reconcile(id)
