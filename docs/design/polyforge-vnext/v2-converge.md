@@ -478,9 +478,9 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
     `unable to index file` 行。
   - `add` 之后兜底剔除：属性为 lfs/git-crypt filter 的改动文件；单个超过 blob 上限的；改动总量超过上限时先剔除最大的。
   被剔除的已跟踪路径在快照里保持 HEAD 的内容（不会变成删除），未跟踪路径直接不收。
-- **关停与 step 结束**：快照的期限（关停：所有 job 并行、共用一个 30 秒期限；step 结束：2 分钟）作为 `gitops.Opts.Deadline`：carrier
-  通道每次 git 调用的超时都截到该时刻，到点杀掉整个 git 进程组；到点后剩下的仓库不再尝试，`carrier_push_failed` 写明
-  `deadline exceeded`（而不是误导的仓库布局拒绝原因）。
+- **关停与 step 结束**：快照在一个 context 下运行（`gitops.Opts.Ctx`；关停：所有 job 并行、共用一个 30 秒期限；step 结束：driver 的
+  context 加 2 分钟期限）：carrier 通道每次 git 调用的超时都截到其期限，context 结束（到期或取消）即杀掉整个 git 进程组并释放
+  per-WI 锁；之后剩下的仓库不再尝试，`carrier_push_failed` 写明 `deadline exceeded` 或 `cancelled`（而不是误导的仓库布局拒绝原因）。
 - **hook**：`refs/pf-wip/*` 是草稿 ref，允许删除与 non-fast-forward；只检查新对象（`rev-list --objects <new> --not --all`）的
   blob 上限，用 carrier 的 100 MiB；不做 seq / gitlink 检查。其余 ref 的规则不变（`refs/pf-task/*` 仍禁止删除与非快进）。
 - **恢复**（`runtime.restoreTaskWIP`，在 `restoreTaskRepoState` 之后，只对新 clone）：取 `refs/pf-wip/<name>`；若其唯一父提交等于

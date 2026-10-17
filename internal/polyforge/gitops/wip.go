@@ -151,9 +151,9 @@ func PushTaskWIP(o Opts, keep, chainOK bool) {
 	for _, s := range srcs {
 		ref := TaskWIPRefName(s.name)
 		if o.expired() {
-			fmt.Fprintf(os.Stderr, "gitops: %s: repo %s: WIP lane skipped: deadline exceeded\n", o.WorkItemID, s.name)
+			fmt.Fprintf(os.Stderr, "gitops: %s: repo %s: WIP lane skipped: %s\n", o.WorkItemID, s.name, o.ended())
 			if keep {
-				o.carrierRefFailed(s.name, ref, chainOK, "deadline exceeded before the WIP snapshot (the hub's WIP ref, if any, predates this close)")
+				o.carrierRefFailed(s.name, ref, chainOK, o.ended()+" before the WIP snapshot (the hub's WIP ref, if any, predates this close)")
 			}
 			continue
 		}
@@ -170,7 +170,7 @@ func PushTaskWIP(o Opts, keep, chainOK bool) {
 			if err != nil {
 				detail := err.Error()
 				if o.expired() {
-					detail = "deadline exceeded: " + detail
+					detail = o.ended() + ": " + detail
 				}
 				fmt.Fprintf(os.Stderr, "gitops: %s: WIP push for repo %s failed (its uncommitted work may not survive a re-claim; the hub's WIP ref, if any, predates this close): %s: %s\n", o.WorkItemID, s.name, detail, strings.TrimSpace(out))
 				o.carrierRefFailed(s.name, ref, chainOK, detail+" (the hub's WIP ref, if any, predates this close)")
@@ -203,7 +203,7 @@ func pushTaskWIP(o Opts, env []string, reposDir string, s carrierSrc, credAdditi
 	wenv := append(append(append([]string{}, env...), wipIdentity...), "GIT_INDEX_FILE="+filepath.Join(tmp, "pf-wip-index"))
 	flags := append(carrierTmpFlags(tmp), "--work-tree="+dir)
 	gitw := func(timeout time.Duration, args ...string) (string, error) {
-		return gitTimed(o.bound(timeout), wenv, dir, append(append([]string{}, flags...), args...)...)
+		return o.gitT(timeout, wenv, dir, append(append([]string{}, flags...), args...)...)
 	}
 	if out, err := gitw(carrierCheckTimeout, "read-tree", s.sha); err != nil {
 		return "", nil, out, err
@@ -544,7 +544,7 @@ func effectiveInfoFile(o Opts, dir, tmp, key, xdgName string) string {
 		}
 	}
 	get := func(args ...string) string {
-		out, err := gitTimed(o.bound(carrierCheckTimeout), plain, tmp, append([]string{"config", "--type=path", "--get"}, args...)...)
+		out, err := o.gitT(carrierCheckTimeout, plain, tmp, append([]string{"config", "--type=path", "--get"}, args...)...)
 		if err != nil {
 			return ""
 		}

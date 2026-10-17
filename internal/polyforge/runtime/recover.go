@@ -456,9 +456,10 @@ var pushTaskWIPFn = gitops.PushTaskWIP
 // SaveTaskWIP snapshots wi's task-repo uncommitted work to refs/pf-wip
 // once its step process is gone (the shutdown, after terminating the
 // agent tree; the driver, at each step end), so a re-claim restores it.
-// ctx's deadline is the gitops Deadline: every git call of the lane is
-// cut to it and its process group killed on expiry. The caller is
-// released at ctx's end at the latest. No runtime lock is held across
+// ctx bounds the lane (gitops.Opts.Ctx): when it ends — its deadline or
+// a cancellation — the running git call's process group is killed and
+// the rest skipped, so the per-WI git lock is released promptly. The
+// caller is released at ctx's end at the latest. No runtime lock is held across
 // the push; a failure is logged and never fails the caller.
 func (r *Runtime) SaveTaskWIP(ctx context.Context, wi string) {
 	j := r.jobOf(wi)
@@ -466,7 +467,7 @@ func (r *Runtime) SaveTaskWIP(ctx context.Context, wi string) {
 		return
 	}
 	o := j.git
-	o.Deadline, _ = ctx.Deadline()
+	o.Ctx = ctx
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

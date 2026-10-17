@@ -101,7 +101,7 @@ func TestSaveTaskWIPReturnsAtItsDeadline(t *testing.T) {
 	if took > 5*time.Second {
 		t.Fatalf("SaveTaskWIP took %s on a hung push, want its 300ms context", took)
 	}
-	if !o.Deadline.Equal(want) {
-		t.Fatalf("push deadline = %v, want the context's %v", o.Deadline, want)
+	if got, _ := o.Ctx.Deadline(); !got.Equal(want) {
+		t.Fatalf("push deadline = %v, want the context's %v", got, want)
 	}
 }
