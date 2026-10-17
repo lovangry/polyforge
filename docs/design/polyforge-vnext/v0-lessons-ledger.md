@@ -77,7 +77,7 @@ D6  needs_input had NO proactive owner notification in v0 (watcher
     file — the events file exists; owner-facing surface?
 D7  Shutdown sequence: stop_notice -> flush(shutdown) -> seal; never
     let observe re-derive an agent after seal.
-    〔SUPERSEDED (2026-10-16): the shutdown sequence is latch → stop observe → kill agent trees → refs/pf-wip snapshot → persist, no flush, no session end — reference.md §6.2. The lesson stands.〕
+    〔SUPERSEDED (2026-10-16): the shutdown is latch → cancel → kill agent trees → refs/pf-wip snapshot (parallel, 30s) → persist, no flush, no session end — reference.md §6.2. The lesson stands.〕
 
 ## Data/capsule class
 C1' (v0 lesson, superseded by v1 C1 ruling) transcripts are valuable:

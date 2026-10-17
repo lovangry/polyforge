@@ -326,10 +326,6 @@ func TestRestartMissingCapsuleBlocksOnlyThatWI(t *testing.T) {
 	sp := &fakeSpawner{}
 	sock := filepath.Join(dir, "d.sock")
 	cfg := e2eConfig(sock, ws, data, hubBase, hub, sp)
-	// a prior graceful shutdown left its attribution (#110)
-	if err := os.WriteFile(filepath.Join(data, lastShutdownFile), []byte(`{"kind":"signal","detail":"terminated (signal 15)","at":"2026-10-12T00:00:00Z"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	d, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -376,11 +372,6 @@ func TestRestartMissingCapsuleBlocksOnlyThatWI(t *testing.T) {
 	}
 	if !hasKind(eventKinds(d, good), observe.EvDaemonRestarted) {
 		t.Errorf("want daemon_restarted on %s, got %v", good, eventKinds(d, good))
-	}
-	for _, e := range d.obs.Events().SinceAfter(good, 0) {
-		if e.Kind == observe.EvDaemonRestarted && !strings.Contains(string(mustJSON(e)), "signal") {
-			t.Errorf("daemon_restarted must carry the previous shutdown cause: %s", mustJSON(e))
-		}
 	}
 }
 

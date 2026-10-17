@@ -204,7 +204,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return ExitNeedsOperator
 	}
 
-	// SIGTERM/SIGINT run the same bounded graceful sequence the
+	// SIGTERM/SIGINT run the same shutdown the
 	// POST /shutdown route triggers. The signal VALUE is observed via a
 	// Notify channel (polyforge#110): a NotifyContext cancellation
 	// reports only "context canceled", so the cause record could never
@@ -217,9 +217,11 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	go func() {
 		sig := <-sigCh
 		signal.Stop(sigCh) // one shot: a second signal aborts waits hard
-		if err := d.Shutdown(context.Background(), SignalShutdownCause(sig)); err != nil {
-			fmt.Fprintf(stderr, "pf daemon: shutdown: %v\n", err)
+		cause := fmt.Sprintf("signal: %v", sig)
+		if s, ok := sig.(syscall.Signal); ok {
+			cause = fmt.Sprintf("signal: %s (signal %d)", s, int(s))
 		}
+		_ = d.Shutdown(context.Background(), cause)
 	}()
 
 	if err := d.Run(context.Background()); err != nil {

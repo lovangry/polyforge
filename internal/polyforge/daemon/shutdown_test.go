@@ -1,14 +1,15 @@
 package daemon
 
-// shutdown_test.go + restart wiring: the graceful shutdown sequence
-// (state.json on disk, the socket closing) and the daemon-start Restart
-// reconciliation wiring.
+// shutdown_test.go + restart wiring: the shutdown (state.json on disk,
+// the socket closing, the jobs torn down in parallel) and the daemon-start
+// Restart reconciliation wiring.
 
 import (
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -139,29 +140,13 @@ func TestRestartWiring(t *testing.T) {
 	}
 }
 
-// slowSweepAgent is a fake agent whose liveness probe after its
-// teardown — the shutdown's final check, after the face is closed — takes
-// a while.
-type slowSweepAgent struct {
-	fakeAgent
-}
-
-func (a *slowSweepAgent) Alive() bool {
-	if a.isDone() {
-		time.Sleep(500 * time.Millisecond)
-		return false
-	}
-	return true
-}
-
-// repo review 2026-10-16 B-16: closing the face (shutdown step 5) makes
-// Serve return ErrServerClosed; Run must still wait for the rest of the
-// sequence (runtime drain, final check) before it returns and the
-// process exits.
+// repo review 2026-10-16 B-16: closing the face makes Serve return
+// ErrServerClosed; Run must still wait for the rest of the shutdown
+// before it returns and the process exits.
 func TestRunReturnsOnlyAfterTheShutdownSequence(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) {
 		c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
-			return &slowSweepAgent{}, nil
+			return &fakeAgent{}, nil
 		}
 	})
 	td.submitClaim(t, "wi_sweep")
@@ -175,5 +160,47 @@ func TestRunReturnsOnlyAfterTheShutdownSequence(t *testing.T) {
 	case <-td.shutDone:
 	default:
 		t.Fatal("Run returned before the shutdown sequence finished")
+	}
+}
+
+// slowTermAgent takes a while to terminate.
+type slowTermAgent struct{ fakeAgent }
+
+func (a *slowTermAgent) Terminate(b time.Duration) error {
+	time.Sleep(1500 * time.Millisecond)
+	return a.fakeAgent.Terminate(b)
+}
+
+// The shutdown terminates (and WIP-saves) the live jobs in parallel: three
+// agents that take 1.5s each to terminate cost the shutdown ~1.5s, not
+// 4.5s.
+func TestShutdownTerminatesJobsInParallel(t *testing.T) {
+	var mu sync.Mutex
+	var agents []*slowTermAgent
+	td := newTestDaemon(t, func(c *Config) {
+		c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
+			a := &slowTermAgent{}
+			mu.Lock()
+			agents = append(agents, a)
+			mu.Unlock()
+			return a, nil
+		}
+	})
+	for _, wi := range []string{"wi_par1", "wi_par2", "wi_par3"} {
+		td.submitClaim(t, wi)
+	}
+	start := time.Now()
+	if err := td.Shutdown(context.Background(), DirectShutdownCause()); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	if el := time.Since(start); el > 3500*time.Millisecond {
+		t.Fatalf("shutdown took %v: the agents were terminated one after another", el)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i, a := range agents {
+		if !a.isDone() {
+			t.Fatalf("agent %d was not terminated", i)
+		}
 	}
 }
