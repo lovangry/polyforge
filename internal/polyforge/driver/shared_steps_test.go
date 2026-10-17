@@ -298,7 +298,7 @@ func TestSharedStepPromptsKeepLaneFacts(t *testing.T) {
 	common := map[string][]string{
 		"verification": {"command_evidence: [{argv, exit_code, duration_ms}]", "AT LEAST ONE entry", "## Pre-existing failures", "`test_bar`", "`no-untracked-test-files`",
 			"Write `artifacts/verification-report.md`", "which plan step or memo scope item"},
-		"review": {"No faked concurrency semantics", "**Unruled behavior change.**", "**I/O under a lock.**", "**Weak tests.**", "**Stale docs.**", "**Leaked credentials**", "**Guess as fact.**", "**Do not run tests or builds.**", "Write `artifacts/review.md`", "If any of the change's own requirements"},
+		"review": {"No faked concurrency semantics", "**Unruled destination change.**", "**I/O under a lock.**", "**Weak tests.**", "**Stale docs.**", "**Leaked credentials**", "**Guess as fact.**", "**Do not run tests or builds.**", "Write `artifacts/review.md`", "If any of the change's own requirements"},
 	}
 	for stepID, byBundle := range lanes {
 		for bundle, f := range byBundle {

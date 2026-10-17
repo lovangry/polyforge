@@ -82,7 +82,7 @@ exists to prevent. If you cannot prove it, fail honestly.
 
 ## Principles
 
-Every link of the causal chain rests on evidence, not inference. The fix guidance names the simplest change that removes the cause and whether it alters any existing behavior.
+Every causal link rests on evidence, not inference. The fix guidance names the shortest path that removes the cause and any destination it would change.
 
 {{principles}}
 
