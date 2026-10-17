@@ -77,6 +77,8 @@ Separate the destination (features, guarantees) from the path; ask the owner onl
 
 {{principles}}
 
+Before asking anything, check your `## Prior experience` hits: do not ask the owner what a memory already answers; turn a recorded pitfall into a question or an explicit constraint.
+
 ## Output
 
 Emit the final JSON output per the schema above once the questioning is complete:
