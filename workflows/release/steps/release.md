@@ -31,7 +31,7 @@ output:
       properties:
         verdict: { type: string, enum: [pass] }
         version: { type: string, pattern: '\S' }
-        commit: { type: string, minLength: 1 }
+        commit: { type: string, pattern: '\S' }
         artifacts_published: { type: array, minItems: 1 }
       required: [verdict, version, commit, artifacts_published]
     - description: A failed release attempt - requires a non-empty fail_reason.

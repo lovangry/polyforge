@@ -254,7 +254,8 @@ type ResultSpec struct {
 //     would otherwise clear a gate); then the declared output schema
 //     (OutputSchema set, polyforge#164 H3). On the release bundle's
 //     `release` and `deploy` steps (outputSchemaEnforced) a violation
-//     is an envelope rejection — their schemas carry the verdict
+//     — or a schema that is absent or does not load — is an envelope
+//     rejection — their schemas carry the verdict
 //     contract: exact verdict enums, pass owes the version (and on
 //     `release` the commit and published artifacts), fail owes a
 //     fail_reason, a deploy defer carries neither version nor
@@ -352,6 +353,9 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 			return fmt.Errorf("driver: step %q output carries verdict %q — defer validates nowhere but the %s step's schema",
 				spec.StepID, v, deployStepID)
 		}
+		if spec.OutputSchema == nil && outputSchemaEnforced(spec.StepID) {
+			return fmt.Errorf("driver: step %q output schema unloadable: its declared schema is the verdict contract and is enforced, so the result cannot be accepted until the bundle's step definition declares a schema that loads", spec.StepID)
+		}
 		if spec.OutputSchema != nil {
 			if err := checkOutputSchema(spec.OutputSchema, res.Output); err != nil {
 				if outputSchemaEnforced(spec.StepID) {
@@ -370,9 +374,6 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 	evidence, err := decodeCommandEvidence(res.CommandEvidence)
 	if err != nil {
 		return fmt.Errorf("driver: step %q envelope carries unreadable command evidence: %w", spec.StepID, err)
-	}
-	if len(evidence) == 0 {
-		res.CommandEvidence = nil // null or [] records no commands
 	}
 	if res.Outcome == OutcomeCompleted && spec.RequireCommandEvidence {
 		if err := checkCommandEvidence(evidence); err != nil {

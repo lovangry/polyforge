@@ -157,6 +157,40 @@ func TestRunEnforcedReleaseSchemaRejectsViolation(t *testing.T) {
 	}
 }
 
+// An enforced step fails closed: with no loadable schema (absent,
+// unloadable, no bundle) its completed result is rejected, never accepted
+// unchecked; a native gate_failed and a record-only step are unaffected.
+func TestEnforcedStepWithoutSchemaFailsClosed(t *testing.T) {
+	for _, step := range []string{releaseStepID, deployStepID} {
+		res := releaseRes(step, OutcomeCompleted, `{"verdict":"pass","version":"v1"}`)
+		err := ValidateStepResult(res, ResultSpec{WIID: "wi_run", StepID: step, SpawnN: 1, Gate: true})
+		if err == nil || !strings.Contains(err.Error(), "output schema unloadable") {
+			t.Fatalf("%s: want the unloadable-schema rejection, got %v", step, err)
+		}
+		failed := releaseRes(step, OutcomeGateFailed, `{"verdict":"fail","fail_reason":"x"}`)
+		if err := ValidateStepResult(failed, ResultSpec{WIID: "wi_run", StepID: step, SpawnN: 1, Gate: true}); err != nil {
+			t.Fatalf("%s: a native gate_failed is not judged by the schema: %v", step, err)
+		}
+	}
+	if err := ValidateStepResult(releaseRes("verify", OutcomeCompleted, `{"verdict":"pass"}`), ResultSpec{WIID: "wi_run", StepID: "verify", SpawnN: 1}); err != nil {
+		t.Fatalf("a record-only step without a schema is accepted: %v", err)
+	}
+
+	// Through Run: an unloadable release schema blocks the step
+	// result_invalid after the retry bound, naming the reason.
+	d, sp, _ := runEnv(t, gateSpec(releaseStepID, releaseStepID))
+	writeCapsuleFile(t, d.wi.CapsuleDir, "workflows/b/steps/release.md", "---\noutput:\n  type: object\n  required: 7\n---\nrelease")
+	for i := 0; i <= maxEnvelopeRejects; i++ {
+		sp.script = append(sp.script, done(`{"verdict":"pass","version":"v1","commit":"abc","artifacts_published":["t"]}`))
+	}
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if x := d.Snapshot(); x.WorkflowStatus != StatusBlocked || !strings.Contains(x.BlockedReason, "output schema unloadable") {
+		t.Fatalf("status %q reason %q, want blocked naming the unloadable schema", x.WorkflowStatus, x.BlockedReason)
+	}
+}
+
 // The prompt states the consequence the step's schema lane applies:
 // rejection on release/deploy, a record everywhere else.
 func TestOutputSchemaPromptStatesEnforcement(t *testing.T) {

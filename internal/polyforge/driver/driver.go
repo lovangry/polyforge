@@ -929,8 +929,10 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 
 // outputSchema answers stepID's declared output schema (cached; nil when
 // the step definition declares none). A declared schema that does not
-// load is reported once on stderr and validates nothing — the bundle
-// tests pin that every shipped schema compiles.
+// load is reported once on stderr and validates nothing on a record-only
+// step; an enforced step then rejects its completed results
+// (ValidateStepResult) — the bundle tests pin that every shipped schema
+// compiles.
 func (d *Driver) outputSchema(stepID string) *jsonschema.Schema {
 	if d.bundleDir == "" {
 		return nil

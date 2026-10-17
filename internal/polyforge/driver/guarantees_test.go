@@ -354,8 +354,11 @@ func TestNonListEvidenceCollectsThenIsRejected(t *testing.T) {
 	if err != nil || res == nil {
 		t.Fatalf("collect: %v %v", res, err)
 	}
-	if err := ValidateStepResult(res, spec); err != nil || res.CommandEvidence != nil {
-		t.Fatalf("null evidence means none: %v %s", err, res.CommandEvidence)
+	if err := ValidateStepResult(res, spec); err != nil {
+		t.Fatalf("null evidence means none: %v", err)
+	}
+	if ev, err := decodeCommandEvidence(res.CommandEvidence); err != nil || len(ev) != 0 {
+		t.Fatalf("null evidence decodes as none: %v %v", ev, err)
 	}
 }
 
