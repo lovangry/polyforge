@@ -80,17 +80,22 @@ var errAbandoned = errors.New("runtime: the caller gave up before the work item'
 // retry reconciles j's work item again after a backoff — the one retry
 // every pending hub step (a close, a verify, a claim replay) shares: the
 // first after EndRetryBase, each next one twice as long, up to
-// EndRetryMax. The shutdown stops it. Only j's actor calls it.
+// EndRetryMax. The shutdown stops it (its waiting goroutine ends). Only
+// j's actor calls it.
 func (r *Runtime) retry(j *job) {
 	if r.ctx.Err() != nil {
 		return
 	}
 	j.retryIn = min(max(2*j.retryIn, r.cfg.EndRetryBase), r.cfg.EndRetryMax)
-	time.AfterFunc(j.retryIn, func() {
-		if r.ctx.Err() == nil {
+	go func(wait time.Duration) {
+		t := time.NewTimer(wait)
+		defer t.Stop()
+		select {
+		case <-t.C:
 			r.post(j.wi, func() { r.reconcile(j.wi) })
+		case <-r.ctx.Done():
 		}
-	})
+	}(j.retryIn)
 }
 
 // Idle reports whether no work item has an operation queued or running
