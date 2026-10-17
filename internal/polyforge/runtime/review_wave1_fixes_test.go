@@ -44,7 +44,7 @@ func TestFirstBlockedCloseWaitsForTheChainPush(t *testing.T) {
 	j.git.RemoteURL = filepath.Join(t.TempDir(), "unreachable.git")
 	j.mu.Unlock()
 
-	underOpMu(r, func() { r.boundedFail(context.Background(), j, "boom") })
+	underLock(r, j.wi, func() { r.boundedFail(context.Background(), j, "boom") })
 	if n := hub.endCount(); n != 0 {
 		t.Fatalf("SessionEnd(blocked) landed with the chain unpushed (%d ends)", n)
 	}
@@ -67,7 +67,7 @@ func TestFirstBlockedCloseWaitsForTheChainPush(t *testing.T) {
 	}
 }
 
-// Item 2: Restart holds opMu before the socket serves — an end_pending
+// Item 2: Restart runs before the socket serves — an end_pending
 // record must only schedule its retry, so a hung hub cannot hang startup.
 func TestRestartDoesNotBlockOnEndPendingClose(t *testing.T) {
 	hub := newFakeHub()
@@ -287,7 +287,7 @@ func TestRestartRefusedReplayOfOpenSessionEndsIt(t *testing.T) {
 	hub.hold(wi, session, api.StatusRunning)
 	hub.claimFaults = []claimFault{{err: &api.Error{Code: api.ErrCoreConflict, Detail: "NOT_CLAIMABLE"}}}
 
-	replayClaims(r)
+	replayClaims(t, r)
 	if hub.endCount() != 1 || hub.lastEnd().SessionID != session || hub.lastEnd().Status != api.StatusBlocked {
 		t.Fatalf("the open session must be ended blocked with our secret, got %d ends (%+v)", hub.endCount(), hub.lastEnd())
 	}

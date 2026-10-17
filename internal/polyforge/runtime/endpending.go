@@ -27,17 +27,23 @@ import (
 // verify shows the session no longer holds the WI (our earlier close landed
 // and only its answer was lost, or another session took over) — in both
 // cases nothing is left to end.
-func (r *Runtime) endBlockedAtHub(wi, secret, note, head string) bool {
-	err := r.hub.SessionEnd(wi, api.SessionEndRequest{
-		SessionID: secret,
-		Status:    api.StatusBlocked,
-		Note:      note,
-		HeadSHA:   head,
+func (r *Runtime) endBlockedAtHub(ctx context.Context, wi, secret, note, head string) bool {
+	var err error
+	r.hubCall(ctx, func() {
+		err = r.hub.SessionEnd(wi, api.SessionEndRequest{
+			SessionID: secret,
+			Status:    api.StatusBlocked,
+			Note:      note,
+			HeadSHA:   head,
+		})
 	})
 	if err == nil {
 		return true
 	}
-	if v, verr := r.hub.SessionVerify(wi, secret); verr == nil && !v.Matches {
+	var v *api.SessionVerifyResponse
+	var verr error
+	r.hubCall(ctx, func() { v, verr = r.hub.SessionVerify(wi, secret) })
+	if verr == nil && !v.Matches {
 		fmt.Fprintf(os.Stderr, "runtime: %s: blocked close failed (%v) but the session no longer holds the work item (status %s) — settled\n", wi, err, v.Status)
 		return true
 	}
@@ -85,7 +91,15 @@ func (r *Runtime) goRetry(key string, attempt func() bool) {
 // settled (record dropped). See closeBlocked for the push-then-close
 // order.
 func (r *Runtime) endPendingAttempt(j *job) bool {
-	if !r.closeBlocked(j, true) {
+	s, ok := r.tryLockWI(j.wi)
+	if !ok {
+		return false // another operation of the work item is under way
+	}
+	defer r.unlockWI(j.wi, s)
+	if r.jobOf(j.wi) != j {
+		return true // settled or replaced meanwhile
+	}
+	if !r.closeBlocked(context.Background(), j, true) {
 		return false
 	}
 	r.settleEndPending(j)
@@ -108,14 +122,17 @@ func (r *Runtime) endPendingAttempt(j *job) bool {
 //     no retry can land it: stop pushing, raise push_failed with the
 //     local head and the reason (the commits stay in the local capsule),
 //     and close without it.
-func (r *Runtime) closeBlocked(j *job, push bool) bool {
+func (r *Runtime) closeBlocked(ctx context.Context, j *job, push bool) bool {
 	j.mu.Lock()
 	secret, note, head, chain, gaveUp := j.sessionID, j.endNote, j.endHead, j.git, j.endPushGaveUp
 	j.mu.Unlock()
 	if push && !gaveUp && dirExists(j.capsuleDir) && dirExists(chain.GitDir) {
 		if _, perr := gitops.Push(chain); perr != nil {
 			if !gitops.IsPermanentPushRejection(perr) {
-				if v, verr := r.hub.SessionVerify(j.wi, secret); verr == nil && !v.Matches {
+				var v *api.SessionVerifyResponse
+				var verr error
+				r.hubCall(ctx, func() { v, verr = r.hub.SessionVerify(j.wi, secret) })
+				if verr == nil && !v.Matches {
 					fmt.Fprintf(os.Stderr, "runtime: %s: blocked-close chain push failed (%v) and the session no longer holds the work item (status %s) — settled without it\n", j.wi, perr, v.Status)
 					return true
 				}
@@ -142,7 +159,7 @@ func (r *Runtime) closeBlocked(j *job, push bool) bool {
 			}
 		}
 	}
-	return r.endBlockedAtHub(j.wi, secret, note, head)
+	return r.endBlockedAtHub(ctx, j.wi, secret, note, head)
 }
 
 // settleEndPending drops an end_pending job whose close is settled.
@@ -171,12 +188,19 @@ func (r *Runtime) restartEndPending(j *job) {
 }
 
 // retryClaimEnd keeps retrying the compensation SessionEnd(blocked) of a
-// failed start (abandonClaim): the claiming-journal entry stays until the
-// hub accepts the close, in-process here and — after a crash — through the
-// journal replay at the next daemon start.
+// failed start (abandonClaim): the claiming-journal entry stays, marked
+// ending, until the hub accepts the close, in-process here — each attempt
+// under the work item's lock — and, after a crash, at the next daemon
+// start (endClaimAtRestart).
 func (r *Runtime) retryClaimEnd(journalKey, wi, secret, note string) {
+	r.markClaimEnding(journalKey, secret, note)
 	r.goRetry("claim:"+wi, func() bool {
-		if !r.endBlockedAtHub(wi, secret, note, "") {
+		s, ok := r.tryLockWI(wi)
+		if !ok {
+			return false // another operation of the work item is under way
+		}
+		defer r.unlockWI(wi, s)
+		if !r.endBlockedAtHub(context.Background(), wi, secret, note, "") {
 			return false
 		}
 		r.clearClaimingSession(journalKey, secret)
@@ -221,7 +245,8 @@ func (r *Runtime) finishBlocked(j *job, detail string, settled bool) {
 
 // retrySeal is the SEALING job's close retry: the terminal SessionEnd
 // failed after the agent was torn down, so the job sits in SEALING with its
-// verdict recorded. Each attempt takes opMu, checks the job is still the
+// verdict recorded. Each attempt takes the work item's lock (or tries
+// later when another operation of it holds it), checks the job is still the
 // current SEALING one, and runs the very close the restart finisher runs —
 // stopOp(alreadySealing) with the recorded reason and push state. A typed
 // STALE_SESSION answer (the session no longer holds the work item: an
@@ -234,16 +259,16 @@ func (r *Runtime) retrySeal(j *job, note string) {
 
 // sealAttempt is one retry of a SEALING close; true = settled.
 func (r *Runtime) sealAttempt(j *job, note string) bool {
-	r.opMu.Lock()
-	defer r.opMu.Unlock()
+	s, ok := r.tryLockWI(j.wi)
+	if !ok {
+		return false // another operation of the work item is under way
+	}
+	defer r.unlockWI(j.wi, s)
 	if r.jobOf(j.wi) != j {
 		return true // settled or replaced meanwhile
 	}
 	if st, _ := j.snapshot(); st != StateSealing {
 		return true
-	}
-	if j.isBusy() {
-		return false // another door's network step is in flight (B-8)
 	}
 	j.mu.Lock()
 	reason := j.stopReason

@@ -58,9 +58,7 @@ func waitJobGone(t *testing.T, r *Runtime, wi string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		r.opMu.Lock()
 		gone := r.jobOf(wi) == nil
-		r.opMu.Unlock()
 		if gone {
 			waitRetryIdle(t, r)
 			return

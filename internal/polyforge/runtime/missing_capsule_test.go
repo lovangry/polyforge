@@ -207,7 +207,7 @@ func TestRestartResumeMissingCapsuleTypedError(t *testing.T) {
 	r.mu.Unlock()
 
 	var err error
-	underOpMu(r, func() { err = r.restartRunning(context.Background(), rec) })
+	underLock(r, rec.WorkItemID, func() { err = r.restartRunning(context.Background(), rec) })
 	var miss *MissingCapsuleError
 	if !errors.As(err, &miss) {
 		t.Fatalf("want *MissingCapsuleError, got %T: %v", err, err)

@@ -3,7 +3,7 @@ package runtime
 // b8_close_outside_opmu_test.go — repo review 2026-10-16 B-8, the
 // remainder: the closes' and the recovery's network steps (chain push,
 // task-repo WIP, SessionEnd), a failed start's compensation and the
-// restart's journal-replay clone run outside the runtime's opMu, so one
+// restart's journal-replay clone hold only their own work item's lock, so one
 // work item's hung push no longer freezes the stop, pause, resume and
 // wrap of the others.
 
@@ -11,12 +11,17 @@ import (
 	"context"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
+
+// stalledPushes counts, per stalling remote URL, the connections it
+// accepted: a push to it is under way once the count is non-zero.
+var stalledPushes sync.Map // url → *atomic.Int32
 
 // stallingRemote is hangingRemote with an explicit release: the push of
 // a job pointed at it hangs until release() closes the listener and
@@ -27,6 +32,9 @@ func stallingRemote(t *testing.T) (url string, release func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	url = "http://" + ln.Addr().String() + "/capsule.git"
+	accepted := &atomic.Int32{}
+	stalledPushes.Store(url, accepted)
 	var mu sync.Mutex
 	var conns []net.Conn
 	go func() {
@@ -38,6 +46,7 @@ func stallingRemote(t *testing.T) (url string, release func()) {
 			mu.Lock()
 			conns = append(conns, c)
 			mu.Unlock()
+			accepted.Add(1)
 		}
 	}()
 	var once sync.Once
@@ -52,7 +61,7 @@ func stallingRemote(t *testing.T) (url string, release func()) {
 		})
 	}
 	t.Cleanup(release)
-	return "http://" + ln.Addr().String() + "/capsule.git", release
+	return url, release
 }
 
 // startRunning starts wi to RUNNING (its agent is collected at cleanup).
@@ -79,12 +88,20 @@ func stallPushes(t *testing.T, r *Runtime, wi string) (release func()) {
 	return release
 }
 
-// waitBusy blocks until wi's network step runs outside opMu.
+// waitBusy blocks until wi's push to its stalling remote is under way
+// (the operation pushing holds wi's lock).
 func waitBusy(t *testing.T, r *Runtime, wi string) {
 	t.Helper()
-	waitFor(t, wi+" to reach its off-lock network step", func() bool {
+	waitFor(t, wi+" to reach its stalled push", func() bool {
 		j := r.jobOf(wi)
-		return j != nil && j.isBusy()
+		if j == nil || !r.Busy(wi) {
+			return false
+		}
+		j.mu.Lock()
+		url := j.git.RemoteURL
+		j.mu.Unlock()
+		n, ok := stalledPushes.Load(url)
+		return ok && n.(*atomic.Int32).Load() > 0
 	})
 }
 
@@ -271,7 +288,7 @@ func TestB8ShutdownDuringHungSealPush(t *testing.T) {
 	within(t, 10*time.Second, "the runtime's shutdown steps", func() {
 		actx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		r.AbortClaims(actx)
+		r.BeginShutdown(actx)
 		if err := r.Persist(); err != nil {
 			t.Errorf("persist: %v", err)
 		}
@@ -290,7 +307,7 @@ func TestB8ShutdownDuringHungSealPush(t *testing.T) {
 	_ = recvErr(t, stopA, "A's close")
 }
 
-// The restart's journal replay clones outside Restart and opMu: a hung
+// The restart's journal replay clones outside Restart and every lock: a hung
 // replay clone neither holds Restart (the daemon's socket waits on it)
 // nor the other work items; a shutdown defers it with its entry kept.
 func TestB8RestartReplayCloneOutsideOpMu(t *testing.T) {
@@ -318,8 +335,8 @@ func TestB8RestartReplayCloneOutsideOpMu(t *testing.T) {
 	})
 	actx, cancel := context.WithTimeout(bg(), 20*time.Second)
 	defer cancel()
-	within(t, 25*time.Second, "AbortClaims", func() { r.AbortClaims(actx) })
-	r.replays.Wait()
+	within(t, 25*time.Second, "BeginShutdown", func() { r.BeginShutdown(actx) })
+	settleReplays(t, r)
 	if got := journaled(r, slow); got == nil || got.SessionID != sess {
 		t.Fatalf("journal after the deferred replay = %+v, want the original entry", got)
 	}
@@ -329,25 +346,22 @@ func TestB8RestartReplayCloneOutsideOpMu(t *testing.T) {
 	r.Close()
 }
 
-// A failed start's compensation (SessionEnd blocked) runs outside opMu:
-// a hung end holds neither another work item's start nor its close, and
-// a start of the SAME work item meanwhile answers the typed transient
-// instead of replaying the claim being ended.
+// A failed start's compensation (SessionEnd blocked) holds only its own
+// work item's lock: a hung end holds neither another work item's start
+// nor its close, and a start of the SAME work item meanwhile answers the
+// typed transient instead of replaying the claim being ended.
 func TestB8AbandonClaimEndOutsideOpMu(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	t.Cleanup(r.Close)
 	const bad, other = "wi_b8a_bad", "wi_b8a_other"
-	block := make(chan struct{})
-	hub.mu.Lock()
-	hub.endBlockFor = map[string]chan struct{}{bad: block}
-	hub.mu.Unlock()
+	g := hub.hangCall(t, "end", bad)
 	// the claim's task-repo clone fails: an unclonable remote
 	hub.reposFor = map[string][]api.ProjectRepo{bad: {{Name: "app", URL: "/nonexistent/app.git"}}}
 	startBad := make(chan error, 1)
 	go func() { startBad <- r.Start(bg(), bad) }()
-	waitFor(t, "the compensation to reach the hub", func() bool { return r.claimEnding(bad) })
+	g.waitEntered(t, "the compensation")
 
 	within(t, 20*time.Second, "Start of another work item", func() {
 		startRunning(t, r, other)
@@ -364,15 +378,15 @@ func TestB8AbandonClaimEndOutsideOpMu(t *testing.T) {
 			t.Errorf("start during the compensation = %v, want the DAEMON-503 transient", err)
 		}
 	})
-	close(block)
+	g.open()
 	if err := recvErr(t, startBad, "the failed Start"); err == nil {
 		t.Fatal("the failed start answered nil")
 	}
 	if journaled(r, bad) != nil {
 		t.Fatal("the settled compensation kept its journal entry")
 	}
-	if r.claimEnding(bad) {
-		t.Fatal("the ending latch outlived the compensation")
+	if r.Busy(bad) {
+		t.Fatal("the work item's lock outlived the compensation")
 	}
 }
 

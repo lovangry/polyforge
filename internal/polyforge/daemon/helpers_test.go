@@ -696,7 +696,9 @@ func (td *testDaemon) waitLive(t *testing.T, wi string) {
 			var st cli.StatusResponse
 			if json.Unmarshal(raw, &st) == nil {
 				for _, j := range st.Jobs {
-					if j.WorkItemID == wi && j.Status != string(runtime.StateClaiming) {
+					// live, and its start settled: the next door of the
+					// work item is not refused as in progress
+					if j.WorkItemID == wi && j.Status != string(runtime.StateClaiming) && !td.rt.Busy(wi) {
 						return
 					}
 				}

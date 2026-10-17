@@ -1,9 +1,10 @@
 package runtime
 
 // restart_hub_offlock_test.go — the restart reconciliation's hub calls
-// (journal-replay verify and claim, per-record verify) run outside opMu
-// and Restart's wait for them is bounded (RestartHubWait): a hung hub at
-// startup no longer holds the daemon's socket, the unreconciled records
+// (journal-replay verify and claim, per-record verify) hold only their
+// own work item's lock, and Restart's wait for them is bounded
+// (RestartHubWait): a hung hub at startup no longer holds the daemon's
+// socket, the unreconciled records
 // show waiting for aihub and refuse their doors meanwhile, and they end up
 // exactly as a synchronous reconciliation would leave them once the hub
 // answers.
@@ -218,7 +219,7 @@ func TestOffLockRestartHungJournalReplay(t *testing.T) {
 		ji, ok := r.Info(x)
 		return ok && ji.State == StateRunning && ji.Agent != nil && !r.isRestarting()
 	})
-	r.replays.Wait()
+	settleReplays(t, r)
 	if n := hub.claimCount(); n != 1 {
 		t.Fatalf("%s claimed %d times, want the one replay", x, n)
 	}
@@ -228,7 +229,7 @@ func TestOffLockRestartHungJournalReplay(t *testing.T) {
 }
 
 // A shutdown during the restart's hung verify stops the reconciliation:
-// AbortClaims does not wait on it, and once the hub answers nothing is
+// BeginShutdown does not wait on it, and once the hub answers nothing is
 // decided — no agent, no session end, the record kept for the next start.
 func TestOffLockShutdownDuringHungRestartVerify(t *testing.T) {
 	setGitIdentity(t)
@@ -249,7 +250,7 @@ func TestOffLockShutdownDuringHungRestartVerify(t *testing.T) {
 	g.waitEntered(t, "the restart verify")
 	actx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	within(t, promptly, "AbortClaims during the hung restart verify", func() { r.AbortClaims(actx) })
+	within(t, promptly, "BeginShutdown during the hung restart verify", func() { r.BeginShutdown(actx) })
 	g.open()
 	waitFor(t, "the reconciliation lane to stop", func() bool { return !r.isRestarting() })
 	if sp.callCount() != 0 || hub.endCount() != 0 {
@@ -263,7 +264,7 @@ func TestOffLockShutdownDuringHungRestartVerify(t *testing.T) {
 	}
 }
 
-// The deferred-verify retry lane (awaitVerify) verifies outside opMu too:
+// The deferred-verify retry lane (awaitVerify) holds only its own lock:
 // with its verify hung, another work item starts and wraps promptly, the
 // deferred one refuses its close (DAEMON-409), and it resumes once the hub
 // answers.
@@ -384,7 +385,7 @@ func TestOffLockShutdownDuringHungRestartAttach(t *testing.T) {
 	g.waitEntered(t, "the restart attach")
 	actx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	within(t, promptly, "AbortClaims during the hung attach", func() { r.AbortClaims(actx) })
+	within(t, promptly, "BeginShutdown during the hung attach", func() { r.BeginShutdown(actx) })
 	g.open()
 	waitFor(t, "the reconciliation lane to end", func() bool { return !r.isRestarting() })
 	if n := sp.callCount(); n != 0 {
@@ -421,7 +422,7 @@ func TestOffLockRestartSlowPushIsNotAwaitingHub(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- r.Restart(context.Background()) }()
-	waitBusy(t, r, a) // the recovery push is under way outside opMu
+	waitBusy(t, r, a) // the recovery push is under way
 	select {
 	case err := <-done:
 		t.Fatalf("Restart returned during a slow push with a healthy hub (err %v)", err)

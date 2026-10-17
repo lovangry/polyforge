@@ -29,19 +29,33 @@ import (
 // cleanupBound bounds one teardown's waits inside the six-layer cleanup.
 const cleanupBound = 10 * time.Second
 
-// recoverOp runs one recovery event from the message loop. Callers have
-// already verified the attempt-id fence and the RUNNING state; opMu
-// serializes it against Start/Stop/Restart.
+// recoverOp runs one recovery of j's current derivation (see recoverAt).
 func (r *Runtime) recoverOp(ctx context.Context, j *job, cause, detail string) {
-	r.opMu.Lock()
-	defer r.opMu.Unlock()
-	if r.jobOf(j.wi) != j || j.isBusy() {
-		return // settled meanwhile, or a close's network step is in flight (B-8)
+	_, spawn := j.snapshot()
+	r.recoverAt(ctx, j, spawn, cause, detail)
+}
+
+// recoverAt runs one recovery event for derivation spawn of j, off the
+// message loop: it waits for the work item's lock (another operation of
+// it — a close, the claim's settle, a restart step — decides first) and
+// re-checks the fence under it. A job that settled meanwhile, a later
+// derivation (a duplicate death signal of one already recovered), a state
+// other than RUNNING (a close or a pause took it) or a record the restart
+// reconciliation has not reached yet drops the event.
+func (r *Runtime) recoverAt(ctx context.Context, j *job, spawn int, cause, detail string) {
+	s := r.lockWI(j.wi)
+	defer r.unlockWI(j.wi, s)
+	if r.jobOf(j.wi) != j || j.pendingRestart() {
+		return
+	}
+	if st, n := j.snapshot(); st != StateRunning || n != spawn {
+		return
 	}
 	r.recoverCore(ctx, j, cause, detail)
 }
 
-// recoverCore is the recovery sequence; the caller holds opMu. cause
+// recoverCore is the recovery sequence; the caller holds the work item's
+// lock, across its pushes and the relaunch. cause
 // names the recovery trigger (the interrupted-dispatch archive's class
 // input, and the consecutive-failures ledger's exempt-cause key);
 // detail is the observe
@@ -126,8 +140,8 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// from the ledger entirely — neither counted nor resetting — so a deploy
 	// retry or a systemd restart loop cannot bounded-fail every running WI.
 	if !restartExemptCause(cause) {
+		accepted := acceptedResultCount(j.capsuleDir) // disk read: outside the job's mutex
 		j.mu.Lock()
-		accepted := acceptedResultCount(j.capsuleDir)
 		switch {
 		case accepted > j.acceptedAtRelaunch:
 			// real progress since the last relaunch (a step's result was
@@ -165,16 +179,8 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 	// scene) gets it re-materialized before the next derivation wakes up
 	// blind to its own goal (an aihub read when the claim snapshot is
 	// gone). Best-effort, idempotent.
-	//
-	// Both run outside opMu with the job latched busy (offLock, B-8): the
-	// job sits RECOVERING with no agent, so no other door acts on it.
-	if !r.offLock(j, func() {
-		_, _ = commitDirty(r, j)
-		r.ensureWorkItemFile(j)
-	}) {
-		fmt.Fprintf(os.Stderr, "runtime: %s: the job left the job table during its recovery; nothing relaunched\n", j.wi)
-		return
-	}
+	_, _ = commitDirty(r, j)
+	r.ensureWorkItemFile(ctx, j)
 
 	// The bundle is pinned at claim (v2-converge §2.4): recovery relaunches
 	// from the capsule's own materialized snapshot and never re-pins or
@@ -225,8 +231,19 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 		// used — two step processes on one drop path, the fence defeated.
 		// The journal is the one ledger every derivation appends to;
 		// seeding past its max restores the fence.
+		if !r.admit() {
+			// the shutdown latched: no agent starts behind it. The job
+			// stays RECOVERING with no agent; the next daemon start
+			// recovers the persisted record.
+			if perr := r.persist(); perr != nil {
+				fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
+			}
+			fmt.Fprintf(os.Stderr, "runtime: %s: recovery stopped by the shutdown before its relaunch (the next start recovers it)\n", j.wi)
+			return
+		}
+		m := spawnJournalMaxN(j.capsuleDir) // disk read: outside the job's mutex
 		j.mu.Lock()
-		if m := spawnJournalMaxN(j.capsuleDir); m > j.spawnN {
+		if m > j.spawnN {
 			j.spawnN = m
 		}
 		j.spawnN++
@@ -260,6 +277,17 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 			j.agentPID = pid
 			j.agentStartedAt = h.StartedAt()
 			j.mu.Unlock()
+			if r.release() {
+				// bound after the shutdown stopped waiting for it: not in
+				// its live set — torn down here; the record stays for the
+				// next start
+				fmt.Fprintf(os.Stderr, "runtime: %s: relaunched agent bound after the shutdown stopped waiting for it — torn down\n", j.wi)
+				r.killAgentTree(j)
+				if perr := r.persist(); perr != nil {
+					fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
+				}
+				return
+			}
 			// persisted with the advanced counter (crash-safe)
 			if perr := r.persist(); perr != nil {
 				fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, perr)
@@ -267,6 +295,7 @@ func (r *Runtime) recoverCore(ctx context.Context, j *job, cause, detail string)
 			r.recovered(j, h, cause)
 			return
 		}
+		r.release()
 		fmt.Fprintf(os.Stderr, "runtime: %s: engine relaunch failed: %v\n", j.wi, err)
 		j.mu.Lock()
 		j.recoverFails++
@@ -304,6 +333,7 @@ func (r *Runtime) effectiveCandidatesForRecovery(j *job) map[string][]string {
 // is no resume-failure bookkeeping — polyforge#106: every relaunch is a
 // fresh driver derivation.)
 func (r *Runtime) recovered(j *job, h AgentHandle, cause string) {
+	accepted := acceptedResultCount(j.capsuleDir) // disk read: outside the job's mutex
 	j.mu.Lock()
 	// C7: the ledger's reset is the accepted-result check at the next
 	// entry, never the relaunch itself (a relaunch that dies before its
@@ -311,7 +341,7 @@ func (r *Runtime) recovered(j *job, h AgentHandle, cause string) {
 	// the job recovery-stabilized-so-far and notes the accepted-result
 	// count it starts from.
 	j.lastRelaunchRecovery = true
-	j.acceptedAtRelaunch = acceptedResultCount(j.capsuleDir)
+	j.acceptedAtRelaunch = accepted
 	spawnN := j.spawnN
 	pid := j.agentPID
 	j.mu.Unlock()
@@ -366,36 +396,28 @@ func (r *Runtime) boundedFail(ctx context.Context, j *job, detail string) {
 	// the capsule ends at rides the blocked verdict (cross-daemon continue
 	// check, §7).
 	r.killAgentTree(j)
-	// The pushes and the blocked close run outside opMu with the job
-	// latched busy (offLock, B-8); the verdict is applied once the lock
-	// is retaken.
-	settled := false
-	if !r.offLock(j, func() {
-		head := ""
-		chainPushed := true // nothing local to push without a capsule
-		if dirExists(j.capsuleDir) {
-			var perr error
-			head, perr = commitDirty(r, j)
-			chainPushed = perr == nil
-			// The re-claim the owner's resume runs restores the task repos
-			// from the carrier: their uncommitted work rides refs/pf-wip
-			// (polyforge#167). Before the verdict — the session credential
-			// dies with it.
-			r.saveTaskWIP(j, true, chainPushed)
-		}
-		j.mu.Lock()
-		j.endNote, j.endHead = detail, head
-		j.mu.Unlock()
-		// When boundedFail's own push did not land, the close goes
-		// through closeBlocked's push-then-close, so a hub blip never lets
-		// SessionEnd(blocked) land with unpushed commits.
-		settled = r.closeBlocked(j, !chainPushed)
-	}) {
-		fmt.Fprintf(os.Stderr, "runtime: %s: the job left the job table during its blocked close\n", j.wi)
-		return
+	// The pushes and the blocked close run under the work item's lock
+	// like the rest of the verdict.
+	head := ""
+	chainPushed := true // nothing local to push without a capsule
+	if dirExists(j.capsuleDir) {
+		var perr error
+		head, perr = commitDirty(r, j)
+		chainPushed = perr == nil
+		// The re-claim the owner's resume runs restores the task repos
+		// from the carrier: their uncommitted work rides refs/pf-wip
+		// (polyforge#167). Before the verdict — the session credential
+		// dies with it.
+		r.saveTaskWIP(j, true, chainPushed)
 	}
+	j.mu.Lock()
+	j.endNote, j.endHead = detail, head
+	j.mu.Unlock()
+	// When boundedFail's own push did not land, the close goes through
+	// closeBlocked's push-then-close, so a hub blip never lets
+	// SessionEnd(blocked) land with unpushed commits.
+	settled := r.closeBlocked(ctx, j, !chainPushed)
 	r.finishBlocked(j, detail, settled)
-	_ = ctx
 }
 
 // commitDirty is the commit-dirty-on-recover step (§六): stage everything,
@@ -423,8 +445,12 @@ func (r *Runtime) saveTaskWIP(j *job, keep, chainOK bool) {
 	if !dirExists(j.capsuleDir) {
 		return
 	}
-	gitops.PushTaskWIP(j.git, keep, chainOK)
+	pushTaskWIPFn(j.git, keep, chainOK)
 }
+
+// pushTaskWIPFn is the close's task-repo WIP push (a seam for the
+// hung-call tests).
+var pushTaskWIPFn = gitops.PushTaskWIP
 
 // SaveTaskWIP is the graceful-shutdown face of the WIP lane: called after
 // the shutdown terminated wi's agent tree, it snapshots the task repos'

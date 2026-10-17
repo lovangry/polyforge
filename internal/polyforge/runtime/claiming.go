@@ -21,11 +21,17 @@ package runtime
 //     start reuses it (claimIntent) and so does the next replay; only a
 //     typed refusal (4xx) or a verify that no longer matches drops it.
 //
-// The file is a map keyed by the SUBMITTED id spelling (a slug is legal:
-// the claim endpoint accepts id-or-slug), so clearClaiming and the
-// restart replay agree on keys. claimMu serializes the read-modify-write
-// of every writer: the claim-end retry lane (and a claim's session end
-// outside opMu, B-8) clears entries without opMu.
+// The file is a map keyed by the canonical work-item id a start claims
+// under (entries an older build wrote may be keyed by the submitted
+// spelling, a slug; the restart replays them through rec.WorkItemID just
+// the same), so clearClaiming and the restart replay agree on keys.
+// claimMu serializes the read-modify-write of every writer: they hold
+// different work items' locks (the claim-end retry lane among them).
+//
+// An entry whose compensation SessionEnd(blocked) failed is marked
+// ending: a Start of the work item answers the typed transient until the
+// background retry lands the close, and a restart ends the session
+// blocked instead of replaying the claim.
 
 import (
 	"context"
@@ -53,7 +59,7 @@ type claimingFile struct {
 // reference.md §3.5 shape): the minted session secret is the replay anchor — a
 // verify of it answers "did our claim land, and is it still ours?".
 type claimingRec struct {
-	WorkItemID     string `json:"work_item_id"`    // the SUBMITTED spelling (id-or-slug)
+	WorkItemID     string `json:"work_item_id"`    // the claimed id (an older entry: the submitted spelling)
 	SessionID      string `json:"session_id"`      // the minted SECRET (replay anchor)
 	IdempotencyKey string `json:"idempotency_key"` // the D4 replay token
 	MachineID      string `json:"machine_id"`
@@ -61,6 +67,10 @@ type claimingRec struct {
 	// Models is the manual `pf submit --models` list of this start, so a
 	// crash-replayed claim keeps it.
 	Models []string `json:"models,omitempty"`
+	// Ending: the claim's compensation SessionEnd(blocked) did not land;
+	// EndNote is the note it carries.
+	Ending  bool   `json:"ending,omitempty"`
+	EndNote string `json:"end_note,omitempty"`
 }
 
 func (r *Runtime) claimingPath() string {
@@ -139,9 +149,9 @@ func (r *Runtime) noteClaiming(wi, sessionID, key string, models []string) error
 func (r *Runtime) clearClaiming(wi string) { r.clearClaimingSession(wi, "") }
 
 // clearClaimingSession is clearClaiming that, with sessionID set, only
-// drops an entry still journaling that session: a close settling outside
-// opMu must never drop the entry a newer start of the same work item
-// wrote meanwhile.
+// drops an entry still journaling that session: a close settling in the
+// background must never drop the entry a newer start of the same work
+// item wrote meanwhile.
 func (r *Runtime) clearClaimingSession(wi, sessionID string) {
 	r.claimMu.Lock()
 	defer r.claimMu.Unlock()
@@ -156,14 +166,34 @@ func (r *Runtime) clearClaimingSession(wi, sessionID string) {
 	}
 }
 
+// markClaimEnding marks the journal entry key (still journaling sessionID)
+// ending: its compensation SessionEnd did not land. A write failure is
+// loud; the in-process retry still runs.
+func (r *Runtime) markClaimEnding(key, sessionID, note string) {
+	r.claimMu.Lock()
+	defer r.claimMu.Unlock()
+	items := r.loadClaiming()
+	rec, ok := items[key]
+	if !ok || rec.SessionID != sessionID || rec.Ending {
+		return
+	}
+	rec.Ending, rec.EndNote = true, note
+	if err := r.writeClaiming(items); err != nil {
+		fmt.Fprintf(os.Stderr, "runtime: %s: claiming journal ending mark failed: %v\n", key, err)
+	}
+}
+
 // resumeClaiming replays every uncleared journal entry at daemon start
-// (called from the restart reconciliation, opMu held — released around
-// every hub call: the verify and the claim replay (hubUnlocked), a
-// compensation SessionEnd (claimEndOffLock) — BEFORE the state.json
-// records are reconciled; a journaled start wins over any stale record of
-// the same WI). A shutdown latched meanwhile stops it, every remaining
-// entry kept. Per entry:
+// (called from the restart reconciliation, BEFORE the state.json records
+// are reconciled; a journaled start wins over any stale record of the
+// same WI). Its verify and claim replay hold no lock (the restarting
+// latch refuses every Start meanwhile); a placeholder and a compensation
+// SessionEnd go under the work item's lock. A shutdown latched meanwhile
+// stops it, every remaining entry kept. Per entry:
 //
+//   - marked ending (the compensation of a failed start never landed) →
+//     end the session blocked now, retrying in the background; the claim
+//     is never replayed;
 //   - aihub unreachable → keep the entry for the next restart, never
 //     guess a verdict;
 //   - SessionVerify says the journaled session still holds the WI →
@@ -171,8 +201,8 @@ func (r *Runtime) clearClaimingSession(wi, sessionID string) {
 //     same response — bundle pin, repos, fingerprint — comes back) and
 //     enter its CLAIMING placeholder; the answered replays are carried
 //     to their agents by runReplays once Restart's records are seeded
-//     (B-8: the clone runs outside opMu), and their own failure paths
-//     compensate with SessionEnd(blocked) and clear the entry;
+//     (B-8: the clone runs outside every lock), and their own failure
+//     paths compensate with SessionEnd(blocked) and clear the entry;
 //   - verify says otherwise (another session holds it, the WI went
 //     terminal, the session was cleared) → the intention can no longer
 //     be honored: drop the entry. The restart reconciliation still
@@ -187,9 +217,13 @@ func (r *Runtime) resumeClaiming(ctx context.Context) (replays []claimReplay) {
 		if r.restartStopping(ctx) {
 			return replays // shutdown: the remaining entries stay for the next start
 		}
+		if rec.Ending {
+			r.endClaimAtRestart(ctx, wi, rec)
+			continue
+		}
 		var v *api.SessionVerifyResponse
 		var err error
-		r.hubUnlocked(func() { r.laneHub(func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) }) })
+		r.hubCall(ctx, func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) })
 		if r.restartStopping(ctx) {
 			return replays // nothing decided: the entry stays
 		}
@@ -211,14 +245,12 @@ func (r *Runtime) resumeClaiming(ctx context.Context) (replays []claimReplay) {
 			continue
 		}
 		var resp *api.SessionClaimResponse
-		r.hubUnlocked(func() {
-			r.laneHub(func() {
-				resp, err = r.hub.SessionClaim(api.SessionClaimRequest{
-					WorkItemID:     rec.WorkItemID,
-					SessionID:      rec.SessionID,
-					MachineID:      rec.MachineID,
-					IdempotencyKey: rec.IdempotencyKey,
-				})
+		r.hubCall(ctx, func() {
+			resp, err = r.hub.SessionClaim(api.SessionClaimRequest{
+				WorkItemID:     rec.WorkItemID,
+				SessionID:      rec.SessionID,
+				MachineID:      rec.MachineID,
+				IdempotencyKey: rec.IdempotencyKey,
 			})
 		})
 		if r.restartStopping(ctx) {
@@ -242,57 +274,84 @@ func (r *Runtime) resumeClaiming(ctx context.Context) (replays []claimReplay) {
 			// secret (abandonClaim; the entry stays until the close
 			// lands) rather than dropping the only copy.
 			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay refused, ending the open session blocked: %v\n", wi, err)
-			r.abandonClaim(&job{wi: rec.WorkItemID, sessionID: rec.SessionID}, wi, err,
+			s := r.laneLock(ctx, rec.WorkItemID)
+			r.abandonClaim(ctx, &job{wi: rec.WorkItemID, sessionID: rec.SessionID}, wi, err,
 				"the replayed claim of an open session was refused at restart: "+err.Error())
+			r.unlockWI(rec.WorkItemID, s)
 			continue
 		}
-		// The claim is already open server-side, so this is the one place
-		// the yaml is read after a claim: an invalid file here
-		// compensates with the D5 blocked end like any post-claim refusal.
-		wcfg, werr := r.LoadWorkspace(resp.WorkItem.ProjectName)
-		if werr != nil {
-			var ae *api.Error
-			note := werr.Error()
-			if errors.As(werr, &ae) && ae.Detail != "" {
-				note = ae.Detail
-			}
-			id := claimAnswerID(resp)
-			r.abandonClaim(&job{wi: id, sessionID: rec.SessionID}, rec.WorkItemID, werr, note)
-			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay refused (session ended blocked): %v\n", wi, werr)
-			continue
-		}
-		// A journaled start wins over a stale record of the same work item
-		// (the record predates the secret the journal carries): Restart
-		// seeded the records before this lane ran, so the still-unreconciled
-		// one is dropped here, exactly as if it had never been seeded.
-		var stale *job
 		id := claimAnswerID(resp)
-		if ex := r.jobOf(id); ex != nil {
-			ex.mu.Lock()
-			pending := ex.restartPending
-			ex.mu.Unlock()
-			if pending {
-				stale = ex
-				r.forgetRecord(&jobRecord{WorkItemID: id})
-			}
+		if j := r.placeReplay(ctx, wi, id, rec, resp); j != nil {
+			replays = append(replays, claimReplay{wi: wi, j: j})
 		}
-		j, err := r.claimPlaceholder(ctx, rec.WorkItemID, rec.SessionID, resp, wcfg, rec.Models)
-		if err != nil {
-			if stale != nil && r.jobOf(id) == nil {
-				// the replay did not take the work item after all: the
-				// record is reconciled as if never dropped
-				r.mu.Lock()
-				r.jobs[id] = stale
-				r.mu.Unlock()
-			}
-			// claimPlaceholder already compensated (blocked) and cleared
-			// the entry; the log line is for the operator.
-			fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay start failed (session ended blocked): %v\n", wi, err)
-			continue
-		}
-		replays = append(replays, claimReplay{wi: rec.WorkItemID, j: j})
 	}
 	return replays
+}
+
+// placeReplay settles one answered journal replay under the canonical
+// id's lock: the yaml read (the claim is already open server-side, so an
+// invalid file compensates with the D5 blocked end like any post-claim
+// refusal) and the CLAIMING placeholder. It answers the placeholder, nil
+// when the replay ended otherwise.
+func (r *Runtime) placeReplay(ctx context.Context, key, id string, rec *claimingRec, resp *api.SessionClaimResponse) *job {
+	s := r.laneLock(ctx, id)
+	defer r.unlockWI(id, s)
+	wcfg, werr := r.LoadWorkspace(resp.WorkItem.ProjectName)
+	if werr != nil {
+		var ae *api.Error
+		note := werr.Error()
+		if errors.As(werr, &ae) && ae.Detail != "" {
+			note = ae.Detail
+		}
+		r.abandonClaim(ctx, &job{wi: id, sessionID: rec.SessionID}, key, werr, note)
+		fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay refused (session ended blocked): %v\n", key, werr)
+		return nil
+	}
+	// A journaled start wins over a stale record of the same work item
+	// (the record predates the secret the journal carries): Restart
+	// seeded the records before this lane ran, so the still-unreconciled
+	// one is dropped here, exactly as if it had never been seeded.
+	var stale *job
+	if ex := r.jobOf(id); ex != nil {
+		ex.mu.Lock()
+		pending := ex.restartPending
+		ex.mu.Unlock()
+		if pending {
+			stale = ex
+			r.forgetRecord(&jobRecord{WorkItemID: id})
+		}
+	}
+	j, err := r.claimPlaceholder(ctx, rec.WorkItemID, key, rec.SessionID, resp, wcfg, rec.Models)
+	if err != nil {
+		if stale != nil && r.jobOf(id) == nil {
+			// the replay did not take the work item after all: the
+			// record is reconciled as if never dropped
+			r.mu.Lock()
+			r.jobs[id] = stale
+			r.mu.Unlock()
+		}
+		// claimPlaceholder already compensated (blocked) and cleared
+		// the entry; the log line is for the operator.
+		fmt.Fprintf(os.Stderr, "runtime: %s: claiming replay start failed (session ended blocked): %v\n", key, err)
+		return nil
+	}
+	return j
+}
+
+// endClaimAtRestart ends the session of a journal entry marked ending
+// (its failed start's compensation never landed): SessionEnd(blocked)
+// under the work item's lock, the entry cleared once it settled, the
+// background retry otherwise. The claim is never replayed.
+func (r *Runtime) endClaimAtRestart(ctx context.Context, key string, rec *claimingRec) {
+	fmt.Fprintf(os.Stderr, "runtime: %s: claiming entry of an unfinished compensation — ending the session blocked (no claim replay)\n", key)
+	s := r.laneLock(ctx, rec.WorkItemID)
+	settled := r.endBlockedAtHub(ctx, rec.WorkItemID, rec.SessionID, rec.EndNote, "")
+	r.unlockWI(rec.WorkItemID, s)
+	if settled {
+		r.clearClaimingSession(key, rec.SessionID)
+		return
+	}
+	r.retryClaimEnd(key, rec.WorkItemID, rec.SessionID, rec.EndNote)
 }
 
 // claimReplay is one journal replay whose CLAIMING placeholder is in the
@@ -304,27 +363,25 @@ type claimReplay struct {
 
 // runReplays carries the restart's journal replays to their agents, each
 // on its own goroutine like Start's lane: the capsule
-// clone and materialize do not run under opMu inside Restart, so a hung
+// clone and materialize do not run inside Restart, so a hung
 // clone holds neither the other records' reconciliation nor the
-// daemon's socket. A shutdown meanwhile defers them (AbortClaims) with
+// daemon's socket. A shutdown meanwhile defers them (BeginShutdown) with
 // their journal entries kept.
 //
-// The caller holds opMu. The shutdown latch and the WaitGroup's Add are
-// read and done under mu, so AbortClaims (which latches under mu before it
-// waits) either waits for these goroutines or they are never started: a
-// replay the shutdown caught is deferred here and then, journal kept.
+// The caller holds no lock. The placeholders already sit CLAIMING in the
+// table, so a shutdown latched before or after this point cancels them and
+// waits for their claims to settle (BeginShutdown); a replay the latch
+// caught first is deferred here, journal kept.
 func (r *Runtime) runReplays(ctx context.Context, replays []claimReplay) {
 	r.mu.Lock()
-	if r.claimsAborted {
+	if r.down {
 		r.mu.Unlock()
 		r.deferReplays(ctx, replays)
 		return
 	}
-	r.replays.Add(len(replays))
 	r.mu.Unlock()
 	for _, cr := range replays {
 		go func(cr claimReplay) {
-			defer r.replays.Done()
 			if err := r.runClaim(ctx, cr.wi, cr.j); err != nil {
 				if IsClaimDeferred(err) {
 					return // a shutdown during the replay: the entry stays
@@ -336,16 +393,18 @@ func (r *Runtime) runReplays(ctx context.Context, replays []claimReplay) {
 }
 
 // deferReplays settles journal replays whose clones must not start — a
-// shutdown caught them, or the startup aborts (opMu held): each
+// shutdown caught them, or the startup aborts (no lock held): each
 // placeholder goes, its journal entry stays for the next start
 // (finishClaim's deferral), and a Stop that requested a close meanwhile
 // still gets its close.
 func (r *Runtime) deferReplays(_ context.Context, replays []claimReplay) {
 	for _, cr := range replays {
 		cr.j.claim.cancel()
+		s := r.lockWI(cr.j.wi)
 		// the claim's own (now cancelled) context: finishClaim defers
 		// whatever the caller's context says
 		_ = r.finishClaim(cr.j.claim.ctx, cr.wi, cr.j, context.Canceled, context.Canceled.Error())
+		r.unlockWI(cr.j.wi, s)
 	}
 }
 
