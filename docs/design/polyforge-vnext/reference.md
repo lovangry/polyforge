@@ -73,13 +73,10 @@ The blocked WI has exactly two exits: `pf resume` (continue = resume-blocked + a
 ### 2.3 attrs: no execution state <!-- §2.3 -->
 
 `attrs` is a free JSON object written at create; aihub never stores workflow execution state in it.
-Create refuses these keys (at any nesting depth) with `CORE-400 EXECUTION_STATE_REJECTED` (`core/workitem.go`
-`executionStateKeys`): `current_step step_id step_attempt_id attempt review_round review_rounds
-review_verdict progress workflow_status steps rewind_stats budget_consumed command_count
-step_start_refs pending_question blocked_seal`. Execution state lives only in the capsule's `execution.json`
-(§7.3). `blocked_seal` is not execution state but is reserved: aihub itself writes it when a
-daemon's session-end reports `blocked` with a head (§3.5), through a direct update that bypasses
-this create-time check; a create cannot plant one.
+Execution state lives only in the capsule's `execution.json` (§7.3). The one reserved key is a
+top-level `blocked_seal`: aihub itself writes it when a daemon's session-end reports `blocked` with a
+head (§3.5), through a direct update that bypasses the create-time check, so create refuses it with
+`CORE-400 EXECUTION_STATE_REJECTED` (`core/workitem.go` `checkAttrs`); a create cannot plant one.
 
 ## 3. Sessions and fencing <!-- §3 -->
 
@@ -142,7 +139,7 @@ health route. All paths under `/api/v1` except `/git/`.
 |---|---|---|---|
 | POST | `/work-items` | key + project writer | create (`bundle_name`, `repo_inventory`, `parent_id`, …) |
 | GET | `/work-items` | key; rows filtered by read access | `limit` (default 500, max 1000), `project`, `status`, `assignee`, `priority`, `milestone` |
-| GET | `/work-items/{id}` | key + read | `include=events,deps` (anything else `CORE-400`) |
+| GET | `/work-items/{id}` | key + read | `include=events` (anything else `CORE-400`) |
 | PATCH | `/work-items/{id}` | key + writer | `goal content labels priority milestone waiting_on clean_pause`, `bundle_name` in the R2 window (`patchableFields`; `attrs` only at create) |
 | POST | `/work-items/{id}/cancel` | reporter/maintainer/admin | §2.1 |
 | POST | `/work-items/{id}/claim` | writer | §3.2 |
