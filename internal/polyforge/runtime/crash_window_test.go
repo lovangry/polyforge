@@ -7,6 +7,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 )
 
 // TestRestartClearsIndexLockLeftByKilledCommit (CR-3): the daemon died
@@ -144,5 +146,30 @@ func TestCrashMidQuarantineKeepsPairing(t *testing.T) {
 	want, _ := filepath.EvalSymlinks(moved)
 	if got := gitDirOf(t, quarantinedSibling(t, capDir)); got != want {
 		t.Fatalf("the quarantined tree resolves git-dir %q, want its pair %q", got, want)
+	}
+}
+
+// TestCarrierFetchBlipDoesNotBlock (CR-10): a re-claim whose carrier read
+// meets one hub blip retries it instead of failing the claim (which
+// closed the work item blocked until a human resumed it).
+func TestCarrierFetchBlipDoesNotBlock(t *testing.T) {
+	origFetch, origWait := fetchTaskRefFn, carrierFetchBackoff
+	defer func() { fetchTaskRefFn, carrierFetchBackoff = origFetch, origWait }()
+	carrierFetchBackoff = time.Millisecond
+	calls := 0
+	fetchTaskRefFn = func(context.Context, gitops.Opts, string, string) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", fmt.Errorf("ls-remote: connection reset by peer")
+		}
+		return "", nil
+	}
+	r := &Runtime{}
+	j := &job{wi: "wi_cr10"}
+	if _, err := r.restoreTaskRepoState(context.Background(), j, "app", t.TempDir()); err != nil {
+		t.Fatalf("one hub blip failed the carrier restore: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("the blip must be retried once, got %d reads", calls)
 	}
 }
