@@ -6,9 +6,10 @@ package runtime
 // path existed at all); the F6 ruling answers it in two halves, and this
 // file is the STATIC half:
 //
-//   - at claim time the daemon recalls the project's memories — goal +
-//     the content's head as the query, the aihub memory search face's
-//     ranked any-term mode (match=any) as the index — and writes the
+//   - at claim time the daemon recalls the project's memories — a short
+//     keyword query built from the goal and labels (recallKeywords), the
+//     aihub memory search face's ranked any-term mode (match=any) as the
+//     index — and writes the
 //     top-K hits as a static snapshot into the capsule:
 //     runtime-state/recalled-memories.json, which the driver renders
 //     into every step prompt as non-binding history
@@ -26,6 +27,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
 	"github.com/silgrid/polyforge/internal/common/capsule"
@@ -66,29 +69,138 @@ type recalledSnapshot struct {
 	CreatedAt string `json:"created_at"`
 }
 
-// recallContentRunes bounds how much of the work item's content joins
-// the goal in the claim query. The search runs in aihub's ranked
-// any-term mode (match=any), which keeps at most 32 of the query's
-// longest distinct terms; the task's head (goal + opening content) is
-// where its subject lives, and a bounded prefix keeps a long content
-// body's tail from crowding the goal's terms out of that cap.
-const recallContentRunes = 1500
+// recallMaxTerms caps the claim query's keywords.
+const recallMaxTerms = 12
 
-// recallQuery builds the claim query: the goal, plus the first
-// recallContentRunes runes of the content when there is any.
-func recallQuery(goal string, content *string) string {
-	q := strings.TrimSpace(goal)
-	if content == nil {
-		return q
+// recallStopwords are English words too common in a task goal to name
+// its subject (function words and task verbs); words under 3 runes are
+// dropped before this list is consulted.
+var recallStopwords = func() map[string]bool {
+	m := map[string]bool{}
+	for _, w := range strings.Fields(`
+		the and for are but not all any can has have its may new now via
+		with from into onto over under then them they their there here
+		what when where which while who why how will would should could
+		must been being were does done each every some such only also
+		just very more most much many other same both about above below
+		after before again between during through until upon within
+		without because since this that these those than make made need
+		needs want able get got use used using let etc
+		fix fixes fixed add adds added implement implements update updates
+		remove removes support supports change changes ensure handle
+		allow allows keep instead still
+	`) {
+		m[w] = true
 	}
-	c := strings.TrimSpace(*content)
-	if c == "" {
-		return q
+	return m
+}()
+
+// recallParticles are Chinese function characters: a 3-rune shingle
+// holding two of them carries at most one content character.
+const recallParticles = "的了是在和与及或为把被从到也都就而这那之其个"
+
+// recallKeywords builds the claim query without a model: the labels'
+// and the goal's keywords — identifiers (a digit, an underscore or an
+// inner capital: SessionClaim, claim_journal, s24b) first, then the
+// other words of 3+ runes that are not stopwords, and for a CJK clause
+// its 3-rune shingles at a stride of 2 (the trigram unit aihub's search
+// matches) — deduplicated, capped at recallMaxTerms and joined by
+// spaces for aihub's any-term search (match=any).
+func recallKeywords(goal string, labels []string) string {
+	var ids, rest []string
+	for _, src := range append(append([]string(nil), labels...), goal) {
+		i, r := keywordTerms(src)
+		ids, rest = append(ids, i...), append(rest, r...)
 	}
-	if r := []rune(c); len(r) > recallContentRunes {
-		c = string(r[:recallContentRunes])
+	seen := map[string]bool{}
+	var terms []string
+	for _, t := range append(ids, rest...) {
+		if len(terms) == recallMaxTerms {
+			break
+		}
+		if k := strings.ToLower(t); !seen[k] {
+			seen[k] = true
+			terms = append(terms, t)
+		}
 	}
-	return strings.TrimSpace(q + "\n" + c)
+	return strings.Join(terms, " ")
+}
+
+// keywordTerms cuts s into runs of word runes (letters, digits, '_'),
+// splitting where the script switches between CJK and the rest, and
+// answers the identifiers and the remaining keywords (see recallKeywords).
+func keywordTerms(s string) (ids, rest []string) {
+	word := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' }
+	cjk := func(r rune) bool {
+		return unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul)
+	}
+	rs := []rune(s)
+	for i := 0; i < len(rs); {
+		if !word(rs[i]) {
+			i++
+			continue
+		}
+		j, c := i, cjk(rs[i])
+		for j < len(rs) && word(rs[j]) && cjk(rs[j]) == c {
+			j++
+		}
+		run := rs[i:j]
+		i = j
+		if c {
+			rest = append(rest, cjkShingles(run)...)
+			continue
+		}
+		t := strings.Trim(string(run), "_")
+		n := utf8.RuneCountInString(t)
+		switch {
+		case n < 3 || n > 40:
+		case isIdentifier(t):
+			ids = append(ids, t)
+		case !recallStopwords[strings.ToLower(t)]:
+			rest = append(rest, t)
+		}
+	}
+	return ids, rest
+}
+
+// isIdentifier reports a code-like word: a digit, an underscore or an
+// inner capital, with at least one letter and 3+ runes.
+func isIdentifier(t string) bool {
+	if utf8.RuneCountInString(t) < 3 {
+		return false
+	}
+	letter, mark := false, false
+	for i, r := range t {
+		letter = letter || unicode.IsLetter(r)
+		mark = mark || unicode.IsDigit(r) || r == '_' || (i > 0 && unicode.IsUpper(r))
+	}
+	return letter && mark
+}
+
+// cjkShingles answers a CJK run's 3-rune shingles at a stride of 2 (the
+// last one ends the run), skipping a shingle with two particles; a run
+// under 3 runes yields nothing.
+func cjkShingles(run []rune) []string {
+	var starts []int
+	for i := 0; i+3 <= len(run); i += 2 {
+		starts = append(starts, i)
+	}
+	if k := len(starts); k > 0 && starts[k-1]+3 < len(run) {
+		starts = append(starts, len(run)-3)
+	}
+	var out []string
+	for _, i := range starts {
+		p := 0
+		for _, r := range run[i : i+3] {
+			if strings.ContainsRune(recallParticles, r) {
+				p++
+			}
+		}
+		if p < 2 {
+			out = append(out, string(run[i:i+3]))
+		}
+	}
+	return out
 }
 
 // recallTopK answers the effective K for the snapshot (configured,
@@ -118,8 +230,8 @@ func (r *Runtime) writeRecalledMemories(j *job) {
 		Items:      []RecalledMemory{},
 		CreatedAt:  nowStamp(),
 	}
-	// The query is the claim's own task definition: goal + content, the
-	// same pair the agent will be driving. j.item is the claim answer's
+	// The query is the keywords of the claim's own task definition (goal
+	// and labels; recallKeywords). j.item is the claim answer's
 	// snapshot; a missing one (never in the start path) falls back to an
 	// aihub lookup, and even THAT failing degrades to a noticed empty
 	// recall.
@@ -130,7 +242,7 @@ func (r *Runtime) writeRecalledMemories(j *job) {
 		}
 	}
 	if item != nil {
-		snap.Query = recallQuery(item.Goal, item.Content)
+		snap.Query = recallKeywords(item.Goal, item.Labels)
 	}
 	switch {
 	case strings.TrimSpace(snap.Query) == "":

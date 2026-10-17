@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,8 +55,8 @@ func readSnapshot(t *testing.T, path string) recalledSnapshot {
 	return snap
 }
 
-// A populated recall writes the query (goal+content), the top_k, the
-// hits with bounded excerpts, and no notice.
+// A populated recall writes the query (the goal's keywords, never the
+// content), the top_k, the hits with bounded excerpts, and no notice.
 func TestRecalledMemoriesSnapshotShape(t *testing.T) {
 	var gotQuery string
 	var gotProject string
@@ -71,9 +72,8 @@ func TestRecalledMemoriesSnapshotShape(t *testing.T) {
 	if snap.WorkItemID != "wi_rc1" {
 		t.Fatalf("work_item_id = %q", snap.WorkItemID)
 	}
-	if !strings.Contains(gotQuery, "fix the flaky retry ladder") ||
-		!strings.Contains(gotQuery, "background about the flaky provider retry ladder") {
-		t.Fatalf("recall query must carry goal+content: %q", gotQuery)
+	if gotQuery != "flaky retry ladder" {
+		t.Fatalf("recall query = %q, want the goal's keywords", gotQuery)
 	}
 	if snap.Query != gotQuery {
 		t.Fatalf("snapshot query %q != seam query %q", snap.Query, gotQuery)
@@ -134,27 +134,34 @@ func TestRecalledMemoriesNilSeamWritesNothing(t *testing.T) {
 	}
 }
 
-// The claim query is the goal plus the content's head: a content body
-// past recallContentRunes is cut (rune-safe), a missing or blank one
-// leaves the goal alone.
-func TestRecallQueryBoundsContent(t *testing.T) {
-	if got := recallQuery("  the goal ", nil); got != "the goal" {
-		t.Fatalf("nil content: %q", got)
+// The claim query is a short keyword list of the goal and the labels:
+// identifiers first, stopwords and short words dropped, CJK clauses as
+// 3-rune shingles, deduplicated case-insensitively and capped.
+func TestRecallKeywords(t *testing.T) {
+	cases := []struct {
+		name, goal string
+		labels     []string
+		want       string
+	}{
+		{"words and identifiers", "Fix the flaky retry ladder in SessionClaim (claim_journal, s24b)", nil,
+			"SessionClaim claim_journal s24b flaky retry ladder"},
+		{"labels lead, duplicates fold", "retry the Retry ladder", []string{"retry", "runtime"},
+			"retry runtime ladder"},
+		{"cjk shingles at stride 2", "修复重试阶梯的问题", nil, "修复重 重试阶 阶梯的 的问题"},
+		{"particle-heavy shingle dropped", "这是在重试", nil, "在重试"},
+		{"mixed scripts split", "修复retry阶梯逻辑", nil, "retry 阶梯逻 梯逻辑"},
+		{"nothing informative", "fix it", nil, ""},
 	}
-	blank := "  \n "
-	if got := recallQuery("the goal", &blank); got != "the goal" {
-		t.Fatalf("blank content: %q", got)
+	for _, c := range cases {
+		if got := recallKeywords(c.goal, c.labels); got != c.want {
+			t.Errorf("%s: recallKeywords(%q, %v) = %q, want %q", c.name, c.goal, c.labels, got, c.want)
+		}
 	}
-	short := "short body"
-	if got := recallQuery("the goal", &short); got != "the goal\nshort body" {
-		t.Fatalf("short content: %q", got)
+	long := ""
+	for i := 0; i < 30; i++ {
+		long += fmt.Sprintf(" term%02d", i)
 	}
-	long := strings.Repeat("检", recallContentRunes) + "TAILMARKER"
-	got := recallQuery("the goal", &long)
-	if strings.Contains(got, "TAILMARKER") || !strings.HasPrefix(got, "the goal\n检") {
-		t.Fatalf("long content not cut at %d runes: tail kept=%v", recallContentRunes, strings.Contains(got, "TAILMARKER"))
-	}
-	if n := len([]rune(got)); n != len([]rune("the goal\n"))+recallContentRunes {
-		t.Fatalf("query is %d runes, want goal + %d content runes", n, recallContentRunes)
+	if got := strings.Fields(recallKeywords(long, nil)); len(got) != recallMaxTerms || got[0] != "term00" {
+		t.Fatalf("cap: %v, want the first %d terms", got, recallMaxTerms)
 	}
 }
