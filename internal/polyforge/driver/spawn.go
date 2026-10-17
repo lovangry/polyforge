@@ -402,7 +402,7 @@ func assembleStepPrompt(p promptParts) string {
 	if p.OutputSchema != "" {
 		b.WriteString("# Output schema\n\n")
 		b.WriteString("The `output` object of a `completed` result envelope must validate against this JSON Schema (draft-07, written as YAML; omit an optional property rather than writing null). ")
-		if enforceOutputSchemas {
+		if outputSchemaEnforced(p.StepID) {
 			b.WriteString("The driver validates it and rejects a non-conforming envelope:\n\n```yaml\n")
 		} else {
 			b.WriteString("The driver validates it and records every violation for the owner:\n\n```yaml\n")

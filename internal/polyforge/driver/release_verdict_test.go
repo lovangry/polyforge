@@ -1,17 +1,19 @@
 package driver
 
-// release_verdict_test.go: the release verdict binding — the mechanical
-// half of the release bundle's verdict vocabularies. `release` is closed
-// [pass, fail]: pass owes a non-empty version plus at least one
-// artifacts_published entry, fail owes a non-empty fail_reason, and defer
-// is rejected (a release WI without a procedure is an error). `deploy` is
-// [pass, defer, fail]: pass owes a non-empty version, defer owes neither
-// version nor artifacts_published. A defer verdict on any OTHER step is a
-// validation error. The gate binding stays prefix-fail only, so a defer
-// verdict clears the deploy gate while fail re-binds to gate_failed.
+// release_verdict_test.go: the release bundle's verdict contract, carried
+// by the enforced output schemas of its `release` and `deploy` steps.
+// `release` is closed [pass, fail]: pass owes a non-empty version, the
+// release commit and at least one artifacts_published entry, fail owes a
+// non-empty fail_reason, and defer is rejected (a release WI without a
+// procedure is an error). `deploy` is [pass, defer, fail]: pass owes a
+// non-empty version, defer carries neither version nor
+// artifacts_published. A defer verdict on any OTHER step is a validation
+// error. The gate binding stays prefix-fail only, so a defer verdict
+// clears the deploy gate while fail re-binds to gate_failed.
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -29,8 +31,17 @@ func releaseRes(step string, outcome Outcome, output string) *StepResult {
 }
 
 func TestValidateStepResultReleaseVerdictBinding(t *testing.T) {
+	bundle := filepath.Join("..", "..", "..", "workflows", "release")
 	gate := func(step string) ResultSpec {
-		return ResultSpec{WIID: "wi_run", StepID: step, SpawnN: 1, Gate: true}
+		spec := ResultSpec{WIID: "wi_run", StepID: step, SpawnN: 1, Gate: true}
+		if step == releaseStepID || step == deployStepID {
+			s, err := loadStepOutputSchema(bundle, step, shippedVars(t, bundle, step))
+			if err != nil || s == nil {
+				t.Fatalf("%s schema: %v", step, err)
+			}
+			spec.OutputSchema = s.Schema
+		}
+		return spec
 	}
 	type tcase struct {
 		name        string
@@ -58,7 +69,7 @@ func TestValidateStepResultReleaseVerdictBinding(t *testing.T) {
 			spec:        gate("deploy"),
 			res:         releaseRes("deploy", OutcomeCompleted, `{"verdict":"defer","version":"v1.2.3"}`),
 			wantErr:     true,
-			wantErrSub:  "owes neither version nor artifacts_published",
+			wantErrSub:  "declared output schema",
 			wantOutcome: OutcomeCompleted,
 		},
 		{
@@ -94,7 +105,7 @@ func TestValidateStepResultReleaseVerdictBinding(t *testing.T) {
 			spec:        gate("release"),
 			res:         releaseRes("release", OutcomeCompleted, `{"verdict":"fail"}`),
 			wantErr:     true,
-			wantErrSub:  "requires a non-empty fail_reason",
+			wantErrSub:  "declared output schema",
 			wantOutcome: OutcomeCompleted,
 		},
 		{
@@ -102,29 +113,29 @@ func TestValidateStepResultReleaseVerdictBinding(t *testing.T) {
 			spec:        gate("deploy"),
 			res:         releaseRes("deploy", OutcomeCompleted, `{"verdict":"fail","fail_reason":"   "}`),
 			wantErr:     true,
-			wantErrSub:  "requires a non-empty fail_reason",
+			wantErrSub:  "declared output schema",
 			wantOutcome: OutcomeCompleted,
 		},
 		{
 			name:        "release pass with version and artifacts validates and stays completed",
 			spec:        gate("release"),
-			res:         releaseRes("release", OutcomeCompleted, `{"verdict":"pass","version":"v1.6.0","artifacts_published":["tag:v1.6.0","image:ghcr.io/x/y:v1.6.0"]}`),
+			res:         releaseRes("release", OutcomeCompleted, `{"verdict":"pass","version":"v1.6.0","commit":"abc1234","artifacts_published":["tag:v1.6.0","image:ghcr.io/x/y:v1.6.0"]}`),
 			wantOutcome: OutcomeCompleted,
 		},
 		{
 			name:        "release pass without a version is rejected",
 			spec:        gate("release"),
-			res:         releaseRes("release", OutcomeCompleted, `{"verdict":"pass","artifacts_published":["x"]}`),
+			res:         releaseRes("release", OutcomeCompleted, `{"verdict":"pass","commit":"abc1234","artifacts_published":["x"]}`),
 			wantErr:     true,
-			wantErrSub:  "requires a non-empty version and at least one artifacts_published",
+			wantErrSub:  "declared output schema",
 			wantOutcome: OutcomeCompleted,
 		},
 		{
 			name:        "release pass without artifacts is rejected",
 			spec:        gate("release"),
-			res:         releaseRes("release", OutcomeCompleted, `{"verdict":"pass","version":"v1.6.0"}`),
+			res:         releaseRes("release", OutcomeCompleted, `{"verdict":"pass","version":"v1.6.0","commit":"abc1234"}`),
 			wantErr:     true,
-			wantErrSub:  "requires a non-empty version and at least one artifacts_published",
+			wantErrSub:  "declared output schema",
 			wantOutcome: OutcomeCompleted,
 		},
 		{
@@ -138,7 +149,7 @@ func TestValidateStepResultReleaseVerdictBinding(t *testing.T) {
 			spec:        gate("deploy"),
 			res:         releaseRes("deploy", OutcomeCompleted, `{"verdict":"pass"}`),
 			wantErr:     true,
-			wantErrSub:  "requires a non-empty version",
+			wantErrSub:  "declared output schema",
 			wantOutcome: OutcomeCompleted,
 		},
 		{
@@ -146,7 +157,7 @@ func TestValidateStepResultReleaseVerdictBinding(t *testing.T) {
 			spec:        gate("release"),
 			res:         releaseRes("release", OutcomeCompleted, `{"verdict":"excellent"}`),
 			wantErr:     true,
-			wantErrSub:  "outside the closed release vocabulary",
+			wantErrSub:  "declared output schema",
 			wantOutcome: OutcomeCompleted,
 		},
 		{
@@ -154,13 +165,39 @@ func TestValidateStepResultReleaseVerdictBinding(t *testing.T) {
 			spec:        gate("deploy"),
 			res:         releaseRes("deploy", OutcomeCompleted, `{"verdict":"excellent"}`),
 			wantErr:     true,
-			wantErrSub:  "outside the closed deploy vocabulary",
+			wantErrSub:  "declared output schema",
 			wantOutcome: OutcomeCompleted,
 		},
 		{
-			name:        "a release envelope with no verdict at all is untouched (no output, no binding)",
+			name:        "a release envelope with no verdict at all is rejected",
 			spec:        gate("release"),
 			res:         releaseRes("release", OutcomeCompleted, `{}`),
+			wantErr:     true,
+			wantErrSub:  "declared output schema",
+			wantOutcome: OutcomeCompleted,
+		},
+		{
+			name:        "release pass without the release commit is rejected",
+			spec:        gate("release"),
+			res:         releaseRes("release", OutcomeCompleted, `{"verdict":"pass","version":"v1.6.0","artifacts_published":["x"]}`),
+			wantErr:     true,
+			wantErrSub:  "declared output schema",
+			wantOutcome: OutcomeCompleted,
+		},
+		{
+			name:        "a decorated fail verdict on release is rejected (exact vocabulary)",
+			spec:        gate("release"),
+			res:         releaseRes("release", OutcomeCompleted, `{"verdict":"FAIL: tag exists","fail_reason":"tag v1.6.0 exists"}`),
+			wantErr:     true,
+			wantErrSub:  "declared output schema",
+			wantOutcome: OutcomeGateFailed,
+		},
+		{
+			name:        "defer on deploy carrying published artifacts is rejected",
+			spec:        gate("deploy"),
+			res:         releaseRes("deploy", OutcomeCompleted, `{"verdict":"defer","artifacts_published":["image:x"]}`),
+			wantErr:     true,
+			wantErrSub:  "declared output schema",
 			wantOutcome: OutcomeCompleted,
 		},
 		{

@@ -10,8 +10,8 @@
 //  1. shape     — the outcome is in the closed set
 //  2. binding   — wi_id/step_id identity and the spawn_n fence
 //  3. substance — the needs_input question pair, the gate verdict
-//     binding, the human-gate guarantee and the release/deploy verdict
-//     binding
+//     binding, the human-gate guarantee, the deploy-only defer rule
+//     and the declared output schema
 //
 // The MINIMAL CONTRACT (polyforge#147 审计减法 A): an envelope is the
 // outcome + output pair (needs_input adds question_id + question),
@@ -69,14 +69,14 @@ const EvGateVerdictBound = "gate_verdict_bound"
 const EvHumanGateUnasked = "human_gate_unasked"
 
 // releaseStepID and deployStepID are the step ids of the `release`
-// workflow bundle (the only place a release or deploy happens). They are
-// the steps the release verdict binding (rule 3c below) judges: `release`
+// workflow bundle (the only place a release or deploy happens). Their
+// declared output schemas are enforced (outputSchemaEnforced): `release`
 // owns the closed vocabulary [pass, fail] (a release WI with no procedure
 // is an error, never a defer) and its pass must name the published
 // artifacts; `deploy` owns [pass, defer, fail] — defer validates on it
-// and nowhere else, because a project may release without deploying. They
-// mirror the bundle's step declarations the same way verificationStepID
-// does in observe.
+// and nowhere else (rule 3c below), because a project may release
+// without deploying. They mirror the bundle's step declarations the same
+// way verificationStepID does in observe.
 const (
 	releaseStepID = "release"
 	deployStepID  = "deploy"
@@ -143,8 +143,8 @@ type StepResult struct {
 	// touched (the authored_tests_rebaselined event body).
 	rebaselined []string
 	// schemaViolation is the declared-output-schema validation error of
-	// an accepted result while the schema lane records instead of
-	// enforcing (enforceOutputSchemas false); "" = conforming.
+	// an accepted result on a step whose schema is recorded, not
+	// enforced (outputSchemaEnforced false); "" = conforming.
 	schemaViolation string
 }
 
@@ -249,23 +249,20 @@ type ResultSpec struct {
 //     event;
 //     3b'. the human-gate guarantee (#138): judged on the DELIVERED
 //     outcome so a gate-fail verdict cannot dodge the human either;
-//     3c. release verdict binding (the release bundle's `release` and
-//     `deploy` steps only, judged on the DELIVERED outcome): a
-//     completed envelope for one of them whose output carries a
-//     top-level verdict is judged against that step's vocabulary. On
-//     `release`: pass owes a non-empty version plus at least one
-//     artifacts_published entry, fail owes a non-empty fail_reason,
-//     and anything else (defer included) is outside the closed
-//     [pass, fail] set. On `deploy`: pass owes a non-empty version
-//     (the version now serving), fail owes a non-empty fail_reason,
-//     defer (no deploy procedure in the capsule) owes neither, and
-//     anything else is outside [pass, defer, fail]. A defer verdict on
-//     any OTHER step is a validation error. The gate binding above
-//     stays prefix-fail only, so a defer verdict clears the deploy
-//     gate and the workflow proceeds, while a fail verdict (with its
-//     fail_reason) still re-binds to gate_failed. A binding error is
-//     an envelope rejection (the in-process retry lane), never a
-//     silent reclassification;
+//     3c. judged on the DELIVERED outcome (a completed envelope): a
+//     top-level defer verdict on any step but `deploy` is a validation
+//     error (the gate binding above stays prefix-fail only, so a defer
+//     would otherwise clear a gate); then the declared output schema
+//     (OutputSchema set, polyforge#164 H3). On the release bundle's
+//     `release` and `deploy` steps (outputSchemaEnforced) a violation
+//     is an envelope rejection — their schemas carry the verdict
+//     contract: exact verdict enums, pass owes the version (and on
+//     `release` the commit and published artifacts), fail owes a
+//     fail_reason, a deploy defer carries neither version nor
+//     artifacts. On every other step a violation of an accepted
+//     completed result is recorded (res.schemaViolation), not rejected.
+//     A rejection is the in-process retry lane, never a silent
+//     reclassification;
 //  4. the V4 command-evidence gate (RequireCommandEvidence steps): a
 //     completed result must carry at least one command_evidence entry,
 //     each with a non-empty argv and duration_ms > 0;
@@ -273,11 +270,7 @@ type ResultSpec struct {
 //     completed result whose output declares test_files must have every
 //     listed path committed at HEAD in its task repo(s)
 //     (checkTestFilesCommitted) — rejected like the evidence gate;
-//  6. the declared output schema (OutputSchema set): a completed
-//     result's output must validate against the step definition's
-//     `output:` schema (polyforge#164 H3) — recorded as a violation,
-//     not rejected, while enforceOutputSchemas is false;
-//     6b. the pre-existing-failure boundary (any completed step,
+//  6. the pre-existing-failure boundary (any completed step,
 //     checkPreExisting): no repro check or authored/regression test may
 //     be classified pre_existing, a pre_existing check must name its base
 //     commit and be listed in pre_existing_failures, and a bug-fix
@@ -351,13 +344,22 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 		return fmt.Errorf("driver: step %q requires a human answer: return needs_input first (a %s result is refused until a human has answered a question in this attempt)",
 			spec.StepID, delivered)
 	}
-	// 3c. the release verdict binding: judged on the DELIVERED outcome
-	// (a completed envelope). A binding error is an envelope rejection
-	// (the in-process retry lane re-dispatches the step with the typed
-	// reason) — never a silent reclassification.
+	// 3c. judged on the DELIVERED outcome, so a fail verdict re-bound to
+	// gate_failed above still owes what its schema declares.
 	if delivered == OutcomeCompleted {
-		if err := releaseVerdictBinding(res); err != nil {
-			return err
+		if v := topVerdict(res.Output); spec.StepID != deployStepID && strings.EqualFold(strings.TrimSpace(v), "defer") {
+			return fmt.Errorf("driver: step %q output carries verdict %q — defer validates nowhere but the %s step's schema",
+				spec.StepID, v, deployStepID)
+		}
+		if spec.OutputSchema != nil {
+			if err := checkOutputSchema(spec.OutputSchema, res.Output); err != nil {
+				if outputSchemaEnforced(spec.StepID) {
+					return fmt.Errorf("driver: step %q completed but its %w", spec.StepID, err)
+				}
+				if res.Outcome == OutcomeCompleted {
+					res.schemaViolation = err.Error()
+				}
+			}
 		}
 	}
 	// 4. the V4 command-evidence gate: a completed result (after the
@@ -378,19 +380,7 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 			return fmt.Errorf("driver: step %q completed with %w", spec.StepID, err)
 		}
 	}
-	// 6. the declared output schema (polyforge#164 H3): the schema the
-	// prompt shows is the contract. While enforceOutputSchemas is false
-	// a violation is recorded (res.schemaViolation -> the
-	// output_schema_violation event), never rejected.
-	if res.Outcome == OutcomeCompleted && spec.OutputSchema != nil {
-		if err := checkOutputSchema(spec.OutputSchema, res.Output); err != nil {
-			if enforceOutputSchemas {
-				return fmt.Errorf("driver: step %q completed but its %w", spec.StepID, err)
-			}
-			res.schemaViolation = err.Error()
-		}
-	}
-	// 6b. the pre-existing-failure boundary (polyforge#164 S6): the tests
+	// 6. the pre-existing-failure boundary (polyforge#164 S6): the tests
 	// that pin THIS change — the repro, the authored acceptance and
 	// regression tests — can never be excused as failing on the base.
 	if res.Outcome == OutcomeCompleted {
@@ -504,101 +494,23 @@ func currentChainAnswers(st *capsule.Step) int {
 // a non-string one is not a fail verdict this binding can interpret,
 // and the declared-schema lane stays its authority.
 func failVerdictInOutput(output json.RawMessage) (string, bool) {
-	if len(output) == 0 {
-		return "", false
-	}
-	var probe struct {
-		Verdict any `json:"verdict"`
-	}
-	if err := json.Unmarshal(output, &probe); err != nil {
-		return "", false
-	}
-	s, ok := probe.Verdict.(string)
-	if !ok {
-		return "", false
-	}
+	s := topVerdict(output)
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(s)), "fail") {
 		return s, true
 	}
 	return "", false
 }
 
-// releaseVerdictBinding judges one completed envelope against the release
-// bundle's verdict contract. It reads only the top-level scalar fields the
-// output schemas name and mirrors the failVerdictInOutput tolerance: an
-// output that is not a JSON object, or whose verdict is absent/non-string,
-// is not this binding's business (the declared-schema lane stays its
-// authority). `release`: closed vocabulary [pass, fail]; pass owes a
-// non-empty version plus at least one artifacts_published entry. `deploy`:
-// [pass, defer, fail]; pass owes a non-empty version, defer owes neither
-// version nor artifacts_published. fail owes a non-empty fail_reason on
-// both, and defer is illegal on every other step.
-func releaseVerdictBinding(res *StepResult) error {
-	if len(res.Output) == 0 {
-		return nil
-	}
+// topVerdict answers the top-level "verdict" string of one result output
+// ("" when the output is not an object or its verdict is absent or not a
+// string).
+func topVerdict(output json.RawMessage) string {
 	var probe struct {
-		Verdict            any   `json:"verdict"`
-		Version            any   `json:"version"`
-		ArtifactsPublished []any `json:"artifacts_published"`
-		FailReason         any   `json:"fail_reason"`
+		Verdict any `json:"verdict"`
 	}
-	if err := json.Unmarshal(res.Output, &probe); err != nil {
-		return nil // not a decodable output object: not this binding's business
+	if len(output) == 0 || json.Unmarshal(output, &probe) != nil {
+		return ""
 	}
-	v, ok := probe.Verdict.(string)
-	if !ok {
-		return nil
-	}
-	verdict := strings.ToLower(strings.TrimSpace(v))
-	isRelease := res.StepID == releaseStepID
-	isDeploy := res.StepID == deployStepID
-	bound := isRelease || isDeploy
-	switch {
-	case verdict == "defer":
-		if !isDeploy {
-			return fmt.Errorf("driver: step %q output carries verdict %q — defer validates nowhere but the %s step's schema",
-				res.StepID, v, deployStepID)
-		}
-		if nonEmptyJSONString(probe.Version) || len(probe.ArtifactsPublished) > 0 {
-			return fmt.Errorf("driver: deploy output verdict %q owes neither version nor artifacts_published — a defer deploys nothing; report pass with the deployed version or defer with none", v)
-		}
-		return nil
-	case strings.HasPrefix(verdict, "fail"):
-		if !bound {
-			return nil // the gate binding's business, not this one
-		}
-		if !nonEmptyJSONString(probe.FailReason) {
-			return fmt.Errorf("driver: %s output verdict %q requires a non-empty fail_reason — the failure must say what went wrong", res.StepID, v)
-		}
-		return nil
-	case verdict == "pass":
-		switch {
-		case isRelease:
-			if !nonEmptyJSONString(probe.Version) || len(probe.ArtifactsPublished) == 0 {
-				return fmt.Errorf("driver: release output verdict %q requires a non-empty version and at least one artifacts_published entry — pass means something was actually published", v)
-			}
-		case isDeploy:
-			if !nonEmptyJSONString(probe.Version) {
-				return fmt.Errorf("driver: deploy output verdict %q requires a non-empty version — pass means that version is now serving", v)
-			}
-		}
-		return nil
-	default:
-		if isRelease {
-			return fmt.Errorf("driver: release output verdict %q is outside the closed release vocabulary [pass, fail]", v)
-		}
-		if isDeploy {
-			return fmt.Errorf("driver: deploy output verdict %q is outside the closed deploy vocabulary [pass, defer, fail]", v)
-		}
-		return nil
-	}
-}
-
-// nonEmptyJSONString answers whether one decoded JSON field carries a
-// non-blank string value (absent, non-string and blank all count as
-// empty — the release schema's minLength: 1 discipline).
-func nonEmptyJSONString(v any) bool {
-	s, ok := v.(string)
-	return ok && strings.TrimSpace(s) != ""
+	s, _ := probe.Verdict.(string)
+	return s
 }

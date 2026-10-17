@@ -30,14 +30,14 @@ output:
     - description: A completed release - requires a non-empty version, the release commit and at least one published artifact.
       properties:
         verdict: { type: string, enum: [pass] }
-        version: { type: string, minLength: 1 }
+        version: { type: string, pattern: '\S' }
         commit: { type: string, minLength: 1 }
         artifacts_published: { type: array, minItems: 1 }
       required: [verdict, version, commit, artifacts_published]
     - description: A failed release attempt - requires a non-empty fail_reason.
       properties:
         verdict: { type: string, enum: [fail] }
-        fail_reason: { type: string, minLength: 1 }
+        fail_reason: { type: string, pattern: '\S' }
       required: [verdict, fail_reason]
 ---
 

@@ -869,7 +869,7 @@ type StepRun interface {
 // transition. It builds a ResultSpec from the driver's current state and
 // delegates to ValidateStepResult (the staging gates: shape, binding and
 // fencing, the needs_input question pair, the verdict binding, the
-// human-gate guarantee, the release verdict binding, the V4
+// human-gate guarantee, the declared output schema, the V4
 // command-evidence gate and the committed-test-files gate). A
 // failure is an infrastructure-class rejection — Run surfaces it and the
 // recovery lane owns re-derivation.
@@ -961,9 +961,9 @@ func (d *Driver) outputSchema(stepID string) *jsonschema.Schema {
 }
 
 // noteAcceptedResultRecords emits the durable records an accepted result
-// owes: an output that violates its declared schema while the schema lane
-// is record-only (polyforge#164 H3), and a human-approved re-baseline of
-// authored tests naming the files (H4).
+// owes: an output that violates its declared schema on a step whose
+// schema is recorded, not enforced (polyforge#164 H3), and a
+// human-approved re-baseline of authored tests naming the files (H4).
 func (d *Driver) noteAcceptedResultRecords(stepID string, n int64, res *StepResult) {
 	if res.schemaViolation != "" {
 		d.emit(EvOutputSchemaViolation, map[string]any{

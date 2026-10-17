@@ -10,12 +10,12 @@
 //     above"), instead of being stripped with the rest of the
 //     frontmatter;
 //   - the driver validates it: a completed result's output is checked
-//     against the compiled schema inside ValidateStepResult. In the
-//     v2.5.0 RECORD-ONLY mode (enforceOutputSchemas false) a violation is
-//     the durable output_schema_violation event and the result is still
-//     accepted; with the switch flipped it becomes an ordinary envelope
-//     rejection (the in-process retry lane, bounded into blocked
-//     result_invalid).
+//     against the compiled schema inside ValidateStepResult. On the
+//     release bundle's `release` and `deploy` steps a violation is an
+//     ordinary envelope rejection (the in-process retry lane, bounded
+//     into blocked result_invalid); on every other step it is recorded
+//     as the durable output_schema_violation event and the result is
+//     still accepted (outputSchemaEnforced).
 //
 // A step definition without an `output:` block declares nothing and is
 // not validated. Schemas are draft-07.
@@ -38,19 +38,20 @@ import (
 // outputSchemaKey is the step-definition frontmatter key of the schema.
 const outputSchemaKey = "output"
 
-// enforceOutputSchemas selects the H3 mode (the one switch; flip the
-// default to true in a later release). false (v2.5.0) = RECORD
-// ONLY: the schema rides the prompt and every completed output is
-// validated, but a violation is the durable EvOutputSchemaViolation event,
-// never an envelope rejection — replayed real outputs (written before
-// any agent saw a schema) violate it too often to enforce yet. true =
-// a violation is an envelope rejection (the in-process retry lane).
-var enforceOutputSchemas = false
+// outputSchemaEnforced answers whether stepID's declared output schema
+// is enforced: true for the release bundle's `release` and `deploy`
+// steps (their schemas are the release verdict contract), false for
+// every other step, whose violations are recorded, never rejected —
+// replayed real outputs violate those schemas too often to enforce.
+func outputSchemaEnforced(stepID string) bool {
+	return stepID == releaseStepID || stepID == deployStepID
+}
 
 // EvOutputSchemaViolation is the durable event kind recording a
-// completed output that violates its step's declared schema (record-only
-// mode). EvOutputSchemaUnloadable records a declared schema that does
-// not load (so nothing is validated for that step).
+// completed output that violates its step's declared schema on a step
+// whose schema is not enforced. EvOutputSchemaUnloadable records a
+// declared schema that does not load (so nothing is validated for that
+// step).
 const (
 	EvOutputSchemaViolation  = "output_schema_violation"
 	EvOutputSchemaUnloadable = "output_schema_unloadable"
@@ -159,8 +160,8 @@ func dropNulls(v any) any {
 }
 
 // maxSchemaErrorLen bounds the validation detail carried by the
-// output_schema_violation event (record-only mode) or, when enforcing,
-// by the rejection fed back into the retry prompt.
+// output_schema_violation event or, on an enforced step, by the
+// rejection fed back into the retry prompt.
 const maxSchemaErrorLen = 2000
 
 // checkOutputSchema validates one output payload against the declared
