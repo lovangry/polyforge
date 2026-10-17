@@ -607,7 +607,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `interrupted_seal` / `pending_close_replay` / `seal_finished_locally` | runtime `restart.go`、`endpending.go` | 中断的封存以 blocked 收尾 / 重放持久化的收尾意图 / hub 已不再持有 session，本地完成封存 |
 | `missing_midflight_capsule` | runtime `recover.go` | 运行中 capsule 消失，拒绝静默重建（#103） |
 | `manual_models_dropped` | runtime `runtime.go` | 重新领取时丢弃早于 `<harness>:<model>` 格式的 `--models` 记录（#175） |
-| `exec_init` / `step_started` / `step_done` / `gate_verdict` / `needs_input` / `incomplete` / `rewind` / `terminal` / `budget_update` / `answered` / `interrupted` / `resumed` / `step_failed` / `blocked` / `candidate_switched` / `candidates_exhausted` | driver `transition.go`（`emitLocked` 按已提交的状态转移发出） | 状态转移的进度新闻；body 带 spawn_n 与 step |
+| `exec_init` / `step_started` / `step_done` / `gate_verdict` / `needs_input` / `incomplete` / `rewind` / `terminal` / `answered` / `interrupted` / `resumed` / `step_failed` / `blocked` / `candidate_switched` / `candidates_exhausted` | driver `transition.go`（`emitLocked` 按已提交的状态转移发出） | 状态转移的进度新闻；body 带 spawn_n 与 step |
 | `driver_stalled` / `step_dead` / `verdict_stale` / `schema_fault` | driver `driver.go`、`supervision.go` | driver 收到的监督裁决 / 过期裁决被丢弃 / 结果信封持续被拒（契约坏了而非模型问题） |
 | `envelope_rejected` / `gate_verdict_bound` / `human_gate_unasked` | driver `result.go` 常量 | 信封校验拒绝（原文带错误）/ gate 步以 completed 交了 fail 判定，被改绑为 gate_failed / `requires_human_answer: if_asked` 步零提问完成 |
 | `output_schema_violation` / `output_schema_unloadable` | driver `outputschema.go` | 输出不符合声明的 schema / schema 读不出来 |

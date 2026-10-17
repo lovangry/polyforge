@@ -11,7 +11,9 @@ package driver
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -167,12 +169,7 @@ func TestD6RewindZeroesTheStepBudget(t *testing.T) {
 	mustInit(t, d)
 	mustStart(t, d, "a", 1)
 	if err := d.transition(TransitionRequest{
-		Kind: TransBudgetUpdate, StepID: "a", SpawnN: 1, Budget: &capsule.Budget{WallMs: 5000},
-	}); err != nil {
-		t.Fatalf("budget: %v", err)
-	}
-	if err := d.transition(TransitionRequest{
-		Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: completedResult("a", 1, `{}`),
+		Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: completedResult("a", 1, `{}`), WallMs: 5000,
 	}); err != nil {
 		t.Fatalf("result: %v", err)
 	}
@@ -214,12 +211,7 @@ func TestD6GateFailRewindZeroesTheGateBudget(t *testing.T) {
 	}
 	mustStart(t, d, "g", 2)
 	if err := d.transition(TransitionRequest{
-		Kind: TransBudgetUpdate, StepID: "g", SpawnN: 2, Budget: &capsule.Budget{WallMs: 7000},
-	}); err != nil {
-		t.Fatalf("budget: %v", err)
-	}
-	if err := d.transition(TransitionRequest{
-		Kind: TransStepResult, StepID: "g", SpawnN: 2,
+		Kind: TransStepResult, StepID: "g", SpawnN: 2, WallMs: 7000,
 		Result: &StepResult{StepID: "g", SpawnN: 2, Outcome: OutcomeGateFailed},
 		Gate:   &GateVerdict{GateStepID: "g", TargetStep: "a", VerdictText: "FAIL: redo it"},
 	}); err != nil {
@@ -242,7 +234,7 @@ func TestDegradedLatchBlocksBeforeAnyWrite(t *testing.T) {
 	memBefore := d.exec.Version
 	d.mu.Unlock()
 	if err := d.transition(TransitionRequest{
-		Kind: TransBudgetUpdate, StepID: "a", SpawnN: 1, Budget: &capsule.Budget{WallMs: 5000},
+		Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: completedResult("a", 1, `{}`),
 	}); err == nil {
 		t.Fatal("a degraded driver must refuse the transition")
 	}
@@ -277,5 +269,43 @@ func TestAcceptedAttemptSeqAndClock(t *testing.T) {
 	}
 	if !strings.HasPrefix(last.ArchivedAt, "2026-09-20T") {
 		t.Fatalf("accepted attempt archived at %q, want the driver's (fake) clock", last.ArchivedAt)
+	}
+}
+
+// TestD6CancelledDispatchBooksNothing: a cancelled dispatch (pause,
+// recovery relaunch) is an interruption like a kill -9 — it books no wall
+// time and writes nothing; T counts the dispatches that ended in a result
+// or a failure, each booked in that same write.
+func TestD6CancelledDispatchBooksNothing(t *testing.T) {
+	d, sp, execPath := runEnv(t, spec("a"))
+	var mu sync.Mutex
+	at := time.Unix(1_700_000_000, 0)
+	d.cfg.Now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		at = at.Add(time.Second)
+		return at
+	}
+	sp.script = []fakeEntry{{hold: true}}
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.Run(ctx) }()
+	waitUntil(t, "the dispatch to start", func() bool { return len(sp.dispatched()) == 1 })
+	before := readExec(t, execPath).Version
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run: %v, want the cancellation", err)
+	}
+	exec := readExec(t, execPath)
+	if exec.Version != before {
+		t.Fatalf("a cancelled dispatch wrote execution.json: version %d -> %d", before, exec.Version)
+	}
+	if got := exec.Steps["a"].BudgetConsumed.WallMs; got != 0 {
+		t.Fatalf("a cancelled dispatch booked %dms", got)
+	}
+	for _, k := range d.log.(*eventLog).kinds() {
+		if k == "budget_update" {
+			t.Fatal("a cancelled dispatch emitted budget_update")
+		}
 	}
 }

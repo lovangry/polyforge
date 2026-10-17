@@ -60,10 +60,9 @@ var ErrStaleFence = errors.New("driver: stale spawn fence")
 type TransitionKind string
 
 const (
-	TransStepStart    TransitionKind = "step_start"
-	TransStepResult   TransitionKind = "step_result"
-	TransTerminal     TransitionKind = "terminal"
-	TransBudgetUpdate TransitionKind = "budget_update"
+	TransStepStart  TransitionKind = "step_start"
+	TransStepResult TransitionKind = "step_result"
+	TransTerminal   TransitionKind = "terminal"
 	// TransInit and TransAnswer are additions the single-write rule
 	// forces: someone must write the first execution.json (that write is
 	// a mutation like any other), and the D9 answer-consumption write —
@@ -98,15 +97,14 @@ const (
 type TransitionRequest struct {
 	Kind       TransitionKind
 	StepID     string
-	Result     *StepResult     // step_result
-	Gate       *GateVerdict    // step_result of a gate_failed outcome: the fail policy (nil = the workflow's on_fail)
-	Budget     *capsule.Budget // budget_update: the ADDITIVE delta
-	Model      string          // step_start: the pinned candidate this dispatch runs under
-	Effort     string          // step_start: that candidate's thinking effort (polyforge#176)
-	Status     string          // terminal: the target workflow_status
-	Reason     string          // terminal/rewind reason; answer: the answer text
-	QuestionID string          // answer: the question id being answered
-	AnsweredBy string          // answer: who answered ("" → "owner")
+	Result     *StepResult  // step_result
+	Gate       *GateVerdict // step_result of a gate_failed outcome: the fail policy (nil = the workflow's on_fail)
+	Model      string       // step_start: the pinned candidate this dispatch runs under
+	Effort     string       // step_start: that candidate's thinking effort (polyforge#176)
+	Status     string       // terminal: the target workflow_status
+	Reason     string       // terminal/rewind reason; answer: the answer text
+	QuestionID string       // answer: the question id being answered
+	AnsweredBy string       // answer: who answered ("" → "owner")
 	// Failure carries a step_failed write's failed-dispatch record.
 	Failure *StepFailure
 	// WallMs is the finished dispatch's wall time folded into the step's
@@ -233,8 +231,6 @@ func (d *Driver) applyLocked(req TransitionRequest, info *appliedInfo) error {
 		return d.applyStepResultLocked(req, info)
 	case TransTerminal:
 		return d.applyTerminalLocked(req)
-	case TransBudgetUpdate:
-		return d.applyBudgetLocked(req)
 	case TransAnswer:
 		return d.applyAnswerLocked(req)
 	case TransInterrupted:
@@ -605,31 +601,6 @@ func (d *Driver) applyTerminalLocked(req TransitionRequest) error {
 	return nil
 }
 
-// applyBudgetLocked adds one delta to both budget layers (reference.md §7.3:
-// step-level authority, workflow-level aggregation — the same atomic
-// write).
-func (d *Driver) applyBudgetLocked(req TransitionRequest) error {
-	if req.Budget == nil {
-		return fmt.Errorf("driver: budget_update without a delta")
-	}
-	if isTerminalStatus(d.exec.WorkflowStatus) {
-		return fmt.Errorf("driver: workflow is terminal (%s); budget is frozen", d.exec.WorkflowStatus)
-	}
-	stepID := req.StepID
-	if stepID == "" {
-		stepID = d.exec.CurrentStep
-	}
-	if stepID == "" {
-		return fmt.Errorf("driver: budget_update without a step and no current step")
-	}
-	st := d.exec.Steps[stepID]
-	if st == nil {
-		return fmt.Errorf("driver: budget_update for unknown step %q", stepID)
-	}
-	d.addWallLocked(st, req.Budget.WallMs)
-	return nil
-}
-
 // addWallLocked adds wall time to the step's cumulative runtime (the T
 // accumulator, the step-level authority) and the workflow aggregate.
 func (d *Driver) addWallLocked(st *capsule.Step, ms int64) {
@@ -799,10 +770,6 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 		kind = "terminal"
 		body["status"] = req.Status
 		body["reason"] = req.Reason
-	case TransBudgetUpdate:
-		kind = "budget_update"
-		body["step"] = req.StepID
-		body["wall_ms"] = d.exec.BudgetConsumed.WallMs
 	case TransAnswer:
 		kind = "answered"
 		body["step"] = d.exec.CurrentStep

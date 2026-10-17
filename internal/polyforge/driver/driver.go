@@ -399,11 +399,13 @@ func (d *Driver) Run(ctx context.Context) error {
 		if werr != nil {
 			_ = run.Terminate(5 * time.Second)
 			if ctx.Err() != nil {
-				// Cancellation (shutdown, recovery relaunch): not a failure of
-				// the step — nothing is counted and the candidate pointer
-				// stays; the cumulative runtime is still booked.
+				// Cancellation (pause, recovery relaunch): not a failure of
+				// the step — nothing is counted, the candidate pointer stays
+				// and no wall time is booked. A cancelled dispatch is an
+				// interruption exactly like a kill -9: the step's runtime T
+				// counts the dispatches that ended in a result or a failure,
+				// each booked in that same write.
 				d.announceEnd(stepID, n, supervise.OutcomeExitedWithoutResult, -1, "cancelled")
-				d.bookWall(stepID, dispatchedAt)
 				return fmt.Errorf("driver: step %s dispatch %d ended without a result: %w", stepID, n, werr)
 			}
 			cause, code, detail := classifyWaitFailure(werr)

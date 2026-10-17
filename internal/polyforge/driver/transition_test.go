@@ -700,33 +700,6 @@ func TestTransitionTerminalValidation(t *testing.T) {
 	}
 }
 
-func TestTransitionBudgetUpdate(t *testing.T) {
-	d, _, _, _ := testEnv(t, spec("a"), spec("b"))
-	mustInit(t, d)
-	mustStart(t, d, "a", 1)
-	if err := d.transition(TransitionRequest{
-		Kind: TransBudgetUpdate, StepID: "a", SpawnN: 1,
-		Budget: &capsule.Budget{WallMs: 1000},
-	}); err != nil {
-		t.Fatalf("budget: %v", err)
-	}
-	// StepID empty credits the CURRENT step.
-	if err := d.transition(TransitionRequest{
-		Kind: TransBudgetUpdate, SpawnN: 1,
-		Budget: &capsule.Budget{WallMs: 500},
-	}); err != nil {
-		t.Fatalf("budget (current step): %v", err)
-	}
-	snap := d.Snapshot()
-	st := snap.Steps["a"]
-	if st.BudgetConsumed.WallMs != 1500 {
-		t.Fatalf("step budget must accumulate: %+v", st.BudgetConsumed)
-	}
-	if snap.BudgetConsumed.WallMs != 1500 {
-		t.Fatalf("workflow budget aggregates the same deltas: %+v", snap.BudgetConsumed)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // persist failure → revert
 
