@@ -73,7 +73,7 @@ func TestStartClonesTaskRepos(t *testing.T) {
 	hub.repos = []api.ProjectRepo{{Name: "app", URL: url}}
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 
-	if err := r.Start(context.Background(), "wi_repo1"); err != nil {
+	if err := r.Start(context.Background(), "wi_repo1", StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	capDir := testCapsuleDir(r, "wi_repo1")
@@ -124,7 +124,7 @@ func TestClaimReplayQuarantinesHusk(t *testing.T) {
 	hub.repos = []api.ProjectRepo{{Name: "app", URL: url}}
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 
-	if err := r.Start(context.Background(), "wi_repo2"); err != nil {
+	if err := r.Start(context.Background(), "wi_repo2", StartOpts{}); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
 	capDir := testCapsuleDir(r, "wi_repo2")
@@ -182,7 +182,7 @@ func TestCloneFailureBlocksTicket(t *testing.T) {
 	hub.repos = []api.ProjectRepo{{Name: "app", URL: "file:///nonexistent/nope.git"}}
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 
-	err := r.Start(context.Background(), "wi_repo3")
+	err := r.Start(context.Background(), "wi_repo3", StartOpts{})
 	ae, ok := err.(*api.Error)
 	if !ok || ae.Code != api.ErrDaemonSpawnFail {
 		t.Fatalf("expected typed %s, got %v", api.ErrDaemonSpawnFail, err)
@@ -208,7 +208,7 @@ func TestCloneFailureBlocksTicket(t *testing.T) {
 	hub2 := newFakeHub()
 	hub2.repos = []api.ProjectRepo{{Name: "../escape", URL: "file:///nonexistent/x.git"}}
 	r2, _, _ := newTestRuntime(t, hub2, &scriptedSpawner{})
-	if err := r2.Start(context.Background(), "wi_repo4"); err == nil {
+	if err := r2.Start(context.Background(), "wi_repo4", StartOpts{}); err == nil {
 		t.Fatal("unsafe repo name must fail Start")
 	} else if ae, ok := err.(*api.Error); !ok || ae.Code != api.ErrDaemonSpawnFail {
 		t.Fatalf("unsafe name must be typed %s, got %v", api.ErrDaemonSpawnFail, err)
@@ -253,7 +253,7 @@ func TestReclaimRestoresTaskRepoFromCarrier(t *testing.T) {
 	r.cfg.GitRemoteBase = hubRoot
 
 	wi := "wi_durab"
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
 	capDir := testCapsuleDir(r, wi)
@@ -296,7 +296,7 @@ func TestReclaimRestoresTaskRepoFromCarrier(t *testing.T) {
 	r.dropJob(j)
 	writeStateFile(t, r, nil)
 	hub.forceEnd(wi)
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("re-claim Start: %v", err)
 	}
 
@@ -388,7 +388,7 @@ func TestCarrierPushFailedAlertStateIsPerJob(t *testing.T) {
 			t.Fatalf("CommitPush(%s): %v", label, err)
 		}
 	}
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
 	publish("a1")
@@ -403,7 +403,7 @@ func TestCarrierPushFailedAlertStateIsPerJob(t *testing.T) {
 	r.dropJob(j)
 	writeStateFile(t, r, nil)
 	hub.forceEnd(wi)
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("re-claim Start: %v", err)
 	}
 	publish("b1")

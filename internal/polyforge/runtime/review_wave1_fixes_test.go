@@ -261,7 +261,7 @@ func TestStartRefusedReplayOfOpenSessionEndsIt(t *testing.T) {
 	refusal := &api.Error{Code: api.ErrCoreConflict, Detail: "NOT_CLAIMABLE"}
 	hub.claimFaults = []claimFault{{err: refusal}}
 
-	if err := r.Start(context.Background(), wi); err == nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err == nil {
 		t.Fatal("the refused replay must surface")
 	}
 	if hub.endCount() != 1 || hub.lastEnd().SessionID != session || hub.lastEnd().Status != api.StatusBlocked {

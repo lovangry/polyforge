@@ -79,7 +79,7 @@ func TestRecoveryRelaunchCarriesClaimSnapshot(t *testing.T) {
 	r.cfg.AgentStarter = rec.start
 
 	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [pi:w79/code-a, pi:w79/code-b] }\n")
-	if err := r.Start(context.Background(), "wi_w079rec"); err != nil {
+	if err := r.Start(context.Background(), "wi_w079rec", StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	j := r.jobOf("wi_w079rec")
@@ -230,7 +230,7 @@ func TestRecoveryRecomposesARecordWithoutSnapshot(t *testing.T) {
 	r.cfg.AgentStarter = rec.start
 
 	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: { models: [pi:w79/code-a, pi:w79/code-b] }\n")
-	if err := r.Start(context.Background(), "wi_w079old"); err != nil {
+	if err := r.Start(context.Background(), "wi_w079old", StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	j := r.jobOf("wi_w079old")

@@ -20,18 +20,7 @@ func TestOriginPersists(t *testing.T) {
 	}
 }
 
-func TestNoteOriginIsConsumedOnce(t *testing.T) {
-	r := &Runtime{origins: map[string]Origin{}}
-	r.NoteOrigin("wi_a", Origin{Kind: OriginAuto})
-	if o := r.takeOrigin("wi_a"); o == nil || o.Kind != OriginAuto {
-		t.Fatalf("take: %+v", o)
-	}
-	if o := r.takeOrigin("wi_a"); o != nil {
-		t.Fatal("origin must be consumed once")
-	}
-}
-
-func TestStartRecordsNotedOrigin(t *testing.T) {
+func TestStartRecordsItsOrigin(t *testing.T) {
 	setGitIdentity(t)
 	hub := newFakeHub()
 	r, toOB, _ := newTestRuntime(t, hub, &scriptedSpawner{})
@@ -41,8 +30,7 @@ func TestStartRecordsNotedOrigin(t *testing.T) {
 	if out, err := run(t, "git", "init", "--bare", filepath.Join(base, wi+".git")); err != nil {
 		t.Fatalf("bare init: %s", out)
 	}
-	r.NoteOrigin(wi, Origin{Kind: OriginChat, ChatID: "chat_9", Owner: "usr_1"})
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{Origin: &Origin{Kind: OriginChat, ChatID: "chat_9", Owner: "usr_1"}}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	recvRT(t, toOB)

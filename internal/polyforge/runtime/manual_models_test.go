@@ -48,15 +48,14 @@ func newManualRuntime(t *testing.T, hub *fakeHub) (*Runtime, string) {
 // The manual `pf submit --models` list is the top precedence level: it
 // beats the yaml project default and rides every step of the claim, is
 // audited in capsule.json (manual_candidates + effective_candidates), and
-// is consumed by the one Start it was noted for.
+// governs only the Start that carries it.
 func TestManualModelsBeatYamlAndAreAudited(t *testing.T) {
 	hub := newFakeHub()
 	r, ws := newManualRuntime(t, hub)
 	writeWorkspaceYaml(t, ws, w079ValidYaml)
 
 	manual := []string{"pi:m/one", "pi:m/two"}
-	r.NoteModels("wi_man", manual)
-	if err := r.Start(context.Background(), "wi_man"); err != nil {
+	if err := r.Start(context.Background(), "wi_man", StartOpts{Models: manual}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	j := r.jobOf("wi_man")
@@ -80,9 +79,6 @@ func TestManualModelsBeatYamlAndAreAudited(t *testing.T) {
 	if raw, _ := os.ReadFile(filepath.Join(j.capsuleDir, "capsule.json")); strings.Contains(string(raw), "manual_candidates") {
 		t.Fatalf("capsule.json must not carry the manual list: %s", raw)
 	}
-	if r.takeModels("wi_man") != nil {
-		t.Fatal("the noted list must be consumed by Start")
-	}
 	if err := r.Stop(context.Background(), "wi_man", protocol.FinishWrapped); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
@@ -91,7 +87,7 @@ func TestManualModelsBeatYamlAndAreAudited(t *testing.T) {
 	// a plain next start (auto-pulled shape) is unaffected: the yaml
 	// default governs every step without a list of its own (the fixture's
 	// fix and release steps keep their own lists — polyforge#164).
-	if err := r.Start(context.Background(), "wi_plain"); err != nil {
+	if err := r.Start(context.Background(), "wi_plain", StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	own := map[string]string{"fix": "pi:prov/flash,pi:prov/glm", "release": "pi:prov/glm"}
@@ -161,8 +157,7 @@ func TestManualModelsReclaimIsDaemonLocal(t *testing.T) {
 	r, ws := newManualRuntime(t, hub)
 	writeWorkspaceYaml(t, ws, w079ValidYaml)
 
-	r.NoteModels("wi_rc", []string{"pi:m/one", "pi:m/two"})
-	if err := r.Start(context.Background(), "wi_rc"); err != nil {
+	if err := r.Start(context.Background(), "wi_rc", StartOpts{Models: []string{"pi:m/one", "pi:m/two"}}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	j := r.jobOf("wi_rc")
@@ -201,7 +196,7 @@ func TestManualModelsReclaimIsDaemonLocal(t *testing.T) {
 	}
 
 	// re-claim with no --models: the daemon record governs, not capsule.json
-	if err := r.Start(context.Background(), "wi_rc"); err != nil {
+	if err := r.Start(context.Background(), "wi_rc", StartOpts{}); err != nil {
 		t.Fatalf("re-claim Start: %v", err)
 	}
 	for step, got := range r.jobOf("wi_rc").stepCandidates {

@@ -51,7 +51,7 @@ func nextRT(q *supervise.Queue[protocol.RTMsg]) (protocol.RTMsg, error) {
 
 // startLive starts wi and consumes its RTStarted.
 func startLive(r *Runtime, toOB *supervise.Queue[protocol.RTMsg], wi string) error {
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		return fmt.Errorf("Start(%s): %w", wi, err)
 	}
 	m, err := nextRT(toOB)
@@ -134,14 +134,14 @@ func TestOffLockHungClaimHubCallLeavesOthersResponsive(t *testing.T) {
 				// a journal entry whose claim answer was lost: the next
 				// start verifies it first (claimIntent)
 				hub.claimFaults = []claimFault{{err: errors.New("connection reset (scripted)"), afterCommit: true}}
-				if err := r.Start(ctx, a); !isTransient(err) {
+				if err := r.Start(ctx, a, StartOpts{}); !isTransient(err) {
 					t.Fatalf("lost-answer Start = %v, want the typed transient", err)
 				}
 				wantClaims = 2 // the lost one + its replay
 			}
 			g := hub.hangCall(t, kind, a)
 			aErr := make(chan error, 1)
-			go func() { aErr <- r.Start(ctx, a) }()
+			go func() { aErr <- r.Start(ctx, a, StartOpts{}) }()
 			g.waitEntered(t, kind+" of "+a)
 
 			within(t, promptly, "Start of another work item", func() {
@@ -169,8 +169,8 @@ func TestOffLockHungClaimHubCallLeavesOthersResponsive(t *testing.T) {
 			// competing starts of the hung work item (its id, and its slug
 			// once the probe answers) wait and claim nothing of their own
 			second, slug := make(chan error, 1), make(chan error, 1)
-			go func() { second <- r.Start(ctx, a) }()
-			go func() { slug <- r.Start(ctx, "proj#9") }()
+			go func() { second <- r.Start(ctx, a, StartOpts{}) }()
+			go func() { slug <- r.Start(ctx, "proj#9", StartOpts{}) }()
 			stillPending(t, "the competing starts of the hung work item", aErr, second)
 			if kind != "probe" {
 				stillPending(t, "the slug start of the hung work item", slug)
@@ -244,7 +244,7 @@ func TestOffLockResumeHungVerifyWhileAnotherCloses(t *testing.T) {
 		}
 		again <- err
 	}()
-	go func() { start <- r.Start(ctx, p) }()
+	go func() { start <- r.Start(ctx, p, StartOpts{}) }()
 	stillPending(t, "the doors of the resuming work item", res, again, start)
 	g.open()
 	if err := recvErr(t, res, "the hung resume"); err != nil {
@@ -312,13 +312,13 @@ func TestOffLockShutdownDuringHungClaimHubCall(t *testing.T) {
 			ctx := context.Background()
 			if kind == "verify" {
 				hub.claimFaults = []claimFault{{err: errors.New("connection reset (scripted)"), afterCommit: true}}
-				if err := r.Start(ctx, a); !isTransient(err) {
+				if err := r.Start(ctx, a, StartOpts{}); !isTransient(err) {
 					t.Fatalf("lost-answer Start = %v", err)
 				}
 			}
 			g := hub.hangCall(t, kind, a)
 			aErr := make(chan error, 1)
-			go func() { aErr <- r.Start(ctx, a) }()
+			go func() { aErr <- r.Start(ctx, a, StartOpts{}) }()
 			g.waitEntered(t, kind+" of "+a)
 
 			r.Close()

@@ -402,7 +402,7 @@ func TestDegradedSealCarriesHeadAndGuardsOtherMachine(t *testing.T) {
 	hub.mu.Unlock()
 	b.cfg.GitRemoteBase = base
 	t.Cleanup(func() { terminateJobAgent(b, wi) })
-	err = b.Start(context.Background(), wi)
+	err = b.Start(context.Background(), wi, StartOpts{})
 	if err == nil || !strings.Contains(err.Error(), api.ErrDaemonSealedHeadMismatch) {
 		t.Fatalf("a continue on another machine from the stale hub head = %v, want %s", err, api.ErrDaemonSealedHeadMismatch)
 	}

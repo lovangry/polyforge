@@ -408,8 +408,8 @@ func (d *Daemon) submitRoute() http.HandlerFunc {
 			// ctx is the driver's parent (bridge.Start derives from it) — a
 			// request-scoped ctx would cancel the driver mid-dispatch the
 			// moment the CLI hangs up on this answer.
-			d.rt.NoteOrigin(canonical, body.Origin.origin())
-			err := d.rt.Start(d.runCtx, canonical)
+			origin := body.Origin.origin()
+			err := d.rt.Start(d.runCtx, canonical, runtime.StartOpts{Origin: &origin})
 			if err == nil {
 				d.autoSubscribe(body.Origin, canonical, cursor)
 				writeJSON(w, http.StatusOK, resumeBlockedResponse{Resumed: true, WorkItemID: canonical})

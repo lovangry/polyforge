@@ -183,7 +183,7 @@ func (r *Runtime) reconcile(wi string) {
 		// dead, the entry goes
 		err := r.replayable(e)
 		if err == nil {
-			err = r.claim(r.ctx, wi, wi, e.Models)
+			err = r.claim(r.ctx, wi, wi, StartOpts{Models: e.Models})
 		}
 		if hubUnavailable(err) && j != nil && r.jobOf(wi) == j {
 			r.retry(j)

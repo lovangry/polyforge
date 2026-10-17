@@ -99,7 +99,7 @@ func TestBlockedRecordDroppedAtRestartThenResumeReclaims(t *testing.T) {
 		t.Fatalf("Restart: %v", err)
 	}
 	hub.status[wi] = api.StatusQueued // pf resume
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("resume re-claim refused: %v", err)
 	}
 	defer terminateJobAgent(r, wi)

@@ -43,7 +43,7 @@ func TestNewClaimCapsuleNamedBySlugAndFoundAfterRestart(t *testing.T) {
 	}
 	sp := &scriptedSpawner{}
 	r, toOB, _ := newTestRuntime(t, hub, sp)
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	want := testCapsuleDir(r, "proj-140")

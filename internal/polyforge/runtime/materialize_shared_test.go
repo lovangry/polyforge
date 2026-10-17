@@ -26,7 +26,7 @@ func TestMaterializeSetCarriesSharedSteps(t *testing.T) {
 	}
 	r, _, _ := newTestRuntime(t, newFakeHub(), &scriptedSpawner{})
 	r.cfg.WorkflowsDir = wfDir
-	if err := r.Start(context.Background(), "wi_shared"); err != nil {
+	if err := r.Start(context.Background(), "wi_shared", StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = r.Stop(context.Background(), "wi_shared", protocol.FinishWrapped) })

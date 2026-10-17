@@ -755,9 +755,7 @@ func (d *Daemon) dispatch() {
 // startEntry runs one Take()n queue entry's claim to its verdict and
 // settles the entry.
 func (d *Daemon) startEntry(e qEntry) {
-	d.rt.NoteOrigin(e.WorkItemID, e.Origin)
-	d.rt.NoteModels(e.WorkItemID, e.Models)
-	err := d.rt.Start(d.runCtx, e.WorkItemID)
+	err := d.rt.Start(d.runCtx, e.WorkItemID, runtime.StartOpts{Origin: &e.Origin, Models: e.Models})
 	if runtime.IsClaimDeferred(err) {
 		// the shutdown stopped the claim: the entry stays in flight on
 		// disk (the queue file keeps it) and a claim that landed stays

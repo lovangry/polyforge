@@ -74,7 +74,7 @@ func TestWorkspaceYamlRefusesBeforeClaim(t *testing.T) {
 	r, ws, sp := newWorkspaceTestRuntime(t, hub, "proj")
 
 	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    fix: [\n") // torn
-	err := r.Start(context.Background(), "wi_w079ref")
+	err := r.Start(context.Background(), "wi_w079ref", StartOpts{})
 	if err == nil {
 		t.Fatal("an invalid workspace yaml must refuse the claim")
 	}
@@ -106,7 +106,7 @@ func TestWorkspaceYamlRefusesBeforeClaim(t *testing.T) {
 
 	// The operator fixes the yaml; the SAME runtime serves the next claim.
 	writeWorkspaceYaml(t, ws, w079ValidYaml)
-	if err := r.Start(context.Background(), "wi_w079fix"); err != nil {
+	if err := r.Start(context.Background(), "wi_w079fix", StartOpts{}); err != nil {
 		t.Fatalf("the fixed yaml must let the next claim run: %v", err)
 	}
 	if r.jobOf("wi_w079fix") == nil {
@@ -142,7 +142,7 @@ func TestWorkspaceYamlRefusalFamilies(t *testing.T) {
 			hub := newFakeHub()
 			r, ws, _ := newWorkspaceTestRuntime(t, hub, "proj")
 			writeWorkspaceYaml(t, ws, c.yaml)
-			err := r.Start(context.Background(), "wi_w079fam")
+			err := r.Start(context.Background(), "wi_w079fam", StartOpts{})
 			ae, ok := err.(*api.Error)
 			if !ok || ae.Code != api.ErrDaemonWorkspaceYaml {
 				t.Fatalf("expected DAEMON-414 for %s, got %v", c.name, err)
@@ -164,7 +164,7 @@ func TestProbeFailureClaimsNothing(t *testing.T) {
 	hub := newFakeHub()
 	r, _, _ := newWorkspaceTestRuntime(t, hub, "proj")
 	hub.lookupErr["wi_w079probe"] = errors.New("hub unreachable")
-	err := r.Start(context.Background(), "wi_w079probe")
+	err := r.Start(context.Background(), "wi_w079probe", StartOpts{})
 	if err == nil || !strings.Contains(err.Error(), "hub unreachable") {
 		t.Fatalf("expected the probe error, got %v", err)
 	}
@@ -184,7 +184,7 @@ func TestAbsentWorkspaceYamlEqualsToday(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(ws, ".polyforge.yaml")); !os.IsNotExist(err) {
 		t.Fatalf("fixture defect: %v", err)
 	}
-	if err := r.Start(context.Background(), "wi_w079abs"); err != nil {
+	if err := r.Start(context.Background(), "wi_w079abs", StartOpts{}); err != nil {
 		t.Fatalf("an absent yaml must not refuse the claim: %v", err)
 	}
 	j := r.jobOf("wi_w079abs")
@@ -201,7 +201,7 @@ func TestCommentsOnlyWorkspaceYamlIsAbsentEquivalent(t *testing.T) {
 	hub := newFakeHub()
 	r, ws, _ := newWorkspaceTestRuntime(t, hub, "proj")
 	writeWorkspaceYaml(t, ws, "# just comments\n# nothing more\n")
-	if err := r.Start(context.Background(), "wi_w079cmt"); err != nil {
+	if err := r.Start(context.Background(), "wi_w079cmt", StartOpts{}); err != nil {
 		t.Fatalf("a comments-only yaml must not refuse the claim: %v", err)
 	}
 	j := r.jobOf("wi_w079cmt")
@@ -221,7 +221,7 @@ func TestWorkspaceYamlReadOnFreshClaimAndReclaim(t *testing.T) {
 	r, ws, _ := newWorkspaceTestRuntime(t, hub, "proj")
 
 	writeWorkspaceYaml(t, ws, w079ValidYaml)
-	if err := r.Start(context.Background(), "wi_w079lane"); err != nil {
+	if err := r.Start(context.Background(), "wi_w079lane", StartOpts{}); err != nil {
 		t.Fatalf("fresh claim: %v", err)
 	}
 	if err := r.Stop(context.Background(), "wi_w079lane", protocol.FinishPaused); err != nil {
@@ -230,7 +230,7 @@ func TestWorkspaceYamlReadOnFreshClaimAndReclaim(t *testing.T) {
 	hub.forceEnd("wi_w079lane")
 	claims := hub.claimCount()
 	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    bogus: { models: [pi:a] }\n")
-	terr := r.Start(context.Background(), "wi_w079lane")
+	terr := r.Start(context.Background(), "wi_w079lane", StartOpts{})
 	if ae, ok := terr.(*api.Error); !ok || ae.Code != api.ErrDaemonWorkspaceYaml {
 		t.Fatalf("expected DAEMON-414 on the re-claim, got %v", terr)
 	}
@@ -238,7 +238,7 @@ func TestWorkspaceYamlReadOnFreshClaimAndReclaim(t *testing.T) {
 		t.Fatalf("the refused re-claim must not call the hub (claims %d -> %d)", claims, n)
 	}
 	writeWorkspaceYaml(t, ws, w079ValidYaml)
-	if err := r.Start(context.Background(), "wi_w079lane"); err != nil {
+	if err := r.Start(context.Background(), "wi_w079lane", StartOpts{}); err != nil {
 		t.Fatalf("re-claim after the fix: %v", err)
 	}
 	if err := r.Stop(context.Background(), "wi_w079lane", protocol.FinishWrapped); err != nil {
@@ -279,13 +279,13 @@ func TestStartProbeFailureIsTypedTransient(t *testing.T) {
 	hub := newFakeHub()
 	r, _, _ := newWorkspaceTestRuntime(t, hub, "proj")
 	hub.lookupErr = map[string]error{"wi_probe": errors.New("connection refused")}
-	err := r.Start(context.Background(), "wi_probe")
+	err := r.Start(context.Background(), "wi_probe", StartOpts{})
 	var ae *api.Error
 	if !errors.As(err, &ae) || ae.Code != api.ErrDaemonHubUnavailable {
 		t.Fatalf("transport-class probe failure = %v, want DAEMON-503", err)
 	}
 	hub.lookupErr["wi_probe"] = &api.Error{Code: api.ErrCoreNotFound, Detail: "no such work item"}
-	err = r.Start(context.Background(), "wi_probe")
+	err = r.Start(context.Background(), "wi_probe", StartOpts{})
 	if err == nil || (errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable) {
 		t.Fatalf("a hub refusal must stay final, got %v", err)
 	}

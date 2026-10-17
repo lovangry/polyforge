@@ -174,7 +174,7 @@ func newInprocRig(t *testing.T, inst *v1Install, obsTune ...inprocObsTune) *inpr
 // start claims and runs one work item through the real Runtime.
 func (r *inprocRig) start(wi string) {
 	r.t.Helper()
-	if err := r.rt.Start(r.ctx, wi); err != nil {
+	if err := r.rt.Start(r.ctx, wi, runtime.StartOpts{}); err != nil {
 		r.t.Fatalf("runtime start %s: %v", wi, err)
 	}
 }

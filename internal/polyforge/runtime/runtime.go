@@ -178,11 +178,6 @@ type Runtime struct {
 	// Resolve's unknown-input answer is "", and the daemon's resolver
 	// falls back to aihub for those.
 	aliases map[string]string
-	// origins: submit origins noted by the daemon, consumed at job creation.
-	origins map[string]Origin
-	// manualModels: `pf submit --models` lists noted by the daemon,
-	// consumed by the next Start of that work item (like origins).
-	manualModels map[string][]string
 	// manualMu guards the daemon-local manual-models.json (manualmodels.go).
 	manualMu sync.Mutex
 	// claimMu serializes the claiming journal's read-modify-writes: its
@@ -342,19 +337,17 @@ func New(cfg Config, hub Aihub, spawner Spawner, toOB *supervise.Queue[protocol.
 	cfg.fill()
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Runtime{
-		cfg:          cfg,
-		hub:          hub,
-		spawner:      spawner,
-		toOB:         toOB,
-		fromOB:       fromOB,
-		ctx:          ctx,
-		cancel:       cancel,
-		jobs:         map[string]*job{},
-		boxes:        map[string]*mailbox{},
-		aliases:      map[string]string{},
-		origins:      map[string]Origin{},
-		manualModels: map[string][]string{},
-		statePath:    filepath.Join(cfg.DataDir, "runtime-state.json"),
+		cfg:       cfg,
+		hub:       hub,
+		spawner:   spawner,
+		toOB:      toOB,
+		fromOB:    fromOB,
+		ctx:       ctx,
+		cancel:    cancel,
+		jobs:      map[string]*job{},
+		boxes:     map[string]*mailbox{},
+		aliases:   map[string]string{},
+		statePath: filepath.Join(cfg.DataDir, "runtime-state.json"),
 	}
 }
 
@@ -529,49 +522,6 @@ func (r *Runtime) NoteAlias(alias, canonical string) {
 	r.mu.Unlock()
 }
 
-// NoteOrigin records the origin the NEXT job started for wi will carry.
-// The daemon calls it right before Start; claimPlaceholder consumes it.
-func (r *Runtime) NoteOrigin(wi string, o Origin) {
-	r.mu.Lock()
-	r.origins[wi] = o
-	r.mu.Unlock()
-}
-
-// NoteModels records the manual `pf submit --models` list the NEXT
-// Start of wi will compose as the top precedence level. A nil/empty list
-// notes nothing.
-func (r *Runtime) NoteModels(wi string, models []string) {
-	if len(models) == 0 {
-		return
-	}
-	r.mu.Lock()
-	r.manualModels[wi] = models
-	r.mu.Unlock()
-}
-
-func (r *Runtime) takeModels(wi string) []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	m := r.manualModels[wi]
-	delete(r.manualModels, wi)
-	return m
-}
-
-// takeOrigin pops the noted origin for any of the given id spellings.
-func (r *Runtime) takeOrigin(ids ...string) *Origin {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	var found *Origin
-	for _, id := range ids {
-		if o, ok := r.origins[id]; ok {
-			o := o
-			found = &o
-			delete(r.origins, id)
-		}
-	}
-	return found
-}
-
 // Resolve maps any id form this runtime knows — a live job key (already
 // canonical) or a registered alias — to the canonical work-item id;
 // "" when the form is unknown to this daemon (the daemon's resolver
@@ -644,6 +594,15 @@ func mintSessionID() (string, error) {
 // Start (§一 Runtime): claim → clone/init capsule → materialize → spawn →
 // RTStarted.
 
+// StartOpts is what the daemon's start carries beyond the id: the
+// origin the job records (nil: none) and the manual `pf submit --models`
+// list composed as the top precedence level (nil: the one recorded for
+// a re-claim, if any).
+type StartOpts struct {
+	Origin *Origin
+	Models []string
+}
+
 // Start claims wi and runs it to a live agent, returning once the claim
 // settled. The read-only work-item probe and the local pre-claim checks
 // (workspace yaml, bundle) run on the caller's goroutine — a refusal
@@ -652,8 +611,7 @@ func mintSessionID() (string, error) {
 // of the canonical id's actor (claim), so two starts of one work item
 // under different spellings meet in one mailbox and the second finds the
 // first's job.
-func (r *Runtime) Start(ctx context.Context, wi string) error {
-	manual := r.takeModels(wi) // always consumed: a refused start must not leak it
+func (r *Runtime) Start(ctx context.Context, wi string, opts StartOpts) error {
 	if r.stopped(ctx) {
 		return claimDeferredError(wi)
 	}
@@ -683,7 +641,7 @@ func (r *Runtime) Start(ctx context.Context, wi string) error {
 			return err
 		}
 	}
-	err = r.call(ctx, probe.ID, func() error { return r.claim(ctx, wi, probe.ID, manual) })
+	err = r.call(ctx, probe.ID, func() error { return r.claim(ctx, wi, probe.ID, opts) })
 	if errors.Is(err, errAbandoned) {
 		return claimDeferredError(wi) // the shutdown came while it waited its turn
 	}
@@ -723,7 +681,7 @@ func (r *Runtime) probeWorkItem(wi string) (*api.WorkItem, error) {
 // reused when its session still holds the work item (the claim is then a
 // D4 replay that hands the same answer back), so a claim whose answer was
 // lost is adopted instead of orphaned.
-func (r *Runtime) claim(ctx context.Context, spelling, id string, manual []string) error {
+func (r *Runtime) claim(ctx context.Context, spelling, id string, opts StartOpts) error {
 	if ex := r.jobOf(id); ex != nil {
 		if st, _ := ex.snapshot(); st != StatePaused && st != StateClaiming {
 			return alreadyActive(id, st)
@@ -736,7 +694,7 @@ func (r *Runtime) claim(ctx context.Context, spelling, id string, manual []strin
 	if err != nil {
 		return err
 	}
-	if err := r.noteClaiming(id, sessionID, manual); err != nil {
+	if err := r.noteClaiming(id, sessionID, opts.Models); err != nil {
 		return fmt.Errorf("runtime: %s: claiming journal write failed (refusing to claim): %w", id, err)
 	}
 	crashpoint.At("claim.before-answer")
@@ -768,7 +726,7 @@ func (r *Runtime) claim(ctx context.Context, spelling, id string, manual []strin
 		return r.abandonClaim(bare, cerr, cerr.Error())
 	}
 	crashpoint.At("claim.after-answer")
-	j, cctx, err := r.claimPlaceholder(ctx, spelling, sessionID, resp, manual)
+	j, cctx, err := r.claimPlaceholder(ctx, spelling, sessionID, resp, opts)
 	if err != nil {
 		return err
 	}
@@ -830,7 +788,7 @@ func (r *Runtime) claimIntent(id string) (sessionID string, replay bool, err err
 // carries (F2); the capsule directory alone is named for humans, after the
 // answer's slug in its path-safe form "<project>-<seq>" (api.PathName). A
 // raw slug never reaches any path ("#" is the URL fragment separator).
-func (r *Runtime) claimPlaceholder(ctx context.Context, spelling, sessionID string, resp *api.SessionClaimResponse, manual []string) (*job, context.Context, error) {
+func (r *Runtime) claimPlaceholder(ctx context.Context, spelling, sessionID string, resp *api.SessionClaimResponse, opts StartOpts) (*job, context.Context, error) {
 	c := resp.Claim
 	id := claimAnswerID(resp)
 	fp := api.SessionFingerprint(sessionID)
@@ -863,6 +821,7 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, spelling, sessionID stri
 	// carries one records it under the daemon's data dir; a re-claim
 	// (pf resume of a blocked WI) carries none and reads it back. Never
 	// from the capsule — the agent writes there.
+	manual := opts.Models
 	if len(manual) > 0 {
 		r.saveManualModels(id, manual)
 	} else {
@@ -890,7 +849,7 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, spelling, sessionID stri
 		bundleName:   c.BundleName,
 		repos:        c.Repos,
 		item:         &resp.WorkItem,
-		origin:       r.takeOrigin(spelling, id),
+		origin:       opts.Origin,
 		manualModels: manual,
 	}
 	// polyforge#113: the capsule routes by the claim answer's project

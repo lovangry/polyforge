@@ -40,7 +40,7 @@ func TestStartStopEndToEnd(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := r.Start(ctx, wi); err != nil {
+	if err := r.Start(ctx, wi, StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 

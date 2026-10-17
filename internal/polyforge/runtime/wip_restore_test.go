@@ -62,7 +62,7 @@ func newWIPRig(t *testing.T, wi string) *wipRig {
 		}
 		g.events = append(g.events, b)
 	}
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
 	g.repoDir = filepath.Join(testCapsuleDir(r, wi), capsule.DirRepos, "app")
@@ -158,7 +158,7 @@ func TestBlockedResumeRestoresUncommittedTaskWork(t *testing.T) {
 		t.Fatalf("the agent's index changed: staged %q, want work.txt", staged)
 	}
 
-	if err := g.r.Start(context.Background(), g.wi); err != nil {
+	if err := g.r.Start(context.Background(), g.wi, StartOpts{}); err != nil {
 		t.Fatalf("re-claim Start: %v", err)
 	}
 	repoB := filepath.Join(testCapsuleDir(g.r, g.wi), capsule.DirRepos, "app")
@@ -215,7 +215,7 @@ func TestReclaimSkipsWIPOnParentMismatch(t *testing.T) {
 	later := carrierGit(t, g.repoDir, "rev-parse", "HEAD")
 	carrierGit(t, g.repoDir, "push", "-q", g.hubBare, "HEAD:"+gitops.TaskRefName("app"))
 
-	if err := g.r.Start(context.Background(), g.wi); err != nil {
+	if err := g.r.Start(context.Background(), g.wi, StartOpts{}); err != nil {
 		t.Fatalf("re-claim Start: %v", err)
 	}
 	repoB := filepath.Join(testCapsuleDir(g.r, g.wi), capsule.DirRepos, "app")
@@ -242,7 +242,7 @@ func TestCleanTaskRepoProducesNoWIPRef(t *testing.T) {
 	if wip, ok := g.hubRef(t, gitops.TaskWIPRefName("app")); ok {
 		t.Fatalf("a clean task repo produced refs/pf-wip/app = %s", wip)
 	}
-	if err := g.r.Start(context.Background(), g.wi); err != nil {
+	if err := g.r.Start(context.Background(), g.wi, StartOpts{}); err != nil {
 		t.Fatalf("re-claim Start: %v", err)
 	}
 	repoB := filepath.Join(testCapsuleDir(g.r, g.wi), capsule.DirRepos, "app")

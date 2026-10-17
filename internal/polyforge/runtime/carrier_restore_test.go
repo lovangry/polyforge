@@ -66,7 +66,7 @@ func newCarrierRig(t *testing.T, wi string, publishCarrier bool) *carrierRig {
 	}
 	r.cfg.GitRemoteBase = hubRoot
 
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("first Start: %v", err)
 	}
 	capDir := testCapsuleDir(r, wi)
@@ -114,7 +114,7 @@ func TestReclaimRestoresCarrierFromDetachedHeadSource(t *testing.T) {
 		t.Fatal("test setup: the source checkout must be detached")
 	}
 
-	if err := g.r.Start(context.Background(), g.wi); err != nil {
+	if err := g.r.Start(context.Background(), g.wi, StartOpts{}); err != nil {
 		t.Fatalf("re-claim Start: %v", err)
 	}
 	if got := g.repoHead(t); got != g.workHead {
@@ -146,7 +146,7 @@ func TestReclaimRefusesWhenCarrierCannotBeRestored(t *testing.T) {
 	}
 	endsBefore := len(g.hub.ends)
 
-	err := g.r.Start(context.Background(), g.wi)
+	err := g.r.Start(context.Background(), g.wi, StartOpts{})
 	if err == nil {
 		t.Fatal("a WI whose carrier cannot be restored must not start")
 	}
@@ -173,7 +173,7 @@ func TestReclaimRefusesWhenCarrierCannotBeRestored(t *testing.T) {
 func TestFreshClaimWithoutCarrierClonesNormally(t *testing.T) {
 	g := newCarrierRig(t, "wi_nocarrier", false)
 	carrierGit(t, g.source, "checkout", "--detach", "HEAD") // the detached source alone changes nothing
-	if err := g.r.Start(context.Background(), g.wi); err != nil {
+	if err := g.r.Start(context.Background(), g.wi, StartOpts{}); err != nil {
 		t.Fatalf("re-claim Start without a carrier: %v", err)
 	}
 	if got := g.repoHead(t); got != g.srcHead {

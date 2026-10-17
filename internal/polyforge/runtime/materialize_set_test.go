@@ -24,7 +24,7 @@ func startedWithBundle(t *testing.T, wi string) (*Runtime, string, *job) {
 	hub := newFakeHub()
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.WorkflowsDir = wfDir
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() {
@@ -235,7 +235,7 @@ func TestMaterializeBundleWithoutStepsStillCopiesWorkflowTree(t *testing.T) {
 	hub := newFakeHub()
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	r.cfg.WorkflowsDir = dir
-	if err := r.Start(context.Background(), "wi_f7nos"); err != nil {
+	if err := r.Start(context.Background(), "wi_f7nos", StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = r.Stop(context.Background(), "wi_f7nos", protocol.FinishWrapped) })

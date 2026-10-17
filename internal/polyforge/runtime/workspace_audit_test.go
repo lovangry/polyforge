@@ -72,7 +72,7 @@ func TestGovernedClaimWritesAuditRecord(t *testing.T) {
 	r, ws := newAuditRuntime(t, nil)
 	writeWorkspaceYaml(t, ws, "steps:\n  proj:\n    default: { models: [pi:w79/flow-a, pi:w79/flow-b] }\n")
 
-	if err := r.Start(context.Background(), "wi_w079aud"); err != nil {
+	if err := r.Start(context.Background(), "wi_w079aud", StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	_, raw := readIdentity(t, testCapsuleDir(r, "wi_w079aud"))
@@ -97,7 +97,7 @@ func TestUngovernedClaimWritesNoAuditContent(t *testing.T) {
 		if yaml != "" {
 			writeWorkspaceYaml(t, ws, yaml)
 		}
-		if err := r.Start(context.Background(), "wi_w079noaud"); err != nil {
+		if err := r.Start(context.Background(), "wi_w079noaud", StartOpts{}); err != nil {
 			t.Fatalf("Start: %v", err)
 		}
 		idn, raw := readIdentity(t, testCapsuleDir(r, "wi_w079noaud"))

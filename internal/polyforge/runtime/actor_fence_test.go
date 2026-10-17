@@ -87,7 +87,7 @@ func TestStartBehindAStaleJournalReplayClaims(t *testing.T) {
 	if err := r.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("Start behind the stale replay: %v", err)
 	}
 	t.Cleanup(func() { terminateJobAgent(r, wi) })
@@ -112,7 +112,7 @@ func TestClaimKeepsJournalWhenStatePersistFails(t *testing.T) {
 	orig := writeStateFn
 	writeStateFn = func(string, []byte, os.FileMode) error { return errors.New("disk full (scripted)") }
 	t.Cleanup(func() { writeStateFn = orig })
-	if err := r.Start(context.Background(), wi); err != nil {
+	if err := r.Start(context.Background(), wi, StartOpts{}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { terminateJobAgent(r, wi) })
