@@ -980,17 +980,34 @@ func wiSlug(t *testing.T, inst *v1Install, wi string) string {
 	return item.Slug
 }
 
-// eventsOf reads the daemon's durable events.log and returns the entries
-// of one work item.
+// eventsRaw concatenates the daemon's durable events files (one JSONL
+// file per work item under <data-dir>/events/); "" before the first.
+func eventsRaw(t *testing.T, dataDir string) string {
+	t.Helper()
+	dir := filepath.Join(dataDir, "events")
+	des, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("events dir: %v", err)
+	}
+	var b strings.Builder
+	for _, de := range des {
+		raw, err := os.ReadFile(filepath.Join(dir, de.Name()))
+		if err != nil {
+			t.Fatalf("events file: %v", err)
+		}
+		b.Write(raw)
+	}
+	return b.String()
+}
+
+// eventsOf reads the daemon's durable events and returns the entries of
+// one work item.
 func (d *v1Daemon) eventsOf(t *testing.T, wi string) []protocol.EventEntry {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(d.dataDir, "events.log"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		t.Fatalf("events.log: %v", err)
-	}
+	raw := eventsRaw(t, d.dataDir)
 	var out []protocol.EventEntry
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
@@ -1107,7 +1124,7 @@ func (d *v1Daemon) settleClose(wi string) {
 	}
 }
 
-// waitForEvent polls the daemon's durable events.log until one event of
+// waitForEvent polls the daemon's durable events until one event of
 // the given kind appears for wi, and returns it.
 func waitForEvent(t *testing.T, d *v1Daemon, wi, kind string, bound time.Duration) protocol.EventEntry {
 	t.Helper()
@@ -1734,7 +1751,7 @@ func writePlanExtra(t *testing.T, inst *v1Install, wi string, actions, resume []
 }
 
 // restartSameDaemon re-execs a daemon on the SAME socket, data dir and
-// workspace (so events.log and capsules are
+// workspace (so the events and capsules are
 // exactly what the new process re-opens) — the s08 restart shape, with
 // the observe-window flags carried over.
 func restartSameDaemon(t *testing.T, d *v1Daemon, logName string) *v1Daemon {

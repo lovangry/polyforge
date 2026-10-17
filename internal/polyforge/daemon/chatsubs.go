@@ -501,16 +501,22 @@ func (d *Daemon) attentionClass(j statusJob) string {
 		return "failed"
 	}
 	if d.obs != nil {
-		ring := d.obs.Events().Recent(j.WorkItemID)
-		for i := len(ring) - 1; i >= 0; i-- {
-			switch ring[i].Kind {
-			case "step_dead", "candidates_exhausted",
-				observe.EvSubmitRejected, observe.EvSubmitDropped, observe.EvDaemonRestarted:
-				return ring[i].Kind
-			}
+		if e, ok := d.obs.Events().Newest(j.WorkItemID, decisionEventKind); ok {
+			return e.Kind
 		}
 	}
 	return ""
+}
+
+// decisionEventKind reports the event kinds that are a decision only
+// the events name (the state-backed classes come from the job record).
+func decisionEventKind(kind string) bool {
+	switch kind {
+	case "step_dead", "candidates_exhausted",
+		observe.EvSubmitRejected, observe.EvSubmitDropped, observe.EvDaemonRestarted:
+		return true
+	}
+	return false
 }
 
 // hubCanceledCandidate reports whether a job in this state can have

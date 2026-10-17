@@ -1,33 +1,31 @@
 package observe
 
-// events.go: the daemon events file + per-WI serving ring.
+// events.go: the daemon events store — one JSONL file per work item.
 //
 // Every observation the supervisor makes AND every driver event is
-// appended as ONE JSONL line to <DataDir>/events.log using
-// common/protocol.EventEntry (the wire-stable shape the CLI and the
-// aihub read face share). Each line carries its per-WI id (seq),
-// MONOTONIC across daemon restarts: on open the counters are rebuilt from
-// the durable files (plus a small snapshot written at rotation, so a WI
-// whose newest lines rotated away keeps counting forward). The file
-// rotates by size (events.log -> events.log.1 -> ...). The same entries
-// are kept in an in-memory ring per work item, pre-filled from the file
-// at open; the observe face serves the ring and falls back to the
-// durable files for a cursor older than the ring retains (history
-// survives restarts). The execution-state authority is NEVER here — it
-// stays the capsule's runtime-state/execution.json (INV-1); events are
+// appended as ONE line (common/protocol.EventEntry, the wire-stable shape
+// the CLI and the aihub read face share) to
+// <DataDir>/events/wi-<id>.jsonl; daemon-scope entries (no work item) go
+// to events/daemon.jsonl. Each line carries its per-WI seq, MONOTONIC
+// across daemon restarts: a work item's next seq is its file's last seq
+// plus one, learned the first time the work item is touched. The watch
+// face's ?after cursor reads the file. The execution-state authority is
+// NEVER here — it stays the capsule's execution.json (INV-1); events are
 // news, not state, and an append failure is a logged degradation, never
-// a correctness dependency.
+// a correctness dependency. A work item's file is dropped once it has
+// been silent for eventsRetention (at open).
 
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"time"
-
-	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
 )
@@ -108,186 +106,98 @@ const (
 	EvDaemonRestarted = "daemon_restarted"
 )
 
-// RingCap bounds the per-WI live view served over observe.
-const RingCap = 500
+// EventsDir is the per-WI events directory inside the daemon data dir.
+const EventsDir = "events"
 
-// EventsFile is the JSONL file name inside the daemon data directory.
-const EventsFile = "events.log"
-
-// eventsSeqFile is the counter snapshot written at rotation.
-const eventsSeqFile = "events.seq"
-
-// Rotation defaults: the file rotates when it reaches
-// DefaultEventsMaxBytes and DefaultEventsKeep rotated generations stay.
 const (
-	DefaultEventsMaxBytes = 16 << 20
-	DefaultEventsKeep     = 3
-	// HistoryCap bounds one durable-history answer.
+	// HistoryCap bounds one ?after answer (oldest first); the watcher's
+	// next poll continues after the last seq it was given.
 	HistoryCap = 5000
+	// eventsRetention: a work item's file silent this long is removed at
+	// open.
+	eventsRetention = 30 * 24 * time.Hour
+	daemonEvents    = "daemon.jsonl"
 )
 
-// EventLogOpts tunes rotation (zero = the defaults).
-type EventLogOpts struct {
-	MaxBytes int64
-	Keep     int
-}
-
-// EventLog appends protocol.EventEntry lines to the daemon events file
-// and mirrors them into per-WI rings. Safe for concurrent use: monitor
-// goroutines, push sub-goroutines, the driver and the HTTP read face all
-// touch it.
+// EventLog appends protocol.EventEntry lines to the per-WI files (each
+// append opens, writes and closes: no descriptor outlives it). Safe for
+// concurrent use: monitor goroutines, push sub-goroutines, the driver and
+// the HTTP read face all touch it. mu guards only the file table; a work
+// item's I/O runs under its own wiLog lock.
 type EventLog struct {
-	mu       sync.Mutex
-	f        *os.File
-	path     string
-	dir      string
-	size     int64
-	maxBytes int64
-	keep     int
-	// rings holds per-WI protocol.EventEntry values. Seq is the per-WI
-	// MONOTONIC append ordinal — the total appended count at write time,
-	// persisted on every line and rebuilt from the files at open, so the
-	// numbering survives truncation of the ring AND daemon restarts (a
-	// client's ?after cursor keeps working throughout).
-	rings  map[string][]protocol.EventEntry
-	totals map[string]int64 // per-WI append count: the monotonic seq source
+	dir    string
+	mu     sync.Mutex
+	logs   map[string]*wiLog
+	closed bool
 }
 
-// NewEventLog opens (creating if needed) <dataDir>/events.log.
+// wiLog is one work item's file and its seq counter.
+type wiLog struct {
+	mu     sync.Mutex
+	path   string
+	seq    int64 // the last seq written (0 = none)
+	loaded bool  // seq was learned from the file
+}
+
+// NewEventLog opens (creating if needed) <dataDir>/events/ and drops the
+// files of work items silent past eventsRetention.
 func NewEventLog(dataDir string) (*EventLog, error) {
-	return NewEventLogOpts(dataDir, EventLogOpts{})
-}
-
-// NewEventLogOpts is NewEventLog with explicit rotation tuning.
-func NewEventLogOpts(dataDir string, o EventLogOpts) (*EventLog, error) {
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	dir := filepath.Join(dataDir, EventsDir)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	if o.MaxBytes <= 0 {
-		o.MaxBytes = DefaultEventsMaxBytes
-	}
-	if o.Keep <= 0 {
-		o.Keep = DefaultEventsKeep
-	}
-	l := &EventLog{
-		path:     filepath.Join(dataDir, EventsFile),
-		dir:      dataDir,
-		maxBytes: o.MaxBytes,
-		keep:     o.Keep,
-		rings:    map[string][]protocol.EventEntry{},
-		totals:   map[string]int64{},
-	}
-	l.loadSnapshot()
-	// rebuild counters + rings from the durable files (oldest first)
-	for _, e := range l.scanFiles() {
-		if e.Seq <= 0 {
-			continue // not a valid persisted event (ids are always persisted)
-		}
-		if e.Seq > l.totals[e.WI] {
-			l.totals[e.WI] = e.Seq
-		}
-		ring := append(l.rings[e.WI], e)
-		if len(ring) > RingCap {
-			ring = ring[len(ring)-RingCap:]
-		}
-		l.rings[e.WI] = ring
-	}
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return nil, err
-	}
-	if st, err := f.Stat(); err == nil {
-		l.size = st.Size()
-	}
-	l.f = f
-	return l, nil
-}
-
-// Path returns the events file location (diagnostic/tests).
-func (l *EventLog) Path() string { return l.path }
-
-func (l *EventLog) rotatedPath(i int) string { return fmt.Sprintf("%s.%d", l.path, i) }
-
-// loadSnapshot reads the rotation-time counter snapshot.
-func (l *EventLog) loadSnapshot() {
-	raw, err := os.ReadFile(filepath.Join(l.dir, eventsSeqFile))
-	if err != nil {
-		return
-	}
-	var m map[string]int64
-	if json.Unmarshal(raw, &m) == nil {
-		for wi, n := range m {
-			if n > l.totals[wi] {
-				l.totals[wi] = n
+	if des, err := os.ReadDir(dir); err == nil {
+		for _, de := range des {
+			if fi, err := de.Info(); err == nil && strings.HasPrefix(de.Name(), "wi-") && time.Since(fi.ModTime()) > eventsRetention {
+				_ = os.Remove(filepath.Join(dir, de.Name()))
 			}
 		}
 	}
+	return &EventLog{dir: dir, logs: map[string]*wiLog{}}, nil
 }
 
-// writeSnapshotLocked persists the counters (tmp + rename).
-func (l *EventLog) writeSnapshotLocked() {
-	raw, err := json.Marshal(l.totals)
-	if err != nil {
+func eventsFileName(wi string) string {
+	if wi == "" {
+		return daemonEvents
+	}
+	return "wi-" + url.PathEscape(wi) + ".jsonl"
+}
+
+// of answers wi's log (nil once closed); create=false answers nil for a
+// work item never appended to by this process, so reads of arbitrary ids
+// grow nothing.
+func (l *EventLog) of(wi string, create bool) *wiLog {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return nil
+	}
+	w := l.logs[wi]
+	if w == nil && create {
+		w = &wiLog{path: filepath.Join(l.dir, eventsFileName(wi))}
+		l.logs[wi] = w
+	}
+	return w
+}
+
+// loadLocked learns the last seq from the file (w.mu held).
+func (w *wiLog) loadLocked() {
+	if w.loaded {
 		return
 	}
-	_ = atomicfile.Write(filepath.Join(l.dir, eventsSeqFile), raw, 0o644)
+	w.loaded = true
+	es, _ := readEventsFile(w.path)
+	for _, e := range es {
+		w.seq = max(w.seq, e.Seq)
+	}
 }
 
-// scanFiles parses every durable generation, oldest first.
-func (l *EventLog) scanFiles() []protocol.EventEntry {
-	var out []protocol.EventEntry
-	paths := make([]string, 0, l.keep+1)
-	for i := l.keep; i >= 1; i-- {
-		paths = append(paths, l.rotatedPath(i))
-	}
-	paths = append(paths, l.path)
-	for _, p := range paths {
-		es, _ := ReadEventsFile(p)
-		out = append(out, es...)
-	}
-	return out
-}
-
-// rotateLocked moves the full file aside and opens a fresh one. The
-// counter snapshot is written FIRST so ids stay monotonic even when the
-// generation holding a WI's newest line is later dropped.
-func (l *EventLog) rotateLocked() error {
-	l.writeSnapshotLocked()
-	if err := l.f.Close(); err != nil {
-		return err
-	}
-	_ = os.Remove(l.rotatedPath(l.keep))
-	for i := l.keep - 1; i >= 1; i-- {
-		_ = os.Rename(l.rotatedPath(i), l.rotatedPath(i+1))
-	}
-	if err := os.Rename(l.path, l.rotatedPath(1)); err != nil {
-		// keep appending to the oversized file rather than lose the log
-		f, oerr := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-		if oerr == nil {
-			l.f = f
-		}
-		return err
-	}
-	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return err
-	}
-	l.f, l.size = f, 0
-	return nil
-}
-
-// Append writes one event for work item wi. body may be nil. The file
-// write is best-effort by design (§五: an events-file failure never
-// blocks the agent, and execution.json stays the authority): an I/O
-// failure is returned to the caller as a degradation signal, but the
-// ring entry (and the in-memory counter) is recorded either way so the
-// live observe face keeps working.
+// Append writes one event for work item wi ("" = daemon scope). body may
+// be nil. The write is best-effort by design (§五: an events failure
+// never blocks the agent); a failed write is returned and consumes no
+// seq.
 func (l *EventLog) Append(wi, kind string, body any) error {
-	entry := protocol.EventEntry{
-		At:   time.Now().UTC().Format(time.RFC3339Nano),
-		Kind: kind,
-		WI:   wi,
-	}
+	entry := protocol.EventEntry{Kind: kind, WI: wi}
 	if body != nil {
 		raw, err := json.Marshal(body)
 		if err != nil {
@@ -295,126 +205,131 @@ func (l *EventLog) Append(wi, kind string, body any) error {
 		}
 		entry.Body = raw
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.totals[wi]++
-	entry.Seq = l.totals[wi]
+	w := l.of(wi, true)
+	if w == nil {
+		return os.ErrClosed
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.loadLocked()
+	entry.Seq = w.seq + 1
+	entry.At = time.Now().UTC().Format(time.RFC3339Nano) // under the lock: per WI, time order is seq order
 	line, err := json.Marshal(entry)
 	if err != nil {
 		return err
 	}
-	line = append(line, '\n')
-	var werr error
-	if l.f == nil {
-		werr = os.ErrClosed
-	} else {
-		n, e := l.f.Write(line)
-		l.size += int64(n)
-		werr = e
-		if werr == nil && l.size >= l.maxBytes {
-			if rerr := l.rotateLocked(); rerr != nil {
-				werr = rerr
-			}
-		}
+	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
 	}
-	ring := append(l.rings[wi], entry)
-	if len(ring) > RingCap {
-		ring = ring[len(ring)-RingCap:]
+	_, err = f.Write(append(line, '\n'))
+	if cerr := f.Close(); err == nil {
+		err = cerr
 	}
-	l.rings[wi] = ring
-	return werr
+	if err != nil {
+		return err
+	}
+	w.seq = entry.Seq
+	return nil
 }
 
-// SinceAfter returns the entries for wi whose seq is strictly greater
-// than after — the watch snapshot's ?after cursor (#21). The ring
-// answers when it still holds the cursor's successor; a cursor older than
-// the ring (or from before a restart that outlived the ring) is served
-// from the DURABLE files, so history is never limited to the in-memory
-// ring (at most HistoryCap entries per answer, oldest first).
+// SinceAfter returns wi's entries whose seq is strictly greater than
+// after, oldest first (at most HistoryCap) — the watch snapshot's ?after
+// cursor (#21).
 func (l *EventLog) SinceAfter(wi string, after int64) []protocol.EventEntry {
-	l.mu.Lock()
-	ring := l.rings[wi]
-	total := l.totals[wi]
-	covered := len(ring) > 0 && ring[0].Seq <= after+1
-	if covered || total <= after {
-		out := make([]protocol.EventEntry, 0, len(ring))
-		for _, e := range ring {
-			if e.Seq > after {
-				out = append(out, e)
-			}
-		}
-		l.mu.Unlock()
-		return out
+	if l.LastSeq(wi) <= after {
+		return nil
 	}
-	l.mu.Unlock()
-	return l.History(wi, after)
-}
-
-// LastSeq is the highest seq ever appended for wi (0 = none) — the
-// monotonic counter itself, so it stays exact past HistoryCap and never
-// touches the durable files.
-func (l *EventLog) LastSeq(wi string) int64 {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.totals[wi]
-}
-
-// Recent returns a copy of wi's in-memory ring (the newest <= RingCap
-// entries, oldest first; rebuilt from the files at open). It never reads
-// the durable files — the face for hot-path "what happened last" polls.
-func (l *EventLog) Recent(wi string) []protocol.EventEntry {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return append([]protocol.EventEntry(nil), l.rings[wi]...)
-}
-
-// History reads the durable files for wi's entries with seq > after
-// (oldest first, at most HistoryCap). It is read-only and runs outside
-// the append lock; a concurrent rotation can only make it see a
-// generation boundary twice, which the seq filter absorbs.
-func (l *EventLog) History(wi string, after int64) []protocol.EventEntry {
-	var out []protocol.EventEntry
-	seen := map[int64]bool{}
-	for _, e := range l.scanFiles() {
-		if e.WI != wi || e.Seq <= after || seen[e.Seq] {
-			continue
-		}
-		seen[e.Seq] = true
-		out = append(out, e)
-		if len(out) >= HistoryCap {
-			break
+	es, _ := readEventsFile(filepath.Join(l.dir, eventsFileName(wi)))
+	out := make([]protocol.EventEntry, 0, len(es))
+	for _, e := range es {
+		if e.Seq > after && e.WI == wi {
+			out = append(out, e)
+			if len(out) >= HistoryCap {
+				break
+			}
 		}
 	}
 	return out
 }
 
-// Close closes the events file.
-func (l *EventLog) Close() error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.f == nil {
-		return nil
+// Newest answers wi's newest entry whose kind match accepts (ok=false:
+// none), reading the whole file.
+func (l *EventLog) Newest(wi string, match func(kind string) bool) (protocol.EventEntry, bool) {
+	es, _ := readEventsFile(filepath.Join(l.dir, eventsFileName(wi)))
+	for i := len(es) - 1; i >= 0; i-- {
+		if es[i].WI == wi && match(es[i].Kind) {
+			return es[i], true
+		}
 	}
-	err := l.f.Close()
-	l.f = nil
-	return err
+	return protocol.EventEntry{}, false
 }
 
-// ReadEventsFile parses one events file (test/diagnostic face).
-func ReadEventsFile(path string) ([]protocol.EventEntry, error) {
+// LastSeq is the highest seq ever appended for wi (0 = none).
+func (l *EventLog) LastSeq(wi string) int64 {
+	w := l.of(wi, false)
+	if w == nil {
+		probe := wiLog{path: filepath.Join(l.dir, eventsFileName(wi))}
+		probe.loadLocked()
+		return probe.seq
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.loadLocked()
+	return w.seq
+}
+
+// Close ends the log: later appends answer os.ErrClosed (an append in
+// flight completes).
+func (l *EventLog) Close() error {
+	l.mu.Lock()
+	l.closed = true
+	l.mu.Unlock()
+	return nil
+}
+
+// ReadEventsDir reads every events file under dataDir, ordered by time
+// (per work item that is seq order) — the test/diagnostic face.
+func ReadEventsDir(dataDir string) ([]protocol.EventEntry, error) {
+	dir := filepath.Join(dataDir, EventsDir)
+	des, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []protocol.EventEntry
+	for _, de := range des {
+		es, err := readEventsFile(filepath.Join(dir, de.Name()))
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, es...)
+	}
+	at := func(e protocol.EventEntry) time.Time { t, _ := time.Parse(time.RFC3339Nano, e.At); return t }
+	sort.SliceStable(out, func(i, j int) bool { return at(out[i]).Before(at(out[j])) })
+	return out, nil
+}
+
+// readEventsFile parses one events file, lines of any length; a torn or
+// foreign line is skipped.
+func readEventsFile(path string) ([]protocol.EventEntry, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 	var out []protocol.EventEntry
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64<<10), 1<<20)
-	for sc.Scan() {
+	r := bufio.NewReader(f)
+	for {
+		line, err := r.ReadBytes('\n')
 		var e protocol.EventEntry
-		if json.Unmarshal(sc.Bytes(), &e) == nil {
+		if len(line) > 0 && json.Unmarshal(line, &e) == nil && e.Seq > 0 {
 			out = append(out, e)
 		}
+		if err == io.EOF {
+			return out, nil
+		}
+		if err != nil {
+			return out, err
+		}
 	}
-	return out, sc.Err()
 }

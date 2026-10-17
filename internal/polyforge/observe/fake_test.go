@@ -327,7 +327,7 @@ func soon(t *testing.T, bound time.Duration, what string, cond func() bool) {
 	t.Fatalf("condition not met in time: %s", what)
 }
 
-// eventsOf reads the monitor's ring, filtered by kind.
+// eventsOf reads the monitor's work item's events, filtered by kind.
 func eventsOf(m *Monitor, kind string) []protocol.EventEntry {
 	var out []protocol.EventEntry
 	for _, e := range m.log.SinceAfter(m.wi.WorkItem, 0) {

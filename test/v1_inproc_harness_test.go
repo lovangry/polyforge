@@ -12,7 +12,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -183,13 +182,7 @@ func (r *inprocRig) start(wi string) {
 // eventsOf reads the rig's durable events file for one work item.
 func (r *inprocRig) eventsOf(t *testing.T, wi string) []protocol.EventEntry {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(r.dataDir, "events.log"))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		t.Fatalf("events.log: %v", err)
-	}
+	raw := eventsRaw(t, r.dataDir)
 	var out []protocol.EventEntry
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)

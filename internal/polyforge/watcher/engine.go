@@ -302,12 +302,12 @@ func cycle(d API, o *Options, attended *bool) ([]string, batch, error) {
 		}
 		snap, err := d.Snapshot(sub.WI, sub.Cursor)
 		if err == nil && snap.LastSeq < sub.Cursor {
-			// Defensive: the daemon's event seq is persisted per line and
-			// rebuilt at open (and snapshotted at rotation), so it is
-			// monotonic across restarts. It can still fall below a cursor
-			// if the daemon's data dir (events.log*) was wiped or replaced
-			// while the chat's subscription survived — then replay from
-			// the start rather than wait on ids that will never come.
+			// The daemon's event seq continues from the work item's events
+			// file, so it is monotonic across restarts. It falls below a
+			// cursor when that file is gone (wiped, or dropped after 30
+			// silent days) while the chat's subscription survived — then
+			// replay from the start rather than wait on ids that will
+			// never come.
 			sub.Cursor = 0
 			snap, err = d.Snapshot(sub.WI, 0)
 		}

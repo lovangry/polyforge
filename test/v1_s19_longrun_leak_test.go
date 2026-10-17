@@ -16,7 +16,7 @@ package test
 //     plus a bounded settle window for async teardown, must not exceed
 //     the baseline captured after daemon start-up idle-settle and
 //     BEFORE job 1.
-//   - events.log is clean: every line of <dataDir>/events.log is one
+//   - the events are clean: every line of <dataDir>/events/* is one
 //     valid protocol.EventEntry, and no event occurrence is written
 //     twice — a re-written/duplicated event line is the failure signal.
 //     The per-work-item accounting is the healthy driver-run shape:
@@ -34,7 +34,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -169,10 +168,7 @@ func s19MinFDCount(t *testing.T, pid int, n int, gap time.Duration) int {
 //     a work item outside the run.
 func s19AssertEventsLogClean(t *testing.T, dataDir string, wis []string) {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(dataDir, "events.log"))
-	if err != nil {
-		t.Fatalf("events.log: %v", err)
-	}
+	raw := eventsRaw(t, dataDir)
 	run := map[string]bool{}
 	for _, wi := range wis {
 		run[wi] = true
@@ -191,13 +187,13 @@ func s19AssertEventsLogClean(t *testing.T, dataDir string, wis []string) {
 		lines++
 		var e protocol.EventEntry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			t.Fatalf("events.log line %d is not a valid protocol.EventEntry: %v (%q)", lines, err, line)
+			t.Fatalf("events line %d is not a valid protocol.EventEntry: %v (%q)", lines, err, line)
 		}
 		if e.Kind == "" {
-			t.Fatalf("events.log line %d carries no kind: %q", lines, line)
+			t.Fatalf("events line %d carries no kind: %q", lines, line)
 		}
 		if _, err := time.Parse(time.RFC3339Nano, e.At); err != nil {
-			t.Fatalf("events.log line %d carries an invalid timestamp %q: %v", lines, e.At, err)
+			t.Fatalf("events line %d carries an invalid timestamp %q: %v", lines, e.At, err)
 		}
 		seenLine[line]++
 		if e.WI == "" {
@@ -205,7 +201,7 @@ func s19AssertEventsLogClean(t *testing.T, dataDir string, wis []string) {
 			continue
 		}
 		if !run[e.WI] {
-			t.Fatalf("events.log names a work item outside this run: %q", e.WI)
+			t.Fatalf("the events name a work item outside this run: %q", e.WI)
 		}
 		perWI[e.WI]++
 		switch e.Kind {
@@ -233,7 +229,7 @@ func s19AssertEventsLogClean(t *testing.T, dataDir string, wis []string) {
 	}
 	// Line count equals event count: every line above was a valid, unique
 	// occurrence, so the produced-event count IS the line count.
-	t.Logf("s19: events.log clean: %d lines, %d per-WI + %d daemon-scope, no duplicates", lines, lines-daemonScope, daemonScope)
+	t.Logf("s19: events clean: %d lines, %d per-WI + %d daemon-scope, no duplicates", lines, lines-daemonScope, daemonScope)
 }
 
 func TestV1S19LongRunLeakProbe(t *testing.T) {

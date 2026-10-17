@@ -15,7 +15,7 @@ package test
 // semantics — the real `pf daemon` is a separate process whose
 // runtime.NumGoroutine no test can read, and the owner explicitly
 // rejected adding test-only introspection hooks to the shipped binary
-// (option B). So the fd and events.log halves of the probe live in the
+// (option B). So the fd and events halves of the probe live in the
 // companion scenario v1_s19_longrun_leak_test.go against the REAL
 // daemon binary (process-level reality), and this file carries the
 // goroutine assertion through the rig, the faithful already-existing

@@ -38,7 +38,7 @@ type Config struct {
 	// OB is the Observe→Runtime queue (WINeedsRecovery, WICompleted).
 	// Unbounded: a send never blocks and never drops.
 	OB *supervise.Queue[protocol.OBMsg]
-	// DataDir hosts the daemon events file (events.log).
+	// DataDir hosts the per-WI events files (events/).
 	DataDir string
 	// PushFunc overrides the capsule commit+push operation (tests).
 	PushFunc PushFunc

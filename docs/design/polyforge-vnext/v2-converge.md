@@ -52,7 +52,7 @@
 - 实时信号走进程内通道：**每个 WI 一条无界队列，发送方永不阻塞**（supervisor 的 select 循环与 runtime 的串行处理都不得被投递卡住）；**事实与判定不得丢弃**。
 - driver 消费判定时**不得在跨 WI 的锁下做网络 / git 等长操作**（避免一个 WI 的推送卡住所有 WI）；runtime 只按 WI 加锁跨网络，全局的任务表锁持有期间不做任何 I/O。
 - harness 的海量输出**只保留最新状态**（合并，不排队）。
-- 持久化：`execution.json` 是**唯一权威**（进度、待答问题、失败计数、放宽后的阈值、终态）；事件日志是**补充记录**——driver 事件也写入（替代只打 stderr 的 `stdLogger`），每条事件带**跨重启单调递增 id**（不再每次重启从 1 重编），文件按大小轮转；磁盘满时事件追加失败只降级为日志告警，权威仍在 `execution.json`。
+- 持久化：`execution.json` 是**唯一权威**（进度、待答问题、失败计数、放宽后的阈值、终态）；事件日志是**补充记录**——driver 事件也写入（替代只打 stderr 的 `stdLogger`），每条事件带**跨重启单调递增 id**（不再每次重启从 1 重编），每个 WI 一个文件；磁盘满时事件追加失败只降级为日志告警，权威仍在 `execution.json`。
 - supervisor 不再轮询 `execution.json` 作为主路径；推送进度到 aihub 改由事件触发，**保留退避与同错熔断**（F18/F22 教训：曾 185 次推送风暴）。
 - 转录同步（F3）以最近一次 `step_started.transcript_path` 为源，commit 前同步。（现状：job 级收尾前的活转录同步**保留**——C11 裁定，polyforge#150；实现为 `runtime/pitranscript.go` 的 `syncLiveTranscript`（commit 24cde0d 恢复）：job 在 pause / bounded-fail / seal 等收尾路径上结束时，当前派发的 step 未走到提交边界，其活转录若不在收尾提交前同步就会丢失——收尾前同步保证终态前转录落盘。）
 
@@ -309,7 +309,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
    - git-dir 修法：隔离 capsule 时把外置 git-dir 一并移入隔离区；目标已存在时报错而非复用（含跨文件系统 EXDEV 合并情形）；加"同机隔离后重新领取 → HEAD 等于 aihub 最新提交"的测试。
    - **V4 验证证据门禁移入 driver**（已定）：driver 接受 verification 步骤的 completed 结果时，要求结构化命令证据（argv、exit_code、duration_ms），缺失则走信封拒绝的进程内重试；旧 flush 路径上的同名检查随 #136 删除。
    - 步骤 1 完成后：**验证"结束会话 + 重新领取能从断点继续"**，通过则按第 8 节四档简化 takeover / adopt-session / verify-session（**已完成**，见第 8 节四档）。
-2. **事件底座**：driver 事件写入事件日志；单调 id、轮转；`execution.json` 权威。
+2. **事件底座**：driver 事件写入事件日志；单调 id、每 WI 一个文件；`execution.json` 权威。
 3. **监督替换（同一批上线）**：driver ↔ supervisor 契约 + 判死规则 + 死因处理 + 失败计数 + 阈值 + 恢复引擎的 driver 异常退出界 + **孤儿 step 进程回收（第 6 节 bug 3，必须同批——否则"重启后同模型重派"会与孤儿进程双写同一 capsule，#99 教训）**。
 4. **`pf watch`**：Go 实现、双通道、固定模板唤醒、订阅/游标存 daemon、Claude Code statusLine 与唤醒适配、pi 扩展；删除 watch.sh / watch-probe。
 5. **身份模型**：daemon id 存放迁移、`PF_CHAT_ID`、负责人、origin、通知路由。
@@ -563,7 +563,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 **代码位置**
 - 契约、翻译器、判死规则：`internal/polyforge/supervise`（`contract.go` 事实/判定/无界队列/每 WI 的 `Link`；`translator.go` + `pi.go` 翻译器接口与 pi 实现；`tracker.go` 每次派发一份的合并状态；`rules.go` 规则 ⓪–④ 的纯函数 `Judge`；`defaults.go` 全局阈值）。
 - driver 一侧：`internal/polyforge/driver/supervision.go`（判定围栏、死因表、失败计数、放宽、事实发送）；`TransStepFailed` 在 `transition.go`，一次原子写入记录 attempt（带死因子类）、计数、放宽值、下一次派发形态，必要时写 blocked。
-- supervisor 一侧：`internal/polyforge/observe/monitor.go`（消费事实、每派发一份状态、判定、`driver_stalled`、事件触发推送、M4 保留）；事件底座 `observe/events.go`（逐行带 id、按大小轮转、重启后续号、历史从文件读）。
+- supervisor 一侧：`internal/polyforge/observe/monitor.go`（消费事实、每派发一份状态、判定、`driver_stalled`、事件触发推送、M4 保留）；事件底座 `observe/events.go`（每 WI 一个 JSONL 文件，逐行带 id、重启后续号、`?after` 从文件读）。
 - 失败计数等持久字段：`capsule.Step.Supervision`、`Attempt.FailureCause`、`Execution.BlockedReason`。
 
 **规则 ① 与 T 的后续修订（集成分支）**：规则 ① 扩展到正常结束的轮次（`ended_without_result`，见 2.3 表）；T 取 `max(3 × wall_minutes, 全局默认)`（见 2.4）。
@@ -581,7 +581,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 
 本附录只登记现状，不新增也不改变任何机制：以下各项在代码里是活的、有读者或有外部可见面，但此前设计文档里查不到。来源即表中的常量与文件；与代码不一致时以代码为准，并回改本表。
 
-### E.1 事件 kind（`<data-dir>/events.log`，`protocol.EventEntry` 一行一条）
+### E.1 事件 kind（`<data-dir>/events/wi-<id>.jsonl`，daemon 级为 `events/daemon.jsonl`；`protocol.EventEntry` 一行一条）
 
 事件是"新闻"不是状态：执行态权威始终是 capsule 的 `runtime-state/execution.json`（INV-1），追加失败只降级不影响正确性（`observe/events.go`）。`pf watch` 读取的就是这些行。
 
@@ -636,7 +636,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `runtime-state.json` | runtime `runtime.go` | runtime 的 job 记录（旧文档称作 `state.json`） |
 | `claiming.json` | runtime `claiming.go` | 领取前的持久化意图日志（B1，`reference.md#§3.5`），崩溃后重放 |
 | `manual-models.json` | runtime `manualmodels.go` | 每个 WI 的 `pf submit --models` 列表（只在本机有效） |
-| `events.log`（`.1`…`.3`）/ `events.seq` | observe `events.go` | 事件 JSONL（16 MiB 轮转，保留 3 代）/ 轮转时写入的每 WI 序号快照，保证 seq 跨重启单调 |
+| `events/wi-<id>.jsonl`、`events/daemon.jsonl` | observe `events.go` | 每 WI 一个事件 JSONL（seq = 文件末行 seq + 1，跨重启单调）；静默超过 30 天的 WI 文件在 daemon 启动时删除 |
 | `chats.json`、`chat-subs.json`、`chat-status/` | 见 E.2 | |
 | `git/<wi>.git` | runtime | capsule 的外置 git-dir（agent 碰不到 hooks/config） |
 | `release/<tag>`、`release/current` | `tools/install.sh` | release checkout；daemon 以 `release/current/workflows` 为 `-workflows-dir` |
