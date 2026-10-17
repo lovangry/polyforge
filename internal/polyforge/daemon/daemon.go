@@ -894,9 +894,7 @@ func (d *Daemon) startEntry(e qEntry) {
 		if e.Deferrals == 0 {
 			fmt.Fprintf(os.Stderr, "daemon: start %s deferred, will retry with backoff: %v\n", e.WorkItemID, err)
 		}
-		if rerr := d.q.Requeue(e.WorkItemID); rerr != nil {
-			fmt.Fprintf(os.Stderr, "daemon: submit queue persist after %s: %v\n", e.WorkItemID, rerr)
-		}
+		d.q.Requeue(e.WorkItemID)
 		return
 	}
 	if errors.As(err, &ae) && ae.Code == api.ErrDaemonConflict {

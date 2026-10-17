@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -282,13 +283,16 @@ func TestDeferralBackoffGrowsAndCaps(t *testing.T) {
 
 // A deferred entry is skipped by Take until its NotBefore, so another
 // pending entry (even a lower-priority one) proceeds; the deferred entry is
-// never dropped, keeps its rank, and its backoff persists with it.
+// never dropped and keeps its rank. Only the submit's intent is on disk:
+// Take and Requeue leave the file alone (the entry never left it) and the
+// backoff is never written, so a restart retries at once.
 func TestRequeueBackoffDoesNotBlockOthers(t *testing.T) {
 	now := time.Unix(1_000_000, 0)
 	q := NewJobQueue(4, func() map[string]bool { return map[string]bool{} })
 	q.now = func() time.Time { return now }
 	var persisted []qEntry
-	q.persist = func(es []qEntry) error { persisted = append([]qEntry(nil), es...); return nil }
+	writes := 0
+	q.persist = func(es []qEntry) error { persisted = append([]qEntry(nil), es...); writes++; return nil }
 
 	if err := q.Enqueue(qEntry{WorkItemID: "wi_bad", Priority: "urgent"}); err != nil {
 		t.Fatal(err)
@@ -300,18 +304,16 @@ func TestRequeueBackoffDoesNotBlockOthers(t *testing.T) {
 	if e == nil || e.WorkItemID != "wi_bad" || e.Deferrals != 0 {
 		t.Fatalf("first take = %+v, want wi_bad (urgent)", e)
 	}
-	if err := q.Requeue("wi_bad"); err != nil {
+	q.Requeue("wi_bad")
+	if writes != 2 || len(persisted) != 2 {
+		t.Fatalf("take/requeue rewrote the queue file: %d writes, %d entries on disk", writes, len(persisted))
+	}
+	blob, err := json.Marshal(submitQueueState{Version: 1, Entries: []qEntry{{WorkItemID: "wi_bad", NotBefore: now, Deferrals: 3}}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	// the persisted entry carries the backoff (survives a restart)
-	var saved *qEntry
-	for i := range persisted {
-		if persisted[i].WorkItemID == "wi_bad" {
-			saved = &persisted[i]
-		}
-	}
-	if saved == nil || saved.Deferrals != 1 || !saved.NotBefore.Equal(now.Add(time.Second)) {
-		t.Fatalf("persisted wi_bad = %+v, want deferrals 1 and not_before now+1s", saved)
+	if strings.Contains(string(blob), "not_before") || strings.Contains(string(blob), "deferrals") {
+		t.Fatalf("the persisted shape carries the backoff: %s", blob)
 	}
 	// not due: the lower-priority entry proceeds, then nothing is takeable
 	if e := q.Take(); e == nil || e.WorkItemID != "wi_ok" {
@@ -329,7 +331,7 @@ func TestRequeueBackoffDoesNotBlockOthers(t *testing.T) {
 	if e == nil || e.WorkItemID != "wi_bad" || e.Deferrals != 1 {
 		t.Fatalf("take after the backoff = %+v", e)
 	}
-	_ = q.Requeue("wi_bad")
+	q.Requeue("wi_bad")
 	if e := q.Take(); e != nil {
 		t.Fatalf("second backoff not honored: %+v", e)
 	}

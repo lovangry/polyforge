@@ -122,7 +122,8 @@ func rankOf(priority string) int {
 
 // qEntry is one pending submit. The JSON tags are the persisted shape
 // (submit-queue.json, v2-converge §5): the answered `accepted` must
-// survive a daemon restart.
+// survive a daemon restart. Only the submit's intent is persisted; the
+// backoff is the running process's own and starts over at a restart.
 type qEntry struct {
 	WorkItemID string    `json:"work_item_id"`
 	Priority   string    `json:"priority,omitempty"`
@@ -140,10 +141,8 @@ type qEntry struct {
 	// NotBefore/Deferrals are the DAEMON-503 backoff: a claim the hub
 	// could not be reached for is held back until NotBefore (Take skips
 	// it, so other entries proceed) and each deferral doubles the wait.
-	// Both persist with the entry, so a restart keeps the remaining wait
-	// (at most deferralMax) instead of hammering a down hub.
-	NotBefore time.Time `json:"not_before,omitempty"`
-	Deferrals int       `json:"deferrals,omitempty"`
+	NotBefore time.Time `json:"-"`
+	Deferrals int       `json:"-"`
 }
 
 // Hub-unavailable backoff bounds: 1s, 2s, 4s ... capped at deferralMax.
@@ -168,10 +167,11 @@ type jobQueue struct {
 	mu      sync.Mutex
 	pending []qEntry
 	// inflight holds entries Take()n but not yet Settled: the dispatcher
-	// popped them and the claim has not finished. They stay in the
-	// persisted file so a crash between the pop and the claim journal
-	// cannot lose an accepted submit; replay's aihub check + claiming
-	// dedupe make a re-attempt harmless.
+	// popped them and the claim has not finished. Which entries are in
+	// flight is not persisted, but the entries stay in the file until
+	// Settle, so a crash between the pop and the claim journal cannot
+	// lose an accepted submit; the claiming-journal dedupe makes the
+	// replayed attempt harmless.
 	inflight map[string]qEntry
 	// occupied returns the WIs holding a concurrency slot, derived from
 	// the runtime's live job list — the single source of truth, so jobs
@@ -186,7 +186,8 @@ type jobQueue struct {
 	// now is the clock (tests inject one); nil means time.Now.
 	now func() time.Time
 	// persist, when non-nil, atomically rewrites the queue file from the
-	// given snapshot (pending + inflight). Called under mu.
+	// given snapshot (pending + inflight). Called under mu, only when the
+	// set of entries changes (Enqueue, Settle, Restore, PurgeOrigin).
 	persist func([]qEntry) error
 }
 
@@ -342,22 +343,22 @@ func (q *jobQueue) Settle(wi string) error {
 }
 
 // Requeue returns a Take()n entry to pending (the claim attempt did not
-// run to a verdict — a transient hub failure) and persists; the next
-// dispatch pass after the entry's backoff retries it (Take skips it until
-// then, so other entries are not starved by one WI's failure). The entry
-// keeps its original enqueue time, so its rank is unchanged.
-func (q *jobQueue) Requeue(wi string) error {
+// run to a verdict — a transient hub failure); the next dispatch pass
+// after the entry's backoff retries it (Take skips it until then, so
+// other entries are not starved by one WI's failure). The entry keeps its
+// original enqueue time, so its rank is unchanged. Nothing is written:
+// the entry never left the file.
+func (q *jobQueue) Requeue(wi string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	e, ok := q.inflight[wi]
 	if !ok {
-		return nil
+		return
 	}
 	delete(q.inflight, wi)
 	e.Deferrals++
 	e.NotBefore = q.clock().Add(deferralBackoff(e.Deferrals))
 	q.pending = append(q.pending, e)
-	return q.persistLocked()
 }
 
 // Restore appends the entries a restart replays and persists the queue
@@ -495,8 +496,7 @@ func (q *jobQueue) Take() *qEntry {
 	}
 	e := q.pending[best]
 	q.pending = append(q.pending[:best], q.pending[best+1:]...)
-	q.inflight[e.WorkItemID] = e // persisted until Settle; a persist error here is non-fatal (the entry is merely re-listed on disk)
-	_ = q.persistLocked()
+	q.inflight[e.WorkItemID] = e // stays in the file until Settle
 	return &e
 }
 
