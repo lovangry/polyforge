@@ -123,7 +123,7 @@ commits beyond its baseline (`git rev-list --count <baseline>..HEAD` is 0). Othe
      nothing - a release this WI must not have cut), and the capsule holds no
      `artifacts/release-*` tree.
    - Where the repo's review checklist names owner-kept mechanisms (for polyforge: the
-     V4 command-evidence gate, the human gates, the release/deploy verdict binding), grep
+     V4 command-evidence gate, the human gates, the enforced release/deploy output schemas), grep
      that they still exist in the tree you deliver.
    Judgment items (invented mechanisms, duplicated acceptance tests) belong to the
    review; list any you notice in the delivery note as review points for the human.

@@ -177,9 +177,9 @@ func TestStepResultJSONRoundTrip(t *testing.T) {
 	// The V4 command evidence (the one field an evidence-owing step's
 	// envelope adds) round-trips under its command_evidence tag.
 	f.res.Outcome, f.res.QuestionID, f.res.Question = OutcomeCompleted, "", ""
-	f.res.CommandEvidence = []CommandEvidence{{
+	f.res.CommandEvidence = rawEvidence([]CommandEvidence{{
 		Argv: []string{"go", "test", "./..."}, Cwd: "/w/repo", ExitCode: 0, DurationMs: 4242, LogPath: "logs/v.log",
-	}}
+	}})
 	raw, err = json.Marshal(f.res)
 	if err != nil {
 		t.Fatal(err)
@@ -195,8 +195,8 @@ func TestStepResultJSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &back); err != nil {
 		t.Fatal(err)
 	}
-	if len(back.CommandEvidence) != 1 || back.CommandEvidence[0].DurationMs != 4242 ||
-		len(back.CommandEvidence[0].Argv) != 3 {
+	backEv, err := decodeCommandEvidence(back.CommandEvidence)
+	if err != nil || len(backEv) != 1 || backEv[0].DurationMs != 4242 || len(backEv[0].Argv) != 3 {
 		t.Fatalf("round trip lost command evidence: %+v", back.CommandEvidence)
 	}
 }

@@ -61,7 +61,7 @@ func TestRunHumanGateRejectsCompletedUntilAnswered(t *testing.T) {
 func TestRunVerificationRequiresEvidence(t *testing.T) {
 	d, sp, execPath := runEnv(t, StepSpec{ID: "verification", RequiresCommandEvidence: true})
 	withEv := done(`{}`)
-	withEv.res.CommandEvidence = goodEvidence()
+	withEv.res.CommandEvidence = rawEvidence(goodEvidence())
 	sp.script = []fakeEntry{done(`{}`), withEv}
 	if err := d.Run(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
