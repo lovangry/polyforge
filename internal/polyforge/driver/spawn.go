@@ -1,37 +1,21 @@
 package driver
 
-// spawn.go: the production StepSpawner adapter — the lane driver.go's
-// spawn-seam comment defers to. One adapter bridges the driver's
-// StepSpawn order onto the EXISTING runtime derivation mechanism and
-// owns three things:
+// spawn.go: the production StepSpawner adapter. It bridges the driver's
+// StepSpawn order onto the runtime derivation mechanism and owns:
 //
-//   - PROMPT ASSEMBLY. The prompt is the step definition (the R9 path
-//     convention: workflows/<bundle>/steps/<id>.md) plus the consumed
-//     gate-FAIL rewind verdict plus the step's archived Q&A history,
-//     plus — for inherit steps — the producing step's handoff artifact
-//     content, plus every declared input artifact's content (R11),
-//     plus the result-delivery contract. Fresh steps get the same
-//     assembly minus the handoff: a fresh context never carries one.
-//
-//   - PROCESS DERIVATION through spawn.Params → spawn.Spawner
-//     (the same mechanism the WI-agent lane uses): the model pin rides
-//     argv, the resume session rides the spawn journal's latest
-//     transcript, the spawn identity line is appended through
-//     SpawnParams.Journal, and the isolation flags / env sanitize
-//     point / dedicated step agent directory stay in their one place
-//     (runtime/spawn.go).
-//
-//   - RESULT COLLECTION. The step process delivers its envelope by
-//     writing it to runtime-state/pending-results/<spawn_n>.json (the
-//     delivery contract in the prompt states the path and the shape).
-//     The run collects it, stamps it into the staging location
-//     artifacts/steps/<step>/s<spawn_n>/result.json, consumes the drop
-//     (single-shot collection) and tears the process down. A crash
-//     between the envelope write and collection loses nothing durable:
-//     the drop path is keyed by the spawn ordinal, every re-dispatch
-//     takes a fresh ordinal (B2 — the driver-path relaunches advance
-//     the counter too), and a collected drop is removed, so a stale
-//     drop file is never mistaken for a live derivation's result.
+//   - PROMPT ASSEMBLY: the step definition (workflows/<bundle>/steps/<id>.md)
+//     plus the consumed gate-FAIL rewind verdict, the step's archived Q&A,
+//     the producing step's handoff (inherit steps only) and the
+//     result-delivery contract;
+//   - PROCESS DERIVATION through spawn.Params -> spawn.Spawner: the model
+//     pin rides argv, the resume session the spawn journal's latest
+//     transcript; isolation and env sanitizing stay in runtime/spawn.go;
+//   - RESULT COLLECTION: the step writes its envelope to
+//     runtime-state/pending-results/<spawn_n>.json; the run collects it,
+//     stamps it to artifacts/steps/<step>/s<spawn_n>/result.json, consumes
+//     the drop and tears the process down. The drop path is keyed by the
+//     spawn ordinal and every re-dispatch takes a fresh one (B2), so a
+//     stale drop is never mistaken for a live derivation's result.
 
 import (
 	"context"
@@ -737,13 +721,7 @@ func readCapsuleFile(root, rel string) ([]byte, error) {
 // convention path: the handoff section is simply omitted, never a
 // dispatch failure (01-workflow-skills.md §4.4a).
 func (a *StepSpawnAdapter) resolveHandoff(stepID string) (*handoffSection, error) {
-	idx := -1
-	for i := range a.Workflow.Steps {
-		if a.Workflow.Steps[i].ID == stepID {
-			idx = i
-			break
-		}
-	}
+	idx, _ := a.Workflow.indexOf(stepID) // -1 when absent
 	if idx <= 0 {
 		return nil, nil // no earlier step declares anything
 	}
@@ -777,12 +755,11 @@ func (a *StepSpawnAdapter) resolveHandoff(stepID string) (*handoffSection, error
 // record is done. No execution.json (a fresh capsule) or an absent
 // record answers false.
 func (a *StepSpawnAdapter) producerDone(stepID string) (bool, error) {
-	execPath := filepath.Join(a.WI.CapsuleDir, "runtime-state", "execution.json")
-	data, err := os.ReadFile(execPath)
+	data, err := os.ReadFile(filepath.Join(a.WI.CapsuleDir, capsule.ExecutionJSON))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil // no execution.json: nothing is done
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil // no execution.json: nothing is done
-		}
 		return false, fmt.Errorf("driver: read execution.json for handoff-producer check: %w", err)
 	}
 	var exec struct {
@@ -793,11 +770,7 @@ func (a *StepSpawnAdapter) producerDone(stepID string) (bool, error) {
 	if err := json.Unmarshal(data, &exec); err != nil {
 		return false, fmt.Errorf("driver: parse execution.json: %w", err)
 	}
-	st, ok := exec.Steps[stepID]
-	if !ok {
-		return false, nil
-	}
-	return st.Status == "done", nil
+	return exec.Steps[stepID].Status == capsule.StepDone, nil
 }
 
 // spawnTokenDir is the archive token directory for spawn ordinal n.
@@ -850,18 +823,8 @@ func (a *StepSpawnAdapter) latestJournalEntry(stepID string) (capsule.SpawnJourn
 // with no journal line (or no journal) answers ("", nil): the caller
 // degrades to a fresh dispatch; only an unreadable journal is an error.
 func (a *StepSpawnAdapter) latestJournalTranscript(stepID string) (string, error) {
-	entries, err := capsule.ReadSpawnJournal(a.WI.CapsuleDir)
-	if err != nil {
-		return "", fmt.Errorf("driver: resume ordered but the capsule spawn journal is unreadable: %w", err)
-	}
-	bestN := -1
-	best := ""
-	for _, e := range entries {
-		if e.StepID == stepID && e.Transcript != "" && e.SpawnN > bestN {
-			bestN, best = e.SpawnN, e.Transcript
-		}
-	}
-	return best, nil
+	e, err := a.latestJournalEntry(stepID)
+	return e.Transcript, err
 }
 
 // appendSpawnJournal appends one spawn identity line through
@@ -1027,14 +990,10 @@ func (r *stepRun) Wait(ctx context.Context) (*StepResult, error) {
 				_ = r.handle.Terminate(teardownBound)
 				return nil, fmt.Errorf("driver: step %s spawn %d result staging failed: %w", r.sp.StepID, r.sp.SpawnN, err)
 			}
-			// Consume the drop (the #97 lesson): collection is single-shot.
-			// The archived copy under artifacts/steps/<step>/s<N>/ is the
-			// durable record; the drop left in place would be re-collected
-			// verbatim by the NEXT dispatch that lands on this ordinal —
-			// with a rejected envelope that was a reject/relaunch death
-			// loop, because nothing else ever removed the file. A failed
-			// remove is logged and never fatal: the fence (spawn ordinal)
-			// still guards a stale re-read.
+			// Consume the drop (the #97 lesson): collection is single-shot,
+			// the archived copy is the durable record — a drop left in place
+			// would be re-collected by the next dispatch on this ordinal. A
+			// failed remove is logged, never fatal (the fence still guards).
 			if rerr := os.Remove(r.dropPath); rerr != nil && !os.IsNotExist(rerr) {
 				fmt.Fprintf(os.Stderr, "driver: step %s spawn %d drop removal failed (stale re-read still fenced): %v\n",
 					r.sp.StepID, r.sp.SpawnN, rerr)
@@ -1084,55 +1043,12 @@ func (r *stepRun) collect() (*StepResult, error) {
 	}
 	var res StepResult
 	if err := json.Unmarshal(raw, &res); err != nil {
-		// Tolerant re-parse: step agents persistently write command_evidence
-		// as a string list instead of the object array. Re-parse with a
-		// string-tolerant shadow and salvage the envelope (the evidence
-		// descriptions become log notes, not machine-parsed objects).
-		var shadow struct {
-			CommandEvidence json.RawMessage `json:"command_evidence"`
+		salvaged, ok := salvageEvidence(raw)
+		if !ok {
+			return nil, fmt.Errorf("envelope at %s is not valid JSON: %w", r.dropPath, err)
 		}
-		if json.Unmarshal(raw, &shadow) == nil {
-			// Zero out the malformed field and re-parse the rest.
-			var m map[string]interface{}
-			var dropped []string
-			if json.Unmarshal(raw, &m) == nil {
-				// Keep the well-formed object entries (a mixed or partly
-				// string-typed list must not drop real evidence before the
-				// V4 gate looks at it); string entries are discarded.
-				delete(m, "command_evidence")
-				var elems []json.RawMessage
-				if json.Unmarshal(shadow.CommandEvidence, &elems) == nil {
-					kept := []json.RawMessage{}
-					for i, el := range elems {
-						var ce CommandEvidence
-						t := strings.TrimSpace(string(el))
-						switch {
-						case !strings.HasPrefix(t, "{"):
-							dropped = append(dropped, fmt.Sprintf("command_evidence[%d] is not an OBJECT", i))
-						default:
-							if uerr := json.Unmarshal(el, &ce); uerr != nil {
-								dropped = append(dropped, fmt.Sprintf("command_evidence[%d] could not be decoded: %v (started_at must be RFC3339, argv a string list, numbers numeric)", i, uerr))
-							} else {
-								kept = append(kept, el)
-							}
-						}
-					}
-					if len(kept) > 0 {
-						m["command_evidence"] = kept
-					}
-				}
-				if cleaned, jerr := json.Marshal(m); jerr == nil {
-					res = StepResult{} // the failed first decode leaves partial fields (e.g. a zeroed evidence entry)
-					if uerr := json.Unmarshal(cleaned, &res); uerr == nil {
-						res.evidenceDropped = dropped
-						goto parsed
-					}
-				}
-			}
-		}
-		return nil, fmt.Errorf("envelope at %s is not valid JSON: %w", r.dropPath, err)
+		res = *salvaged
 	}
-parsed:
 	// Light completion checks — the identity fields a minimal-contract
 	// envelope may leave to the dispatch are filled from the dispatch
 	// identity; the fence and the closed sets are enforced (full
@@ -1158,6 +1074,52 @@ parsed:
 		return nil, fmt.Errorf("driver: envelope outcome %q is not in the closed set", clipAgentText(string(res.Outcome)))
 	}
 	return &res, nil
+}
+
+// salvageEvidence is the tolerant re-parse of an envelope that failed to
+// decode: step agents persistently write command_evidence as a string
+// list instead of the object array. The well-formed object entries are
+// kept (a mixed list must not drop real evidence before the V4 gate
+// looks at it), every other entry is dropped with its reason recorded
+// (evidenceDropped), and the rest of the envelope is decoded as is.
+// ok is false when the envelope still does not decode.
+func salvageEvidence(raw []byte) (res *StepResult, ok bool) {
+	var m map[string]interface{}
+	var shadow struct {
+		CommandEvidence json.RawMessage `json:"command_evidence"`
+	}
+	if json.Unmarshal(raw, &shadow) != nil || json.Unmarshal(raw, &m) != nil {
+		return nil, false
+	}
+	delete(m, "command_evidence")
+	var dropped []string
+	var elems []json.RawMessage
+	if json.Unmarshal(shadow.CommandEvidence, &elems) == nil {
+		kept := []json.RawMessage{}
+		for i, el := range elems {
+			var ce CommandEvidence
+			if !strings.HasPrefix(strings.TrimSpace(string(el)), "{") {
+				dropped = append(dropped, fmt.Sprintf("command_evidence[%d] is not an OBJECT", i))
+			} else if uerr := json.Unmarshal(el, &ce); uerr != nil {
+				dropped = append(dropped, fmt.Sprintf("command_evidence[%d] could not be decoded: %v (started_at must be RFC3339, argv a string list, numbers numeric)", i, uerr))
+			} else {
+				kept = append(kept, el)
+			}
+		}
+		if len(kept) > 0 {
+			m["command_evidence"] = kept
+		}
+	}
+	cleaned, err := json.Marshal(m)
+	if err != nil {
+		return nil, false
+	}
+	res = &StepResult{}
+	if json.Unmarshal(cleaned, res) != nil {
+		return nil, false
+	}
+	res.evidenceDropped = dropped
+	return res, true
 }
 
 // archive lands the collected envelope at the R14 staging path —
