@@ -1,9 +1,8 @@
 package core
 
-// queue_test.go — the w140 unit tests for the ready queue's additive
-// 待选 bundle segment (plan step queue_pending_bundle_segment): exactly
-// the childless, bundle-less, queued, unblocked, non-waiting tickets;
-// epics in no segment; the old segments and entry fields unchanged.
+// queue_test.go — the ready queue's segment membership: only bound,
+// queued, unblocked, non-waiting tickets execute; registration tickets
+// and epics appear in no segment.
 
 import (
 	"encoding/json"
@@ -33,10 +32,10 @@ func queueIDs(t *testing.T, q *ReadyQueue, key string) []string {
 	for _, e := range entries {
 		id, _ := e["id"].(string)
 		ids = append(ids, id)
-		// additivity: every entry (old and new segments) keeps the old fields.
+		// every entry carries the WI fields the CLI renders.
 		for _, k := range []string{"id", "slug", "status", "goal", "priority", "bundle_name"} {
 			if _, ok := e[k]; !ok {
-				t.Fatalf("segment %q entry lost the old field %q (additive-only): %v", key, k, e)
+				t.Fatalf("segment %q entry lacks the field %q: %v", key, k, e)
 			}
 		}
 	}
@@ -52,7 +51,11 @@ func hasQueuedID(ids []string, id string) bool {
 	return false
 }
 
-func TestReadyQueuePendingBundleSegment(t *testing.T) {
+// TestReadyQueueSegments: the executable segment holds exactly the
+// bound, queued, unblocked, non-waiting tickets; registration tickets and
+// epics appear in no segment; the wire top level is exactly
+// project/items/running/paused.
+func TestReadyQueueSegments(t *testing.T) {
 	env := newEnv(t)
 	mk := func(goal string, bundle, parent *string) string {
 		wi, err := env.WIs.Create(CreateRequest{
@@ -65,12 +68,12 @@ func TestReadyQueuePendingBundleSegment(t *testing.T) {
 		return wi.ID
 	}
 
-	x := mk("executable bound", strPtrTest("q-x"), nil) // bound → items
-	tt := mk("pending candidate", nil, nil)             // T: the 待选 candidate
-	w := mk("waiting excluded", nil, nil)               // waiting_on → excluded
-	bq := mk("blocker", strPtrTest("q-bq"), nil)        // bound blocker → items
-	d := mk("dependency excluded", nil, nil)            // blocked → excluded
-	e := mk("epic parent", nil, nil)                    // epic → no segment
+	x := mk("executable bound", strPtrTest("q-x"), nil)    // bound → items
+	reg := mk("registration ticket", nil, nil)             // no bundle → no segment
+	w := mk("waiting excluded", strPtrTest("q-w"), nil)    // waiting_on → excluded
+	bq := mk("blocker", strPtrTest("q-bq"), nil)           // bound blocker → items
+	d := mk("dependency excluded", strPtrTest("q-d"), nil) // blocked → excluded
+	e := mk("epic parent", nil, nil)                       // epic → no segment
 	ec := mk("epic bound child", strPtrTest("q-ec"), strPtrTest(e))
 	v := mk("later unbound", strPtrTest("q-v"), nil) // bound now, unbound below
 
@@ -86,10 +89,6 @@ func TestReadyQueuePendingBundleSegment(t *testing.T) {
 		t.Fatalf("ready queue: %v", err)
 	}
 
-	items := queueIDs(t, q, "items")
-	pending := queueIDs(t, q, "pending_bundles")
-	// additivity: the old segments keep their keys and the wire top level
-	// only gains the new segment.
 	raw, _ := json.Marshal(q)
 	var wire map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &wire); err != nil {
@@ -97,41 +96,33 @@ func TestReadyQueuePendingBundleSegment(t *testing.T) {
 	}
 	for _, k := range []string{"project", "items", "running", "paused"} {
 		if _, ok := wire[k]; !ok {
-			t.Fatalf("queue lost the old top-level key %q", k)
+			t.Fatalf("queue lost the top-level key %q", k)
 		}
 	}
-	if len(wire) != 5 {
-		t.Fatalf("queue top level = %d keys, want exactly the old four + pending_bundles", len(wire))
+	if len(wire) != 4 {
+		t.Fatalf("queue top level = %d keys, want exactly project/items/running/paused", len(wire))
 	}
 
+	items := queueIDs(t, q, "items")
 	for _, id := range []string{x, bq, ec, v} {
 		if !hasQueuedID(items, id) {
-			t.Fatalf("executable segment lost %s (old membership must survive)", id)
+			t.Fatalf("executable segment lost %s", id)
 		}
 	}
-	for _, id := range []string{tt, w, d, e} {
+	for _, id := range []string{reg, w, d, e} {
 		if hasQueuedID(items, id) {
 			t.Fatalf("executable segment gained %s (must stay excluded)", id)
 		}
 	}
-
-	if !hasQueuedID(pending, tt) {
-		t.Fatalf("pending-bundle segment does not contain the qualifying ticket %s: %v", tt, pending)
-	}
-	for _, id := range []string{w, d, e, x, bq, ec, v} {
-		if hasQueuedID(pending, id) {
-			t.Fatalf("pending-bundle segment contains %s, which must be excluded", id)
+	for _, seg := range []string{"running", "paused"} {
+		for _, id := range []string{reg, e} {
+			if hasQueuedID(queueIDs(t, q, seg), id) {
+				t.Fatalf("%s appears in segment %q, want no segment", id, seg)
+			}
 		}
 	}
 
-	// the epic appears in NO segment at all.
-	for _, seg := range []string{"items", "running", "paused", "pending_bundles"} {
-		if hasQueuedID(queueIDs(t, q, seg), e) {
-			t.Fatalf("epic %s appears in segment %q, want no segment", e, seg)
-		}
-	}
-
-	// unbind tail: X→NULL returns the ticket to the pending segment.
+	// unbind: X→NULL removes the ticket from the executable segment.
 	if _, err := env.WIs.Patch(v, map[string]json.RawMessage{"bundle_name": json.RawMessage("null")}); err != nil {
 		t.Fatalf("unbind %s in R2 window: %v", v, err)
 	}
@@ -142,15 +133,12 @@ func TestReadyQueuePendingBundleSegment(t *testing.T) {
 	if hasQueuedID(queueIDs(t, q2, "items"), v) {
 		t.Fatalf("unbound ticket %s still in the executable segment", v)
 	}
-	if !hasQueuedID(queueIDs(t, q2, "pending_bundles"), v) {
-		t.Fatalf("unbound ticket %s did not return to the pending-bundle segment", v)
-	}
 }
 
 // TestReadyQueueWaitingOnRetainedValueExclusion (polyforge#149): a
-// queued ticket holding EITHER retained waiting_on value ('owner' or
-// 'dependency:<slug>') is excluded from the executable `items` segment
-// AND the `pending_bundles` segment; clearing waiting_on re-includes it.
+// queued bound ticket holding EITHER retained waiting_on value ('owner'
+// or 'dependency:<slug>') is excluded from the executable `items`
+// segment; clearing waiting_on re-includes it.
 func TestReadyQueueWaitingOnRetainedValueExclusion(t *testing.T) {
 	env := newEnv(t)
 	mk := func(goal string, bundle *string) string {
@@ -163,9 +151,8 @@ func TestReadyQueueWaitingOnRetainedValueExclusion(t *testing.T) {
 		}
 		return wi.ID
 	}
-	wo := mk("waiting owner ticket", nil)               // waiting_on=owner
-	wd := mk("waiting dependency ticket", nil)          // waiting_on=dependency:slug
-	bo := mk("bound waiting owner", strPtrTest("q-wo")) // bound + waiting_on=owner
+	wo := mk("waiting owner ticket", strPtrTest("q-wo"))      // waiting_on=owner
+	wd := mk("waiting dependency ticket", strPtrTest("q-wd")) // waiting_on=dependency:slug
 
 	patch := func(id, v string) {
 		t.Helper()
@@ -177,42 +164,29 @@ func TestReadyQueueWaitingOnRetainedValueExclusion(t *testing.T) {
 	}
 	patch(wo, "owner")
 	patch(wd, "dependency:demo-bundle")
-	patch(bo, "owner")
 
 	q, err := env.WIs.ReadyQueue("alpha")
 	if err != nil {
 		t.Fatalf("ready queue: %v", err)
 	}
-	for _, id := range []string{wo, wd, bo} {
+	for _, id := range []string{wo, wd} {
 		if hasQueuedID(queueIDs(t, q, "items"), id) {
 			t.Fatalf("waiting ticket %s appears in the executable segment", id)
 		}
-		if hasQueuedID(queueIDs(t, q, "pending_bundles"), id) {
-			t.Fatalf("waiting ticket %s appears in the pending-bundles segment", id)
-		}
 	}
 
-	// clearing waiting_on re-includes both (the plain segments by kind).
-	clear := func(id string) {
-		t.Helper()
-		if _, err := env.WIs.Patch(id, map[string]json.RawMessage{"waiting_on": json.RawMessage("null")}); err != nil {
-			t.Fatalf("clear waiting_on on %s: %v", id, err)
-		}
+	if _, err := env.WIs.Patch(wo, map[string]json.RawMessage{"waiting_on": json.RawMessage("null")}); err != nil {
+		t.Fatalf("clear waiting_on on %s: %v", wo, err)
 	}
-	clear(wo)
-	clear(bo)
 	q2, err := env.WIs.ReadyQueue("alpha")
 	if err != nil {
 		t.Fatalf("ready queue 2: %v", err)
 	}
-	if !hasQueuedID(queueIDs(t, q2, "pending_bundles"), wo) {
-		t.Fatalf("cleared ticket %s not re-included in pending_bundles", wo)
+	if !hasQueuedID(queueIDs(t, q2, "items"), wo) {
+		t.Fatalf("cleared ticket %s not re-included in items", wo)
 	}
-	if !hasQueuedID(queueIDs(t, q2, "items"), bo) {
-		t.Fatalf("cleared bound ticket %s not re-included in items", bo)
-	}
-	if hasQueuedID(queueIDs(t, q2, "items"), wd) || hasQueuedID(queueIDs(t, q2, "pending_bundles"), wd) {
-		t.Fatalf("still-waiting ticket %s leaked into a segment", wd)
+	if hasQueuedID(queueIDs(t, q2, "items"), wd) {
+		t.Fatalf("still-waiting ticket %s leaked into items", wd)
 	}
 }
 

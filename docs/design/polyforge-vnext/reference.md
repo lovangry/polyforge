@@ -68,7 +68,7 @@ The blocked WI has exactly two exits: `pf resume` (continue = resume-blocked + a
 
 - Edge kinds `blocks` (default), `supersedes`, `related` (`core/workitem.go` `AddDependency`); same project only; no self-edge; a `blocks` blocker must be an execution ticket (`CORE-400 BLOCKER_NOT_EXECUTABLE`); non-`related` edges refuse cycles (`CORE-409 DEPENDENCY_CYCLE`). Only a **wrapped** blocker releases a `blocks` edge (`core/owner.go`, #161).
 - Parent/child and bundle binding rules: `wi-kind-contract.md#§2` (one nesting level, `PARENT_NOT_REGISTRY`, `HAS_CHILDREN_NO_BUNDLE`, bundle frozen at first claim).
-- Ready queue `GET /projects/{p}/ready-queue` (`core/queue.go`): `{project, items, running, paused, pending_bundles}`; `items` = queued ∧ `waiting_on` empty ∧ no unfinished `blocks` edge ∧ has a bundle ∧ inventory repos still exist; ordered priority (`urgent high normal low`) then `created_at`. No `blocked` segment.
+- Ready queue `GET /projects/{p}/ready-queue` (`core/queue.go`): `{project, items, running, paused}`; `items` = queued ∧ `waiting_on` empty ∧ no unfinished `blocks` edge ∧ has a bundle ∧ inventory repos still exist; ordered priority (`urgent high normal low`) then `created_at`. No `blocked` segment.
 
 ### 2.3 attrs: no execution state <!-- §2.3 -->
 
@@ -142,7 +142,7 @@ health route. All paths under `/api/v1` except `/git/`.
 |---|---|---|---|
 | POST | `/work-items` | key + project writer | create (`bundle_name`, `repo_inventory`, `parent_id`, …) |
 | GET | `/work-items` | key; rows filtered by read access | `limit` (default 500, max 1000), `project`, `status`, `assignee`, `priority`, `milestone` |
-| GET | `/work-items/{id}` | key + read | `include=events,deps` (anything else `CORE-400`); `derived` block for parents |
+| GET | `/work-items/{id}` | key + read | `include=events,deps` (anything else `CORE-400`) |
 | PATCH | `/work-items/{id}` | key + writer | `goal content labels priority milestone waiting_on clean_pause`, `bundle_name` in the R2 window (`patchableFields`; `attrs` only at create) |
 | POST | `/work-items/{id}/cancel` | reporter/maintainer/admin | §2.1 |
 | POST | `/work-items/{id}/claim` | writer | §3.2 |
