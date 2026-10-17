@@ -35,7 +35,7 @@
 - **model_candidates**：step 的有序候选列表 `<harness>:<model>[:<effort>]`（§4.1；优先级与切换见 `reference.md#§7.5`）。
 - **grill / grill-review**：参考流程中两个显式 step（§4.2、§4.3）。
 - **e2e-author**：code 之前只为新行为编写验收场景、提交，并在同一步内对实现前的树证明逐场景断言级红；code 之后由 `verification` 复跑（polyforge#165）。
-- **gate FAIL / 基础设施失败**：前者是闸对产出的否定判定（`gate_failed` 结果）；后者是一切未产出判定的失败（进程死亡、无结果退出、超时、限流等，死因见 `v2-converge.md#§2.3`）。输出不合 `output` schema **不是**基础设施失败（只记录模式，§4.4）。
+- **gate FAIL / 基础设施失败**：前者是闸对产出的否定判定（`gate_failed` 结果）；后者是一切未产出判定的失败（进程死亡、无结果退出、超时、限流等，死因见 `v2-converge.md#§2.3`）。输出不合 `output` schema **不是**基础设施失败（release/deploy 两步为信封被拒，其余只记录，§4.4）。
 - **人工 gate**：`requires_human_answer: true`（本次尝试链里没有人工回答前既不能 completed 也不能 gate_failed）或 `if_asked`（问题只能由人回答，零问题可完成但记 `human_gate_unasked` 事件）。旧键 `interactive:` 是未知键，被忽略——写了它**得不到**人工 gate。
 - **`next_step_by_order`**：驱动主循环选下一个待执行 step 的过程（最早的非 done step）；不判断 workflow 成功或失败（§6.5）。
 
@@ -47,7 +47,7 @@
 - INV-1d：rewind 使 `[target, gate)` 内全部 step 重置为 `pending`，旧产物归档为历史尝试，不存在第二种失效机制。
 - INV-1e：`next_step_by_order` 返回空只有两种原因——全部 done，或 workflow 已是 `failed_gate` / `failed_rewind_exhausted`；主循环必须先区分再决定收尾（§6.5）。
 - INV-1g：模型候选只在 workflow.md frontmatter（及 `.polyforge.yaml` / `pf submit --models` 覆盖，`reference.md#§7.5`）；候选指针只由模型类死因推进，gate FAIL 绝不切换候选（rewind 重置指针）。
-- INV-1h：step 定义文件不写 `model`；completed 结果的 `output` 应符合声明的 `output` schema，当前只记录不拒收（§4.4）。
+- INV-1h：step 定义文件不写 `model`；completed 结果的 `output` 应符合声明的 `output` schema：release bundle 的 `release`/`deploy` 强制（不合格拒收），其余只记录不拒收（§4.4）。
 
 ## 4. 数据结构：workflow.md frontmatter schema 与 step 定义文件 <!-- §4 -->
 
@@ -155,7 +155,7 @@ frontmatter 字段——**driver 只读 `output`**：
 | `model` | 禁止 | 模型选择只在 workflow.md frontmatter（INV-1g），`model` 不被读取 |
 | `tools` | 已删除（G10） | 从未被读取；旧快照里残留的被忽略 |
 
-**输出契约（INV-1h）**：v2.5.0 起为**只记录模式**（`driver/outputschema.go` 的 `enforceOutputSchemas=false`，唯一开关）：不合格只记持久事件 `output_schema_violation`，不拒信封、不算基础设施失败、不推进候选；声明了却无法加载的 schema 记 `output_schema_unloadable` 并写 stderr。翻转开关后将改为信封被拒（同一进程内重试车道）。
+**输出契约（INV-1h）**：release bundle 的 `release`、`deploy` 两步**强制**（`driver/outputschema.go` 的 `outputSchemaEnforced`）：不合格即信封被拒（同一进程内重试车道），不算基础设施失败、不推进候选。其余 step 为**只记录模式**：不合格只记持久事件 `output_schema_violation`，不拒信封、不算基础设施失败、不推进候选。声明了却无法加载的 schema 记 `output_schema_unloadable` 并写 stderr。
 
 ### 4.4a step 间上下文传递：`context_policy` 与 `handoff`（polyforge#147） <!-- §4.4a -->
 
