@@ -887,6 +887,12 @@ func (m *Monitor) onPushResult(res pushResult) {
 	_ = m.log.Append(m.wi.WorkItem, EvPushFailed, map[string]any{
 		"version": res.version, "error": res.err.Error(),
 	})
+	if gitops.IsCredentialRefused(res.err) {
+		// the git face refused the session credential — this session may
+		// no longer hold the work item: revalidate at the next tick, not
+		// at the next interval (a superseded work item stops at once)
+		m.lastVerifyAt = time.Time{}
+	}
 }
 
 // checkBackpressure writes the DEGRADATION events (§九): N consecutive

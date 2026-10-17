@@ -3,7 +3,9 @@ package observe
 // session.go: the v1.5 M4 session revalidation — the periodic holder
 // check that bounds zombie discovery latency (the design record's
 // ruling: push-cadence-dependent discovery is unbounded; a supersession
-// (force-end + re-claim elsewhere) must be learned within ~5 minutes even when the zombie never pushes).
+// (force-end + re-claim elsewhere) must be learned within ~30 seconds even
+// when the zombie never pushes). A boundary push the git face refuses for
+// its credential re-runs the check at once (onPushResult).
 //
 // Every monitor tick piggybacks a session-verify for each RUNNING job
 // whose attachment carried a session id (RTMsg.SessionID travels
@@ -22,7 +24,7 @@ package observe
 //     and every unmatched verdict re-emits OBSuperseded (a full OB
 //     channel dropped the first delivery; the runtime's RTFinished
 //     release — Finding 4 — is what stops the loop), at a bounded retry
-//     cadence rather than the full ~5min interval.
+//     cadence.
 //
 //   - verify error (transport) → LOG ONLY, never act. A dead network
 //     must not kill a live job: the check retries after a bounded
@@ -56,9 +58,8 @@ type SessionVerifier interface {
 
 // Revalidation tunables.
 const (
-	// defaultRevalidateEvery is the M4 cadence (~5 minutes per RUNNING
-	// job).
-	defaultRevalidateEvery = 5 * time.Minute
+	// defaultRevalidateEvery is the M4 cadence (per RUNNING job).
+	defaultRevalidateEvery = 30 * time.Second
 	// verifyErrorBackoff bounds the retry cadence after a TRANSPORT-class
 	// verify failure: the next attempt waits this long (never the full
 	// interval — the task's "retry next tick" — but never the raw poll
@@ -210,8 +211,7 @@ func (m *Monitor) onVerifyResult(res verifyResult) {
 	})
 	// Bound the retry cadence like the transport-error path: the next
 	// re-verify fires after verifyErrorBackoff (never longer than the
-	// configured interval), so a dropped delivery is retried in seconds,
-	// not at the raw ~5min revalidation interval.
+	// configured interval).
 	backoff := verifyErrorBackoff
 	if m.cfg.revalidate < backoff {
 		backoff = m.cfg.revalidate

@@ -1014,3 +1014,24 @@ func TestFetchTaskRefHonoursContext(t *testing.T) {
 		t.Fatalf("the cancelled fetch took %s", d)
 	}
 }
+
+// IsCredentialRefused must match a REAL push the git face refused for
+// its credential (an HTTP 401), and not a push that failed otherwise.
+func TestIsCredentialRefusedOnRealGitOutput(t *testing.T) {
+	setIdentity(t)
+	o, _ := testOpts(t, "wi_cred")
+	mkBare(t, o.RemoteURL, true)
+	mkCapsule(t, o)
+	writeDirty(t, o, "a.txt", "a\n")
+	refused := o
+	refused.RemoteURL, _ = attackerServer(t)
+	_, _, _, err := CommitPush(refused, "refused")
+	if err == nil || !IsCredentialRefused(err) {
+		t.Fatalf("a 401 push: err=%v, want a credential refusal", err)
+	}
+	dead := o
+	dead.RemoteURL = filepath.Join(t.TempDir(), "nowhere.git")
+	if _, _, _, err := CommitPush(dead, "dead"); err == nil || IsCredentialRefused(err) {
+		t.Fatalf("a push to a missing remote: err=%v, want a failure that is no credential refusal", err)
+	}
+}
