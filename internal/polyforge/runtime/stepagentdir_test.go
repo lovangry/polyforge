@@ -123,7 +123,7 @@ func TestStepAgentDirMinimalSetAndPlacement(t *testing.T) {
 
 func TestStepAgentDirNeverCopiesSettings(t *testing.T) {
 	src := operatorDirFixture(t)
-	cfg := Config{DataDir: t.TempDir(), OperatorAgentDir: src}
+	cfg := Config{DataDir: t.TempDir(), HarnessRoot: t.TempDir(), OperatorAgentDir: src}
 	if err := cfg.SyncStepAgentDir(); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestStepAgentDirNeverCopiesSettings(t *testing.T) {
 
 func TestStepAgentDirResyncFollowsSourceAndPrunesExtras(t *testing.T) {
 	src := operatorDirFixture(t)
-	cfg := Config{DataDir: t.TempDir(), OperatorAgentDir: src}
+	cfg := Config{DataDir: t.TempDir(), HarnessRoot: t.TempDir(), OperatorAgentDir: src}
 	if err := cfg.SyncStepAgentDir(); err != nil {
 		t.Fatalf("first sync: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestStepAgentDirResyncFollowsSourceAndPrunesExtras(t *testing.T) {
 // the prune is the daemon-start sync's job.
 func TestStepAgentDirPerSpawnRefreshNeverPrunes(t *testing.T) {
 	src := operatorDirFixture(t)
-	cfg := Config{DataDir: t.TempDir(), OperatorAgentDir: src}
+	cfg := Config{DataDir: t.TempDir(), HarnessRoot: t.TempDir(), OperatorAgentDir: src}
 	if err := cfg.SyncStepAgentDir(); err != nil {
 		t.Fatalf("daemon-start sync: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestStepAgentDirPerSpawnRefreshNeverPrunes(t *testing.T) {
 
 func TestStepAgentDirExplicitSourceWithoutCredentialsRefuses(t *testing.T) {
 	src := t.TempDir() // configured, but no auth.json
-	cfg := Config{DataDir: t.TempDir(), OperatorAgentDir: src, OperatorAgentDirExplicit: true}
+	cfg := Config{DataDir: t.TempDir(), HarnessRoot: t.TempDir(), OperatorAgentDir: src, OperatorAgentDirExplicit: true}
 	err := cfg.SyncStepAgentDir()
 	if err == nil {
 		t.Fatal("an explicitly configured source without credentials must refuse (a step agent without credentials is a dead end)")
@@ -258,7 +258,7 @@ func TestStepAgentDirExplicitSourceWithoutCredentialsRefuses(t *testing.T) {
 	}
 	// the implicit default (no flag/env) carries on instead: the harness
 	// adapter may hold its credentials elsewhere
-	cfg2 := Config{DataDir: t.TempDir(), OperatorAgentDir: src}
+	cfg2 := Config{DataDir: t.TempDir(), HarnessRoot: t.TempDir(), OperatorAgentDir: src}
 	if err := cfg2.SyncStepAgentDir(); err != nil {
 		t.Fatalf("the implicit default without file credentials must carry on, got: %v", err)
 	}

@@ -288,7 +288,7 @@ the same table, with the step-origin refusal and socket resolution, is in
 | Code | Meaning | Operator move |
 | --- | --- | --- |
 | `DAEMON-516` | Re-claim clone refusal: the capsule clone failed for a WI with published progress (or its progress cannot be determined), so a local init — which would restart the workflow at step 1 — is refused. The claim is abandoned back to blocked. | Fix aihub reachability / credentials, then `pf resume <id>`. |
-| `DAEMON-518` | A blocked WI continued on a different daemon than the one that sealed it, and the aihub capsule head is not the sealed head. | Continue it on the sealing machine, abandon with `pf cancel <id>`, or — when that machine is gone and its unpushed work may be lost — `pf resume <id> --accept-lost-work` (clears the seal; recorded as a `blocked_seal_abandoned` event). |
+| `DAEMON-518` | A blocked WI's aihub capsule head is not the sealed head, and the claiming daemon is not the sealing one or (on the sealing machine) no quarantined scene holds the sealed head. | Continue it on the sealing machine (it continues from the sealed head), abandon with `pf cancel <id>`, or — when the sealed work is gone — `pf resume <id> --accept-lost-work` (clears the seal; recorded as a `blocked_seal_abandoned` event). |
 
 A missing capsule is no longer a startup failure: only the affected WI is set to
 the ordinary `blocked` status at restart (the reason note names the cause —

@@ -266,6 +266,11 @@ type job struct {
 	// materialize clones each entry into repos/<name> before the agent
 	// starts. In-memory only — recovery never re-materializes.
 	repos []api.ProjectRepo
+	// sealedScene is the quarantined capsule of the blocked seal this
+	// claim continues on the sealing machine (verifySealedHead): its
+	// task repos are restored from there, not from aihub's carriers.
+	// Claim lane only; "" otherwise.
+	sealedScene string
 
 	// stepCandidates is the polyforge#79 claim-time compose: the
 	// per-step post-precedence candidate lists (step id → list; a
@@ -885,7 +890,7 @@ func (r *Runtime) claimScene(ctx context.Context, j *job, c api.SessionClaim) (n
 	if err := r.prepareCapsule(ctx, j); err != nil {
 		return "prepare capsule: " + err.Error(), err
 	}
-	if err := r.verifySealedHead(j, c); err != nil {
+	if err := r.verifySealedHead(ctx, j, c); err != nil {
 		return err.Error(), err
 	}
 	if err := r.materialize(ctx, j); err != nil {
@@ -1083,18 +1088,56 @@ func (r *Runtime) pendingClose(j *job, note string) bool {
 	return r.persistLog(j.wi)
 }
 
-// verifySealedHead is the cross-daemon continue guard (v2-converge §7): a
-// blocked WI claimed by a DIFFERENT machine than the one that sealed it must
-// find the sealing daemon's recorded capsule head in its fresh clone,
-// otherwise the clone is pre-blocked state (the #116 lesson) and the start
-// is refused. A same-machine continue, or a WI with no recorded seal, is
-// not gated here.
-func (r *Runtime) verifySealedHead(j *job, c api.SessionClaim) error {
-	if c.SealedHead == "" || c.SealedMachine == "" || c.SealedMachine == r.cfg.MachineID {
+// verifySealedHead is the continue guard of a blocked seal (v2-converge §7):
+// a blocked WI never continues without the sealing daemon's recorded
+// capsule head. A clone already at that head proceeds. When aihub lacks it
+// on the sealing machine, the sealed scene is the newest quarantined
+// generation of the work item (prepareCapsule moved it aside) whose
+// git-dir holds the head — a materialized one first, so an adopted clone
+// that never laid its task repos out is passed over. The fresh clone
+// adopts the head from it (the next publish pushes it), and the task
+// repos are restored from the same generation (j.sealedScene,
+// cloneTaskRepos). Anywhere else a clone not at the head
+// is pre-blocked state (the #116 lesson) and the start is refused, as on
+// the sealing machine when no generation holds the head. A WI with no
+// recorded seal is not gated.
+func (r *Runtime) verifySealedHead(ctx context.Context, j *job, c api.SessionClaim) error {
+	if c.SealedHead == "" || c.SealedMachine == "" {
 		return nil
 	}
 	head, err := gitops.Head(j.git)
-	if err == nil && head == c.SealedHead {
+	atHead := err == nil && head == c.SealedHead
+	if c.SealedMachine == r.cfg.MachineID {
+		if atHead {
+			return nil
+		}
+		gen, scene := "", ""
+		for _, q := range quarantinedGitDirs(j.git.GitDir) {
+			if !gitops.HasCommit(j.git, q, c.SealedHead) {
+				continue
+			}
+			s := j.capsuleDir + strings.TrimPrefix(q, j.git.GitDir)
+			if _, serr := os.Stat(filepath.Join(s, filepath.FromSlash(RelMaterializeMarker))); serr == nil {
+				gen, scene = q, s
+				break
+			}
+			if gen == "" {
+				gen = q
+			}
+		}
+		if gen != "" {
+			if aerr := gitops.AdoptCommit(ctx, j.git, c.SealedHead, gen); aerr != nil {
+				return aerr
+			}
+			j.sealedScene = scene
+			fmt.Fprintf(os.Stderr, "runtime: %s: continuing from the sealed head %s adopted from %s\n", j.wi, c.SealedHead, gen)
+			return nil
+		}
+		return &api.Error{Code: api.ErrDaemonSealedHeadMismatch,
+			Detail: fmt.Sprintf("continue refused: the work item was sealed blocked by this machine (%q) at capsule head %s, but neither the aihub capsule (at %q) nor any quarantined capsule of it on this machine holds that commit — accept losing that work with pf resume %s --accept-lost-work, or abandon (pf cancel)",
+				c.SealedMachine, c.SealedHead, head, j.wi)}
+	}
+	if atHead {
 		return nil
 	}
 	return &api.Error{Code: api.ErrDaemonSealedHeadMismatch,

@@ -131,19 +131,40 @@ var wipSkippedFilters = map[string]bool{"lfs": true, "git-crypt": true}
 // unborn task HEAD has nothing to anchor a WIP commit to and is skipped.
 // Takes the per-WI lock.
 func PushTaskWIP(o Opts, keep, chainOK bool) {
+	_, _ = pushTaskWIP0(o, keep, chainOK)
+}
+
+// SnapshotTaskRepos runs the WIP lane (keep) over the capsule at
+// o.CapsuleDir into o.RemoteURL and answers what it should have carried
+// — every task repo except one whose HEAD is unborn — and the repos whose
+// carrier or WIP snapshot was not written. A caller that must not lose
+// task-repo state checks both.
+func SnapshotTaskRepos(o Opts) (want, failed []string) {
+	return pushTaskWIP0(o, true, false)
+}
+
+// pushTaskWIP0 is PushTaskWIP answering SnapshotTaskRepos' lists.
+func pushTaskWIP0(o Opts, keep, chainOK bool) (want, failed []string) {
 	if o.RemoteURL == "" {
-		return
+		return nil, nil
 	}
 	release := Lock(o.WorkItemID)
 	defer release()
-	reposDir, srcs := pushTaskRefsLocked(o, chainOK)
+	reposDir, srcs, failed := pushTaskRefsLocked(o, chainOK)
+	want = append([]string{}, failed...)
+	for _, s := range srcs {
+		want = append(want, s.name)
+	}
 	if len(srcs) == 0 {
-		return
+		return want, failed
 	}
 	additions, cleanup, err := credentialEnv(o)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gitops: %s: task WIP lane skipped (credential prep failed): %v\n", o.WorkItemID, err)
-		return
+		for _, s := range srcs {
+			failed = append(failed, s.name)
+		}
+		return want, failed
 	}
 	defer cleanup()
 	env := carrierEnv(reposDir)
@@ -153,6 +174,7 @@ func PushTaskWIP(o Opts, keep, chainOK bool) {
 			fmt.Fprintf(os.Stderr, "gitops: %s: repo %s: WIP lane skipped: %s\n", o.WorkItemID, s.name, o.ended())
 			if keep {
 				o.carrierRefFailed(s.name, ref, chainOK, o.ended()+" before the WIP snapshot (the hub's WIP ref, if any, predates this close)")
+				failed = append(failed, s.name)
 			}
 			continue
 		}
@@ -173,6 +195,7 @@ func PushTaskWIP(o Opts, keep, chainOK bool) {
 				}
 				fmt.Fprintf(os.Stderr, "gitops: %s: WIP push for repo %s failed (its uncommitted work may not survive a re-claim; the hub's WIP ref, if any, predates this close): %s: %s\n", o.WorkItemID, s.name, detail, strings.TrimSpace(out))
 				o.carrierRefFailed(s.name, ref, chainOK, detail+" (the hub's WIP ref, if any, predates this close)")
+				failed = append(failed, s.name)
 				continue
 			}
 			if wip != "" {
@@ -183,6 +206,7 @@ func PushTaskWIP(o Opts, keep, chainOK bool) {
 		}
 		dropWIPRef(o, env, ref, additions)
 	}
+	return want, failed
 }
 
 // pushTaskWIP snapshots the working tree of one task repo into a WIP

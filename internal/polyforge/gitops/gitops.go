@@ -557,7 +557,7 @@ func pushLocked(ctx context.Context, o Opts) (bool, int64, error) {
 	// fenced session fails both, and that is not a "cannot be saved"
 	// decision (a still-failing carrier is reported on the next
 	// successful publish).
-	pushTaskRefsLocked(o, perr == nil)
+	_, _, _ = pushTaskRefsLocked(o, perr == nil)
 	return perr == nil, pushMS, perr
 }
 
@@ -600,19 +600,22 @@ func TaskRefName(repo string) string { return TaskCarrierNamespace + repo }
 // repo's object store through objects/info/alternates (data only — git
 // reads objects from an alternate, it runs nothing from it). It answers
 // the symlink-resolved repos dir and the repos that passed carrierSource
-// with a born HEAD (the WIP lane, PushTaskWIP, works on exactly those).
-func pushTaskRefsLocked(o Opts, chainOK bool) (string, []carrierSrc) {
+// with a born HEAD (the WIP lane, PushTaskWIP, works on exactly those),
+// and the repos whose carrier was not written (skipped, refused or a
+// failed push).
+func pushTaskRefsLocked(o Opts, chainOK bool) (string, []carrierSrc, []string) {
 	reposDir := filepath.Join(o.CapsuleDir, capsule.DirRepos)
 	ents, err := os.ReadDir(reposDir)
 	if err != nil {
-		return "", nil // no repos/ tree: no inventory, nothing to carry
+		return "", nil, nil // no repos/ tree: no inventory, nothing to carry
 	}
 	// ONE symlink-resolved repos dir for every check and push (the
 	// GIT_CEILING_DIRECTORIES value and the object paths agree).
 	if reposDir, err = filepath.EvalSymlinks(reposDir); err != nil {
-		return "", nil
+		return "", nil, []string{"repos/ (" + err.Error() + ")"}
 	}
 	var srcs []carrierSrc
+	var failed []string
 	for _, e := range ents {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
@@ -620,6 +623,7 @@ func pushTaskRefsLocked(o Opts, chainOK bool) (string, []carrierSrc) {
 		if o.expired() {
 			fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s skipped: %s\n", o.WorkItemID, e.Name(), o.ended())
 			o.carrierFailed(e.Name(), chainOK, o.ended())
+			failed = append(failed, e.Name())
 			continue
 		}
 		objects, sha, reason := carrierSourceT(o, reposDir, e.Name())
@@ -629,6 +633,7 @@ func pushTaskRefsLocked(o Opts, chainOK bool) (string, []carrierSrc) {
 		if reason != "" {
 			fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s refused (task-repo state may not survive a re-claim): %s\n", o.WorkItemID, e.Name(), reason)
 			o.carrierFailed(e.Name(), chainOK, "carrier push refused: "+reason)
+			failed = append(failed, e.Name())
 			continue
 		}
 		if sha == "" {
@@ -637,12 +642,15 @@ func pushTaskRefsLocked(o Opts, chainOK bool) (string, []carrierSrc) {
 		srcs = append(srcs, carrierSrc{e.Name(), objects, sha})
 	}
 	if len(srcs) == 0 {
-		return reposDir, nil
+		return reposDir, nil, failed
 	}
 	additions, cleanup, cerr := credentialEnv(o)
 	if cerr != nil {
 		fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push skipped (credential prep failed): %v\n", o.WorkItemID, cerr)
-		return reposDir, srcs
+		for _, s := range srcs {
+			failed = append(failed, s.name)
+		}
+		return reposDir, srcs, failed
 	}
 	defer cleanup()
 	for _, s := range srcs {
@@ -657,6 +665,7 @@ func pushTaskRefsLocked(o Opts, chainOK bool) (string, []carrierSrc) {
 		}
 		fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s failed (task-repo state may not survive a re-claim): %s: %s\n", o.WorkItemID, s.name, detail, strings.TrimSpace(out))
 		o.carrierFailed(s.name, chainOK, detail)
+		failed = append(failed, s.name)
 		// Never force: a non-fast-forward rejection means the carrier
 		// and this worktree DIVERGED (e.g. a re-claim that started
 		// from a clone lacking the carried commits). The carrier is
@@ -670,7 +679,7 @@ func pushTaskRefsLocked(o Opts, chainOK bool) (string, []carrierSrc) {
 			})
 		}
 	}
-	return reposDir, srcs
+	return reposDir, srcs, failed
 }
 
 // carrierSrc is one task repo that passed carrierSource with a born HEAD:
@@ -1039,6 +1048,31 @@ func Clone(ctx context.Context, o Opts) error {
 		// The real diagnosis lives in the error (stderr); stdout is empty
 		// on failure.
 		return fmt.Errorf("git symbolic-ref: %s", err.Error())
+	}
+	return nil
+}
+
+// HasCommit reports whether the git-dir gitDir holds sha as a commit
+// (read-only).
+func HasCommit(o Opts, gitDir, sha string) bool {
+	_, err := git(append(hubEnv(o, false, nil), "GIT_DIR="+gitDir), "", "cat-file", "-e", sha+"^{commit}")
+	return err == nil
+}
+
+// AdoptCommit moves a freshly cloned capsule's chain to sha, taking the
+// commit from the local git-dir src (git fetch from a path: nothing
+// leaves the machine, src is only read). The worktree is reset to sha, so
+// the chain continues from it and the next publish pushes the adopted
+// commits. Takes the per-WI lock; ctx bounds the fetch.
+func AdoptCommit(ctx context.Context, o Opts, sha, src string) error {
+	release := Lock(o.WorkItemID)
+	defer release()
+	env := hubEnv(o, true, nil)
+	if _, err := runGitCtx(ctx, chainRemoteTimeout, env, o.CapsuleDir, "fetch", "--no-tags", "--quiet", src, sha); err != nil {
+		return fmt.Errorf("gitops: fetching %s from %s: %w", sha, src, err)
+	}
+	if _, err := git(env, o.CapsuleDir, "reset", "--quiet", "--hard", sha); err != nil {
+		return fmt.Errorf("gitops: moving the chain to %s: %w", sha, err)
 	}
 	return nil
 }

@@ -73,6 +73,21 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 	for _, name := range recorded {
 		repos = append(repos, api.ProjectRepo{Name: name})
 	}
+	// The carrier store the restores read: aihub's bare repo, or — for a
+	// continue of a blocked seal on the sealing machine — the sealed
+	// scene's own task-repo state.
+	store := j.git
+	if j.sealedScene != "" {
+		local, err := sealedTaskStore(j)
+		if local != "" {
+			defer os.RemoveAll(local)
+		}
+		if err != nil {
+			return nil, &api.Error{Code: api.ErrDaemonSpawnFail,
+				Detail: fmt.Sprintf("task_repo_restore_failed: snapshotting the task repos of the sealed scene %s failed: %v (the scene is kept; fix the cause and resume)", j.sealedScene, err)}
+		}
+		store.RemoteURL, store.Username, store.Secret = local, "", ""
+	}
 	for _, pr := range repos {
 		if !safeRepoName(pr.Name) {
 			return nil, repoCloneErr(j.wi, pr, "repo name %q is not a single safe path element", pr.Name)
@@ -98,7 +113,7 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 		// (typed DAEMON-507, the WI closes blocked, the carrier stays
 		// safe on aihub) and the half-restored clone is removed so a
 		// retry re-clones it cleanly.
-		restored, rerr := r.restoreTaskRepoState(ctx, j, pr.Name, dir)
+		restored, rerr := r.restoreTaskRepoState(ctx, j, store, pr.Name, dir)
 		if rerr != nil {
 			_ = os.RemoveAll(dir)
 			return nil, repoCloneErr(j.wi, pr, "task_repo_restore_failed: %v (the WI's commits are safe on %s at aihub; fix the cause and resume)", rerr, gitops.TaskRefName(pr.Name))
@@ -108,11 +123,53 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 		}
 		// The previous session's uncommitted work (polyforge#167):
 		// checked out on top of the restored head, never committed.
-		r.restoreTaskWIP(ctx, j, pr.Name, dir, sha)
+		r.restoreTaskWIP(ctx, j, store, pr.Name, dir, sha)
 		out[pr.Name] = sha
 	}
 	return out, nil
 }
+
+// sealedTaskStore records the sealed scene's task-repo state in a
+// daemon-owned local bare repo, in aihub's carrier layout: the carrier
+// lane (gitops.PushTaskWIP, the close points' own snapshot) runs over the
+// scene with that repo as its remote, so each repos/<name> HEAD lands on
+// refs/pf-task/<name> and its uncommitted work on refs/pf-wip/<name>, and
+// the claim-time restore reads it exactly as it reads aihub. Every task
+// repo of the scene with a born HEAD must land there, or the claim is
+// refused (the seal stays). The scene is only read. The store sits beside the external git-dirs as a pf-carrier-*
+// temp (the daemon start sweeps one a crash left); the caller removes it.
+func sealedTaskStore(j *job) (string, error) {
+	store, err := os.MkdirTemp(filepath.Dir(j.git.GitDir), "pf-carrier-sealed-")
+	if err != nil {
+		return "", err
+	}
+	if out, err := gitTask(context.Background(), store, "init", "--quiet", "--bare", "--template=", store); err != nil {
+		return store, fmt.Errorf("%v: %s", err, strings.TrimSpace(out))
+	}
+	want, failed := snapshotTaskReposFn(gitops.Opts{
+		WorkItemID:    j.wi,
+		CapsuleDir:    j.sealedScene,
+		GitDir:        j.git.GitDir,
+		RemoteURL:     store,
+		EventSink:     j.git.EventSink,
+		CarrierAlerts: &gitops.CarrierAlerts{},
+	})
+	if len(failed) > 0 {
+		return store, fmt.Errorf("the task-repo state of %s could not be recorded", strings.Join(failed, ", "))
+	}
+	// Fail closed: a carrier missing from the store would read as "first
+	// claim" and continue from the origin's branch without the sealed work.
+	for _, name := range want {
+		if _, err := gitTask(context.Background(), store, "--git-dir="+store, "rev-parse", "--verify", "-q", gitops.TaskRefName(name)); err != nil {
+			return store, fmt.Errorf("repos/%s has a born HEAD but its carrier %s was not recorded", name, gitops.TaskRefName(name))
+		}
+	}
+	return store, nil
+}
+
+// snapshotTaskReposFn is sealedTaskStore's carrier-lane run (a seam for
+// the store-failure test).
+var snapshotTaskReposFn = gitops.SnapshotTaskRepos
 
 // fetchTaskRefFn is the carrier read (a seam for the hub-blip test);
 // carrierFetchBackoff is the first wait of its retries of a transient
@@ -136,9 +193,9 @@ var (
 // has none, so the carrier tip lands on the deterministic branch
 // carrierFallbackBranch. Non-destructive by construction: the worktree
 // is a just-created clone with no local state.
-func (r *Runtime) restoreTaskRepoState(ctx context.Context, j *job, name, dir string) (string, error) {
+func (r *Runtime) restoreTaskRepoState(ctx context.Context, j *job, store gitops.Opts, name, dir string) (string, error) {
 	ref := gitops.TaskRefName(name)
-	sha, err := fetchTaskRefFn(ctx, j.git, dir, name)
+	sha, err := fetchTaskRefFn(ctx, store, dir, name)
 	// a hub blip must not park the work item blocked: a transient failure
 	// is retried with backoff before the claim gives up on it; a refusal
 	// (auth, no such repository) fails at once
@@ -149,7 +206,7 @@ func (r *Runtime) restoreTaskRepoState(ctx context.Context, j *job, name, dir st
 			return "", fmt.Errorf("carrier %s fetch failed: %w", ref, err)
 		case <-time.After(wait):
 		}
-		sha, err = fetchTaskRefFn(ctx, j.git, dir, name)
+		sha, err = fetchTaskRefFn(ctx, store, dir, name)
 	}
 	if err != nil {
 		return "", fmt.Errorf("carrier %s fetch failed: %w", ref, err)
@@ -194,7 +251,7 @@ func (r *Runtime) restoreTaskRepoState(ctx context.Context, j *job, name, dir st
 // claim; every failure is loud (stderr + the event). The ref also stays
 // after an apply: the next close supersedes or deletes it, and
 // re-applying it after a crash before that close is the same restore.
-func (r *Runtime) restoreTaskWIP(ctx context.Context, j *job, name, dir, head string) {
+func (r *Runtime) restoreTaskWIP(ctx context.Context, j *job, store gitops.Opts, name, dir, head string) {
 	ref := gitops.TaskWIPRefName(name)
 	notApplied := func(reason string, extra map[string]any) {
 		fmt.Fprintf(os.Stderr, "runtime: %s: repo %s: %s not applied: %s\n", j.wi, name, ref, reason)
@@ -207,7 +264,7 @@ func (r *Runtime) restoreTaskWIP(ctx context.Context, j *job, name, dir, head st
 		}
 		j.git.EventSink(gitops.EventTaskWIPNotApplied, body)
 	}
-	wip, err := gitops.FetchTaskWIP(ctx, j.git, dir, name)
+	wip, err := gitops.FetchTaskWIP(ctx, store, dir, name)
 	if err != nil {
 		notApplied("fetch failed: "+err.Error(), nil)
 		return
