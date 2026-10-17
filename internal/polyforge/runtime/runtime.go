@@ -30,6 +30,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/common/workflow"
+	"github.com/silgrid/polyforge/internal/polyforge/crashpoint"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
@@ -914,6 +915,7 @@ func (r *Runtime) claimLocked(ctx context.Context, wi, id string, probe *api.Wor
 	}
 	// The claim goes out under the canonical id: the journal entry, the
 	// lock and the claim all name the same work item.
+	crashpoint.At("claim.before-answer")
 	resp, err := r.hub.SessionClaim(api.SessionClaimRequest{
 		WorkItemID:     id,
 		SessionID:      sessionID,
@@ -951,6 +953,7 @@ func (r *Runtime) claimLocked(ctx context.Context, wi, id string, probe *api.Wor
 		cerr := fmt.Errorf("runtime: %s: the claim answer names work item %s", id, cid)
 		return nil, r.abandonClaim(ctx, &job{wi: id, sessionID: sessionID}, id, cerr, cerr.Error())
 	}
+	crashpoint.At("claim.after-answer")
 	return r.claimPlaceholder(ctx, wi, id, sessionID, resp, wcfg, manual)
 }
 
@@ -2229,6 +2232,7 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 		}
 		return fmt.Errorf("runtime: %s: session-end failed (job left sealing, retrying): %w", j.wi, endErr)
 	}
+	crashpoint.At("seal.ended")
 	if err := sealReadOnly(j.capsuleDir); err != nil {
 		// The generation is closed; a chmod failure is a scene-preservation
 		// wart, not a seal failure. Loud, non-fatal.
@@ -2300,6 +2304,7 @@ func (r *Runtime) sealNetwork(ctx context.Context, j *job, reason, note string, 
 			j.mu.Lock()
 			j.sealedPush = true
 			j.mu.Unlock()
+			crashpoint.At("seal.pushed")
 		}
 	}
 	// Task-repo uncommitted work (polyforge#167): every close but wrapped
@@ -2366,6 +2371,7 @@ func (r *Runtime) pauseOp(ctx context.Context, j *job) error {
 	j.cleanPause = true
 	j.mu.Unlock()
 	r.persist()
+	crashpoint.At("pause.persisted")
 	// Six-layer teardown: no writer survives into the retained scene.
 	r.killAgentTree(j)
 	// The retained record carries no live agent: clear the pid so the

@@ -38,6 +38,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/harness"
+	"github.com/silgrid/polyforge/internal/polyforge/crashpoint"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
@@ -408,6 +409,7 @@ func (d *Driver) Run(ctx context.Context) error {
 		}
 		d.announceEnd(stepID, n, supervise.OutcomeResult, 0, "")
 		d.addUnbooked(stepID, dispatchedAt)
+		crashpoint.At("driver.collected:" + stepID)
 		if stop, err := d.settle(stepID, n, res, run); stop {
 			return err
 		}
@@ -540,6 +542,7 @@ func (d *Driver) settle(stepID string, n int64, res *StepResult, run StepRun) (s
 	}); err != nil {
 		return true, fmt.Errorf("driver: step %s result transition failed: %w", stepID, err)
 	}
+	crashpoint.At("driver.settled:" + stepID)
 	d.noteUnaskedHumanGate(stepID, n, res)
 	d.noteAcceptedResultRecords(stepID, n, res)
 
