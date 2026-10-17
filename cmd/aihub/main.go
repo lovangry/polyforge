@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -99,37 +100,23 @@ func main() {
 	jan.Start()
 	defer jan.Stop()
 
-	srv, mems := newServer(db, *dataDir, gitMgr)
+	srv := server.New(db, *dataDir, gitMgr)
 	srv.StaleAfter = *staleAfter
 	httpSrv := &http.Server{Addr: *listen, Handler: srv}
 
-	// Bind BEFORE the reconcile starts: the port must exist while any
-	// long background pass runs (polyforge#129: reconciling synchronously
-	// first would refuse every connection for the whole pass).
+	// Bind first, then migrate, then serve: a client connecting during the
+	// one-time memory content migration waits in the listen backlog
+	// instead of being refused, and no memory is served before its row
+	// carries its content.
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
 		log.Fatalf("aihub: listen: %v", err)
 	}
-
-	// Memory startup reconcile (authority files are the truth source).
-	// polyforge#129, serve-first: the reconcile's steady state is a
-	// freshness-stamp check (stat + row compare per entry, no reads, no
-	// index writes), but a first boot after an upgrade, an index repair
-	// is still O(library) — it runs in the
-	// background so the listener binds immediately, with progress logs
-	// for any long pass and a batch yield that lets API writers
-	// interleave. The completion line (always logged, a no-op reconcile
-	// included) is the readiness signal.
-	go func() {
-		start := time.Now()
-		n, err := mems.RebuildIndex()
-		if err != nil {
-			log.Printf("aihub: startup memory reconcile: %v", err)
-			return
-		}
-		log.Printf("aihub: startup memory reconcile complete: %d entries brought current in %s",
-			n, time.Since(start).Round(time.Millisecond))
-	}()
+	rep, err := srv.Mems.MigrateContent()
+	if err != nil {
+		log.Fatalf("aihub: memory content migration: %v", err)
+	}
+	logMigration(rep)
 
 	go func() {
 		sig := make(chan os.Signal, 1)
@@ -147,20 +134,19 @@ func main() {
 	}
 }
 
-// newServer assembles the HTTP server and returns the memory store the
-// startup reconcile must run on. It is srv.Mems itself — exactly one
-// memory.Store per process: the store's
-// per-entry lock table is per instance, so a second instance reconciling
-// in the background could sweep the serving instance's in-flight
-// memory.md.tmp or delete a row whose file rename had not landed yet.
-func newServer(db *core.DB, dataDir string, gitMgr *git.Manager) (*server.Server, *memory.Store) {
-	srv := server.New(db, dataDir, gitMgr)
-	mems := srv.Mems
-	mems.ReconcileProgress = func(p memory.ProgressReport) {
-		log.Printf("aihub: memory reconcile: scanned %d, reindexed %d, elapsed %s",
-			p.Scanned, p.Reindexed, p.Elapsed.Round(time.Millisecond))
+// logMigration logs one content migration pass: the counts always, the
+// ids of every row that needed more than a copy.
+func logMigration(rep memory.MigrateReport) {
+	log.Printf("aihub: memory content migration: %d copied, %d adopted (file differed from content_sha), %d redact completed, %d missing, in %s",
+		rep.Copied, len(rep.Adopted), len(rep.Redacted), len(rep.Missing), rep.Elapsed.Round(time.Millisecond))
+	for _, l := range []struct {
+		what string
+		ids  []string
+	}{{"adopted", rep.Adopted}, {"redact completed", rep.Redacted}, {"missing (not served)", rep.Missing}} {
+		if len(l.ids) > 0 {
+			log.Printf("aihub: memory content migration: %s: %s", l.what, strings.Join(l.ids, " "))
+		}
 	}
-	return srv, mems
 }
 
 // bootstrapKeyFile is the data-dir file a fresh install writes the

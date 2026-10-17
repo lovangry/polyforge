@@ -1,21 +1,17 @@
 package memory
 
-// Store: per-mem write mutexes, the three-step write order, the INV-7f
-// serving gate, FTS5-trigram search (with the short-query widening for
-// <3-rune tokens, kept from v0: trigram MATCH cannot answer those) and
-// redact.
+// Store: the memories rows (the stored document lives in the content
+// column), FTS5-trigram search (with the short-query widening for <3-rune
+// tokens, kept from v0: trigram MATCH cannot answer those) and redact.
 
 import (
 	"container/heap"
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -23,36 +19,8 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 )
 
-// fileStamp is the freshness stamp a memories row carries (polyforge#129):
-// the authority file's observed mtime (nanoseconds) and byte size at the
-// moment the row was written. Equality with a fresh Stat of the file is
-// the reconcile's skip condition — the row (and its FTS row, written in
-// the same transaction) then provably describe this exact file state.
-type fileStamp struct {
-	mtimeNS int64
-	size    int64
-}
-
-// statStamp observes one file's freshness stamp. nil when the file cannot
-// be stat'ed: the row is written unstamped and the next reconcile pass
-// verifies it by content — a write never fails for a stamp.
-func statStamp(path string) *fileStamp {
-	st, err := os.Stat(path)
-	if err != nil {
-		return nil
-	}
-	return &fileStamp{mtimeNS: st.ModTime().UnixNano(), size: st.Size()}
-}
-
-// stampArgs renders a stamp as two SQL values (NULL when unstamped).
-func stampArgs(st *fileStamp) (any, any) {
-	if st == nil {
-		return nil, nil
-	}
-	return st.mtimeNS, st.size
-}
-
-// Entry is the memories row as served.
+// Entry is the memories row as served. ContentSHA and ContentLen
+// describe the stored document (frontmatter + body).
 type Entry struct {
 	ID          string   `json:"id"`
 	ProjectID   string   `json:"project_id"`
@@ -68,73 +36,22 @@ type Entry struct {
 	Status      string   `json:"status"`
 	CreatedAt   string   `json:"created_at"`
 	UpdatedAt   string   `json:"updated_at"`
-
-	apath string `json:"-"` // authority_path, internal
-
-	// fsStamp is the row's freshness stamp (polyforge#129); nil when the
-	// row is unstamped (a pre-#129 row, or a write that could not stat
-	// the file) and the reconcile must verify it by content.
-	fsStamp *fileStamp `json:"-"`
 }
 
 // Store is the memory subsystem.
 type Store struct {
-	db      *core.DB
+	db *core.DB
+	// dataDir holds the memory/ tree the content migration reads
+	// (migrate.go); nothing else touches the file system.
 	dataDir string
-
-	// ReconcileProgress, when set, receives periodic progress during
-	// O(library) reconcile passes (polyforge#129: a long pass — first
-	// boot after the upgrade, index repair — must be
-	// distinguishable from a hang). Set it before the first RebuildIndex
-	// call; it is invoked only from the goroutine running the pass.
-	ReconcileProgress func(ProgressReport)
 
 	// now is the search clock the freshness term ages entries against
 	// (freshness.go); tests pin it.
 	now func() time.Time
-
-	mu    sync.Mutex
-	locks map[string]*sync.Mutex // per-mem_id write mutex
 }
 
 func NewStore(db *core.DB, dataDir string) *Store {
-	return &Store{db: db, dataDir: dataDir, now: time.Now, locks: map[string]*sync.Mutex{}}
-}
-
-func (s *Store) authorityDir(projectID, memID string) string {
-	return filepath.Join(s.dataDir, "memory", projectID, memID)
-}
-
-func (s *Store) memLock(memID string) func() {
-	s.mu.Lock()
-	l, ok := s.locks[memID]
-	if !ok {
-		l = &sync.Mutex{}
-		s.locks[memID] = l
-	}
-	s.mu.Unlock()
-	l.Lock()
-	return l.Unlock
-}
-
-// tryMemLock is memLock without waiting: it answers false instead of
-// blocking when the entry's mutex is already held. The reconcile's
-// batched pass uses it to never wait on a per-mem lock while holding an
-// open write transaction — the lock holder needs Core's only connection
-// for its own write, so blocking there is a deadlock shape (polyforge#129:
-// the startup reconcile runs concurrently with serving traffic).
-func (s *Store) tryMemLock(memID string) (func(), bool) {
-	s.mu.Lock()
-	l, ok := s.locks[memID]
-	if !ok {
-		l = &sync.Mutex{}
-		s.locks[memID] = l
-	}
-	s.mu.Unlock()
-	if !l.TryLock() {
-		return nil, false
-	}
-	return l.Unlock, true
+	return &Store{db: db, dataDir: dataDir, now: time.Now}
 }
 
 // CreateRequest is the POST /api/v1/memories body.
@@ -150,11 +67,10 @@ type CreateRequest struct {
 	IdempotencyKey *string  `json:"idempotency_key"`
 }
 
-// Create runs the write order: ① tmp+fsync, ② one Core tx (row + FTS),
-// ③ rename over the authority file. Between ② and ③ no half-committed
-// state is ever served (INV-7f); crash residue is swept by reconcile.
-// A blank title is derived from the body for the row (rowTitle); the
-// authority frontmatter keeps the title as requested.
+// Create renders the stored document (frontmatter + body) and writes the
+// row and its FTS row in one Core transaction. A blank title is derived
+// from the body for the row (rowTitle); the document's frontmatter keeps
+// the title as requested.
 func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	if strings.TrimSpace(req.Content) == "" {
 		return nil, errf(api.ErrMemBadInput, "", "content required")
@@ -209,8 +125,6 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	unlock := s.memLock(memID)
-	defer unlock()
 	now := core.Now()
 	fm := &frontmatter{
 		ID: memID, Type: req.Type, OwnerUserID: owner, Title: req.Title,
@@ -224,31 +138,13 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	if fm.Related == nil {
 		fm.Related = []string{}
 	}
-	authorityBytes, err := buildAuthorityFile(fm, body)
+	doc, err := buildDocument(fm, body)
 	if err != nil {
 		return nil, err
 	}
-	if len(authorityBytes) > maxContentBytes {
+	if len(doc) > maxContentBytes {
 		return nil, errf(api.ErrMemTooLarge, "", "authority document exceeds 1 MiB")
 	}
-	dir := s.authorityDir(projectID, memID)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return nil, errf(api.ErrMemInternal, "", "mkdir: %v", err)
-	}
-	tmp := filepath.Join(dir, "memory.md.tmp")
-	authority := filepath.Join(dir, "memory.md")
-	// ①
-	if err := writeTmpSync(tmp, authorityBytes); err != nil {
-		return nil, errf(api.ErrMemInternal, "", "write authority: %v", err)
-	}
-	contentSHA := shaHex(authorityBytes)
-	// Freshness stamp (polyforge#129): the tmp file's mtime+size ARE the
-	// authority file's state after step ③ (rename preserves mtime), so
-	// the stamp is taken now and commits together with the row — before
-	// the rename, never after.
-	fsStamp := statStamp(tmp)
-	// ②
-	rel := "memory/" + projectID + "/" + memID
 	var idem any
 	if req.IdempotencyKey != nil && *req.IdempotencyKey != "" {
 		idem = *req.IdempotencyKey
@@ -258,65 +154,64 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
-	fsM, fsS := stampArgs(fsStamp)
-	_, docBody, _ := splitFrontmatter(string(authorityBytes))
+	_, docBody, _ := splitFrontmatter(doc)
 	title := rowTitle(req.Title, docBody)
 	if _, err := tx.Exec(`INSERT INTO memories(id, project_id, owner_user_id, work_item_id, type, title,
 		visibility, authority_path, content_sha, content_len, tags, related, idempotency_key, status, created_at, updated_at,
-		fs_mtime_ns, fs_size)
-		VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'active',?14,?14,?15,?16)`,
-		memID, projectID, owner, anyPtr(req.WorkItemID), req.Type, anyPtr(title), req.Visibility, rel,
-		contentSHA, len(authorityBytes), jsonOrEmpty(req.Tags), jsonOrEmpty(req.Related), idem, now,
-		fsM, fsS); err != nil {
+		content)
+		VALUES (?1,?2,?3,?4,?5,?6,?7,'',?8,?9,?10,?11,?12,'active',?13,?13,?14)`,
+		memID, projectID, owner, anyPtr(req.WorkItemID), req.Type, anyPtr(title), req.Visibility,
+		shaHex([]byte(doc)), len(doc), jsonOrEmpty(req.Tags), jsonOrEmpty(req.Related), idem, now,
+		doc); err != nil {
 		return nil, err
 	}
-	if err := ftsReplace(tx, memID, extractBody(string(authorityBytes))); err != nil {
+	if err := ftsReplace(tx, memID, extractBody(doc)); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	// ③
-	if err := os.Rename(tmp, authority); err != nil {
-		return nil, errf(api.ErrMemInternal, "", "rename authority: %v", err)
-	}
-	if err := syncDir(dir); err != nil {
-		return nil, errf(api.ErrMemInternal, "", "fsync authority dir: %v", err)
-	}
 	return s.load(memID)
 }
 
-// Get serves one entry through the INV-7f gate.
+// Get serves one active entry.
 func (s *Store) Get(memID string) (*Entry, error) {
-	unlock := s.memLock(memID)
-	defer unlock()
-	return s.validatedLocked(memID)
-}
-
-// Content returns the authority Markdown bytes under the same lock hold
-// that validated them.
-func (s *Store) Content(memID string) ([]byte, error) {
-	unlock := s.memLock(memID)
-	defer unlock()
-	e, err := s.validatedLocked(memID)
+	e, err := s.load(memID)
 	if err != nil {
 		return nil, err
 	}
-	return os.ReadFile(filepath.Join(s.dataDir, filepath.FromSlash(e.apath), "memory.md"))
+	if e.Status != "active" {
+		return nil, errf(api.ErrMemNotFound, "", "memory %s", memID)
+	}
+	return e, nil
 }
 
+// Content returns an active entry's stored document (frontmatter + body).
+func (s *Store) Content(memID string) ([]byte, error) {
+	var doc string
+	err := s.db.QueryRow(`SELECT content FROM memories WHERE id=?1 AND status='active'
+		AND content IS NOT NULL`, memID).Scan(&doc)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errf(api.ErrMemNotFound, "", "memory %s", memID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return []byte(doc), nil
+}
+
+// load reads one row. A row whose content was never filled (its memory
+// file was missing at migration, migrate.go) does not exist as far as
+// serving is concerned.
 func (s *Store) load(memID string) (*Entry, error) {
 	var e Entry
 	var wi, title sql.NullString
 	var tags, related string
-	var fsM, fsS sql.NullInt64
 	err := s.db.QueryRow(`SELECT id, project_id, owner_user_id, work_item_id, type, title, visibility,
-		authority_path, content_sha, content_len, tags, related, status, created_at, updated_at,
-		fs_mtime_ns, fs_size
-		FROM memories WHERE id=?1`, memID).
+		content_sha, content_len, tags, related, status, created_at, updated_at
+		FROM memories WHERE id=?1 AND content IS NOT NULL`, memID).
 		Scan(&e.ID, &e.ProjectID, &e.OwnerUserID, &wi, &e.Type, &title, &e.Visibility,
-			&e.apath, &e.ContentSHA, &e.ContentLen, &tags, &related, &e.Status, &e.CreatedAt, &e.UpdatedAt,
-			&fsM, &fsS)
+			&e.ContentSHA, &e.ContentLen, &tags, &related, &e.Status, &e.CreatedAt, &e.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errf(api.ErrMemNotFound, "", "memory %s", memID)
 	}
@@ -336,9 +231,6 @@ func (s *Store) load(memID string) (*Entry, error) {
 	_ = json.Unmarshal([]byte(related), &e.Related)
 	if e.Related == nil {
 		e.Related = []string{}
-	}
-	if fsM.Valid && fsS.Valid {
-		e.fsStamp = &fileStamp{mtimeNS: fsM.Int64, size: fsS.Int64}
 	}
 	return &e, nil
 }
@@ -436,10 +328,6 @@ func (s *Store) collect(match string, short []string, maxCands int, f searchFilt
 			}
 			e, err := s.load(c.id)
 			if err != nil || e.Status != "active" {
-				continue
-			}
-			e, ok := s.serveConsistent(e)
-			if !ok {
 				continue
 			}
 			if !typeMatches(e.Type, memType) {
@@ -764,56 +652,26 @@ func containsAll(have, want []string) bool {
 	return true
 }
 
-// redactedRelOf maps an entry's recorded placement to its _redacted
-// destination.
-func redactedRelOf(e *Entry) string {
-	rel := filepath.ToSlash(e.apath)
-	i := strings.LastIndexByte(rel, '/')
-	return rel[:i] + "/_redacted/" + rel[i+1:]
-}
-
-// Redact soft-deletes: ① rename the authority dir into _redacted/, ② one
-// Core tx (status + FTS removal). A crash between ① and ② is
-// forward-completed by reconcile from the file position.
+// Redact soft-deletes: the row turns redacted and its FTS row goes, in
+// one Core transaction. The stored document stays in the row and is
+// never served again.
 func (s *Store) Redact(memID string) error {
-	unlock := s.memLock(memID)
-	defer unlock()
-	e, err := s.load(memID)
-	if err != nil {
-		return err
-	}
-	if e.Status != "active" {
-		return errf(api.ErrMemConflict, "", "memory is %s", e.Status)
-	}
-	if !s.entryConsistent(e) {
-		// Crash residue on the entry being redacted: resolve it under the
-		// lock we already hold before moving anything.
-		if _, serr := os.Stat(filepath.Join(s.dataDir, filepath.FromSlash(redactedRelOf(e)), "memory.md")); serr == nil {
-			if ferr := s.forwardCompleteRedact(e); ferr != nil {
-				return ferr
-			}
-			return errf(api.ErrMemConflict, "", "memory is redacted")
-		}
-		if derr := s.deleteOrphanRow(memID); derr != nil {
-			return derr
-		}
-		return errf(api.ErrMemNotFound, "", "memory %s", memID)
-	}
-	// ① file move (the file location IS the authoritative state).
-	src := filepath.Join(s.dataDir, filepath.FromSlash(e.apath))
-	dst := filepath.Join(s.dataDir, filepath.FromSlash(redactedRelOf(e)))
-	if err := os.MkdirAll(filepath.Dir(dst), 0o750); err != nil {
-		return err
-	}
-	if err := os.Rename(src, dst); err != nil {
-		return errf(api.ErrMemInternal, "", "redact move: %v", err)
-	}
-	// ② metadata + FTS removal in one tx.
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	var status string
+	err = tx.QueryRow(`SELECT status FROM memories WHERE id=?1 AND content IS NOT NULL`, memID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errf(api.ErrMemNotFound, "", "memory %s", memID)
+	}
+	if err != nil {
+		return err
+	}
+	if status != "active" {
+		return errf(api.ErrMemConflict, "", "memory is %s", status)
+	}
 	if _, err := tx.Exec(`UPDATE memories SET status='redacted', updated_at=?1 WHERE id=?2`, core.Now(), memID); err != nil {
 		return err
 	}
@@ -824,7 +682,7 @@ func (s *Store) Redact(memID string) error {
 }
 
 // ftsReplace enforces the delete-then-insert invariant: each mem_id has
-// at most one retrievable row, consistent with the latest authority.
+// at most one retrievable row, consistent with the stored document.
 func ftsReplace(tx *sql.Tx, memID, body string) error {
 	if _, err := tx.Exec(`DELETE FROM memory_fts WHERE mem_id=?1`, memID); err != nil {
 		return err

@@ -415,6 +415,55 @@ func TestMemoryOverHTTP(t *testing.T) {
 	}
 }
 
+// TestMemoryDBOnlyOverHTTP: a memory lives in the database alone — no
+// file under the data dir — and an idempotent replay with the same key
+// answers the original entry whose body reads back verbatim (the step
+// summary write compares it with what it sent); after a redact the body
+// is never served and the entry leaves search.
+func TestMemoryDBOnlyOverHTTP(t *testing.T) {
+	e := newSrvEnv(t)
+	const body = "## Step summary\n\nthe wrap lesson about wallabies\n"
+	post := func(content string) (int, map[string]any) {
+		t.Helper()
+		var out map[string]any
+		code, raw := e.do(t, "POST", "/api/v1/memories", e.key, map[string]any{
+			"project": "alpha", "type": "experience.wrap", "visibility": "project",
+			"content": content, "idempotency_key": "wi-1/step-3",
+		}, &out)
+		if code != 201 {
+			t.Fatalf("create: %d %s", code, raw)
+		}
+		return code, out
+	}
+	_, first := post(body)
+	_, replay := post("a different body sent on the replay")
+	if replay["id"] != first["id"] || replay["content_sha"] != first["content_sha"] || replay["content_len"] != first["content_len"] {
+		t.Fatalf("replay = %v, want the original %v", replay, first)
+	}
+	id, _ := first["id"].(string)
+	if code, raw := e.do(t, "GET", "/api/v1/memories/"+id+"?format=content", e.key, nil, nil); code != 200 || string(raw) != body {
+		t.Fatalf("content after the replay: %d %q, want %q", code, raw, body)
+	}
+	if _, err := os.Stat(filepath.Join(e.dataDir, "memory")); !os.IsNotExist(err) {
+		t.Fatalf("a memory file tree exists under the data dir (%v)", err)
+	}
+	var search struct {
+		Total int `json:"total"`
+	}
+	if code, raw := e.do(t, "GET", "/api/v1/memories/search?q=wallabies", e.key, nil, &search); code != 200 || search.Total != 1 {
+		t.Fatalf("search: %d %s", code, raw)
+	}
+	if code, _ := e.do(t, "POST", "/api/v1/memories/"+id+"/redact", e.key, nil, nil); code != 200 {
+		t.Fatalf("redact: %d", code)
+	}
+	if code, _ := e.do(t, "GET", "/api/v1/memories/"+id+"?format=content", e.key, nil, nil); code != 404 {
+		t.Fatalf("redacted body served: %d", code)
+	}
+	if code, raw := e.do(t, "GET", "/api/v1/memories/search?q=wallabies", e.key, nil, &search); code != 200 || search.Total != 0 {
+		t.Fatalf("redacted entry searchable: %d %s", code, raw)
+	}
+}
+
 // TestMemoryWorkItemSlug (polyforge#155): the attributing work item of a
 // memory write accepts the "<project>#<seq>" slug the other faces accept
 // and stores the canonical id; an unknown id or slug answers a typed

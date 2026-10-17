@@ -28,7 +28,9 @@ type DB struct {
 
 // DDL is the Core schema. First boot installs it as-is; Open runs no
 // column migrations (existing databases already carry every column) —
-// an index added later is created on the next Open (IF NOT EXISTS). Seq is
+// an index added later is created on the next Open (IF NOT EXISTS). The
+// one exception is memories.content, added by the memory store's
+// startup content migration (memory/migrate.go), not by Open. Seq is
 // numbered per project: UNIQUE(project_id, seq). Ownership lives ON the
 // work_items row itself (the session model — session_hash/
 // session_fingerprint/clean_pause).
@@ -171,6 +173,9 @@ CREATE TABLE IF NOT EXISTS memories (
   type         TEXT NOT NULL,
   title        TEXT,
   visibility   TEXT NOT NULL,
+  -- memory/<project>/<id>: where a row written before memories.content
+  -- existed kept its document as a file (read once by the content
+  -- migration); '' for rows written since.
   authority_path TEXT NOT NULL,
   content_sha  TEXT NOT NULL,
   content_len  INTEGER NOT NULL,
@@ -180,16 +185,10 @@ CREATE TABLE IF NOT EXISTS memories (
   status       TEXT NOT NULL DEFAULT 'active',
   created_at   TEXT NOT NULL,
   updated_at   TEXT NOT NULL,
-  -- polyforge#129 freshness stamp: the authority file's observed state
-  -- (Stat mtime in nanoseconds + byte size) at the moment the row was
-  -- written, recorded by the write path in the same transaction as the
-  -- row. The reconcile consults it before any per-entry work — stamp
-  -- match ⇒ skip (no read, no hash, no FTS write); mismatch ⇒ verify by
-  -- content sha. NULL means "unverified" (pre-#129 rows, backfills
-  -- awaiting their batched index write): the next reconcile pass
-  -- verifies the row against the file and stamps it.
-  fs_mtime_ns  INTEGER,
-  fs_size      INTEGER
+  -- The stored document (frontmatter + body); content_sha/content_len
+  -- describe it. NULL only on a row the memory content migration could
+  -- not fill (memory/migrate.go): such a row is never served.
+  content      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_mem_work_item ON memories(work_item_id) WHERE work_item_id IS NOT NULL;
