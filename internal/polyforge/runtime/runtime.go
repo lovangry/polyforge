@@ -885,7 +885,7 @@ func (r *Runtime) claimScene(ctx context.Context, j *job, c api.SessionClaim) (n
 	if err := r.prepareCapsule(ctx, j); err != nil {
 		return "prepare capsule: " + err.Error(), err
 	}
-	if err := r.verifySealedHead(j, c); err != nil {
+	if err := r.verifySealedHead(ctx, j, c); err != nil {
 		return err.Error(), err
 	}
 	if err := r.materialize(ctx, j); err != nil {
@@ -1083,19 +1083,35 @@ func (r *Runtime) pendingClose(j *job, note string) bool {
 	return r.persistLog(j.wi)
 }
 
-// verifySealedHead is the cross-daemon continue guard (v2-converge §7): a
-// blocked WI claimed by a DIFFERENT machine than the one that sealed it must
-// find the sealing daemon's recorded capsule head in its fresh clone,
-// otherwise the clone is pre-blocked state (the #116 lesson) and the start
-// is refused. A same-machine continue, or a WI with no recorded seal, is
-// not gated here.
-func (r *Runtime) verifySealedHead(j *job, c api.SessionClaim) error {
-	if c.SealedHead == "" || c.SealedMachine == "" || c.SealedMachine == r.cfg.MachineID {
+// verifySealedHead is the continue guard of a blocked seal (v2-converge §7):
+// a blocked WI never continues without the sealing daemon's recorded
+// capsule head. A clone already at that head proceeds. On the sealing
+// machine the unpushed commits live in a quarantined git-dir of the work
+// item (prepareCapsule moved the sealed scene aside), so the fresh clone
+// adopts the head from there and continues from it; the next publish
+// pushes it. Anywhere else — or when no quarantined git-dir holds the
+// head — the clone is pre-blocked state (the #116 lesson) and the start
+// is refused. A WI with no recorded seal is not gated.
+func (r *Runtime) verifySealedHead(ctx context.Context, j *job, c api.SessionClaim) error {
+	if c.SealedHead == "" || c.SealedMachine == "" {
 		return nil
 	}
 	head, err := gitops.Head(j.git)
 	if err == nil && head == c.SealedHead {
 		return nil
+	}
+	if c.SealedMachine == r.cfg.MachineID {
+		src, aerr := gitops.AdoptCommit(ctx, j.git, c.SealedHead, quarantinedGitDirs(j.git.GitDir))
+		if aerr != nil {
+			return aerr
+		}
+		if src != "" {
+			fmt.Fprintf(os.Stderr, "runtime: %s: continuing from the sealed head %s adopted from %s\n", j.wi, c.SealedHead, src)
+			return nil
+		}
+		return &api.Error{Code: api.ErrDaemonSealedHeadMismatch,
+			Detail: fmt.Sprintf("continue refused: the work item was sealed blocked by this machine (%q) at capsule head %s, but neither the aihub capsule (at %q) nor any quarantined capsule of it on this machine holds that commit — accept losing that work with pf resume %s --accept-lost-work, or abandon (pf cancel)",
+				c.SealedMachine, c.SealedHead, head, j.wi)}
 	}
 	return &api.Error{Code: api.ErrDaemonSealedHeadMismatch,
 		Detail: fmt.Sprintf("continue refused: the work item was sealed blocked by machine %q at capsule head %s, but the aihub capsule this daemon cloned is at %q (%v) — the sealing daemon's last push did not land; continue it on %q, accept losing that work with pf resume %s --accept-lost-work, or abandon (pf cancel)",

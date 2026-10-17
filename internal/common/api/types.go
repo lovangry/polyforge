@@ -332,8 +332,9 @@ type SessionEndRequest struct {
 	// HeadSHA rides the blocked verdict only (v2-converge §7): the capsule
 	// revision-chain head the sealing daemon holds locally after its
 	// best-effort commit+push. aihub records it (with the session's
-	// machine) so a continue claimed by a DIFFERENT daemon can refuse a
-	// clone whose head is not this one (the #116 stale-state hazard).
+	// machine) so a continue never starts from a clone whose head is not
+	// this one (the #116 stale-state hazard): the sealing daemon adopts it
+	// from its quarantined scene, any other daemon refuses.
 	HeadSHA string `json:"head_sha,omitempty"`
 }
 

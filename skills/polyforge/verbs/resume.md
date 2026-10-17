@@ -50,13 +50,17 @@ result) — the §6.4 owner move re-established execution over the parked
 capsule`, then `(the frozen current step re-dispatches in place as a fresh
 derivation; watch it with pf watch <id> --once)`. `--json`: the raw answer.
 
-Cross-daemon safety: the default is that the daemon which sealed the block
-continues it. When a DIFFERENT daemon picks it up, the start is refused
-(`DAEMON-518`, the claim is abandoned back to blocked) unless the aihub
-capsule head equals the head the sealing daemon recorded at block time —
-the sealing daemon's last push did not land, so continue it on that
-machine, abandon with `pf cancel <id>`, or — when the sealing machine is
-gone for good — accept losing its unpushed work:
+Sealed-head safety: a blocked work item never continues without the
+capsule head the sealing daemon recorded at block time. On the sealing
+machine the resume continues from that head even when its last push did
+not land: the fresh capsule takes the unpushed commits from the
+quarantined previous scene (`capsules/<name>.quarantined.<ts>` and its
+git-dir), and the next publish pushes them. When a DIFFERENT daemon picks
+it up, or the sealing machine no longer holds the head, the start is
+refused (`DAEMON-518`, the claim is abandoned back to blocked) unless the
+aihub capsule head equals the sealed head — continue it on the sealing
+machine, abandon with `pf cancel <id>`, or — when the sealed work is gone
+for good — accept losing it:
 
 ```
 pf resume <id> --accept-lost-work
@@ -129,7 +133,7 @@ refused before anything else happens.
 | (200, `deferred: true`) | The hub was unreachable when the daemon went to claim after the resume door | Not an error and no error code: the claim is queued in the daemon (persisted, retried with backoff) and `pf resume` answers `resumed ...: the hub is unreachable right now; the claim is queued`. Do not run `pf resume` again — it would only find the work item already queued (`DAEMON-409`). |
 | `DAEMON-412` | The project has no `[workspace]` mapping on this machine (a claim/submit cannot place its capsule) | Re-add the project to a `[workspace."<path>"]` section (`pf doctor` checks it), then `pf resume`. |
 | `DAEMON-516` | The claim behind the resume could not clone the capsule for a work item with published progress; a local init would restart the workflow at step 1, so it is refused and the claim returns to blocked | Fix aihub reachability / credentials, then `pf resume` again. |
-| `DAEMON-518` | A different daemon than the sealing one claimed the continue and the aihub capsule head is not the sealed head | Continue it on the machine that sealed it, or abandon with `pf cancel <id>`; if that machine is gone and the user accepts losing its unpushed work, `pf resume <id> --accept-lost-work`. |
+| `DAEMON-518` | The aihub capsule head is not the sealed head, and the claiming daemon is not the sealing one or (on the sealing machine) no quarantined scene holds the sealed head | Continue it on the machine that sealed it, or abandon with `pf cancel <id>`; if the sealed work is gone and the user accepts losing it, `pf resume <id> --accept-lost-work`. |
 | `CORE-409 NOT_BLOCKED` | The resume door on a work item that is no longer blocked | The state moved — check `pf queue`/`pf watch <id> --once`; a paused WI unpauses with this same verb. |
 | `CORE-409 SESSION_HELD` (from the resume door) | The blocked WI still carries a session (a half-settled close) | Nobody may resume it until the holder settles — check the holder daemon, or an admin/maintainer ends the session with `pf ops end-session`. |
 | `CORE-404` (from the resume door, on claim) | Another machine claimed the work item between the door and the claim | It resumed elsewhere — watch it there. |

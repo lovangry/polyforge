@@ -279,9 +279,9 @@ func TestQuarantineCapsuleReportsFailedRestore(t *testing.T) {
 	}
 }
 
-// §7: a continue claimed by a DIFFERENT machine refuses a clone whose head
-// is not the sealing daemon's recorded head; the same machine, or a match,
-// proceeds.
+// §7: a continue refuses a clone whose head is not the sealing daemon's
+// recorded head unless the sealing machine finds it in a quarantined
+// scene; a match proceeds.
 func TestVerifySealedHead(t *testing.T) {
 	hub := newFakeHub()
 	r, toOB, _ := newTestRuntime(t, hub, &scriptedSpawner{})
@@ -298,12 +298,13 @@ func TestVerifySealedHead(t *testing.T) {
 		wantErr bool
 	}{
 		{"no seal recorded", api.SessionClaim{}, false},
-		{"same machine is not gated", api.SessionClaim{SealedHead: "deadbeef", SealedMachine: "m-test"}, false},
+		{"same machine, head matches", api.SessionClaim{SealedHead: head, SealedMachine: "m-test"}, false},
+		{"same machine, head nowhere on this machine", api.SessionClaim{SealedHead: "deadbeef", SealedMachine: "m-test"}, true},
 		{"other machine, head matches", api.SessionClaim{SealedHead: head, SealedMachine: "m-other"}, false},
 		{"other machine, stale clone", api.SessionClaim{SealedHead: "deadbeef", SealedMachine: "m-other"}, true},
 	}
 	for _, tc := range cases {
-		err := r.verifySealedHead(j, tc.c)
+		err := r.verifySealedHead(context.Background(), j, tc.c)
 		if (err != nil) != tc.wantErr {
 			t.Fatalf("%s: err=%v wantErr=%v", tc.name, err, tc.wantErr)
 		}

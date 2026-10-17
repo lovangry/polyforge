@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -108,6 +109,31 @@ func quarantineCapsule(capsuleDir, gitDir string) error {
 		return fmt.Errorf("quarantine of the capsule failed, git-dir restored: %w", err)
 	}
 	return nil
+}
+
+// quarantinedGitDirs lists the quarantined git-dirs of gitDir
+// (<gitDir>.quarantined.<ts>, quarantineCapsule's naming), newest first.
+func quarantinedGitDirs(gitDir string) []string {
+	prefix := filepath.Base(gitDir) + ".quarantined."
+	entries, _ := os.ReadDir(filepath.Dir(gitDir))
+	type q struct {
+		path string
+		ts   int64
+	}
+	var qs []q
+	for _, e := range entries {
+		ts, err := strconv.ParseInt(strings.TrimPrefix(e.Name(), prefix), 36, 64)
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), prefix) || err != nil {
+			continue
+		}
+		qs = append(qs, q{filepath.Join(filepath.Dir(gitDir), e.Name()), ts})
+	}
+	sort.Slice(qs, func(a, b int) bool { return qs[a].ts > qs[b].ts })
+	out := make([]string, len(qs))
+	for i, e := range qs {
+		out[i] = e.path
+	}
+	return out
 }
 
 // samePath compares two absolute paths whose last element may not exist

@@ -97,9 +97,10 @@ const (
 	// published state cannot be determined), so a local init — which
 	// would restart the workflow from step 1 — is refused.
 	ErrDaemonCapsuleClone = "DAEMON-516"
-	// ErrDaemonSealedHeadMismatch is the cross-daemon continue refusal
-	// (v2-converge §7): a blocked WI continued on a different daemon than
-	// the one that sealed it, whose aihub capsule head is not the head the
-	// sealing daemon recorded — the clone would be pre-blocked state.
+	// ErrDaemonSealedHeadMismatch is the sealed-head continue refusal
+	// (v2-converge §7): a blocked WI whose aihub capsule head is not the
+	// head the sealing daemon recorded, continued on a different daemon or
+	// on the sealing one with no quarantined scene holding that head — the
+	// clone would be pre-blocked state.
 	ErrDaemonSealedHeadMismatch = "DAEMON-518"
 )

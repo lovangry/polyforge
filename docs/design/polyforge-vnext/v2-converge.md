@@ -396,8 +396,9 @@ carrier ref 与 WIP ref 这三项**现行**机制的唯一设计记录。§14.2�
   （10s 起，每次翻倍，上限 5 分钟）；退避触顶时发一次 `push_backpressure` 降级事件。新的 Version（提交边界）立即推送但不重置退避，
   一次成功推送结束本轮。每次推送上界 60s（`protocol.PushTimeout`）。
 - **再认领 = 重新 clone**：blocked→`pf resume` 等再认领从 aihub 链 clone capsule，再按 §14.2 的 carrier ref 与 §14.3 的 WIP ref 恢复任务仓库；
-  已有发布进度的 WI clone 失败时拒绝本地初始化（`DAEMON-516`，否则会从第 1 步重跑）；由另一台 daemon 续跑 blocked WI 而 aihub 链头不等于
-  封存时记录的 head 时拒绝（`DAEMON-518`）。
+  已有发布进度的 WI clone 失败时拒绝本地初始化（`DAEMON-516`，否则会从第 1 步重跑）；aihub 链头不等于封存时记录的 head 时，封存机从该 WI
+  的隔离 git-dir（`<git-dir>.quarantined.<ts>`，新者优先）取回该 head 并把链移过去，由下一次发布推送；另一台 daemon，或封存机上找不到该 head，
+  则拒绝（`DAEMON-518`）。
 
 ### 14.2 任务仓库 carrier ref（polyforge#108 / #158） <!-- §14.2 -->
 
@@ -622,7 +623,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 ### E.3 `attrs.blocked_seal` 与 `sealed_head` / `sealed_machine`
 
 - `work_items.attrs.blocked_seal = {"head": <sha>, "machine": <id>}`（`core/session.go` `blockedSealKey`）：带 head 的 `End(blocked)` 写入，其他任何 End/Pause 清除；不改 schema，搭在业务 attrs JSON 上。
-- 领取应答的 `sealed_head` / `sealed_machine`（`api/types.go` `SessionClaim`）由它读出：另一台机器继续一个 blocked WI 时，其 clone 里必须恰好有这个 head，否则拒绝（第 7 节"跨 daemon 继续"）。`attrs` 不在 PATCH 可更新键中（`core/workitem.go` `patchableFields`，只在 create 时写入），用户无法改写或删掉它（2026-10-16 wave 4 按代码更正：原文称 PATCH 可删）。
+- 领取应答的 `sealed_head` / `sealed_machine`（`api/types.go` `SessionClaim`）由它读出：继续一个 blocked WI 时 clone 的 head 必须等于它：封存机从隔离 git-dir 取回该 head 后继续，另一台机器（或封存机上已找不到该 head）则拒绝（第 7 节"跨 daemon 继续"）。`attrs` 不在 PATCH 可更新键中（`core/workitem.go` `patchableFields`，只在 create 时写入），用户无法改写或删掉它（2026-10-16 wave 4 按代码更正：原文称 PATCH 可删）。
 - 与 `archive/02-aihub-core.md#§2.6` INV-2c（attrs 不得承载执行态字段）的关系：02 已归档，不再是权威；现行代码是权威。代码里 create 只拒顶层保留键 `blocked_seal`（`core/workitem.go` `checkAttrs`；保留键，不是执行态），带它即 `CORE-400 EXECUTION_STATE_REJECTED`；执行态不进 attrs 由 daemon 只写 capsule 保证。现行行为：`blocked_seal` 只由 aihub 在 session 事务里读写（`setBlockedSealTx` 直接 UPDATE，不经 create 校验 / `blockedSealTx`），daemon 只能经 `End(blocked)` 间接写入，用户既不能在 create 时带入也不能 PATCH；它不是执行态（执行态的唯一权威仍是 capsule 的 `runtime-state/execution.json`），只记录 blocked 封存时的交接点——哪台机器、哪个 head。读不到它（键不存在或 attrs 解析失败）时领取应答的 `sealed_head` 为空，跨机继续不做 head 校验（fail open）。不做迁移（G17 选 A，I-5 不做 D）。
 
 ### E.4 daemon data dir（默认 `~/.local/share/polyforge`）
