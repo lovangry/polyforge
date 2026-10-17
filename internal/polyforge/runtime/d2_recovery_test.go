@@ -111,7 +111,7 @@ func TestBoundedFailSessionEndFailureKeepsRecordAndRetries(t *testing.T) {
 	r, j, toOB := endPendingRuntime(t, hub)
 	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
 
-	underOpMu(r, func() { r.boundedFail(context.Background(), j, "boom") })
+	underLock(r, j.wi, func() { r.boundedFail(context.Background(), j, "boom") })
 	if msg := recvRT(t, toOB); msg.Kind != protocol.RTFinished || msg.Reason != protocol.FinishBlocked {
 		t.Fatalf("observe must be released blocked, got %+v", msg)
 	}
@@ -143,7 +143,7 @@ func TestRestartRetriesEndPendingRecord(t *testing.T) {
 	hub := newFakeHub()
 	r, j, _ := endPendingRuntime(t, hub)
 	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
-	underOpMu(r, func() { r.boundedFail(context.Background(), j, "boom") })
+	underLock(r, j.wi, func() { r.boundedFail(context.Background(), j, "boom") })
 	r.Close()
 
 	// fresh daemon over the same DataDir, hub reachable again
@@ -160,7 +160,7 @@ func TestRestartRetriesEndPendingRecord(t *testing.T) {
 	}
 	_ = toOB2
 	// the restart only schedules the retry (never a synchronous push
-	// under opMu before the socket serves): wait for the lane
+	// before the socket serves): wait for the lane
 	waitFor(t, "the end_pending close to be replayed", func() bool { return hub.endCount() > 0 })
 	waitRetryIdle(t, r2)
 	if hub.endCount() != 1 || hub.lastEnd().Status != api.StatusBlocked {
@@ -181,7 +181,7 @@ func TestEndPendingSettlesWhenSessionNoLongerHoldsWI(t *testing.T) {
 	hub.held[j.wi] = "" // the close landed server-side
 	hub.status[j.wi] = api.StatusBlocked
 	hub.mu.Unlock()
-	underOpMu(r, func() { r.boundedFail(context.Background(), j, "boom") })
+	underLock(r, j.wi, func() { r.boundedFail(context.Background(), j, "boom") })
 	if r.jobOf(j.wi) != nil {
 		t.Fatal("a session that no longer holds the WI settles the close")
 	}
@@ -198,7 +198,7 @@ func TestAbandonClaimRetriesSessionEnd(t *testing.T) {
 	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
 	orig := fmt.Errorf("capsule clone failed")
 	var got error
-	underOpMu(r, func() { got = r.abandonClaim(j, j.wi, orig, "clone") })
+	underLock(r, j.wi, func() { got = r.abandonClaim(context.Background(), j, j.wi, orig, "clone") })
 	if got != orig {
 		t.Fatalf("the original error must be returned, got %v", got)
 	}
@@ -316,7 +316,7 @@ func TestEndPendingWithGoneCapsuleStillRetries(t *testing.T) {
 	hub := newFakeHub()
 	r, j, _ := endPendingRuntime(t, hub)
 	hub.end[j.wi] = fmt.Errorf("aihub unreachable (scripted)")
-	underOpMu(r, func() { r.boundedFail(context.Background(), j, "boom") })
+	underLock(r, j.wi, func() { r.boundedFail(context.Background(), j, "boom") })
 	r.Close()
 	if j.capsuleDir != "" {
 		_ = os.RemoveAll(j.capsuleDir)

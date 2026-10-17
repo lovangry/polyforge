@@ -169,7 +169,7 @@ func TestClaimCrashRestartReplaysSameKey(t *testing.T) {
 	if err := r2.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
-	r2.replays.Wait() // the journal replays clone outside Restart (B-8)
+	settleReplays(t, r2) // the journal replays clone outside Restart
 	if n := hub2.claimCount(); n != 1 {
 		t.Fatalf("the replay must issue exactly one claim, got %d", n)
 	}
@@ -213,7 +213,7 @@ func TestStaleClaimingEntryDropped(t *testing.T) {
 	if err := r.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
-	r.replays.Wait() // the journal replays clone outside Restart (B-8)
+	settleReplays(t, r) // the journal replays clone outside Restart
 	if n := hub.claimCount(); n != 0 {
 		t.Fatalf("a stale entry must not be re-claimed, got %d claims", n)
 	}
@@ -245,6 +245,7 @@ func newTestRuntimeAt(t *testing.T, hub Aihub, sp Spawner, dataDir string) (*Run
 	toOB := supervise.NewQueue[protocol.RTMsg]()
 	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
+	t.Cleanup(func() { settleOps(t, r, 10e9) }) // see newTestRuntime
 	// The claim-time capsule remote (see newTestRuntime): aihub creates
 	// the bare repo at claim; the fake hub implements the contract.
 	if fh, ok := hub.(*fakeHub); ok {

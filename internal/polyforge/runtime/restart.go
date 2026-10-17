@@ -64,6 +64,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -143,13 +144,14 @@ func (r *Runtime) requireMidflightCapsule(wi, project, dir string) error {
 // reconciliation (a running WI whose capsule lives on another machine is
 // that machine's business).
 //
-// Locking (B-8): Restart seeds the records under opMu (local work only),
-// then reconciles them on a lane that holds opMu except around every
-// network step — the journal replays' verify and claim, each record's
-// session verify and attach (hubUnlocked / offLock), a close's or a
-// recovery's pushes and SessionEnd, a claim's compensation end (offLock /
-// claimEndOffLock). A seeded record is latched busy until the lane
-// reaches it, so no door acts on an unreconciled record: its Stop and
+// Locking: the lane seeds each record under its work item's lock (local
+// work only), then reconciles them: the journal replays hold no
+// lock but a placeholder's or a compensation's work-item lock; each
+// record is reconciled under its work item's lock, its network steps
+// included — the session verify and attach, a close's or a recovery's
+// pushes and SessionEnd — so one hung step holds only that work item's
+// doors. A seeded record is marked restartPending until the lane
+// reconciled it, so no door acts on an unreconciled record: its Stop and
 // resume answer DAEMON-409; while the reconciliation runs every Start
 // answers DAEMON-503 and the deferred verifies wait (restarting).
 //
@@ -166,53 +168,27 @@ func (r *Runtime) requireMidflightCapsule(wi, project, dir string) error {
 // (RestartAttach), and the lane finishes the rest once the hub answers,
 // announcing every job it brings back to life itself. A shutdown stops the
 // lane before its next step (the remaining records and journal entries
-// stay for the next start); the shutdown joins the step in flight
-// (WaitRestartStep), and one latched while Restart still waits makes it
-// wait for that step instead of returning — there is nothing to serve.
+// stay for the next start), and one latched while Restart still waits
+// makes it return at once — there is nothing to serve, and the step in
+// flight starts no agent behind the latch (admit).
 func (r *Runtime) Restart(ctx context.Context) error {
 	r.mu.Lock()
 	r.restarting = true
 	r.restartServed = false
+	r.restartAttached = nil
+	r.laneHubSince = time.Time{}
 	r.mu.Unlock()
-	r.opMu.Lock()
 	st, err := loadState(r.statePath)
 	if err != nil {
-		r.opMu.Unlock()
 		r.endRestarting()
 		return err
 	}
-	// Seed every recorded job into the live map first: persist() rewrites
-	// state.json from the map, so records that must SURVIVE the
-	// reconciliation (blocked, aihub-unreachable) are preserved by simply
-	// staying in it. A record whose WI is already live (Start ran before
-	// Restart) is left alone. The B1 journal replay still runs FIRST on
-	// the lane, and a replay that adopts a work item drops its seeded
-	// record (resumeClaiming).
-	for _, rec := range st.Jobs {
-		if r.jobOf(rec.WorkItemID) != nil {
-			continue
-		}
-		if rec.SessionID == "" {
-			// a torn write: no session to verify,
-			// nothing to reconcile — drop it rather than guess.
-			fmt.Fprintf(os.Stderr, "runtime: %s: record without a session dropped\n", rec.WorkItemID)
-			continue
-		}
-		j := r.restoredJob(rec)
-		j.restartPending = true
-		j.busy = 1 // released when the lane reaches the record (restartOne)
-		r.mu.Lock()
-		r.jobs[rec.WorkItemID] = j
-		r.mu.Unlock()
-	}
 	r.mu.Lock()
-	r.laneRunning = true
-	r.laneHubSince = time.Time{}
-	r.restartAttached = nil
+	r.seeding = true // until the lane seeded every record (persist writes nothing)
 	r.mu.Unlock()
-	r.opMu.Unlock()
+	lane := &restartLane{}
 	done := make(chan error, 1)
-	go func() { done <- r.reconcile(ctx, st) }()
+	go func() { done <- r.reconcile(withRestartLane(ctx, lane), lane, st) }()
 	// Wait for the lane; return early only when one of its hub calls has
 	// gone unanswered for RestartHubWait — local and git work (a slow
 	// push) keeps the startup waiting exactly as a synchronous
@@ -222,50 +198,34 @@ func (r *Runtime) Restart(ctx context.Context) error {
 	for {
 		select {
 		case err := <-done:
+			r.serveRestart()
 			return err
 		case <-tick.C:
 		}
 		if r.restartStopping(ctx) {
 			// a shutdown is under way: there is nothing to serve, and the
-			// lane stops at its next step — let the step in flight land
-			// before the daemon unwinds
-			return <-done
+			// lane decides nothing further — its step in flight starts no
+			// agent behind the latch, and the records it did not reach
+			// stay for the next start
+			r.serveRestart()
+			return nil
 		}
 		r.mu.Lock()
 		since := r.laneHubSince
-		r.mu.Unlock()
-		if since.IsZero() || time.Since(since) < r.cfg.RestartHubWait {
-			continue
-		}
-		r.opMu.Lock()
-		select {
-		case err := <-done:
-			// the lane finished meanwhile: its answer (a persist failure
-			// aborts the startup) is Restart's
-			r.opMu.Unlock()
-			return err
-		default:
-		}
-		r.mu.Lock()
-		if r.laneHubSince.IsZero() {
-			// the hub answered while the lock was taken: keep waiting
-			r.mu.Unlock()
-			r.opMu.Unlock()
-			continue
-		}
-		r.restartServed = true
-		r.restartAttached = map[string]bool{}
-		for wi, j := range r.jobs {
-			if j.liveAgent() {
-				r.restartAttached[wi] = true
-			}
+		// the lane clears restarting as it ends: then its answer (a
+		// persist failure aborts the startup) is Restart's, read above
+		hung := r.restarting && !since.IsZero() && time.Since(since) >= r.cfg.RestartHubWait
+		if hung {
+			r.serveRestartLocked()
 		}
 		r.mu.Unlock()
+		if !hung {
+			continue
+		}
 		n := r.postureUnreconciled()
 		if err := r.persist(); err != nil {
 			fmt.Fprintf(os.Stderr, "runtime: state persist failed: %v\n", err)
 		}
-		r.opMu.Unlock()
 		fmt.Fprintf(os.Stderr, "runtime: restart reconciliation: aihub has not answered for %s (%d record(s) shown waiting); serving meanwhile\n", r.cfg.RestartHubWait, n)
 		go func() {
 			if err := <-done; err != nil {
@@ -274,6 +234,64 @@ func (r *Runtime) Restart(ctx context.Context) error {
 		}()
 		return nil
 	}
+}
+
+// serveRestart marks the moment Restart returns: the jobs live now are
+// exactly the set the daemon's startup re-attachment pass hands to
+// observe (RestartAttach); every job the reconciliation lane or a
+// deferred verify brings to life afterwards is announced by the runtime
+// itself (announceReconciled).
+func (r *Runtime) serveRestart() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.serveRestartLocked()
+}
+
+func (r *Runtime) serveRestartLocked() {
+	r.restartServed = true
+	r.restartAttached = map[string]bool{}
+	for wi, j := range r.jobs {
+		if j.liveAgent() {
+			r.restartAttached[wi] = true
+		}
+	}
+}
+
+// restartLane marks the reconciliation lane's context: a hub call made
+// under it (hubCall) is one Restart's wait bounds, until the lane ended —
+// a deferred verify scheduled by the lane runs later under the same
+// context and is no longer the lane's.
+type restartLane struct{ ended atomic.Bool }
+
+type restartLaneKey struct{}
+
+func withRestartLane(ctx context.Context, l *restartLane) context.Context {
+	return context.WithValue(ctx, restartLaneKey{}, l)
+}
+
+// laneLock takes id's lock for the restart lane. While the reconciliation
+// runs no door can hold a work item's lock for long — a Start answers the
+// typed transient, a seeded record's doors refuse — so a holder is one of
+// the work item's background retries, parked on aihub (a claim-end or
+// end_pending close, a seal retry): the lane's wait for it is timed like
+// one of its own hub calls (hubCall), so Restart's bound still fires.
+func (r *Runtime) laneLock(ctx context.Context, id string) *wiSlot {
+	if s, ok := r.tryLockWI(id); ok {
+		return s
+	}
+	var s *wiSlot
+	r.hubCall(ctx, func() { s = r.lockWI(id) })
+	return s
+}
+
+// hubCall runs fn — one hub call — timed for Restart's wait when ctx is
+// the running reconciliation lane's (laneHub), plainly otherwise.
+func (r *Runtime) hubCall(ctx context.Context, fn func()) {
+	if l, _ := ctx.Value(restartLaneKey{}).(*restartLane); l != nil && !l.ended.Load() {
+		r.laneHub(fn)
+		return
+	}
+	fn()
 }
 
 // restartWaitTick is the polling period of Restart's wait.
@@ -289,7 +307,7 @@ func restartWaitTick(wait time.Duration) time.Duration {
 }
 
 // laneHub marks fn — one hub call of the restart lane — as outstanding
-// for Restart's wait and the shutdown's join (laneHubSince).
+// for Restart's wait (laneHubSince).
 func (r *Runtime) laneHub(fn func()) {
 	r.mu.Lock()
 	r.laneHubSince = time.Now()
@@ -303,9 +321,9 @@ func (r *Runtime) laneHub(fn func()) {
 }
 
 // RestartAttach reports whether the daemon's startup re-attachment pass
-// hands wi to observe: every live job when Restart returned with its
-// reconciliation finished, otherwise only those live at that moment —
-// the lane announces the rest itself, so each job is attached once.
+// hands wi to observe: the jobs live when Restart returned — the runtime
+// announces every job it brings to life afterwards itself, so each job is
+// attached once. Before any Restart every job is the pass's.
 func (r *Runtime) RestartAttach(wi string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -313,24 +331,47 @@ func (r *Runtime) RestartAttach(wi string) bool {
 }
 
 // reconcile is the restart reconciliation lane (see Restart): the journal
-// replays, then every seeded record, then the persist and the replays'
-// clones. opMu is held except around the network steps.
-func (r *Runtime) reconcile(ctx context.Context, st *stateFile) error {
+// replays, then every seeded record (each under its work item's lock),
+// then the persist and the replays' clones.
+func (r *Runtime) reconcile(ctx context.Context, lane *restartLane, st *stateFile) error {
 	defer r.endRestarting()
-	defer func() {
-		r.mu.Lock()
-		r.laneRunning = false
-		r.mu.Unlock()
-	}()
-	r.opMu.Lock()
-	defer r.opMu.Unlock()
+	defer lane.ended.Store(true)
+	// Seed every recorded job into the live map first (the lane's first
+	// step, so a lock it waits for counts against Restart's bound):
+	// persist() rewrites state.json from the map, so records that must SURVIVE the
+	// reconciliation (blocked, aihub-unreachable) are preserved by simply
+	// staying in it. A record whose WI is already live (Start ran before
+	// Restart) is left alone. The B1 journal replay still runs FIRST on
+	// the lane, and a replay that adopts a work item drops its seeded
+	// record (resumeClaiming). A seeded record is marked restartPending
+	// until the lane reaches it: every door of it refuses meanwhile.
+	for _, rec := range st.Jobs {
+		if rec.SessionID == "" {
+			// a torn write: no session to verify,
+			// nothing to reconcile — drop it rather than guess.
+			fmt.Fprintf(os.Stderr, "runtime: %s: record without a session dropped\n", rec.WorkItemID)
+			continue
+		}
+		s := r.laneLock(ctx, rec.WorkItemID)
+		if r.jobOf(rec.WorkItemID) == nil {
+			j := r.restoredJob(rec)
+			j.restartPending = true
+			r.mu.Lock()
+			r.jobs[rec.WorkItemID] = j
+			r.mu.Unlock()
+		}
+		r.unlockWI(rec.WorkItemID, s)
+	}
+	r.mu.Lock()
+	r.seeding = false
+	r.mu.Unlock()
 	// B1 journal replay FIRST, before the state.json records: a journaled
 	// start (crash between the claim call and the spawn) must win over any
 	// stale record of the same WI — the replay carries the secret the
 	// record may predate. resumeClaiming's sessionIsRecorded guard keeps
 	// the crash-past-registration window honest (see claiming.go). The
 	// replays it answered sit CLAIMING in the table; their clones start
-	// once the records are reconciled, outside opMu (runReplays, B-8).
+	// once the records are reconciled, outside every lock (runReplays).
 	replays := r.resumeClaiming(ctx)
 	for _, rec := range st.Jobs {
 		if rec.SessionID == "" {
@@ -341,9 +382,12 @@ func (r *Runtime) reconcile(ctx context.Context, st *stateFile) error {
 		}
 		// One bad record never aborts the daemon (v2 §6): a missing
 		// capsule / unmapped project parks that WI alone; everything else
-		// keeps its record-kept posture.
+		// keeps its record-kept posture. The record is reconciled under
+		// its work item's lock.
+		s := r.laneLock(ctx, rec.WorkItemID)
 		r.restartOne(ctx, rec)
 		r.announceReconciled(rec.WorkItemID)
+		r.unlockWI(rec.WorkItemID, s)
 	}
 	if r.restartStopping(ctx) {
 		// a shutdown during the reconciliation: the records not reached
@@ -365,6 +409,7 @@ func (r *Runtime) reconcile(ctx context.Context, st *stateFile) error {
 func (r *Runtime) endRestarting() {
 	r.mu.Lock()
 	r.restarting = false
+	r.seeding = false
 	r.mu.Unlock()
 }
 
@@ -377,12 +422,12 @@ func (r *Runtime) isRestarting() bool {
 // restartStopping reports whether a shutdown caught the reconciliation:
 // it decides nothing further.
 func (r *Runtime) restartStopping(ctx context.Context) bool {
-	return ctx.Err() != nil || r.abortedClaims()
+	return ctx.Err() != nil || r.isDown()
 }
 
 // postureUnreconciled shows every record the reconciliation has not
-// verified yet as waiting for aihub (opMu held; Restart returning before
-// its lane finished): awaiting_hub latched — status and watch name it, a
+// verified yet as waiting for aihub (each under its job's mu; Restart
+// returning before its lane finished): awaiting_hub latched — status and watch name it, a
 // close answers "waiting for aihub" — and a running record RECOVERING,
 // the awaitVerify posture. An end_pending record keeps its own state (its
 // close retry is its posture). It answers how many records it marked.
@@ -418,24 +463,25 @@ func (r *Runtime) postureUnreconciled() int {
 	return n
 }
 
-// announceReconciled hands a job the reconciliation brought back to life
-// to the observe lane (opMu held) once Restart already returned — the
-// daemon's startup re-attachment pass ran before it; before that, the pass
-// itself attaches it.
+// announceReconciled hands a job the reconciliation (or a deferred
+// verify) brought back to life to the observe lane (wi's lock held) once
+// Restart already returned without it in the startup re-attachment set;
+// before that, the daemon's pass itself attaches it. The decision and the
+// liveness read share the job-table lock with Restart's serve snapshot,
+// so each job is attached exactly once.
 func (r *Runtime) announceReconciled(wi string) {
 	r.mu.Lock()
-	served := r.restartServed && !r.restartAttached[wi]
+	cur := r.jobs[wi]
+	announce := r.restartServed && !r.restartAttached[wi] && cur != nil && cur.liveAgent()
 	r.mu.Unlock()
-	if !served {
+	if !announce {
 		return
 	}
-	if cur := r.jobOf(wi); cur != nil && cur.liveAgent() {
-		cur.mu.Lock()
-		msg := protocol.RTMsg{Kind: protocol.RTStarted, SpawnN: cur.spawnN, WorkItem: cur.wi,
-			AgentPID: cur.agentPID, SessionID: cur.sessionID}
-		cur.mu.Unlock()
-		r.send(msg)
-	}
+	cur.mu.Lock()
+	msg := protocol.RTMsg{Kind: protocol.RTStarted, SpawnN: cur.spawnN, WorkItem: cur.wi,
+		AgentPID: cur.agentPID, SessionID: cur.sessionID}
+	cur.mu.Unlock()
+	r.send(msg)
 }
 
 // restartRelease is the superseded-at-restart path: the WI is held by
@@ -489,27 +535,18 @@ func (r *Runtime) attachPaused(ctx context.Context, rec *jobRecord, cause, detai
 	if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
 		return err
 	}
-	// The attach runs with opMu released and the job latched busy
-	// (offLock, B-8): a Stop or a second resume of it answers DAEMON-409
-	// meanwhile, the other work items' doors stay open.
+	// The attach runs under the work item's lock (the caller's): a Stop or
+	// a second resume of it answers DAEMON-409 meanwhile, the other work
+	// items' doors stay open.
 	var err error
-	attach := func() {
+	r.hubCall(ctx, func() {
 		_, err = r.hub.SessionAttach(rec.WorkItemID, api.SessionAttachRequest{
 			WorkItemID: rec.WorkItemID,
 			SessionID:  rec.SessionID,
 			MachineID:  r.cfg.MachineID,
 		})
-	}
-	if cause == causeOperatorAttach {
-		// the restart lane's attach: one of its hub calls
-		inner := attach
-		attach = func() { r.laneHub(inner) }
-	}
-	if !r.offLock(j, attach) {
-		// defensive: a busy job leaves the table through no other door
-		return fmt.Errorf("runtime: %s: the record left the job table during its session attach", rec.WorkItemID)
-	}
-	if err == nil && r.abortedClaims() {
+	})
+	if err == nil && r.isDown() {
 		// the shutdown latched while the attach was on the wire: resume
 		// nothing behind its teardown. The hub now says running under our
 		// session, so the next daemon start recovers the record.
@@ -552,26 +589,29 @@ func (e *hubTransportError) Unwrap() error { return e.err }
 // close, the session no longer holds the WI, or another door's network
 // step of it in flight), DAEMON-503 (hub unreachable — nothing was
 // resumed), DAEMON-410 (the shutdown latched during the verify). The
-// verify and the attach run with opMu released and the job latched busy
-// (offLock): a Stop of it answers DAEMON-409 meanwhile, a Start
-// DAEMON-503, and every other work item stays operable. A typed mid-flight failure
+// whole resume — verify, attach and the recovery continuation — runs
+// under the work item's lock: a Stop of it answers DAEMON-409 meanwhile,
+// a Start DAEMON-503, and every other work item stays operable. A typed mid-flight failure
 // (missing capsule / unmapped project) BLOCKS the work item first
 // (blockUnrecoverable, the ordinary bounded-fail close at aihub) and
 // returns the cause as the DAEMON-409 refusal detail — the resume door
 // never answers the restart copy for a capsule it cannot resume.
 func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
-	r.opMu.Lock()
-	defer r.opMu.Unlock()
 	id := r.Resolve(wi)
 	if id == "" {
 		id = wi
 	}
+	s, ok := r.tryLockWI(id)
+	if !ok {
+		return "", errBusy(id)
+	}
+	defer r.unlockWI(id, s)
 	j := r.jobOf(id)
 	if j == nil {
 		return "", &api.Error{Code: api.ErrDaemonNotFound, Detail: fmt.Sprintf("no paused work item %s held by this daemon", id)}
 	}
-	if j.isBusy() {
-		return "", errBusy(id) // the pause close is still pushing (B-8)
+	if j.pendingRestart() {
+		return "", errReconciling(id)
 	}
 	state, _ := j.snapshot()
 	if state != StatePaused {
@@ -589,20 +629,8 @@ func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 		// resume must not race the close it would cancel.
 		return "", &api.Error{Code: api.ErrDaemonConflict, Detail: fmt.Sprintf("a %s close of the retained paused record is pending (a crash interrupted it); the next daemon start replays the close", rec.StopReason)}
 	}
-	// The verify (and the attach below) run with opMu released and the
-	// job latched busy (offLock, B-8): a Stop, a pause or a second resume
-	// of it answers DAEMON-409 meanwhile, a Start DAEMON-503, and every
-	// other work item's doors stay open.
-	var v *api.SessionVerifyResponse
-	var err error
-	if !r.offLock(j, func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) }) {
-		return "", &api.Error{Code: api.ErrDaemonConflict, Detail: fmt.Sprintf("%s: the record left the job table during the resume's session verify; nothing was resumed", id)}
-	}
-	if st, _ := j.snapshot(); st != StatePaused {
-		// defensive: a busy job's state moves through no other door
-		return "", &api.Error{Code: api.ErrDaemonConflict, Detail: fmt.Sprintf("work item turned %s during the resume's session verify; nothing was resumed", st)}
-	}
-	if r.abortedClaims() {
+	v, err := r.hub.SessionVerify(rec.WorkItemID, rec.SessionID)
+	if r.isDown() {
 		// the shutdown latched while the verify was on the wire: attach
 		// nothing behind its teardown — the record stays paused, the
 		// next daemon start reconciles it
@@ -654,13 +682,18 @@ func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 			}
 			return "", &api.Error{Code: api.ErrDaemonInternal, Detail: err.Error()}
 		}
-		// the recovery continuation runs synchronously (opMu held, released
-		// around its pushes like every recovery): a
+		// the recovery continuation runs synchronously (under the work
+		// item's lock, like every recovery): a
 		// terminal capsule verdict or an exhausted relaunch ladder closes
 		// the job inside it — the WI does NOT continue in place then.
 		if nj := r.jobOf(id); nj == nil {
 			return ResumeClosed, nil
 		} else if st, _ := nj.snapshot(); st != StateRunning {
+			if st == StateRecovering && r.isDown() {
+				// the relaunch met the shutdown latch: nothing closed, the
+				// record is kept recovering for the next start
+				return "", &api.Error{Code: api.ErrDaemonGone, Detail: fmt.Sprintf("%s: the session was attached but the daemon is shutting down; nothing was resumed here (the next daemon start resumes it)", id)}
+			}
 			return ResumeClosed, nil
 		}
 		return ResumeAttached, nil
@@ -787,14 +820,9 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) {
 	if rec.SessionID == "" {
 		return
 	}
-	// release Restart's seed latch: from here on the record is this lane's
-	// to reconcile (its network steps latch it busy again themselves)
+	// from here on the record is this lane's to reconcile (the lane holds
+	// its work item's lock); it stops being pending once reconciled
 	if j := r.jobOf(rec.WorkItemID); j != nil {
-		j.mu.Lock()
-		if j.restartPending {
-			j.busy--
-		}
-		j.mu.Unlock()
 		defer func() {
 			j.mu.Lock()
 			j.restartPending = false
@@ -822,19 +850,12 @@ func (r *Runtime) restartOne(ctx context.Context, rec *jobRecord) {
 		}
 		return
 	}
-	// The verify runs with opMu released and the record latched busy
-	// (offLock): one hung verify holds neither the other work items'
-	// doors nor — past RestartHubWait — the daemon's socket.
+	// The verify runs under the work item's lock (the lane's): one hung
+	// verify holds neither the other work items' doors nor — past
+	// RestartHubWait — the daemon's socket.
 	var v *api.SessionVerifyResponse
 	var err error
-	verify := func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) }
-	if j := r.jobOf(rec.WorkItemID); j != nil {
-		if !r.offLock(j, func() { r.laneHub(verify) }) {
-			return // defensive: a busy record leaves the table through no other door
-		}
-	} else {
-		r.hubUnlocked(func() { r.laneHub(verify) })
-	}
+	r.hubCall(ctx, func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) })
 	if r.restartStopping(ctx) {
 		return // a shutdown meanwhile: nothing is decided, the record is kept
 	}
@@ -1076,8 +1097,11 @@ func (r *Runtime) awaitVerify(ctx context.Context, rec *jobRecord, cause error) 
 // verifyAttempt is one deferred restart verify; true = settled (the
 // reconciliation ran, or the job went away meanwhile).
 func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bool {
-	r.opMu.Lock()
-	defer r.opMu.Unlock()
+	s, ok := r.tryLockWI(j.wi)
+	if !ok {
+		return false // another operation of the work item is under way
+	}
+	defer r.unlockWI(j.wi, s)
 	if ctx.Err() != nil || r.closing() {
 		// shutting down: nothing may be recovered or spawned now — the
 		// record persists and the next restart verifies afresh.
@@ -1087,7 +1111,7 @@ func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bo
 	restarting := r.restarting
 	r.mu.Unlock()
 	if restarting {
-		return false // the restart reconciliation is still running (it releases opMu around network steps)
+		return false // the restart reconciliation is still running
 	}
 	if r.jobOf(j.wi) != j {
 		return true // closed or replaced by another door meanwhile
@@ -1098,18 +1122,13 @@ func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bo
 		r.clearAwaitingHub(j)
 		return true
 	}
-	if j.isBusy() {
-		return false // another door's network step is in flight (B-8)
-	}
 	rec := j.record()
-	// the verify runs with opMu released and the job latched busy
-	// (offLock, B-8): a hung hub holds no other work item's door
+	// the verify runs under the work item's lock: a hung hub holds no
+	// other work item's door
 	var v *api.SessionVerifyResponse
 	var err error
-	if !r.offLock(j, func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) }) {
-		return true // defensive: a busy job leaves the table through no other door
-	}
-	if ctx.Err() != nil || r.closing() || r.abortedClaims() {
+	r.hubCall(ctx, func() { v, err = r.hub.SessionVerify(rec.WorkItemID, rec.SessionID) })
+	if ctx.Err() != nil || r.closing() || r.isDown() {
 		return true // shutting down meanwhile: the record persists, the next start verifies afresh
 	}
 	if err != nil {
@@ -1137,16 +1156,11 @@ func (r *Runtime) verifyAttempt(ctx context.Context, j *job, wasRunning bool) bo
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", j.wi, err)
 	}
-	// The startup attach pass (the daemon's reattachRecovered) ran long
-	// ago: hand a job this reconciliation brought back to life to the
-	// observe lane through the RTStarted shape it builds monitors on.
-	if cur := r.jobOf(j.wi); cur != nil && cur.liveAgent() {
-		cur.mu.Lock()
-		msg := protocol.RTMsg{Kind: protocol.RTStarted, SpawnN: cur.spawnN, WorkItem: cur.wi,
-			AgentPID: cur.agentPID, SessionID: cur.sessionID}
-		cur.mu.Unlock()
-		r.send(msg)
-	}
+	// A job this reconciliation brought back to life goes to the observe
+	// lane through the RTStarted shape it builds monitors on — unless it
+	// was live when Restart returned, then the daemon's startup
+	// re-attachment pass hands it over.
+	r.announceReconciled(j.wi)
 	return true
 }
 

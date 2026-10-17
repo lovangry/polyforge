@@ -580,6 +580,13 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 			})
 			return
 		}
+		if d.rt.Busy(wi) {
+			// an operation holds the work item's lock with no job in the
+			// table yet — a start on its claim's hub calls: nothing to
+			// close until its CLAIMING placeholder exists
+			writeErr(w, api.ErrDaemonConflict, "a start of this work item is under way (its claim's hub calls are in flight); retry once it settles")
+			return
+		}
 		writeErr(w, api.ErrDaemonNotFound, "no local job for "+wi+" on this daemon")
 		return
 	}

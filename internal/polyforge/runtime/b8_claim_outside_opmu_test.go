@@ -1,7 +1,7 @@
 package runtime
 
 // b8_claim_outside_opmu_test.go — repo review 2026-10-16 B-8: the claim's
-// capsule clone and materialize run outside the runtime's opMu, so one
+// capsule clone and materialize run outside every runtime lock, so one
 // slow or hung clone no longer freezes the other work items, and a
 // stop, a pause or a shutdown during the claim cancels it cleanly.
 
@@ -65,8 +65,8 @@ func waitClaiming(t *testing.T, r *Runtime, wi string) {
 }
 
 // within runs fn and fails the test when it does not return in time —
-// the "promptly" of B-8 (before the fix these calls waited on opMu
-// behind the hung clone, i.e. forever).
+// the "promptly" of B-8 (a call that waited on a global lock behind the
+// hung clone would never return).
 func within(t *testing.T, d time.Duration, what string, fn func()) {
 	t.Helper()
 	done := make(chan struct{})
@@ -241,7 +241,7 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 
 	actx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	within(t, 25*time.Second, "AbortClaims", func() { r.AbortClaims(actx) })
+	within(t, 25*time.Second, "BeginShutdown", func() { r.BeginShutdown(actx) })
 	if err := recvErr(t, startErr, "Start"); !IsClaimDeferred(err) {
 		t.Fatalf("Start answered %v, want the shutdown deferral", err)
 	}
@@ -255,7 +255,7 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 		t.Fatal("the deferred claim left its placeholder in the table")
 	}
 	if err := r.Start(context.Background(), "wi_b8_other"); !IsClaimDeferred(err) {
-		t.Fatalf("a start after AbortClaims answered %v, want the deferral", err)
+		t.Fatalf("a start after BeginShutdown answered %v, want the deferral", err)
 	}
 	r.Close()
 
@@ -277,7 +277,7 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 	if err := r2.Restart(context.Background()); err != nil {
 		t.Fatalf("Restart: %v", err)
 	}
-	r2.replays.Wait() // the journal replays clone outside Restart (B-8)
+	settleReplays(t, r2) // the journal replays clone outside Restart
 	defer terminateJobAgent(r2, wi)
 	ji, ok := r2.Info(wi)
 	if !ok || ji.State != StateRunning || ji.SessionID != rec.SessionID {
@@ -300,32 +300,38 @@ func TestB8ShutdownDuringCloneDefersAndReplays(t *testing.T) {
 	}
 }
 
-// review nit of B-8: AbortClaims waits only for claims already CLAIMING.
-// A Start still queued on opMu (behind a long close) is never waited on —
-// it defers itself at the latch — so the shutdown keeps its budget for
-// the WIP snapshots.
-func TestB8AbortClaimsDoesNotWaitOnStartQueuedOnOpMu(t *testing.T) {
+// BeginShutdown waits only for claims already CLAIMING and agent starts
+// under way. A long close of another work item (its session end hung,
+// its lock held) is never waited on, and a Start after the latch defers
+// without claiming — so the shutdown keeps its budget for the WIP
+// snapshots.
+func TestB8BeginShutdownDoesNotWaitOnALongClose(t *testing.T) {
+	setGitIdentity(t)
 	hub := newFakeHub()
 	r, _, _ := newTestRuntime(t, hub, &scriptedSpawner{})
 	t.Cleanup(r.Close)
-	r.opMu.Lock() // a long close holds the lock
-	startErr := make(chan error, 1)
-	go func() { startErr <- r.Start(context.Background(), "wi_b8_queued") }()
-	time.Sleep(100 * time.Millisecond) // let it queue on opMu
+	const long, queued = "wi_b8_long", "wi_b8_queued"
+	startRunning(t, r, long)
+	g := hub.hangCall(t, "end", long)
+	stopped := make(chan error, 1)
+	go func() { stopped <- r.Stop(context.Background(), long, protocol.FinishWrapped) }()
+	g.waitEntered(t, "the long close's session end")
+	claims := hub.claimCount()
 	actx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	t0 := time.Now()
-	r.AbortClaims(actx)
+	r.BeginShutdown(actx)
 	if d := time.Since(t0); d > 2*time.Second {
-		t.Fatalf("AbortClaims waited %s on a Start queued on opMu", d)
+		t.Fatalf("BeginShutdown waited %s on a long close", d)
 	}
-	r.opMu.Unlock()
-	if err := recvErr(t, startErr, "the queued Start"); !IsClaimDeferred(err) {
-		t.Fatalf("the queued Start answered %v, want the deferral", err)
+	if err := r.Start(context.Background(), queued); !IsClaimDeferred(err) {
+		t.Fatalf("a Start after the latch answered %v, want the deferral", err)
 	}
-	if n := hub.claimCount(); n != 0 {
+	if n := hub.claimCount() - claims; n != 0 {
 		t.Fatalf("the deferred Start claimed %d time(s)", n)
 	}
+	g.open()
+	_ = recvErr(t, stopped, "the long close")
 }
 
 // review nit of B-8: a closed claim's partial capsule is quarantined, not

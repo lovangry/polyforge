@@ -106,4 +106,5 @@ func TestVerifyAttemptWaitsForRestart(t *testing.T) {
 	if r.verifyAttempt(context.Background(), j, true) {
 		t.Fatal("a verify attempt during Restart must retry later")
 	}
+	r.endRestarting() // no lane runs: nothing for the rig's settle to wait for
 }

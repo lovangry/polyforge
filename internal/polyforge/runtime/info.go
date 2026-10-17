@@ -101,6 +101,18 @@ func (r *Runtime) Persist() error { return r.persist() }
 // wait ran out with records waiting for aihub; see Restart).
 func (r *Runtime) Reconciling() bool { return r.isRestarting() }
 
+// Busy reports whether an operation of wi (any id form this runtime
+// knows) is under way — a claim, a close, a recovery, a resume or its
+// restart reconciliation: a door of the work item would answer
+// DAEMON-409/503 now.
+func (r *Runtime) Busy(wi string) bool {
+	id := r.Resolve(wi)
+	if id == "" {
+		id = wi
+	}
+	return r.wiLocked(id)
+}
+
 // resolveJob answers the job behind any id form: the canonical key first,
 // then the alias table — so daemon-side route lookups by the operator's
 // submitted spelling (a slug, most often) find the live job without an

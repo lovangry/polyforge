@@ -217,6 +217,12 @@ type Daemon struct {
 	rtMsgs   *supervise.Queue[protocol.RTMsg]
 	obMsgs   *supervise.Queue[protocol.OBMsg]
 	attachCh *supervise.Queue[observe.Attach]
+	// attachedMu guards attached: the work items whose monitor-building
+	// RTStarted attachment went to the observe lane (the bridge, a
+	// re-attachment) with no RTFinished since — their monitor exists, or
+	// is about to once observe drains attachCh.
+	attachedMu sync.Mutex
+	attached   map[string]bool
 
 	// sealGuard serializes the close paths (CLI wrap/pause): exactly one
 	// close may run per work item; the late arrival answers DAEMON-409.
@@ -764,6 +770,7 @@ func (d *Daemon) reattachJob(ji runtime.JobInfo) {
 	if ji.Agent == nil {
 		return
 	}
+	d.noteAttached(ji.WorkItem, true)
 	d.attachCh.Push(d.buildAttach(protocol.RTMsg{
 		Kind: protocol.RTStarted, SpawnN: ji.SpawnN,
 		WorkItem: ji.WorkItem, AgentPID: ji.AgentPID,
@@ -835,11 +842,12 @@ func (d *Daemon) bridge() {
 			if !ok {
 				break
 			}
-			if msg.Kind == protocol.RTRecovered {
+			if msg.Kind == protocol.RTRecovered && !d.isAttached(msg.WorkItem) {
 				if _, monitored := d.obs.Progress(msg.WorkItem); !monitored {
-					// a recovery of a job no monitor watches yet — the
-					// restart reconciliation's, a deferred verify's, a live
-					// resume's: its RTStarted attachment (the startup
+					// a recovery of a job no monitor watches yet, nor one
+					// whose RTStarted attachment is still on its way —
+					// the restart reconciliation's, a deferred verify's, a
+					// live resume's: its RTStarted attachment (the startup
 					// re-attachment, the runtime's own announcement, the
 					// resume route) builds the monitor; observe would only
 					// log the message as dropped
@@ -853,7 +861,13 @@ func (d *Daemon) bridge() {
 			if msg.Kind == protocol.RTStarted || msg.Kind == protocol.RTRecovered {
 				if ji, live := d.rt.Info(msg.WorkItem); live && ji.Agent != nil {
 					at = d.buildAttach(msg, ji)
+					if msg.Kind == protocol.RTStarted {
+						d.noteAttached(msg.WorkItem, true)
+					}
 				}
+			}
+			if msg.Kind == protocol.RTFinished {
+				d.noteAttached(msg.WorkItem, false)
 			}
 			d.attachCh.Push(at)
 		}
@@ -863,6 +877,27 @@ func (d *Daemon) bridge() {
 		case <-d.rtMsgs.Notify():
 		}
 	}
+}
+
+// noteAttached records (or, on RTFinished, forgets) that wi's
+// monitor-building attachment went to the observe lane.
+func (d *Daemon) noteAttached(wi string, on bool) {
+	d.attachedMu.Lock()
+	defer d.attachedMu.Unlock()
+	if !on {
+		delete(d.attached, wi)
+		return
+	}
+	if d.attached == nil {
+		d.attached = map[string]bool{}
+	}
+	d.attached[wi] = true
+}
+
+func (d *Daemon) isAttached(wi string) bool {
+	d.attachedMu.Lock()
+	defer d.attachedMu.Unlock()
+	return d.attached[wi]
 }
 
 // ---------------------------------------------------------------------------
@@ -993,7 +1028,7 @@ func (d *Daemon) dispatch() {
 			return
 		}
 		// A claim that races the shutdown latch defers itself in the
-		// runtime (AbortClaims); nothing here waits for it.
+		// runtime (BeginShutdown); nothing here waits for it.
 		go d.startEntry(*e)
 	}
 }

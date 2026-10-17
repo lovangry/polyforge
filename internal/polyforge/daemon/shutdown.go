@@ -161,20 +161,21 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 	// Step 1: the latch, before any other action.
 	d.modes.SetShuttingDown()
 
-	// Step 1b: claims under way run outside the Run loop and
-	// outside the runtime's lock. Stop them before the live-job snapshot: no
-	// new claim starts, every capsule/task-repo clone is cancelled, and each
+	// Step 1b: the runtime's shutdown latch, before the live-job snapshot:
+	// no new claim starts and no agent starts any more (a recovery, a
+	// resume or the restart reconciliation meeting the latch relaunches
+	// nothing), every capsule/task-repo clone is cancelled, and each
 	// in-flight claim is DEFERRED — its claiming-journal entry (and its
 	// queue entry) stay for the next start, the work item is never turned
-	// blocked — and none can install an agent behind the teardown below.
-	// Only claims already CLAIMING are waited for, and at most
-	// claimAbortWait — the WIP snapshots below need the rest of the budget.
+	// blocked. Only claims already CLAIMING and agent starts already under
+	// way are waited for, and at most claimAbortWait — the WIP snapshots
+	// below need the rest of the budget.
 	actx, acancel := context.WithTimeout(ctx, claimAbortWait(ctx))
-	d.rt.AbortClaims(actx)
+	settled := d.rt.BeginShutdown(actx)
 	acancel()
 
 	// Steps 2-3 run against the snapshot of live jobs taken here; the
-	// set only shrinks from this moment (no source may add a job).
+	// set only shrinks from this moment (no agent starts after the latch).
 	live := d.liveJobs()
 
 	// Step 2 (polyforge#106): no pf/stop_notice delivery and no agent
@@ -235,8 +236,9 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 	}
 
 	// Step 5: close the UDS face, stop the loops, and wait for the
-	// runtime message loop to drain — an in-flight recovery triggered
-	// before the monitors stopped must never outlive the process.
+	// runtime message loop to return. A recovery the loop handed off
+	// before the monitors stopped starts no agent behind the latch (step
+	// 1b); its record stays recovering for the next start.
 	d.closeFace()
 	if d.cancelRun != nil {
 		d.cancelRun()
@@ -247,26 +249,26 @@ func (d *Daemon) runShutdown(ctx context.Context, cause ShutdownCause) error {
 		case <-ctx.Done():
 		}
 	}
-	// ...and for a restart reconciliation step still in flight (a
-	// recovery's push and relaunch: the relaunch meets the cancelled run
-	// context; the lane starts no new step after the latch), then persist
-	// what it settled — no lane step outlives the sequence.
-	d.rt.WaitRestartStep(ctx)
-	if d.faceOwned {
-		if err := d.rt.Persist(); err != nil {
-			fmt.Fprintf(os.Stderr, "daemon: state.json persist failed: %v\n", err)
-		}
-	}
 	// Stop the runtime's durable-close retry goroutines.
 	d.rt.Close()
-	// Final sweep: no writer survives the shutdown — a recovery that was
-	// mid-cascade when the monitors stopped may have installed a fresh
-	// handle after the terminate pass above read the job set.
+	// Final check. In a settled shutdown the latch above made the
+	// live-job snapshot final, so no agent may still be alive here: one
+	// that is was started behind the latch or survived its teardown — a
+	// defect, named loudly. When the latch stopped waiting for an agent
+	// start still under way (its budget ran out), that start may have
+	// bound after the snapshot: whatever is alive is torn down here (a
+	// later binder tears its own down).
 	for _, ji := range d.rt.List() {
-		if ji.Agent != nil {
-			if err := ji.Agent.Terminate(10 * time.Second); err != nil {
-				fmt.Fprintf(os.Stderr, "daemon: %s: residual agent teardown incomplete: %v\n", ji.WorkItem, err)
-			}
+		if ji.Agent == nil || !ji.Agent.Alive() {
+			continue
+		}
+		if settled {
+			fmt.Fprintf(os.Stderr, "daemon: shutdown: %s: an agent is still alive at the end of the sequence (started behind the shutdown latch, or its teardown failed) — this is a bug\n", ji.WorkItem)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "daemon: shutdown: %s: an agent bound after the shutdown stopped waiting for its start — tearing it down\n", ji.WorkItem)
+		if err := ji.Agent.Terminate(10 * time.Second); err != nil {
+			fmt.Fprintf(os.Stderr, "daemon: %s: late agent teardown incomplete: %v\n", ji.WorkItem, err)
 		}
 	}
 	return nil

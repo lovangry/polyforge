@@ -172,10 +172,11 @@ func TestB8DispatchSlotLimitAndShutdownDuringClone(t *testing.T) {
 	}
 }
 
-// review nit of B-8: a claim queued on the runtime's lock behind a long
-// close (here a wrap whose SessionEnd hangs) must not eat the shutdown
-// budget — the shutdown waits only for claims already CLAIMING, so the
-// sequence (and its WIP step) proceeds at once.
+// review nit of B-8: a claim dispatched while a long close of another
+// work item (here a wrap whose SessionEnd hangs) holds that work item's
+// lock must not eat the shutdown budget — the shutdown waits only for
+// claims already CLAIMING and agent starts under way, so the sequence (and
+// its WIP step) proceeds at once.
 func TestB8ShutdownNotDelayedByClaimQueuedOnLock(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) { c.ShutdownBudget = 60 * time.Second })
 	td.submitClaim(t, "wi_b8_live")
@@ -189,7 +190,7 @@ func TestB8ShutdownNotDelayedByClaimQueuedOnLock(t *testing.T) {
 	wrapDone := make(chan struct{})
 	go func() {
 		defer close(wrapDone)
-		_ = td.rt.Stop(td.runCtx, "wi_b8_live", "wrapped") // holds opMu inside the parked SessionEnd
+		_ = td.rt.Stop(td.runCtx, "wi_b8_live", "wrapped") // holds its lock inside the parked SessionEnd
 	}()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -205,7 +206,7 @@ func TestB8ShutdownNotDelayedByClaimQueuedOnLock(t *testing.T) {
 	if _, err := td.client.ClaimWithModels("wi_b8_queued", "normal", nil); err != nil {
 		t.Fatalf("claim: %v", err)
 	}
-	time.Sleep(200 * time.Millisecond) // the dispatcher's Start queues on opMu
+	time.Sleep(200 * time.Millisecond) // the dispatcher's Start runs meanwhile
 	t0 := time.Now()
 	if err := td.Shutdown(context.Background(), DirectShutdownCause()); err != nil {
 		t.Fatalf("shutdown: %v", err)

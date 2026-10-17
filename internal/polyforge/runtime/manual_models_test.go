@@ -122,7 +122,7 @@ func TestManualModelsSurviveClaimingReplay(t *testing.T) {
 	}
 	hub.hold("wi_manrep", session, api.StatusRunning)
 
-	replayClaims(r)
+	replayClaims(t, r)
 
 	j := r.jobOf("wi_manrep")
 	if j == nil {
@@ -216,7 +216,7 @@ func TestManualModelsRecordDroppedOnTerminalVerdict(t *testing.T) {
 	j := seedJob(r, "wi_term")
 	r.saveManualModels("wi_term", []string{"pi:m/one"})
 	hub.hold("wi_term", "other", api.StatusWrapped)
-	underOpMu(r, func() { r.restartOne(context.Background(), j.record()) })
+	underLock(r, j.wi, func() { r.restartOne(context.Background(), j.record()) })
 	if got := r.loadManualModels("wi_term"); got != nil {
 		t.Fatalf("record survived a wrapped verdict: %v", got)
 	}
