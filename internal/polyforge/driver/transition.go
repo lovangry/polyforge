@@ -843,11 +843,9 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 			}
 		case OutcomeNeedsInput:
 			kind = "needs_input"
-			d.inputEventFor = req.Result.QuestionID
-			body["question_id"] = req.Result.QuestionID
-			if _, q, qerr := needsInputQuestion(req.Result); qerr == nil {
-				body["question"] = q
-			}
+			q := d.exec.Steps[req.StepID].PendingQuestion
+			d.inputEventFor = q.ID
+			body["question_id"], body["question"] = q.ID, q.Question
 		case OutcomeIncomplete:
 			kind = "incomplete"
 		}

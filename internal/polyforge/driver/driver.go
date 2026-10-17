@@ -500,10 +500,7 @@ func (d *Driver) settle(stepID string, n int64, res *StepResult, run StepRun) (s
 			// Keep the pending-question context across the retry: the
 			// rejected envelope was a question, and the rewrite must
 			// still be one.
-			q := strings.TrimSpace(res.Question)
-			if q == "" {
-				_, q, _ = needsInputQuestion(res)
-			}
+			_, q, _ := needsInputQuestion(res)
 			feedback += "\nThe rejected envelope was a needs_input (question) report"
 			if q != "" {
 				feedback += fmt.Sprintf(" asking: %q", q)
