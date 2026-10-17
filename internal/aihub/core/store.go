@@ -165,9 +165,9 @@ CREATE TABLE IF NOT EXISTS memories (
   type         TEXT NOT NULL,
   title        TEXT,
   visibility   TEXT NOT NULL,
-  -- memory/<project>/<id>: the directory of the row's memory.md file —
-  -- read once by the content migration, written through on create and
-  -- redact (memory/writethrough.go), never read while serving.
+  -- memory/<project>/<id>: where a database from before the content
+  -- column kept the row's memory.md; read only by the content migration
+  -- (memory/migrate.go).
   authority_path TEXT NOT NULL,
   content_sha  TEXT NOT NULL,
   content_len  INTEGER NOT NULL,
@@ -180,12 +180,7 @@ CREATE TABLE IF NOT EXISTS memories (
   -- The stored document (frontmatter + body); content_sha/content_len
   -- describe it. NULL only on a row the memory content migration could
   -- not fill (memory/migrate.go): such a row is never served.
-  content      TEXT,
-  -- Transitional (memory/writethrough.go): unused here, kept so a fresh
-  -- install can roll back to v2.11, whose memory store reads and writes
-  -- them. Remove with the write-through.
-  fs_mtime_ns  INTEGER,
-  fs_size      INTEGER
+  content      TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_mem_work_item ON memories(work_item_id) WHERE work_item_id IS NOT NULL;

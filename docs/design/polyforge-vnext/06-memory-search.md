@@ -17,13 +17,7 @@ Memory 是 Core 域数据（项目知识沉淀）：一条 memory = `memories` �
 - 创建：一个事务插入行（含 `content`）+ FTS 行（FTS 先删后插）（`Store.Create`）。redact：一个事务置
   `status='redacted'` + 删除 FTS 行；文档留在行里，此后永不服务（`Store.Redact`）。
 - `content_sha` = `content` 的 SHA-256，`content_len` = 其字节数（`pf memory show` 显示的 `content_len`）。
-- 过渡期写穿（`writethrough.go`，本版本被所有部署运行过之后的下一个版本删除）：创建时照旧写
-  `<data-dir>/memory/<project_id>/<mem_id>/memory.md`（临时文件 + fsync + rename 落位**之后**才提交行；字节与
-  `content` 相同，行的 `authority_path` 指向它；提交失败则删掉该文件），redact 先提交行、再把目录移进
-  `_redacted/`（尽力而为）——回滚到 v2.11 时，旧的对账为每个 active 行找到文件、redacted 行原样保留。崩溃残留：
-  落位后、提交前崩溃留下的无行文件在本版本不是 memory（不服务、不迁移、不删除），v2.11 会把它收为 memory；
-  提交后、挪文件前崩溃的 redact 在两边都是 redacted。运行时只写不读。`fs_mtime_ns`/`fs_size` 列同为过渡保留
-  （本版本不用；保证全新安装也能回滚到 v2.11）。
+- 运行时不写也不读 memory 文件。行的 `authority_path`（`memory/<project_id>/<mem_id>`）只供 §4 的迁移定位旧文件。
 - `content` 为 NULL 的行（只可能来自迁移时找不到文件，§4）对一切读写路径等同不存在（`MEM-404`）。
 
 ## 3. 文档格式 <!-- §3 -->
@@ -47,9 +41,8 @@ Memory 是 Core 域数据（项目知识沉淀）：一条 memory = `memories` �
 `content_sha` 一致 → 复制；不一致 → 以文件为准（旧版本的规则），重算 `content_sha`/`content_len`，active 行重写
 FTS；active 行的文件只在 `_redacted/` 下（redact 在挪文件后、提交前中断）→ 补完 redact；找不到文件 → 留 NULL、
 不服务，下次启动重试。随后同一趟为标题为空的 active 行按其文档派生标题（与创建同一规则：frontmatter 的非空
-`title`，否则正文首个可用行；派生不出的保持为空），并删除 `memory.md.tmp` 残留。每次启动记一行计数日志，非简单复制的行逐个列出 id。已填的行不再被选中：迁移过的库上
-不读 memory 文件、不写。文件一律保留不删（本版本作为后备；删除留给后续版本，届时与写穿一起删除，并删除
-`authority_path` 列与旧库遗留的 `fs_mtime_ns`/`fs_size` 列）。耗时：生产备份副本上 3,810 条约 1.5 s。
+`title`，否则正文首个可用行；派生不出的保持为空）。每次启动记一行计数日志，非简单复制的行逐个列出 id。已填的行不再被选中：迁移过的库上
+不读 memory 文件、不写。文件一律保留不删。耗时：生产备份副本上 3,810 条约 1.5 s。
 
 ## 5. API 与错误码 <!-- §5 -->
 
@@ -85,7 +78,7 @@ rowid 与 rank，再沿 rank 顺序分批读取条目元数据，直到下界 (1
 
 `MEM-400` 输入不合法（缺 `q`/`type`/`content`、可见性越界、frontmatter 不合法）；`MEM-403` 无写权限 / 能读但非 owner
 的 redact；`MEM-404` 不存在或无权读（含 redact 时无读权限）；`MEM-409` 幂等键复用、redact 非 active 条目；`MEM-413` 正文超 1 MiB；
-`MEM-500` 写穿文件（§2）写入/改名失败；`MEM-503` FTS 查询/扫描失败；数据库事务失败 → `CORE-500`（未分类的服务端错误）（常量见 `internal/common/api/errors.go` `ErrMem*`）。另：key 限定在其他项目 → `AUTH-403`；
+`MEM-503` FTS 查询/扫描失败；数据库事务失败 → `CORE-500`（未分类的服务端错误）（常量见 `internal/common/api/errors.go` `ErrMem*`）。另：key 限定在其他项目 → `AUTH-403`；
 创建时项目不存在 → `CORE-404`。
 
 ## 6. 可见性 <!-- §6 -->

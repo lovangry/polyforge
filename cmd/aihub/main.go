@@ -137,8 +137,8 @@ func main() {
 // logMigration logs one content migration pass: the counts always, the
 // ids of every row that needed more than a copy.
 func logMigration(rep memory.MigrateReport) {
-	log.Printf("aihub: memory content migration: %d copied, %d adopted (file differed from content_sha), %d redact completed, %d missing, %d titles derived, %d tmp files swept, in %s",
-		rep.Copied, len(rep.Adopted), len(rep.Redacted), len(rep.Missing), rep.Titled, rep.Swept, rep.Elapsed.Round(time.Millisecond))
+	log.Printf("aihub: memory content migration: %d copied, %d adopted (file differed from content_sha), %d redact completed, %d missing, %d titles derived, in %s",
+		rep.Copied, len(rep.Adopted), len(rep.Redacted), len(rep.Missing), rep.Titled, rep.Elapsed.Round(time.Millisecond))
 	for _, l := range []struct {
 		what string
 		ids  []string
