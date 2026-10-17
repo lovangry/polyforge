@@ -49,6 +49,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/silgrid/polyforge/internal/common/atomicfile"
 )
 
 // hookTemplate is the hook body. Kept as a function so the blob limit
@@ -166,8 +168,7 @@ func writeHook(path string, maxBlob, maxTaskBlob int64) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0o755)
+	// tmp + rename: a push running the hook, or a crash mid-write, never
+	// sees a torn script
+	return atomicfile.Write(path, []byte(body), 0o755)
 }

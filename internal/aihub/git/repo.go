@@ -82,6 +82,10 @@ func git(dir string, env []string, args ...string) (string, error) {
 
 // EnsureBare creates the bare repo for a WI (idempotent) and installs the
 // pre-receive hook. Called at claim time — the WI's chain begins empty.
+// Every step re-runs on a repo the process has not ensured yet (a
+// pre-existing one after a restart, or one a crash left half-initialized):
+// each is idempotent, so the repo always ends with this build's
+// configuration and hook.
 func (m *Manager) EnsureBare(wiID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -89,18 +93,6 @@ func (m *Manager) EnsureBare(wiID string) error {
 		return nil
 	}
 	dir := m.RepoDir(wiID)
-	if _, err := os.Stat(filepath.Join(dir, "HEAD")); err == nil {
-		// Pre-existing repo (e.g. after a server restart): re-install the
-		// hook so it always matches this build's configuration.
-		if err := os.MkdirAll(filepath.Join(dir, "hooks"), 0o750); err != nil {
-			return err
-		}
-		if err := writeHook(filepath.Join(dir, "hooks", "pre-receive"), m.MaxBlobBytes, m.MaxTaskBlobBytes); err != nil {
-			return err
-		}
-		m.known[wiID] = true
-		return nil
-	}
 	if _, err := git(m.Root, nil, "init", "--bare", dir); err != nil {
 		return err
 	}
