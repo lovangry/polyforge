@@ -59,6 +59,10 @@ type Config struct {
 	// engine).
 	AgentStarter AgentStartFunc
 	MachineID    string // registered machine identity
+	// DaemonSocket is the daemon's UDS path, handed to step processes as
+	// PF_DAEMON_SOCKET so their pf reaches this daemon for memory reads
+	// and writes, wherever it listens.
+	DaemonSocket string
 	// Mapping is the workspace→projects plan of record (polyforge#113):
 	// the daemon assembles it from the shared cli.toml ([workspace.
 	// "<path>"] sections) and the runtime routes every capsule through it

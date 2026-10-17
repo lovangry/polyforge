@@ -101,6 +101,9 @@ func (s *claudeSpawner) buildCmd(p SpawnParams) (*exec.Cmd, error) {
 		"DISABLE_AUTOUPDATER=1",
 		"CLAUDE_CODE_STARTUP_FAILURE_RESULTS=1",
 	}
+	if s.cfg.DaemonSocket != "" {
+		additions = append(additions, "PF_DAEMON_SOCKET="+s.cfg.DaemonSocket)
+	}
 	// polyforge#171: the step's config dir is where its credentials live
 	// (claude-config/settings.json's env block — the single authority
 	// layer); the adapter hard-sets it and never injects a credential of

@@ -77,8 +77,6 @@ type queueStats struct {
 	Pending       int `json:"pending"`
 	Running       int `json:"running"`
 	MaxConcurrent int `json:"max_concurrent"`
-	// MaxSource: "ops" (an explicit pf ops max) or "config".
-	MaxSource string `json:"max_source"`
 }
 
 type statusResponse struct {
@@ -121,9 +119,6 @@ type statusResponse struct {
 type opsConfigResponse struct {
 	Auto bool `json:"auto"`
 	Max  int  `json:"max"`
-	// MaxSource is where Max comes from: "ops" (explicit pf ops max) or
-	// "config" (cli.toml [daemon] / flag / default).
-	MaxSource string `json:"max_source"`
 }
 
 type closeResponse struct {
@@ -135,9 +130,10 @@ type closeResponse struct {
 	Reason  string `json:"reason,omitempty"`
 }
 
-// resumeBlockedResponse is the POST /jobs/{id}/resume-blocked answer
-// (polyforge#116): the §6.4 owner move re-established execution — the
-// parked workflow is unblocked and the frozen step re-dispatches in place.
+// resumeBlockedResponse is the POST /jobs/{id}/claim {"resume":true}
+// answer (polyforge#116): the §6.4 owner move re-established execution —
+// the parked workflow is unblocked and the frozen step re-dispatches in
+// place.
 type resumeBlockedResponse struct {
 	Resumed    bool   `json:"resumed"`
 	WorkItemID string `json:"work_item_id"`
@@ -256,11 +252,6 @@ func (d *Daemon) routes() *http.ServeMux {
 			"no live bridge handle for work item "+wi+": the workflow is between derivations — retry after the daemon re-derives it")
 	})
 	mux.HandleFunc("POST /jobs/{wi}/claim", d.submitRoute())
-	// polyforge#116: the §6.4 owner move on a workflow parked blocked on an
-	// honest incomplete result — the state the bounded close leaves has no
-	// live driver, no bridge handle and no job record; the owner's moves
-	// are their own route, not a runtime call.
-	mux.HandleFunc("POST /jobs/{wi}/resume-blocked", d.resumeBlockedRoute)
 	// wi_seWTgHeKtaa8 (v2-converge §7): the live-holder half of the
 	// operator's `pf resume` on a PAUSED work item — the CLI has already
 	// cleared clean_pause at the hub; this route makes that observable
@@ -307,8 +298,23 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 // ---------------------------------------------------------------------------
-// submit: claim.
+// claim: the one start route — `pf submit` (queued) and `pf resume` of a
+// work item parked blocked (started now).
 
+// submitRoute serves POST /jobs/{wi}/claim. A submit is accepted once
+// its entry is on disk; the dispatcher claims it within one tick,
+// priority-desc against the concurrency cap.
+//
+// "resume": true is the claim half of `pf resume` on a workflow parked
+// blocked (polyforge#116). The CLI has already landed the hub's
+// resume-blocked door with the human's own credential (its
+// owner/maintainer/admin check is about the human, never the daemon's
+// machine key), so the work item is queued again; this route claims it
+// synchronously and the claim/start path's owner move (bridge.Start →
+// driver.ResumeCurrent) re-dispatches the frozen step in place. The
+// claim's verdict is answered directly; only an unreachable hub
+// (DAEMON-503) falls back to the queue, so the work item is not stranded
+// queued at the hub.
 func (d *Daemon) submitRoute() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		wi := r.PathValue("wi")
@@ -316,6 +322,7 @@ func (d *Daemon) submitRoute() http.HandlerFunc {
 			Priority string     `json:"priority"`
 			Models   []string   `json:"models,omitempty"` // manual candidate list (pf submit --models)
 			Origin   *reqOrigin `json:"origin,omitempty"`
+			Resume   bool       `json:"resume,omitempty"`
 		}
 		if !decodeBody(w, r, &body) {
 			return
@@ -366,8 +373,15 @@ func (d *Daemon) submitRoute() http.HandlerFunc {
 		// the job is enqueued and before any capsule or server-side claim
 		// state exists. The runtime's own pre-claim check is the
 		// backstop. A failed probe refuses nothing here (the submit is
-		// durable-queued; the dispatcher retries the probe at Start).
-		if probe, err := d.hub.GetWorkItem(canonical); err == nil && probe != nil && probe.ProjectName != "" {
+		// durable-queued; the dispatcher retries the probe at Start). A
+		// resume skips it: its Start answers the same refusals directly.
+		var probe *api.WorkItem
+		if !body.Resume {
+			if p, err := d.hub.GetWorkItem(canonical); err == nil {
+				probe = p
+			}
+		}
+		if probe != nil && probe.ProjectName != "" {
 			if _, lerr := d.rt.LoadWorkspace(probe.ProjectName); lerr != nil {
 				writeErrOf(w, lerr)
 				return
@@ -382,10 +396,33 @@ func (d *Daemon) submitRoute() http.HandlerFunc {
 				}
 			}
 		}
-		// Accepted = enqueued; the dispatcher spawns within one tick,
-		// priority-desc against the machine's concurrency cap.
-		// `accepted` is answered only once the entry is on disk (v2 §5).
 		cursor := d.lastSeq(canonical)
+		if body.Resume {
+			// The daemon's run context, NOT the HTTP request's: the claim's
+			// ctx is the driver's parent (bridge.Start derives from it) — a
+			// request-scoped ctx would cancel the driver mid-dispatch the
+			// moment the CLI hangs up on this answer.
+			d.rt.NoteOrigin(canonical, body.Origin.origin())
+			err := d.rt.Start(d.runCtx, canonical)
+			if err == nil {
+				d.autoSubscribe(body.Origin, canonical, cursor)
+				writeJSON(w, http.StatusOK, resumeBlockedResponse{Resumed: true, WorkItemID: canonical})
+				return
+			}
+			var ae *api.Error
+			if !errors.As(err, &ae) || ae.Code != api.ErrDaemonHubUnavailable {
+				if errors.Is(err, runtime.ErrClaimClosed) {
+					// a pf wrap/pause landed while this claim was materializing
+					writeErr(w, api.ErrDaemonConflict, err.Error())
+					return
+				}
+				writeErrOf(w, err)
+				return
+			}
+			fmt.Fprintf(os.Stderr, "daemon: resume %s deferred, queued for the claim: %v\n", canonical, err)
+		}
+		// `accepted` (or a deferred resume) is answered only once the
+		// entry is on disk (v2 §5).
 		if err := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Models: body.Models, Origin: body.Origin.origin()}); err != nil {
 			writeErr(w, api.ErrDaemonInternal, "submit queue could not be persisted: "+err.Error())
 			return
@@ -393,93 +430,12 @@ func (d *Daemon) submitRoute() http.HandlerFunc {
 		// pf watch: the submitting chat is subscribed (subscription =
 		// adoption); events from here on are its to consume.
 		d.autoSubscribe(body.Origin, canonical, cursor)
-		writeJSON(w, http.StatusOK, submitResponse{Accepted: true, WorkItemID: canonical})
-	}
-}
-
-// ---------------------------------------------------------------------------
-// resume-blocked: the §6.4 owner move on a parked workflow (polyforge#116).
-
-// resumeBlockedRoute serves POST /jobs/{id}/resume-blocked — the owner's
-// resume verdict on a workflow parked blocked on an honest incomplete
-// result. The bounded close dropped the job and ended the session, so this
-// route re-establishes execution AFTER the CLI has landed the hub's
-// resume-blocked door with the human's own credential (never the daemon's
-// machine key — the door's owner/maintainer/admin check is about the human):
-// (blocked → queued, the claim gate stays queued-only), then a plain claim
-// that runs synchronously — the claim/start path's owner move
-// (bridge.Start → driver.ResumeCurrent) unblocks the parked workflow and
-// the loop re-dispatches the frozen in_progress step in place as a fresh
-// derivation (the parked journal and prior step output survive). The claim
-// is the authority for everything else; a refused door (the WI is not
-// blocked, or it is terminal) surfaces verbatim.
-func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
-	wi := r.PathValue("wi")
-	var body struct {
-		Priority string     `json:"priority"`
-		Origin   *reqOrigin `json:"origin,omitempty"`
-	}
-	if !decodeBody(w, r, &body) {
-		return
-	}
-	if err := d.modes.AdmitSubmit(); err != nil {
-		writeAdmissionErr(w, err)
-		return
-	}
-	canonical := d.canonWI(wi)
-	d.rt.NoteAlias(wi, canonical)
-	// The live check mirrors the submit family: a live run owns starts —
-	// the owner's verdict is for the parked state only (a retained paused
-	// record flows to the hub's own gate, as in the submit family).
-	if ji, live := d.rt.Info(canonical); live {
-		if ji.State != runtime.StatePaused {
-			writeErr(w, api.ErrDaemonConflict, "work item is already active on this daemon")
-			return
-		}
-	}
-	if d.q.IsPending(canonical) {
-		writeErr(w, api.ErrDaemonConflict, "work item is already queued on this daemon")
-		return
-	}
-	// The hub's resume-blocked door is NOT called here (v2-converge §7):
-	// its owner/maintainer/admin check must evaluate the HUMAN who typed
-	// `pf resume`, so the CLI lands the door with the user's own api key
-	// first; this route is only the claim/start half. A WI still blocked
-	// at the hub is refused by the claim gate itself.
-	// The daemon's run context, NOT the HTTP request's: the claim's ctx
-	// is the driver's parent (bridge.Start derives from it) — a request-
-	// scoped ctx would cancel the driver mid-dispatch the moment the CLI
-	// hangs up on this answer (the dispatch then dies with "context
-	// canceled" and the recovery lane re-derives at the job counter —
-	// measured exactly that way on the s28 shape). The dispatcher starts
-	// every claim on d.runCtx for the same reason.
-	d.rt.NoteOrigin(canonical, body.Origin.origin())
-	cursor := d.lastSeq(canonical)
-	if err := d.rt.Start(d.runCtx, canonical); err != nil {
-		// The CLI already flipped the WI blocked -> queued at the hub; a
-		// transient hub loss before the claim must not strand it there:
-		// queue the claim like a submit (persisted, retried with backoff).
-		var ae *api.Error
-		if errors.As(err, &ae) && ae.Code == api.ErrDaemonHubUnavailable {
-			if qerr := d.q.Enqueue(qEntry{WorkItemID: canonical, Priority: body.Priority, Origin: body.Origin.origin()}); qerr != nil {
-				writeErr(w, api.ErrDaemonInternal, "submit queue could not be persisted: "+qerr.Error())
-				return
-			}
-			fmt.Fprintf(os.Stderr, "daemon: resume %s deferred, queued for the claim: %v\n", canonical, err)
-			d.autoSubscribe(body.Origin, canonical, cursor)
+		if body.Resume {
 			writeJSON(w, http.StatusOK, resumeBlockedResponse{Resumed: true, WorkItemID: canonical, Deferred: true})
 			return
 		}
-		if errors.Is(err, runtime.ErrClaimClosed) {
-			// a pf wrap/pause landed while this claim was materializing
-			writeErr(w, api.ErrDaemonConflict, err.Error())
-			return
-		}
-		writeErrOf(w, err)
-		return
+		writeJSON(w, http.StatusOK, submitResponse{Accepted: true, WorkItemID: canonical})
 	}
-	d.autoSubscribe(body.Origin, canonical, cursor)
-	writeJSON(w, http.StatusOK, resumeBlockedResponse{Resumed: true, WorkItemID: canonical})
 }
 
 // ---------------------------------------------------------------------------
@@ -500,7 +456,7 @@ func (d *Daemon) resumeBlockedRoute(w http.ResponseWriter, r *http.Request) {
 // and waiting for the human answer before any dispatch.
 //
 // The daemon's run context, NOT the HTTP request's (see
-// resumeBlockedRoute): the recovery continuation must survive the CLI
+// submitRoute): the recovery continuation must survive the CLI
 // hanging up on this answer.
 func (d *Daemon) resumePausedRoute(w http.ResponseWriter, r *http.Request) {
 	wi := r.PathValue("wi")
@@ -721,7 +677,6 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 	// rt.List() reports). F15c rides the same loop: the per-job progress
 	// staleness for the LAST-PROGRESS column.
 	jobs, running := d.statusJobs()
-	maxN, maxSrc := d.q.MaxState()
 	var harnesses map[string]harnessStatus
 	if r.URL.Query().Get("harnesses") == "1" {
 		harnesses = d.harnessStatuses()
@@ -741,31 +696,25 @@ func (d *Daemon) statusRoute(w http.ResponseWriter, r *http.Request) {
 		Queue: queueStats{
 			Pending:       d.q.LenPending(),
 			Running:       running,
-			MaxConcurrent: maxN,
-			MaxSource:     maxSrc,
+			MaxConcurrent: d.q.MaxConcurrent(),
 		},
 	})
 }
 
-// opsConfigRoute is POST /ops/config {"auto":bool?,"max":int?,
-// "max_reset":bool?}: the one switch and the one number. At least one
-// must be present; max and max_reset exclude each other. max is an
-// explicit cap (persisted); max_reset returns to the configured cap.
+// opsConfigRoute is POST /ops/config {"auto":bool?,"max":int?}: the one
+// switch and the one number, at least one present. The switch persists;
+// the cap lasts until the daemon restarts, which takes the configured
+// one again.
 func (d *Daemon) opsConfigRoute(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Auto     *bool `json:"auto"`
-		Max      *int  `json:"max"`
-		MaxReset bool  `json:"max_reset"`
+		Auto *bool `json:"auto"`
+		Max  *int  `json:"max"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
 	}
-	if req.Auto == nil && req.Max == nil && !req.MaxReset {
-		writeErr(w, api.ErrDaemonBadInput, "ops config requires auto, max and/or max_reset")
-		return
-	}
-	if req.Max != nil && req.MaxReset {
-		writeErr(w, api.ErrDaemonBadInput, "ops config: max and max_reset exclude each other")
+	if req.Auto == nil && req.Max == nil {
+		writeErr(w, api.ErrDaemonBadInput, "ops config requires auto and/or max")
 		return
 	}
 	if req.Max != nil && *req.Max < 1 {
@@ -784,19 +733,15 @@ func (d *Daemon) opsConfigRoute(w http.ResponseWriter, r *http.Request) {
 			// (cli/chat) entries ride untouched.
 			d.autoOffPurge()
 		}
+		d.persistModeQuietly()
 	}
 	if req.Max != nil {
-		if err := d.q.SetExplicitMax(*req.Max); err != nil {
+		if err := d.q.SetMaxConcurrent(*req.Max); err != nil {
 			writeErr(w, api.ErrDaemonBadInput, err.Error())
 			return
 		}
 	}
-	if req.MaxReset {
-		d.q.ResetMax(d.cfg.MaxConcurrent)
-	}
-	d.persistModeQuietly()
-	maxN, maxSrc := d.q.MaxState()
-	writeJSON(w, http.StatusOK, opsConfigResponse{Auto: d.modes.Auto(), Max: maxN, MaxSource: maxSrc})
+	writeJSON(w, http.StatusOK, opsConfigResponse{Auto: d.modes.Auto(), Max: d.q.MaxConcurrent()})
 }
 
 func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {

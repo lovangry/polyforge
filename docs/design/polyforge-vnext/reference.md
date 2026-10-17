@@ -182,7 +182,7 @@ server-stamped `last_heartbeat_at`. A new `machine_id` creates (one transaction)
 and the machines row; no API key is issued (the daemon runs on its operator-issued key). Daemon cadence
 `-heartbeat-every` 60s (`daemon/heartbeat.go`), log-only failures with backoff. `GET /machines`
 returns `{machines:[{id,user_id,runtime_version,mode,live_wi_ids,last_heartbeat_at,heartbeat_age_seconds,stale}], stale_after_seconds, count}`, oldest first.
-The daemon id is the machine id: default `m-<hostname>`, persisted in `<data-dir>/daemon-id`
+The daemon id is the machine id: default `m-<short hostname>` (lower-cased, anything but `a-z0-9-` replaced by `-`; `daemon/ensure.go` `hostMachineID`), persisted in `<data-dir>/daemon-id`
 (`daemon/identity.go`, `v2-converge.md#§4`).
 
 ## 5. Error codes <!-- §5 -->
@@ -232,21 +232,20 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 
 ### 6.1 UDS routes <!-- §6.1 -->
 
-`internal/polyforge/daemon/routes.go` `routes()` — 19 routes, all wrapped by `refuseStepOrigin`: every
+`internal/polyforge/daemon/routes.go` `routes()` — 18 routes, all wrapped by `refuseStepOrigin`: every
 non-read request whose peer (or its ancestors / process-group leader) carries this daemon's
 `PF_WI_ID`+`PF_DAEMON_ID` markers — or whose peer credential cannot be read — is refused `DAEMON-403`
 (SO_PEERCRED capture `daemon/peercred.go`, check `runtime/stepproc.go` `StepProcessOrigin`).
 
 | Method | Path | Does | Caller |
 |---|---|---|---|
-| POST | `/jobs/{wi}/claim` | enqueue + claim + start (priority, models, origin) | `pf submit` |
+| POST | `/jobs/{wi}/claim` | enqueue + claim + start (priority, models, origin); `{"resume":true}`: claim + start now — the continue of a blocked WI after the CLI landed the hub door (DAEMON-503 → queued, answered `deferred`) | `pf submit`, `pf resume` |
 | POST | `/jobs/{wi}/answer` | deliver an answer to the driver bridge (no `question_id` → the single pending one) | `pf answer` |
-| POST | `/jobs/{wi}/resume-blocked` | continue a blocked WI (hub door + re-claim) | `pf resume` |
 | POST | `/jobs/{wi}/resume-paused` | live holder re-attaches a paused WI in place (`attached`/`already_live`/`closed`) | `pf resume` |
 | POST | `/jobs/{wi}/pause` | operator pause (clean_pause) | `pf pause` |
 | POST | `/jobs/{wi}/wrap` | terminal close with verdict | `pf wrap [--fail]` |
 | GET | `/status[?harnesses=1]` | machine id, auto, max, workspaces, jobs, queue; harness probe | `pf ops status`, `pf doctor`, `pf daemon ensure` |
-| POST | `/ops/config` | auto-pull switch, max concurrent jobs | `pf ops auto on|off`, `pf ops max N|--reset` |
+| POST | `/ops/config` | auto-pull switch, max concurrent jobs | `pf ops auto on|off`, `pf ops max N` |
 | POST | `/shutdown` | async graceful shutdown | `pf ops shutdown` |
 | POST | `/chat/init` | harness session → chat id | `pf chat init` |
 | GET | `/jobs/{wi}/watch?after=N` | per-WI snapshot + events | `pf watch <wi> --once` |
@@ -255,7 +254,7 @@ non-read request whose peer (or its ancestors / process-group leader) carries th
 | POST | `/chats/{id}/ack` | cursor advance | resident `pf watch --chat` |
 | POST | `/chats/{id}/subscribe-owned` | `{"owner"}`: subscribe the chat to every held WI it submitted or `owner` owns (origin owner, else reporter) that it has no subscription for; answers the added ones (cursor just before the WI's newest decision event) | resident `pf watch --chat` start |
 
-Socket: `--socket` > `PF_DAEMON_SOCKET` > cli.toml `daemon_socket` > `/run/polyforge.sock`
+Socket: `--socket` > `PF_DAEMON_SOCKET` > cli.toml `daemon_socket` > `daemon.sock` in `$POLYFORGE_DATA_DIR`, else `~/.local/share/polyforge` (`cli.DataDir`; the same default for `pf` and the daemon, so `-data-dir` does not move it)
 (`cli/config.go`, `daemon/main.go`).
 
 ### 6.2 Lifecycle <!-- §6.2 -->
@@ -273,11 +272,11 @@ Socket: `--socket` > `PF_DAEMON_SOCKET` > cli.toml `daemon_socket` > `/run/polyf
 ### 6.3 Configuration <!-- §6.3 -->
 
 - **cli.toml** `$XDG_CONFIG_HOME/polyforge/cli.toml` (default `~/.config/polyforge/cli.toml`; `cli/config.go`). Flat keys `server api_key daemon_socket user_id claude_bin`; env overrides `PF_SERVER PF_API_KEY PF_DAEMON_SOCKET PF_USER_ID PF_CHAT_ID`. Unknown sections / flat keys are load errors.
-- **`[daemon]`** keys exactly `step_timeout stall_window harness_root operator_agent_dir max_concurrent_jobs` (quoted Go durations, absolute paths; `parseDaemonTable`). The daemon reads the table itself from `--config`; precedence explicit flag > table > default (`daemon/main.go` `applyDaemonTable`). `pf ops max N` persists in `daemon-state.json` and wins until `pf ops max --reset`.
+- **`[daemon]`** keys exactly `step_timeout stall_window harness_root operator_agent_dir max_concurrent_jobs` (quoted Go durations, absolute paths; `parseDaemonTable`). The daemon reads the table itself from `--config`; precedence explicit flag > table > default (`daemon/main.go` `applyDaemonTable`). `pf ops max N` sets the cap until the daemon restarts (never persisted; `daemon-state.json` holds only the auto switch).
 - **`[workspace."<path>"]`** `projects = [...]` — the only source of capsule placement (no workspace flag/env). A project maps to exactly one workspace; zero sections → exit 78; each workspace dir must exist and `capsules/` be writable (`internal/polyforge/mapping` builds the plan, `daemon/daemon.go` checks the dirs at start). Migration runbook: `08-capsule-base-migration.md#§2`.
 - **Daemon flags** (`cli.DefineDaemonFlags`, parsed by `daemon/main.go`; `pf help daemon` renders them): production-relevant `--config -socket -server -api-key -machine-id -data-dir (POLYFORGE_DATA_DIR, default ~/.local/share/polyforge) -workflows-dir -claude-bin -harness-root -operator-agent-dir (default ~/.pi/agent) -max-concurrent-jobs (4) -step-timeout (90m) -stall-window (10m)`; test/dev-only `-display-name -pi-bin -git-remote-base -recall-topk -auto -silence-window -tool-window -model-error-grace -revalidate-every -heartbeat-every`. Retired `POLYFORGE_HARNESS_ROOT` / `POLYFORGE_OPERATOR_AGENT_DIR` only warn.
 - **`.polyforge.yaml`** at the workspace root (`internal/polyforge/workspace/workspace.go`): closed grammar `steps.<project>.<default|step-id>.models: [candidates]`. Strict: unknown keys, `harness` (`RetiredHarnessHint`), the old top-level `models:`, unmapped projects, and step keys that are not installed step ids are errors → `DAEMON-414` before claim; `pf doctor` reports the same. Read fresh before every claim.
-- **Auto-pull**: `pf ops auto on|off` + `pf ops max N` (`v2-converge.md#§5`); with auto on the daemon pulls each mapped project's ready queue; accepted submits beyond the cap queue in `submit-queue.json` and replay after restart.
+- **Auto-pull**: `pf ops auto on|off` + `pf ops max N` (`v2-converge.md#§5`); with auto on the daemon pulls each mapped project's ready queue; accepted submits beyond the cap queue in `submit-queue.json` and replay after restart (the file holds each submit's intent — work item, priority, enqueue/submit time, models, origin; the DAEMON-503 backoff is not persisted and starts over).
 
 ### 6.4 Data dir and events <!-- §6.4 -->
 

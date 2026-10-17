@@ -18,12 +18,12 @@ import (
 )
 
 // DaemonClient speaks the daemon's UDS HTTP face: HTTP over the local
-// unix socket (/run/polyforge.sock by default). The authoritative route
+// unix socket (<data-dir>/daemon.sock by default). The authoritative route
 // list is the mount list in internal/polyforge/daemon/routes.go (mirrored
 // in README "Daemon UDS routes"); the core of it:
 //
-//	POST /jobs/{id}/claim                   body {"priority":"normal"}
-//	POST /jobs/{id}/resume-blocked|resume-paused
+//	POST /jobs/{id}/claim                   body {"priority":"normal"} or {"resume":true}
+//	POST /jobs/{id}/resume-paused
 //	POST /jobs/{id}/answer                  body = AnswerPayload
 //	                                        {question_id, answer_text, answered_by}
 //	POST /jobs/{id}/pause  {}               POST /jobs/{id}/wrap {"reason"}
@@ -163,9 +163,6 @@ type AnswerPayload struct {
 type OpsConfigRequest struct {
 	Auto *bool `json:"auto,omitempty"`
 	Max  *int  `json:"max,omitempty"`
-	// MaxReset drops an explicit `pf ops max` cap: the configured one
-	// (cli.toml [daemon] max_concurrent_jobs, else 4) applies again.
-	MaxReset bool `json:"max_reset,omitempty"`
 }
 
 // SubmitResponse is the claim-family answer.
@@ -274,10 +271,9 @@ type JobOrigin struct {
 
 // QueueStats is the local job queue counters.
 type QueueStats struct {
-	Pending       int    `json:"pending"`
-	Running       int    `json:"running"`
-	MaxConcurrent int    `json:"max_concurrent"`
-	MaxSource     string `json:"max_source,omitempty"` // "ops" | "config"
+	Pending       int `json:"pending"`
+	Running       int `json:"running"`
+	MaxConcurrent int `json:"max_concurrent"`
 }
 
 // ---------------------------------------------------------------------------
@@ -288,16 +284,24 @@ type QueueStats struct {
 // the manual `--models` candidate list (nil keeps the default). priority
 // defaults to "normal" server-side; empty keeps the default.
 func (d *DaemonClient) ClaimWithModels(wiID, priority string, models []string) (json.RawMessage, error) {
-	return d.submit(wiID, "claim", priority, models)
+	if priority == "" {
+		priority = "normal"
+	}
+	body := map[string]any{"priority": priority}
+	if len(models) > 0 {
+		body["models"] = models
+	}
+	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/claim", "", d.withOrigin(body), nil)
 }
 
-// ResumeBlocked submits the §6.4 owner move for a workflow parked blocked
-// (polyforge#116): the daemon returns the WI to claimable at the hub (the
-// owner's resume door) and re-establishes execution over the parked capsule
-// synchronously — the claim/start path's owner move unblocks the workflow
-// and the loop re-dispatches the frozen step in place as a fresh derivation.
+// ResumeBlocked is the daemon half of the §6.4 owner move for a workflow
+// parked blocked (polyforge#116), after the CLI landed the hub's
+// resume-blocked door: the claim runs synchronously and re-establishes
+// execution over the parked capsule — the claim/start path's owner move
+// unblocks the workflow and the loop re-dispatches the frozen step in
+// place as a fresh derivation.
 func (d *DaemonClient) ResumeBlocked(wiID string) (json.RawMessage, error) {
-	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/resume-blocked", "", d.withOrigin(map[string]any{}), nil)
+	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/claim", "", d.withOrigin(map[string]any{"resume": true}), nil)
 }
 
 // ResumePaused is the live-holder half of `pf resume` on a paused work
@@ -326,18 +330,6 @@ func (d *DaemonClient) ResumePaused(wiID string) (*ResumePausedResponse, error) 
 		return nil, fmt.Errorf("decode the resume-paused answer: %w", err)
 	}
 	return &out, nil
-}
-
-func (d *DaemonClient) submit(wiID, intent, priority string, models []string) (json.RawMessage, error) {
-	if priority == "" {
-		priority = "normal"
-	}
-	body := map[string]any{"priority": priority}
-	if len(models) > 0 {
-		body["models"] = models
-	}
-	return d.do("POST", "/jobs/"+url.PathEscape(wiID)+"/"+intent, "",
-		d.withOrigin(body), nil)
 }
 
 // Answer relays an answer to a needs_input step. The relay message is

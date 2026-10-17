@@ -101,10 +101,7 @@ func planEnsure(cfgPath, workflowsDir string, timeout time.Duration) (*ensurePla
 		return nil, fmt.Errorf("cannot locate the pf binary: %w", err)
 	}
 	home, _ := os.UserHomeDir()
-	dataDir := os.Getenv("POLYFORGE_DATA_DIR")
-	if dataDir == "" {
-		dataDir = filepath.Join(home, ".local", "share", "polyforge")
-	}
+	dataDir := cli.DataDir(home)
 	if workflowsDir == "" {
 		workflowsDir = filepath.Join(dataDir, "release", "current", "workflows")
 	}
@@ -125,14 +122,19 @@ func absOr(path string) string {
 
 var hostSanitizeRe = regexp.MustCompile(`[^a-z0-9-]`)
 
-// ensureMachineID answers the recorded daemon id, else m-<short host>
-// sanitized exactly as tools/install.sh does.
+// ensureMachineID answers the recorded daemon id, else hostMachineID.
 func ensureMachineID(dataDir string) string {
 	if raw, err := os.ReadFile(filepath.Join(dataDir, daemonIDFile)); err == nil {
 		if id := strings.TrimSpace(string(raw)); id != "" {
 			return id
 		}
 	}
+	return hostMachineID()
+}
+
+// hostMachineID is the daemon id a first start derives: m-<short host>,
+// sanitized exactly as tools/install.sh does.
+func hostMachineID() string {
 	host, _ := os.Hostname()
 	host, _, _ = strings.Cut(host, ".")
 	return "m-" + hostSanitizeRe.ReplaceAllString(strings.ToLower(host), "-")

@@ -28,10 +28,10 @@ type DaemonFlags struct {
 func DefineDaemonFlags(fs *flag.FlagSet) *DaemonFlags {
 	return &DaemonFlags{
 		Config:           fs.String("config", "", "shared config file: its [workspace] mapping is the capsule placement source (default ~/.config/polyforge/cli.toml)"),
-		Socket:           fs.String("socket", "", "unix socket path to listen on (env PF_DAEMON_SOCKET; default /run/polyforge.sock)"),
+		Socket:           fs.String("socket", "", "unix socket path to listen on (env PF_DAEMON_SOCKET; default daemon.sock in $POLYFORGE_DATA_DIR, else ~/.local/share/polyforge — the CLI's default; -data-dir does not move it)"),
 		Server:           fs.String("server", "", "aihub base URL (env PF_SERVER)"),
 		APIKey:           fs.String("api-key", "", "machine aihub api key (env PF_API_KEY)"),
-		MachineID:        fs.String("machine-id", "", "daemon id (default m-<hostname>); recorded in <data-dir>/daemon-id on first start, which then wins — a differing value refuses to start"),
+		MachineID:        fs.String("machine-id", "", "daemon id (default m-<short hostname>); recorded in <data-dir>/daemon-id on first start, which then wins — a differing value refuses to start"),
 		DisplayName:      fs.String("display-name", "", "test/dev-only: daemon display name shown by pf ops status (default hostname)"),
 		DataDir:          fs.String("data-dir", "", "daemon data dir (env POLYFORGE_DATA_DIR; default ~/.local/share/polyforge)"),
 		WorkflowsDir:     fs.String("workflows-dir", "", "workflows/ checkout dir (default ./workflows)"),
@@ -40,7 +40,7 @@ func DefineDaemonFlags(fs *flag.FlagSet) *DaemonFlags {
 		HarnessRoot:      fs.String("harness-root", "", "parent root of the step harness state dirs ([daemon] harness_root; default <data-dir>): <harness-root>/step-agent (the dedicated step agent dir), /step-agent-sessions (the pi steps' session store) and /claude-config (claude's config dir; its settings.json env block is the single credential authority layer); it replaces --harness-sessions-root, which is refused"),
 		OperatorAgentDir: fs.String("operator-agent-dir", "", "SOURCE of the dedicated step agent dir ([daemon] operator_agent_dir; default ~/.pi/agent): the daemon copies the minimal set (auth.json, models.json, agents/, extensions/subagent/) from here into <harness-root>/step-agent and every step agent runs against that copy, so the operator's own harness settings never reach a step. A configured source without a readable auth.json refuses the start"),
 		GitRemoteBase:    fs.String("git-remote-base", "", "test/dev-only: aihub bare-repo base URL (default <server>/git)"),
-		MaxConcurrent:    fs.Int("max-concurrent-jobs", 0, "configured max concurrent jobs ([daemon] max_concurrent_jobs; default 4); an explicit pf ops max N is persisted and wins until pf ops max --reset"),
+		MaxConcurrent:    fs.Int("max-concurrent-jobs", 0, "configured max concurrent jobs ([daemon] max_concurrent_jobs; default 4); pf ops max N overrides it until the daemon restarts"),
 		RecallTopK:       fs.Int("recall-topk", 0, "test/dev-only: claim-time memory snapshot hit count (default 10, max 50)"),
 		Auto:             fs.Bool("auto", false, "test/dev-only (production: pf ops auto on|off): auto-pull — the daemon claims ready-queue work itself (default off; unset keeps the persisted switch; --auto=false forces off)"),
 		SilenceWindow:    fs.Duration("silence-window", 0, "test/dev-only: X: no real work signal after dispatch, or no model output while waiting for the model, before the step is judged dead (default 10m for token-level harnesses, 30m for message-level)"),

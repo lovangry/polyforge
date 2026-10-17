@@ -104,20 +104,15 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return ExitNeedsOperator
 	}
 
-	home, _ := os.UserHomeDir()
-	base := os.Getenv("POLYFORGE_DATA_DIR")
-	if base == "" {
-		base = filepath.Join(home, ".local", "share", "polyforge")
-	}
 	if *dataDir == "" {
-		*dataDir = base
+		home, _ := os.UserHomeDir()
+		*dataDir = cli.DataDir(home)
 	}
 	// v2 identity: <data-dir>/daemon-id is THE id once written; a flag
 	// value that disagrees refuses to start (never silently switch).
 	explicitID := *machineID != ""
 	if *machineID == "" {
-		host, _ := os.Hostname()
-		*machineID = "m-" + strings.ToLower(host)
+		*machineID = hostMachineID()
 	}
 	id, err := ResolveDaemonID(*dataDir, *machineID, explicitID)
 	if err != nil {
