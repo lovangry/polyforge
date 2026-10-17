@@ -1,13 +1,15 @@
 package core
 
 // session_test.go — the v1.5 session model's core-level red lines: CAS
-// race, idempotent replay, compare-only verify, attach gates, force-end
+// race, replay by the session secret and the stale-session refusal,
+// compare-only verify, attach gates, force-end
 // + audit event, session-end fence + full field clear, claim gates, the
 // pause/clean_pause distinction, and the git credential's session path.
 
 import (
 	"database/sql"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -108,31 +110,84 @@ func TestSessionClaimCASRace(t *testing.T) {
 	}
 }
 
-// TestSessionClaimIdempotentReplay (D4): the same idempotency key answers
-// the same claim; a key bound to another caller/WI is refused; a cached
-// session that is no longer live answers CORE-403 STALE_SESSION.
-func TestSessionClaimIdempotentReplay(t *testing.T) {
+// TestSessionClaimReplayBySecret (D4): the holding session's repeated
+// claim — whatever idempotency key it carries, or none — answers the same
+// claim and writes nothing; another secret is refused ALREADY_HELD
+// (exclusivity).
+func TestSessionClaimReplayBySecret(t *testing.T) {
 	env, m := sessionEnv(t)
 	id := mustCreateExecWI(t, env, "idem goal", nil, "")
 	secret := "0123456789abcdef0123456789abcdef"
 	c1 := mustSessionClaim(t, m, env, id, secret, "key-1")
+	for _, key := range []string{"key-1", "key-2", ""} {
+		c2, err := m.Claim(id, api.SessionClaimRequest{SessionID: secret, MachineID: "m1", IdempotencyKey: key}, env.UserID)
+		if err != nil {
+			t.Fatalf("replay (key %q): %v", key, err)
+		}
+		if !reflect.DeepEqual(c1, c2) {
+			t.Fatalf("replay (key %q) answered %+v, want the same claim %+v", key, c2, c1)
+		}
+	}
+	if n := countEvents(t, env, id, "session_claimed"); n != 1 {
+		t.Fatalf("a replay must write nothing: %d session_claimed events", n)
+	}
+	if _, err := m.Claim(id, api.SessionClaimRequest{SessionID: "ffffffffffffffffffffffffffffffff", IdempotencyKey: "key-1"}, env.UserID); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "ALREADY_HELD" {
+		t.Fatalf("another secret must be refused ALREADY_HELD: %v", err)
+	}
+}
 
-	c2 := mustSessionClaim(t, m, env, id, "ffffffffffffffffffffffffffffffff", "key-1")
-	if c2.SessionFingerprint != c1.SessionFingerprint {
-		t.Fatalf("replay minted a different session: %s vs %s", c2.SessionFingerprint, c1.SessionFingerprint)
-	}
-	// Key reuse across callers: refused.
-	if _, err := m.Claim(id, api.SessionClaimRequest{SessionID: secret, IdempotencyKey: "key-1"}, env.UserIDB); !IsCode(err, api.ErrCoreConflict) || ErrorReason(err) != "IDEMPOTENCY_KEY_REUSED" {
-		t.Fatalf("key reuse across callers not refused: %v", err)
-	}
-	// A force-end clears the session: the cached response is now stale.
+// TestSessionReplayAfterForceEndIsRefused: a session that was force-ended,
+// superseded or ended never claims the work item again — with its old
+// idempotency key, a new one or none — and the refusal writes nothing.
+func TestSessionReplayAfterForceEndIsRefused(t *testing.T) {
+	env, m := sessionEnv(t)
+	id := mustCreateExecWI(t, env, "stale goal", nil, "")
+	old := "0123456789abcdef0123456789abcdef"
+	mustSessionClaim(t, m, env, id, old, "key-1")
 	if err := m.ForceEnd(id, "machine lost", env.UserID); err != nil {
 		t.Fatalf("force-end: %v", err)
 	}
-	_, err := m.Claim(id, api.SessionClaimRequest{SessionID: secret, IdempotencyKey: "key-1"}, env.UserID)
-	if !IsCode(err, api.ErrCoreForbidden) || ErrorReason(err) != "STALE_SESSION" {
-		t.Fatalf("stale cached replay not fenced: %v", err)
+	refused := func(when string) {
+		t.Helper()
+		for _, key := range []string{"key-1", "key-fresh", ""} {
+			_, err := m.Claim(id, api.SessionClaimRequest{SessionID: old, MachineID: "m1", IdempotencyKey: key}, env.UserID)
+			if !IsCode(err, api.ErrCoreForbidden) || ErrorReason(err) != "STALE_SESSION" {
+				t.Fatalf("%s: the old session's claim (key %q) must be refused STALE_SESSION: %v", when, key, err)
+			}
+		}
 	}
+	refused("after force-end")
+	if status, hash, _, _, _, _ := rowSession(t, env, id); status != api.StatusQueued || hash != nil {
+		t.Fatalf("a refused stale claim wrote the row: status=%s hash=%v", status, hash)
+	}
+	// Another daemon claims the freed work item; the old session stays out.
+	next := "fedcba9876543210fedcba9876543210"
+	mustSessionClaim(t, m, env, id, next, "key-next")
+	refused("after supersession")
+	// The new holder ends the work item: neither session claims it again.
+	if err := m.End(id, api.SessionEndRequest{SessionID: next, Status: api.StatusBlocked, Note: "stop"}, env.UserID); err != nil {
+		t.Fatalf("end: %v", err)
+	}
+	refused("after the holder's end")
+	if _, err := m.Claim(id, api.SessionClaimRequest{SessionID: next}, env.UserID); !IsCode(err, api.ErrCoreForbidden) || ErrorReason(err) != "STALE_SESSION" {
+		t.Fatalf("the ended session's claim must be refused STALE_SESSION: %v", err)
+	}
+}
+
+// countEvents counts the work item's events of one type.
+func countEvents(t *testing.T, env *testEnv, wiID, eventType string) int {
+	t.Helper()
+	events, err := env.WIs.Events(wiID)
+	if err != nil {
+		t.Fatalf("events: %v", err)
+	}
+	n := 0
+	for _, e := range events {
+		if e.Type == eventType {
+			n++
+		}
+	}
+	return n
 }
 
 // TestSessionVerifyCompareOnly (B3): match, mismatch and unheld answers;

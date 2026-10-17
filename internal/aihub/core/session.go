@@ -8,9 +8,10 @@ package core
 //
 //   - Claim  (POST .../claim, replaced handler): CAS in ONE transaction —
 //     status==queued AND session_hash IS NULL AND bundle present AND no
-//     unfinished blockers (M1 joint gate). Idempotent on idempotency_key
-//     (D4); a cached session that is no longer the live one answers
-//     CORE-403 STALE_SESSION.
+//     unfinished blockers (M1 joint gate). Idempotent on the session
+//     secret itself (D4): the holder's repeated claim answers the same
+//     claim; a secret that claimed the WI before but no longer holds it
+//     (superseded, force-ended, ended) answers CORE-403 STALE_SESSION.
 //   - Verify (POST .../session-verify): compare-only (B3): the hub stores
 //     only hex(sha256(session_id)); no state change, no secret echo.
 //   - Attach (POST .../session-attach): same-session resume of a paused
@@ -368,17 +369,21 @@ func (m *WIManager) Views(wis []api.WorkItem) ([]WIView, error) {
 // Claim (reference.md §3.2)
 
 // Claim executes the v1.5 CAS claim. callerIdentity is the api-key's
-// user id (idempotency triple binding). The response carries the public
+// user id (the claim's assignee). The response carries the public
 // fingerprint only — the secret never echoes.
+//
+// The session secret is the replay key (D4): a claim whose answer was
+// lost is repeated with the same secret, and while that session holds the
+// WI the repeat answers the same claim, re-read from the row. A secret
+// that claimed this WI before but no longer holds it is refused
+// STALE_SESSION: a superseded or ended session never claims again.
+// idempotency_key is not read.
 func (m *SessionManager) Claim(wiID string, req api.SessionClaimRequest, callerIdentity string) (*api.SessionClaim, error) {
 	if strings.TrimSpace(req.SessionID) == "" {
 		return nil, Fail(api.ErrCoreBadInput, "", "session_id required (the client-minted secret)")
 	}
-	if req.IdempotencyKey != "" {
-		if cached, err := m.replay(wiID, req.IdempotencyKey, callerIdentity); err != nil || cached != nil {
-			return cached, err
-		}
-	}
+	hash := api.SessionHashHex(req.SessionID)
+	fp := api.SessionFingerprint(req.SessionID)
 	// The joint gate is diagnosed on the transaction's own snapshot and the
 	// guarded UPDATE writes it; the store has a single connection (Open:
 	// SetMaxOpenConns(1)), so nothing interleaves between the two.
@@ -392,6 +397,15 @@ func (m *SessionManager) Claim(wiID string, req api.SessionClaimRequest, callerI
 	if err != nil {
 		return nil, err
 	}
+	if sessionHeld(row) && row.Hash.String == hash {
+		return claimAnswerTx(tx, wiID, row) // the holder's replay: no write
+	}
+	if claimed, err := sessionClaimedBefore(tx, wiID, fp); err != nil {
+		return nil, err
+	} else if claimed {
+		return nil, Fail(api.ErrCoreForbidden, "STALE_SESSION",
+			"session %s no longer holds the work item (current holder %s)", fp, row.Fingerprint.String)
+	}
 	if err := diagnoseClaimGate(row); err != nil {
 		return nil, err
 	}
@@ -404,8 +418,6 @@ func (m *SessionManager) Claim(wiID string, req api.SessionClaimRequest, callerI
 		return nil, err
 	}
 
-	hash := api.SessionHashHex(req.SessionID)
-	fp := api.SessionFingerprint(req.SessionID)
 	now := Now()
 	var machineAny any
 	if req.MachineID != "" {
@@ -422,33 +434,55 @@ func (m *SessionManager) Claim(wiID string, req api.SessionClaimRequest, callerI
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, Fail(api.ErrCoreConflict, "RACE_LOST", "state changed concurrently")
 	}
-
-	claim := &api.SessionClaim{
-		WorkItemID:         wiID,
-		SessionFingerprint: fp,
-		MachineID:          req.MachineID,
-		BundleName:         row.BundleName.String,
-		ClaimedAt:          now,
+	if err := appendEventTx(tx, wiID, now, callerIdentity, "session_claimed",
+		map[string]any{"session_fingerprint": fp, "machine_id": req.MachineID}); err != nil {
+		return nil, err
 	}
-	claim.Repos, err = claimReposTx(tx, wiID, row.ProjectID)
+	row, err = loadSessionRow(tx, wiID)
 	if err != nil {
 		return nil, err
 	}
-	claim.SealedHead, claim.SealedMachine = blockedSealTx(tx, wiID)
-
-	if req.IdempotencyKey != "" {
-		if err := cacheIdempotentClaimTx(tx, req.IdempotencyKey, wiID, callerIdentity, claim); err != nil {
-			return nil, err
-		}
-	}
-	if err := appendEventTx(tx, wiID, now, callerIdentity, "session_claimed",
-		map[string]any{"session_fingerprint": fp, "machine_id": req.MachineID}); err != nil {
+	claim, err := claimAnswerTx(tx, wiID, row)
+	if err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return claim, nil
+}
+
+// claimAnswerTx assembles the claim answer of the session that holds row:
+// identity from the row, repos and the blocked seal read on the same
+// snapshot.
+func claimAnswerTx(tx *sql.Tx, wiID string, row *sessionRow) (*api.SessionClaim, error) {
+	claim := &api.SessionClaim{
+		WorkItemID:         wiID,
+		SessionFingerprint: row.Fingerprint.String,
+		MachineID:          row.Machine.String,
+		BundleName:         row.BundleName.String,
+		ClaimedAt:          row.StartedAt.String,
+	}
+	var err error
+	claim.Repos, err = claimReposTx(tx, wiID, row.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	claim.SealedHead, claim.SealedMachine = blockedSealTx(tx, wiID)
+	return claim, nil
+}
+
+// sessionClaimedBefore reports whether the session with fingerprint fp
+// ever claimed the work item: its session_claimed event is the durable
+// record.
+func sessionClaimedBefore(tx *sql.Tx, wiID, fp string) (bool, error) {
+	var one int
+	err := tx.QueryRow(`SELECT 1 FROM wi_events WHERE work_item_id=?1 AND event_type='session_claimed'
+		AND json_extract(payload, '$.session_fingerprint')=?2 LIMIT 1`, wiID, fp).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // dependencyBlockedDetail is the DEPENDENCY_BLOCKED refusal text
@@ -484,55 +518,6 @@ func diagnoseClaimBundle(row *sessionRow) error {
 			"registration-only work item (no workflow bundle) is not claimable")
 	}
 	return nil
-}
-
-// replay answers a cached claim response when the SAME idempotency key,
-// caller and WI arrive again (D4). The cached response carries no secret,
-// so no replay TTL is needed (unlike the generation-era cache, which held
-// a plaintext credential at rest). The cached session must still be the
-// LIVE one — a cache whose session was superseded or ended answers
-// CORE-403 STALE_SESSION, never a stale claim.
-func (m *SessionManager) replay(wiID, key, callerIdentity string) (*api.SessionClaim, error) {
-	var cached, cachedIdentity, cachedWI string
-	err := m.db.QueryRow(`SELECT response_json, caller_identity, work_item_id
-		FROM claim_idempotency WHERE idempotency_key=?1`, key).
-		Scan(&cached, &cachedIdentity, &cachedWI)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil // no cache: proceed to the real claim
-	}
-	if err != nil {
-		return nil, err
-	}
-	if cachedIdentity != callerIdentity || cachedWI != wiID {
-		return nil, Fail(api.ErrCoreConflict, "IDEMPOTENCY_KEY_REUSED",
-			"key is bound to a different caller or work item")
-	}
-	var claim api.SessionClaim
-	if err := json.Unmarshal([]byte(cached), &claim); err != nil {
-		return nil, err
-	}
-	row, err := loadSessionRow(m.db, wiID)
-	if err != nil {
-		return nil, err
-	}
-	if !sessionHeld(row) || row.Fingerprint.String != claim.SessionFingerprint {
-		return nil, Fail(api.ErrCoreForbidden, "STALE_SESSION",
-			"the cached session %s is no longer the live one (current holder %s)",
-			claim.SessionFingerprint, row.Fingerprint.String)
-	}
-	return &claim, nil
-}
-
-// cacheIdempotentClaimTx stores the claim half of the response (the
-// work-item view is re-assembled fresh on every replay).
-func cacheIdempotentClaimTx(tx *sql.Tx, key, wiID, callerIdentity string, claim *api.SessionClaim) error {
-	blob, err := json.Marshal(claim)
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(`INSERT INTO claim_idempotency(idempotency_key, work_item_id, caller_identity, response_json, created_at)
-		VALUES (?1,?2,?3,?4,?5)`, key, wiID, callerIdentity, string(blob), Now())
-	return err
 }
 
 // projectReposTx reads the project's task-repo inventory on the claim's

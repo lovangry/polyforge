@@ -97,9 +97,10 @@ not authorize). One transaction (`core/session.go` `Claim`), checked in order: n
 unfinished blocker (`DEPENDENCY_BLOCKED`), bundle present (`NOT_CLAIMABLE`); then
 `UPDATE … WHERE status='queued' AND session_hash IS NULL` (0 rows → `CORE-409 RACE_LOST`); a declared inventory repo that left the project → `CORE-409 INVENTORY_REPO_GONE`. Response `{claim, work_item}`
 (`api.SessionClaimResponse`; `claim.repos` = the inventory-filtered project repos; `sealed_head` /
-`sealed_machine` from the blocked seal). Idempotency (`claim_idempotency` table): same key replays the
-same response; a different caller/WI → `CORE-409 IDEMPOTENCY_KEY_REUSED`; a replay whose session is no
-longer live → `CORE-403 STALE_SESSION`. Idempotency rows are kept forever (`v2-converge.md#§13`).
+`sealed_machine` from the blocked seal). Idempotency is keyed on the session secret (`idempotency_key` is
+not read): a repeat by the session that holds the WI answers the same claim, re-read from the row, with no
+write; a secret whose `session_claimed` event exists but that no longer holds the WI (force-ended,
+superseded, ended) → `CORE-403 STALE_SESSION` before any gate, so it never claims again.
 
 ### 3.3 Verify, attach, end <!-- §3.3 -->
 
@@ -199,7 +200,7 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 | `CORE-400` | Validation. Reasons incl. `IMMUTABLE`, `HAS_CHILDREN_NO_BUNDLE`, `PARENT_*`, `INVENTORY_*`, `BLOCKER_*`, `EXECUTION_STATE_REJECTED` |
 | `CORE-403` | `STALE_SESSION`: the presented session is not the holder (attach/end/pause/idempotent replay) |
 | `CORE-404` | WI/project/user missing, or hidden by the read gate |
-| `CORE-409` | State conflict: `ALREADY_HELD NOT_CLAIMABLE DEPENDENCY_BLOCKED RACE_LOST IDEMPOTENCY_KEY_REUSED NOT_ATTACHABLE NOT_HELD NOT_RUNNING NOT_BLOCKED SESSION_HELD DEPENDENCY_CYCLE INVENTORY_REPO_GONE`; without a reason: cancel of a running WI, project already exists, state changed concurrently |
+| `CORE-409` | State conflict: `ALREADY_HELD NOT_CLAIMABLE DEPENDENCY_BLOCKED RACE_LOST NOT_ATTACHABLE NOT_HELD NOT_RUNNING NOT_BLOCKED SESSION_HELD DEPENDENCY_CYCLE INVENTORY_REPO_GONE`; without a reason: cancel of a running WI, project already exists, state changed concurrently |
 | `CORE-410` | `TERMINAL_STATE` |
 | `CORE-500` | Untyped server error (default mapping) |
 | `CORE-507` | Admin backup `VACUUM INTO` failed |
