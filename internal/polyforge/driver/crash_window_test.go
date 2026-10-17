@@ -246,3 +246,57 @@ func TestCrashAtGateVerdictKeepsTheVerdict(t *testing.T) {
 		t.Fatalf("one verdict, one rewind: rewind=%+v rounds=%+v", x.RewindStats, x.ReviewRounds)
 	}
 }
+
+// crashedStart writes the execution.json of a daemon killed after step
+// a's step_start at ordinal n, before the dispatch's journal line.
+func (e *crashEnv) crashedStart(n int64) {
+	e.t.Helper()
+	exec := skeletonExecution(WIInfo{ID: "wi_crash"}, e.wf)
+	exec.WorkItemID = "wi_crash"
+	exec.WorkflowStatus = StatusRunning
+	exec.CurrentStep = "a"
+	exec.Steps["a"].Status = capsule.StepInProgress
+	exec.Steps["a"].Dispatch = n
+	exec.Version = 2
+	blob, _ := json.MarshalIndent(exec, "", "  ")
+	if err := os.MkdirAll(filepath.Dir(e.execPath), 0o755); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := os.WriteFile(e.execPath, blob, 0o644); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// TestCrashBeforeJournalLineNeverReusesOrdinal (CR-9): the process of
+// ordinal 1 started but the daemon died before journaling it, so the
+// journal (the bridge's seed) knows no ordinal. Its envelope is settled
+// if it wrote one; otherwise the re-dispatch takes ordinal 2, never 1.
+func TestCrashBeforeJournalLineNeverReusesOrdinal(t *testing.T) {
+	t.Run("envelope written", func(t *testing.T) {
+		e := newCrashEnv(t, spec("a"))
+		e.crashedStart(1)
+		blob, _ := json.Marshal(StepResult{StepID: "a", WIID: "wi_crash", SpawnN: 1, Outcome: OutcomeCompleted, Output: json.RawMessage(`{}`)})
+		_ = os.MkdirAll(filepath.Dir(pendingResultPath(e.dir, 1)), 0o755)
+		if err := os.WriteFile(pendingResultPath(e.dir, 1), blob, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		sp := &fakeSpawner{}
+		if err := e.driver(sp, 0, nil).Run(context.Background()); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if x := readExec(t, e.execPath); len(sp.dispatched()) != 0 || x.WorkflowStatus != StatusCompleted {
+			t.Fatalf("the orphan's envelope must settle the step: %v, %q", sp.dispatched(), x.WorkflowStatus)
+		}
+	})
+	t.Run("no envelope", func(t *testing.T) {
+		e := newCrashEnv(t, spec("a"))
+		e.crashedStart(1)
+		sp := &fakeSpawner{script: []fakeEntry{done(`{}`)}}
+		if err := e.driver(sp, 0, nil).Run(context.Background()); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if got := sp.dispatched(); len(got) != 1 || sp.spawnAt(0).SpawnN != 2 {
+			t.Fatalf("the re-dispatch must take a fresh ordinal: %v", got)
+		}
+	})
+}

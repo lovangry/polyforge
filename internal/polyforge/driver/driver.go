@@ -240,12 +240,21 @@ func New(cfg Config) (*Driver, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The step_start write lands before its process exists and the spawn
+	// journal line only after: a crash between the two leaves the
+	// dispatch's ordinal in execution.json alone. The seed never goes
+	// below it, so a re-dispatch never reuses the ordinal (and drop path)
+	// of a dispatch that ran.
+	spawnN := cfg.SpawnN
+	if st := exec.Steps[exec.CurrentStep]; st != nil && st.Dispatch > spawnN {
+		spawnN = st.Dispatch
+	}
 	return &Driver{
 		wi:             cfg.WI,
 		workflow:       wf,
 		exec:           exec,
 		execPath:       execPath,
-		spawnN:         cfg.SpawnN,
+		spawnN:         spawnN,
 		initialized:    existed,
 		cfg:            cfg,
 		log:            cfg.Log,
