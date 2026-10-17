@@ -392,7 +392,12 @@ background reconcile (`RebuildIndex`) makes rows/index match files (file wins). 
 `match=all` (default) ANDs every token (≥3 runes as FTS phrases, shorter ones as substrings);
 `match=any` ORs up to 32 filtered terms (words, plus 3-rune shingles of CJK runs) ranked by bm25 and
 examines at most max(100, 10×limit) candidates (rules in `06-memory-search.md#§5.1`); filters, limit
-and the in-SQL `project=` narrowing are the same in both modes (single entry `Store.SearchMode`). CLI (`cli/verbs_aihub.go`): `pf recall --project P <query> [--any]` (project must
+and the in-SQL `project=` narrowing are the same in both modes (single entry `Store.SearchMode`).
+Both modes order by bm25 weighted by per-type freshness: `rank × (1 + 0.5 × exp(-age_days/stability))`,
+age from `updated_at`, stability rule.*/doc.design/doc.decision none, other doc.* (review, audit) 180d,
+experience.* 90d, fact.*/methodology.* 180d, else 90d
+(`memory/freshness.go`). A memory written without a title gets one derived from its body's first line
+(row only; a startup backfill fills older rows). CLI (`cli/verbs_aihub.go`): `pf recall --project P <query> [--any]` (project must
 be mapped; `--any` = `match=any`), `pf remember --project P --type T <content|-|@file>`, `pf memory show <id>`. At claim the
 daemon writes `runtime-state/recalled-memories.json` (query = goal + the first 1500 runes of content, `match=any`, project-scoped, top 10,
 1200-rune excerpts; empty list + notice on error or no hits; never fails the claim — `runtime/recall.go`,
