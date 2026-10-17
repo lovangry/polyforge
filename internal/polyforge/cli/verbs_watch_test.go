@@ -50,7 +50,7 @@ func newWatchDaemon(t *testing.T, snap protocol.WatchSnapshot, subs ...protocol.
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		_ = json.NewEncoder(rw).Encode(protocol.ChatSubscriptions{ChatID: r.PathValue("id"),
-			StatusPath: filepath.Join(t.TempDir(), "daemon-data", "chat.status"), Subscriptions: w.subs})
+			Subscriptions: w.subs})
 	})
 	mux.HandleFunc("POST /chats/{id}/ack", func(rw http.ResponseWriter, r *http.Request) {
 		var a protocol.ChatAck
@@ -199,7 +199,7 @@ func TestWatchStatuslineReadsTheFileWithoutTheDaemon(t *testing.T) {
 	if err := os.MkdirAll(files.Dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(files.FallbackStatusPath(), []byte("wi_1 running step=plan 2m00s\n"), 0o600); err != nil {
+	if err := os.WriteFile(files.StatusPath(), []byte("wi_1 running step=plan 2m00s\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// no daemon socket at all: the statusline must still answer
@@ -220,7 +220,7 @@ func TestWatchStatuslineHarnessSessionFromStdinIsCached(t *testing.T) {
 	w := newWatchDaemon(t, protocol.WatchSnapshot{})
 	files := watcher.NewFiles(filepath.Join(rt, "polyforge"), "chat_from_session")
 	_ = os.MkdirAll(files.Dir, 0o700)
-	_ = os.WriteFile(files.FallbackStatusPath(), []byte("wi_7 running\n"), 0o600)
+	_ = os.WriteFile(files.StatusPath(), []byte("wi_7 running\n"), 0o600)
 	env := map[string]string{"XDG_RUNTIME_DIR": rt, "PF_DAEMON_SOCKET": w.sock}
 	for i := 0; i < 2; i++ {
 		clearEnv(t)

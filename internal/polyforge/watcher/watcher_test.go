@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -467,13 +466,12 @@ func TestDaemonUnreachableIsLoudBacksOffAndRecovers(t *testing.T) {
 		snaps: map[string]*protocol.WatchSnapshot{"wi_1": running("wi_1", "s1")},
 		down:  errors.New("dial unix /run/polyforge.sock: connect: no such file or directory"),
 	}
-	dir := t.TempDir()
-	sink := &StatusSink{Fallback: filepath.Join(dir, "chat.status")}
+	files := NewFiles(t.TempDir(), "chat_x")
 	var errOut bytes.Buffer
 	var sleeps []time.Duration
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	opts := Options{Err: &errOut, Status: sink, Poll: 2 * time.Second, MaxBackoff: 8 * time.Second,
+	opts := Options{Err: &errOut, Status: files.WriteStatus, Poll: 2 * time.Second, MaxBackoff: 8 * time.Second,
 		Sleep: func(_ context.Context, d time.Duration) {
 			sleeps = append(sleeps, d)
 			switch len(sleeps) {
@@ -498,7 +496,7 @@ func TestDaemonUnreachableIsLoudBacksOffAndRecovers(t *testing.T) {
 	if sleeps[0] != time.Second || sleeps[1] != 2*time.Second || sleeps[2] != 2*time.Second /* sliced by Poll */ {
 		t.Fatalf("sleeps = %v", sleeps)
 	}
-	raw, _ := os.ReadFile(sink.Fallback)
+	raw, _ := os.ReadFile(files.StatusPath())
 	if !strings.Contains(string(raw), "wi_1 running") {
 		t.Fatalf("after recovery the progress file must show the WI: %q", raw)
 	}
@@ -506,15 +504,15 @@ func TestDaemonUnreachableIsLoudBacksOffAndRecovers(t *testing.T) {
 
 func TestStatusFileShowsPausedLineWhileDown(t *testing.T) {
 	api := &fakeAPI{down: errors.New("connection refused")}
-	sink := &StatusSink{Fallback: filepath.Join(t.TempDir(), "s")}
+	files := NewFiles(t.TempDir(), "chat_x")
 	ctx, cancel := context.WithCancel(context.Background())
 	n := 0
-	_ = Run(ctx, api, Options{Status: sink, Sleep: func(context.Context, time.Duration) {
+	_ = Run(ctx, api, Options{Status: files.WriteStatus, Sleep: func(context.Context, time.Duration) {
 		if n++; n == 2 {
 			cancel()
 		}
 	}})
-	raw, _ := os.ReadFile(sink.Fallback)
+	raw, _ := os.ReadFile(files.StatusPath())
 	if strings.TrimSpace(string(raw)) != PausedLine {
 		t.Fatalf("status file = %q", raw)
 	}
@@ -578,7 +576,7 @@ func TestRunEndsWhenTheParentIsGone(t *testing.T) {
 // runtime files: statusline, lock, pidfile
 // ---------------------------------------------------------------------------
 
-func TestStatuslineReadsTheProgressFileViaThePidfile(t *testing.T) {
+func TestStatuslineReadsTheWatchersProgressFile(t *testing.T) {
 	dir := t.TempDir()
 	f := NewFiles(dir, "chat_a")
 	if got := f.ReadStatusline(time.Minute); got != "" {
@@ -589,12 +587,10 @@ func TestStatuslineReadsTheProgressFileViaThePidfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	primary := filepath.Join(dir, "data", "chat-a.status")
-	if err := f.WritePID(primary); err != nil {
+	if err := f.WritePID(); err != nil {
 		t.Fatal(err)
 	}
-	sink := &StatusSink{Primary: primary, Fallback: f.FallbackStatusPath()}
-	if _, err := sink.Write([]string{"wi_1 running step=s1 4m12s", "wi_2 queued/preparing"}); err != nil {
+	if err := f.WriteStatus([]string{"wi_1 running step=s1 4m12s", "wi_2 queued/preparing"}); err != nil {
 		t.Fatal(err)
 	}
 	want := "wi_1 running step=s1 4m12s\nwi_2 queued/preparing\n"
@@ -603,23 +599,12 @@ func TestStatuslineReadsTheProgressFileViaThePidfile(t *testing.T) {
 	}
 }
 
-func TestStatusSinkFallsBackWhenThePrimaryIsNotWritable(t *testing.T) {
-	dir := t.TempDir()
-	blocker := filepath.Join(dir, "file")
-	_ = os.WriteFile(blocker, []byte("x"), 0o600)
-	sink := &StatusSink{Primary: filepath.Join(blocker, "sub", "s.status"), Fallback: filepath.Join(dir, "fb.status")}
-	used, err := sink.Write([]string{"wi_1 running"})
-	if err != nil || used != sink.Fallback {
-		t.Fatalf("used=%q err=%v", used, err)
-	}
-}
-
 func TestStatuslineIsEmptyForAStaleDeadWatcher(t *testing.T) {
 	dir := t.TempDir()
 	f := NewFiles(dir, "chat_b")
-	_ = os.WriteFile(f.FallbackStatusPath(), []byte("wi_1 running\n"), 0o600)
+	_ = os.WriteFile(f.StatusPath(), []byte("wi_1 running\n"), 0o600)
 	old := time.Now().Add(-time.Hour)
-	_ = os.Chtimes(f.FallbackStatusPath(), old, old)
+	_ = os.Chtimes(f.StatusPath(), old, old)
 	if got := f.ReadStatusline(30 * time.Second); got != "" {
 		t.Fatalf("stale file of a dead watcher must print nothing, got %q", got)
 	}

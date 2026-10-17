@@ -129,10 +129,7 @@ type ChatSub struct {
 
 // ChatSubscriptions is the GET /chats/{id}/subscriptions answer.
 type ChatSubscriptions struct {
-	ChatID string `json:"chat_id"`
-	// StatusPath is where the resident watcher writes the progress file
-	// (under the daemon data dir).
-	StatusPath    string    `json:"status_path"`
+	ChatID        string    `json:"chat_id"`
 	Subscriptions []ChatSub `json:"subscriptions"`
 }
 

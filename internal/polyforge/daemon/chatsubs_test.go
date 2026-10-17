@@ -103,7 +103,7 @@ func TestChatRoutesAndSubmitAutoSubscribe(t *testing.T) {
 		t.Fatal(err)
 	}
 	subs, err := td.client.ChatSubscriptions("chat_x")
-	if err != nil || len(subs.Subscriptions) != 1 || subs.StatusPath != filepath.Join(td.cfg.DataDir, chatStatusDir, "chat_x.status") {
+	if err != nil || len(subs.Subscriptions) != 1 {
 		t.Fatalf("subs = %+v err=%v", subs, err)
 	}
 	if _, err := td.client.ChatSubscriptions("bad/id"); err == nil {

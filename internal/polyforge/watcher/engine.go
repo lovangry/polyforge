@@ -36,10 +36,8 @@ type Options struct {
 	MaxBackoff   time.Duration
 	// Out receives decision lines ONLY; Err receives operational notices.
 	Out, Err io.Writer
-	Status   *StatusSink
-	// OnStatusPath is told which path the progress file landed on (it can
-	// change from the fallback to the daemon-provided path).
-	OnStatusPath func(path string)
+	// Status writes the progress file (nil = none).
+	Status func(lines []string) error
 	// ParentAlive, when set, is checked every poll; false ends the run.
 	ParentAlive func() bool
 	Now         func() time.Time
@@ -254,13 +252,8 @@ func writeStatus(o *Options, lines []string) {
 	if o.Status == nil {
 		return
 	}
-	p, err := o.Status.Write(lines)
-	if err != nil {
+	if err := o.Status(lines); err != nil {
 		fmt.Fprintf(o.Err, "polyforge watch: cannot write the progress file: %v\n", err)
-		return
-	}
-	if o.OnStatusPath != nil {
-		o.OnStatusPath(p)
 	}
 }
 

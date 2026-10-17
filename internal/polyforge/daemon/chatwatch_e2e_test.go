@@ -80,12 +80,12 @@ func TestWatcherAgainstRealDaemonNeedsInputOnce(t *testing.T) {
 	if out2.Len() != 0 {
 		t.Fatalf("the delivered decision must not repeat: %q", out2.String())
 	}
-	// the progress file (daemon-provided path) is written by the resident watcher
-	sink := &watcher.StatusSink{Primary: subs.StatusPath, Fallback: t.TempDir() + "/fb"}
+	// the progress file is written by the resident watcher
+	files := watcher.NewFiles(t.TempDir(), "chat_e2e")
 	ctx2, cancel2 := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel2()
-	_ = watcher.Run(ctx2, api, watcher.Options{Status: sink, Poll: 20 * time.Millisecond})
-	raw, err := os.ReadFile(subs.StatusPath)
+	_ = watcher.Run(ctx2, api, watcher.Options{Status: files.WriteStatus, Poll: 20 * time.Millisecond})
+	raw, err := os.ReadFile(files.StatusPath())
 	if err != nil || !strings.Contains(string(raw), "proj#7 needs input step=plan") {
 		t.Fatalf("progress file = %q err=%v", raw, err)
 	}

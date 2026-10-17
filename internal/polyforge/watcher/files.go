@@ -17,9 +17,9 @@ import (
 // ChatIDRe is the legal shape of a chat id (it names files).
 var ChatIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
-// RuntimeDir is the per-user directory for the pidfile, lock and fallback
-// status file: $XDG_RUNTIME_DIR/polyforge, else a 0700 dir under the temp
-// dir keyed by uid.
+// RuntimeDir is the per-user directory for the pidfile, lock and status
+// file: $XDG_RUNTIME_DIR/polyforge, else a 0700 dir under the temp dir
+// keyed by uid.
 func RuntimeDir() string {
 	if x := os.Getenv("XDG_RUNTIME_DIR"); x != "" {
 		return filepath.Join(x, "polyforge")
@@ -61,10 +61,8 @@ func EnsureDir(dir string) error {
 
 // PIDInfo is the pidfile content.
 type PIDInfo struct {
-	PID        int    `json:"pid"`
-	Chat       string `json:"chat"`
-	StatusPath string `json:"status_path,omitempty"`
-	Started    string `json:"started"`
+	PID  int    `json:"pid"`
+	Chat string `json:"chat"`
 }
 
 // Files are one chat's runtime files.
@@ -84,7 +82,10 @@ func NewFiles(dir, chat string) Files {
 
 func (f Files) lockPath() string { return filepath.Join(f.Dir, "chat-"+f.Chat+".lock") }
 func (f Files) pidPath() string  { return filepath.Join(f.Dir, "chat-"+f.Chat+".pid") }
-func (f Files) FallbackStatusPath() string {
+
+// StatusPath is the chat's progress file: the resident watcher writes
+// it, `--statusline` reads it.
+func (f Files) StatusPath() string {
 	return filepath.Join(f.Dir, "chat-"+f.Chat+".status")
 }
 
@@ -130,9 +131,8 @@ func (f Files) Lock(wait time.Duration) (release func(), err error) {
 }
 
 // WritePID records the running watcher.
-func (f Files) WritePID(statusPath string) error {
-	blob, _ := json.Marshal(PIDInfo{PID: os.Getpid(), Chat: f.Chat, StatusPath: statusPath,
-		Started: time.Now().UTC().Format(time.RFC3339)})
+func (f Files) WritePID() error {
+	blob, _ := json.Marshal(PIDInfo{PID: os.Getpid(), Chat: f.Chat})
 	return writeAtomic(f.pidPath(), blob, 0o600)
 }
 
@@ -158,37 +158,13 @@ func (info PIDInfo) Alive() bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-// StatusSink writes the progress state file: the daemon-provided path
-// first, the runtime-dir fallback when that is not writable.
-type StatusSink struct {
-	Primary  string
-	Fallback string
-}
-
-// Write replaces the file with one line per entry and answers the path
-// that took it.
-func (s *StatusSink) Write(lines []string) (string, error) {
+// WriteStatus replaces the progress file with one line per entry.
+func (f Files) WriteStatus(lines []string) error {
 	data := []byte(strings.Join(lines, "\n"))
 	if len(lines) > 0 {
 		data = append(data, '\n')
 	}
-	var firstErr error
-	for _, p := range []string{s.Primary, s.Fallback} {
-		if p == "" {
-			continue
-		}
-		if err := writeAtomic(p, data, 0o600); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
-		}
-		return p, nil
-	}
-	if firstErr == nil {
-		firstErr = errors.New("no status path")
-	}
-	return "", firstErr
+	return writeAtomic(f.StatusPath(), data, 0o600)
 }
 
 func writeAtomic(path string, data []byte, perm os.FileMode) error {
@@ -199,17 +175,14 @@ func writeAtomic(path string, data []byte, perm os.FileMode) error {
 }
 
 // ReadStatusline answers what `--statusline` prints: the progress file of
-// the chat's watcher. It consults the pidfile for the file's location and
-// liveness, never the daemon. A watcher that is gone and a file that has
-// not been refreshed within maxStale print nothing.
+// the chat's watcher. It consults the pidfile for liveness, never the
+// daemon. A watcher that is gone and a file that has not been refreshed
+// within maxStale print nothing.
 func (f Files) ReadStatusline(maxStale time.Duration) string {
-	path := f.FallbackStatusPath()
+	path := f.StatusPath()
 	alive := false
 	if info, ok := f.ReadPID(); ok {
 		alive = info.Alive()
-		if info.StatusPath != "" {
-			path = info.StatusPath
-		}
 	}
 	st, err := os.Stat(path)
 	if err != nil {

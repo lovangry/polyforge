@@ -208,7 +208,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 **事故护栏（r2 补；#135 已冻结，这些约束就是现行机制）**
 - 唤醒语句**只用 daemon 生成的固定模板**（WI 编号、事件类型、问题 id），**不夹带任何 agent 可写的自由文本**——防止 step agent 借此对交互 agent 做提示注入。问题正文由人通过 `pf watch <wi> --once` 主动查看。
 - 唤醒语句固定附带一句："这是需要人做的决定，agent 不得代答"（#122 教训）。
-- 进展状态文件 **不放在 agent 可写的路径**。（现状，2026-10-16 按代码更正：文件由常驻 watcher（`pf watch --chat`，`watcher/engine.go`）写在 daemon 订阅应答给出的 `<data-dir>/chat-status/<chat>.status`，daemon 未给出时回退到 `$XDG_RUNTIME_DIR/polyforge/chat-<chat>.status`；statusLine 用 `pf watch --statusline` 直接读文件、不经 daemon，见附录 E.2。）
+- 进展状态文件由常驻 watcher（`pf watch --chat`，`watcher/engine.go`）写在固定路径 `$XDG_RUNTIME_DIR/polyforge/chat-<chat>.status`；statusLine 用 `pf watch --statusline` 直接读文件、不经 daemon，见附录 E.2。（同 uid、不隔离的信任模型（#135）下，任何本地路径对 step agent 都同样可写，不再区分主/回退路径。）
 
 **不做**：tmux 分屏（owner 否决）；把进展原样经过 agent（污染上下文、耗 token）。
 
@@ -615,8 +615,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 |---|---|---|
 | `<data-dir>/chats.json` | daemon `identity.go` | (harness, harness-session) → chat id，让恢复的会话沿用同一 chat；chat id 只是通知标签，不是凭据 |
 | `<data-dir>/chat-subs.json` | daemon `chatsubs.go` | 每个 chat 订阅的 WI、事件游标、已送达的决策键与已显示的提醒；原子写 |
-| `<data-dir>/chat-status/<chat>.status` | 常驻 watcher（`watcher/engine.go`；路径由 daemon 的订阅应答 `status_path` 给出，`daemon/chatsubs.go`） | 该 chat 的进度文件（主路径） |
-| `$XDG_RUNTIME_DIR/polyforge/chat-<chat>.{lock,pid,status}`（无 `XDG_RUNTIME_DIR` 时为临时目录下按 uid 区分的 0700 目录） | 常驻 watcher `watcher/files.go` | 单实例锁、pid 文件、回退进度文件（daemon 未给出主路径时）；回退目录不是本人所有或可被他人写入时拒绝使用 |
+| `$XDG_RUNTIME_DIR/polyforge/chat-<chat>.{lock,pid,status}`（无 `XDG_RUNTIME_DIR` 时为临时目录下按 uid 区分的 0700 目录） | 常驻 watcher `watcher/files.go` | 单实例锁、pid 文件、该 chat 的进度文件；临时目录不是本人所有或可被他人写入时拒绝使用 |
 
 ### E.3 `attrs.blocked_seal` 与 `sealed_head` / `sealed_machine`
 
@@ -637,7 +636,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `claiming.json` | runtime `claiming.go` | 领取前的持久化意图日志（B1，`reference.md#§3.5`），崩溃后重放 |
 | `manual-models.json` | runtime `manualmodels.go` | 每个 WI 的 `pf submit --models` 列表（只在本机有效） |
 | `events/wi-<id>.jsonl`、`events/daemon.jsonl` | observe `events.go` | 每 WI 一个事件 JSONL（seq = 文件末行 seq + 1，跨重启单调）；静默超过 30 天的 WI 文件在 daemon 启动时删除 |
-| `chats.json`、`chat-subs.json`、`chat-status/` | 见 E.2 | |
+| `chats.json`、`chat-subs.json` | 见 E.2 | |
 | `git/<wi>.git` | runtime | capsule 的外置 git-dir（agent 碰不到 hooks/config） |
 | `release/<tag>`、`release/current` | `tools/install.sh` | release checkout；daemon 以 `release/current/workflows` 为 `-workflows-dir` |
 | `step-agent/`、`step-agent-sessions/`、`claude-config/` | runtime（harness root，默认即 data dir） | 专用 pi agent 目录 / pi 会话 / Claude Code 配置目录（其 `settings.json` env 块是凭据权威层） |

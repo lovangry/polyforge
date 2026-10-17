@@ -35,21 +35,14 @@ import (
 // watchNow is the clock seam for the snapshot render.
 var watchNow = time.Now
 
-// chatAPI adapts the daemon client to watcher.API for one chat. Every
-// answer of the subscriptions route also teaches the status sink the
-// daemon-provided progress path.
+// chatAPI adapts the daemon client to watcher.API for one chat.
 type chatAPI struct {
 	d    *DaemonClient
 	chat string
-	sink *watcher.StatusSink
 }
 
 func (c chatAPI) Subscriptions() (protocol.ChatSubscriptions, error) {
-	s, err := c.d.ChatSubscriptions(c.chat)
-	if err == nil && c.sink != nil && s.StatusPath != "" {
-		c.sink.Primary = s.StatusPath
-	}
-	return s, err
+	return c.d.ChatSubscriptions(c.chat)
 }
 func (c chatAPI) Snapshot(wi string, after int64) (*protocol.WatchSnapshot, error) {
 	return c.d.WatchSnapshot(wi, after)
@@ -266,12 +259,11 @@ func watchResident(ctx *Context, fs *flag.FlagSet) error {
 		return fmt.Errorf("watch: %w", err)
 	}
 	defer release()
-	sink := &watcher.StatusSink{Fallback: files.FallbackStatusPath()}
-	_ = files.WritePID(files.FallbackStatusPath())
+	_ = files.WritePID()
 
 	d := ctx.daemon()
 	d.HTTP.Timeout = 10 * time.Second
-	api := chatAPI{d: d, chat: chat, sink: sink}
+	api := chatAPI{d: d, chat: chat}
 
 	opts := watcher.Options{
 		Owner:        ctx.Cfg.UserID,
@@ -279,21 +271,13 @@ func watchResident(ctx *Context, fs *flag.FlagSet) error {
 		Poll:         durationFlag(fs, "poll"),
 		Out:          ctx.Stdout,
 		Err:          ctx.Stderr,
-		Status:       sink,
+		Status:       files.WriteStatus,
 	}
 	if !boolFlag(fs, "no-parent-check") {
 		opts.ParentAlive = parentAlive()
 	}
 	sctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	// Keep the pidfile naming the file the watcher really writes.
-	lastPath := files.FallbackStatusPath()
-	opts.OnStatusPath = func(p string) {
-		if p != lastPath {
-			lastPath = p
-			_ = files.WritePID(p)
-		}
-	}
 	err = watcher.Run(sctx, api, opts)
 	if err == watcher.ErrParentGone {
 		return nil

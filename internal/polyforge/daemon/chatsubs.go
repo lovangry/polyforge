@@ -42,7 +42,6 @@ import (
 
 const (
 	chatSubsFile   = "chat-subs.json"
-	chatStatusDir  = "chat-status"
 	liveWatcherTTL = 20 * time.Second
 )
 
@@ -312,18 +311,12 @@ func chatID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return id, true
 }
 
-func (d *Daemon) statusPathFor(chat string) string {
-	return filepath.Join(d.cfg.DataDir, chatStatusDir, chat+".status")
-}
-
 func (d *Daemon) subscriptionsRoute(w http.ResponseWriter, r *http.Request) {
 	id, ok := chatID(w, r)
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, protocol.ChatSubscriptions{
-		ChatID: id, StatusPath: d.statusPathFor(id), Subscriptions: d.subs.List(id),
-	})
+	writeJSON(w, http.StatusOK, protocol.ChatSubscriptions{ChatID: id, Subscriptions: d.subs.List(id)})
 }
 
 func (d *Daemon) subscribeRoute(subscribe bool) http.HandlerFunc {
