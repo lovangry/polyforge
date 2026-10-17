@@ -11,9 +11,13 @@ package driver
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"path/filepath"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
@@ -23,9 +27,9 @@ import (
 // followed by one healthy dispatch, over a step with the given chain.
 func timeoutOnce(t *testing.T, cause supervise.Cause, wall time.Duration, models ...string) *supEnv {
 	t.Helper()
-	env := newSupEnv(t, func(c *Config) {
+	env := newChainEnv(t, func(c *Config) {
 		c.Limits = supervise.Defaults{StepTimeout: wall}
-	}, chain("s", models...))
+	}, "s", models...)
 	env.sp.script = []fakeEntry{{hold: true}, done(`{"ok":true}`)}
 	go func() {
 		waitForSpawns(env, 1)
@@ -54,9 +58,9 @@ func TestD6SlowModelTimeoutRelaxesWallAndSwitches(t *testing.T) {
 // TestD6SlowModelRelaxationDoublesEachTime: every consecutive
 // slow-model timeout doubles the previous bound (6s -> 12s -> 24s).
 func TestD6SlowModelRelaxationDoublesEachTime(t *testing.T) {
-	env := newSupEnv(t, func(c *Config) {
+	env := newChainEnv(t, func(c *Config) {
 		c.Limits = supervise.Defaults{StepTimeout: 6 * time.Second}
-	}, chain("s", "a", "b", "c"))
+	}, "s", "a", "b", "c")
 	env.sp.script = []fakeEntry{{hold: true}, {hold: true}, done(`{"ok":true}`)}
 	go func() {
 		for n := int64(1); n <= 2; n++ {
@@ -77,9 +81,9 @@ func TestD6SlowModelRelaxationDoublesEachTime(t *testing.T) {
 // T x2 and retries the SAME model; the second one doubles T again and
 // blocks the step.
 func TestD6LongTaskRelaxesSameModelThenBlocks(t *testing.T) {
-	env := newSupEnv(t, func(c *Config) {
+	env := newChainEnv(t, func(c *Config) {
 		c.Limits = supervise.Defaults{StepTimeout: 3 * time.Second}
-	}, chain("s", "a", "b"))
+	}, "s", "a", "b")
 	env.sp.script = []fakeEntry{{hold: true}, {hold: true}}
 	go func() {
 		for n := int64(1); n <= 2; n++ {
@@ -123,13 +127,13 @@ func TestD6NonTimeoutDeathsNeverRelax(t *testing.T) {
 // own startup (the spec's named scenario).
 func TestD6SuccessorRunsUnderTheRelaxedBound(t *testing.T) {
 	tick := 0
-	env := newSupEnv(t, func(c *Config) {
+	env := newChainEnv(t, func(c *Config) {
 		c.Limits = supervise.Defaults{StepTimeout: 6 * time.Second}
 		c.Now = func() time.Time {
 			tick++
 			return time.Unix(1_000_000, 0).Add(time.Duration(tick) * 5 * time.Second)
 		}
-	}, chain("s", "a", "b"))
+	}, "s", "a", "b")
 	env.sp.script = []fakeEntry{{hold: true}, done(`{"ok":true}`)}
 	go func() {
 		waitForSpawns(env, 1)
@@ -167,12 +171,7 @@ func TestD6RewindZeroesTheStepBudget(t *testing.T) {
 	mustInit(t, d)
 	mustStart(t, d, "a", 1)
 	if err := d.transition(TransitionRequest{
-		Kind: TransBudgetUpdate, StepID: "a", SpawnN: 1, Budget: &capsule.Budget{WallMs: 5000},
-	}); err != nil {
-		t.Fatalf("budget: %v", err)
-	}
-	if err := d.transition(TransitionRequest{
-		Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: completedResult("a", 1, `{}`),
+		Kind: TransStepResult, StepID: "a", SpawnN: 1, Result: completedResult("a", 1, `{}`), WallMs: 5000,
 	}); err != nil {
 		t.Fatalf("result: %v", err)
 	}
@@ -214,12 +213,7 @@ func TestD6GateFailRewindZeroesTheGateBudget(t *testing.T) {
 	}
 	mustStart(t, d, "g", 2)
 	if err := d.transition(TransitionRequest{
-		Kind: TransBudgetUpdate, StepID: "g", SpawnN: 2, Budget: &capsule.Budget{WallMs: 7000},
-	}); err != nil {
-		t.Fatalf("budget: %v", err)
-	}
-	if err := d.transition(TransitionRequest{
-		Kind: TransStepResult, StepID: "g", SpawnN: 2,
+		Kind: TransStepResult, StepID: "g", SpawnN: 2, WallMs: 7000,
 		Result: &StepResult{StepID: "g", SpawnN: 2, Outcome: OutcomeGateFailed},
 		Gate:   &GateVerdict{GateStepID: "g", TargetStep: "a", VerdictText: "FAIL: redo it"},
 	}); err != nil {
@@ -227,32 +221,6 @@ func TestD6GateFailRewindZeroesTheGateBudget(t *testing.T) {
 	}
 	if got := readExec(t, execPath).Steps["g"].BudgetConsumed.WallMs; got != 0 {
 		t.Fatalf("a gate-fail rewind must zero the gate's own T, got %dms", got)
-	}
-}
-
-// repo review 2026-10-16 B-18: once the degraded latch is set, a
-// transition is refused BEFORE it touches memory or execution.json.
-func TestDegradedLatchBlocksBeforeAnyWrite(t *testing.T) {
-	d, _, _, execPath := testEnv(t, spec("a"))
-	mustInit(t, d)
-	mustStart(t, d, "a", 1)
-	before := readExec(t, execPath).Version
-	d.mu.Lock()
-	d.degraded = true
-	memBefore := d.exec.Version
-	d.mu.Unlock()
-	if err := d.transition(TransitionRequest{
-		Kind: TransBudgetUpdate, StepID: "a", SpawnN: 1, Budget: &capsule.Budget{WallMs: 5000},
-	}); err == nil {
-		t.Fatal("a degraded driver must refuse the transition")
-	}
-	if got := readExec(t, execPath).Version; got != before {
-		t.Fatalf("execution.json written while degraded: version %d -> %d", before, got)
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.exec.Version != memBefore {
-		t.Fatalf("memory mutated while degraded: version %d -> %d", memBefore, d.exec.Version)
 	}
 }
 
@@ -277,5 +245,216 @@ func TestAcceptedAttemptSeqAndClock(t *testing.T) {
 	}
 	if !strings.HasPrefix(last.ArchivedAt, "2026-09-20T") {
 		t.Fatalf("accepted attempt archived at %q, want the driver's (fake) clock", last.ArchivedAt)
+	}
+}
+
+// TestD6CancelledDispatchBooksNothing: the cancelled driver (pause,
+// recovery relaunch) books no wall time and writes nothing; a system
+// relaunch's dispatch is booked by the successor's interrupted archive
+// (TestD6HangRelaunchLoopReachesT).
+func TestD6CancelledDispatchBooksNothing(t *testing.T) {
+	d, sp, execPath := runEnv(t, spec("a"))
+	var mu sync.Mutex
+	at := time.Unix(1_700_000_000, 0)
+	d.cfg.Now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		at = at.Add(time.Second)
+		return at
+	}
+	sp.script = []fakeEntry{{hold: true}}
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- d.Run(ctx) }()
+	waitUntil(t, "the dispatch to start", func() bool { return len(sp.dispatched()) == 1 })
+	before := readExec(t, execPath).Version
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run: %v, want the cancellation", err)
+	}
+	exec := readExec(t, execPath)
+	if exec.Version != before {
+		t.Fatalf("a cancelled dispatch wrote execution.json: version %d -> %d", before, exec.Version)
+	}
+	if got := exec.Steps["a"].BudgetConsumed.WallMs; got != 0 {
+		t.Fatalf("a cancelled dispatch booked %dms", got)
+	}
+	for _, k := range d.log.(*eventLog).kinds() {
+		if k == "budget_update" {
+			t.Fatal("a cancelled dispatch emitted budget_update")
+		}
+	}
+}
+
+// interruptionCycles runs one driver per entry of interrupted over ONE
+// capsule: each dispatches step "s", holds it for hold on a shared fake
+// clock and is cancelled (the runtime's Terminate); gap passes before
+// the next driver starts (the pause, the recovery). The entry is the
+// Config.Interrupted the driver starts with (nil: a claim, e.g. the
+// resume after a pause). It answers the last driver's link.
+func interruptionCycles(t *testing.T, stepTimeout, hold, gap time.Duration, interrupted []*InterruptedDispatch) (string, *supervise.Link) {
+	t.Helper()
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, capsule.ExecutionJSON)
+	var mu sync.Mutex
+	clock := time.Unix(1_700_000_000, 0)
+	now := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return clock
+	}
+	var link *supervise.Link
+	for i, in := range interrupted {
+		sp := &fakeSpawner{script: []fakeEntry{{hold: true}}}
+		link = supervise.NewLink("wi_run")
+		d, err := New(Config{
+			WI:             WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
+			ExecPath:       execPath,
+			Workflow:       &Workflow{Steps: []StepSpec{spec("s")}, MaxTotal: 4, MaxPerStep: 2},
+			Spawner:        sp,
+			Log:            &safeLog{},
+			Link:           link,
+			Limits:         supervise.Defaults{StepTimeout: stepTimeout},
+			StepCandidates: map[string][]string{"s": {"pi:a"}},
+			Interrupted:    in,
+			Now:            now,
+		})
+		if err != nil {
+			t.Fatalf("cycle %d: New: %v", i, err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		go func() { errCh <- d.Run(ctx) }()
+		waitUntil(t, "the dispatch to start", func() bool { return len(sp.dispatched()) == 1 })
+		mu.Lock()
+		clock = clock.Add(hold)
+		mu.Unlock()
+		cancel()
+		if err := <-errCh; !errors.Is(err, context.Canceled) {
+			t.Fatalf("cycle %d: Run: %v, want the cancellation", i, err)
+		}
+		mu.Lock()
+		clock = clock.Add(gap)
+		mu.Unlock()
+	}
+	return execPath, link
+}
+
+// TestD6PauseCyclesBookNothing: a dispatch cancelled by an operator
+// pause books no wall time — whether the work item resumes by a fresh
+// claim (no interrupted archive) or by a live-holder operator resume (an
+// archive the bridge marks non-booking) — so neither the dispatch nor
+// the pause itself ever counts toward T.
+func TestD6PauseCyclesBookNothing(t *testing.T) {
+	resume := &InterruptedDispatch{Detail: "operator resume"}
+	execPath, _ := interruptionCycles(t, time.Hour, 20*time.Minute, time.Hour,
+		[]*InterruptedDispatch{nil, nil, resume, nil, resume, resume})
+	exec := readExec(t, execPath)
+	if got := exec.Steps["s"].BudgetConsumed.WallMs; got != 0 {
+		t.Fatalf("pause cycles booked %dms toward T", got)
+	}
+	if got := exec.BudgetConsumed.WallMs; got != 0 {
+		t.Fatalf("pause cycles booked %dms on the workflow aggregate", got)
+	}
+}
+
+// TestD6HangRelaunchLoopReachesT: a dispatch the system relaunches after
+// a hang books its runtime in the successor's interrupted archive, so a
+// hang→relaunch loop accumulates and the next dispatch starts with T
+// already spent (the supervisor's T rule then ends it at once). The
+// booking runs from the dispatch's start to the successor's archive
+// write, so the recovery between the kill and the relaunch counts too.
+func TestD6HangRelaunchLoopReachesT(t *testing.T) {
+	stalled := &InterruptedDispatch{Detail: "driver_stalled", BookWall: true}
+	execPath, link := interruptionCycles(t, 10*time.Minute, 3*time.Minute, time.Minute,
+		[]*InterruptedDispatch{nil, stalled, stalled, stalled})
+	exec := readExec(t, execPath)
+	if got := exec.Steps["s"].BudgetConsumed.WallMs; got != (12 * time.Minute).Milliseconds() {
+		t.Fatalf("three relaunched dispatches of 3m (+1m recovery each) booked %dms, want 12m", got)
+	}
+	var last *supervise.StepStarted
+	for _, f := range link.Facts.Drain() {
+		if s, ok := f.(supervise.StepStarted); ok {
+			last = &s
+		}
+	}
+	if last == nil {
+		t.Fatal("the last relaunch dispatched no step")
+	}
+	if th := last.Thresholds; th.PriorRuntime < th.StepTimeout {
+		t.Fatalf("after the loop the dispatch must start with T spent: %v of %v", th.PriorRuntime, th.StepTimeout)
+	}
+}
+
+// TestD6RelaunchBeforeTheNextDispatchBooksOnce: two relaunches with no
+// dispatch between them book the interrupted dispatch once, plus only
+// the time since the first archive.
+func TestD6RelaunchBeforeTheNextDispatchBooksOnce(t *testing.T) {
+	d, _, _, execPath := testEnv(t, spec("a"))
+	at := time.Unix(1_700_000_000, 0)
+	d.cfg.Now = func() time.Time { return at }
+	mustInit(t, d)
+	mustStart(t, d, "a", 1)
+	at = at.Add(3 * time.Second)
+	relaunch := TransitionRequest{Kind: TransInterrupted, Reason: "driver_stalled", BookWall: true, SpawnN: 1}
+	if err := d.transition(relaunch); err != nil {
+		t.Fatalf("first archive: %v", err)
+	}
+	at = at.Add(2 * time.Second)
+	if err := d.transition(relaunch); err != nil {
+		t.Fatalf("second archive: %v", err)
+	}
+	if got := readExec(t, execPath).Steps["a"].BudgetConsumed.WallMs; got != 5000 {
+		t.Fatalf("booked %dms, want 3s + 2s (no re-booking of the dispatch)", got)
+	}
+}
+
+// TestD6PausedDispatchNeverBookedByALaterRelaunch: pause → resume by a
+// fresh claim → the resumed driver stalls before any new dispatch → the
+// system relaunches. The paused dispatch is never booked: the claim
+// re-stamped the step's start, so the relaunch books only from the claim.
+func TestD6PausedDispatchNeverBookedByALaterRelaunch(t *testing.T) {
+	execPath, _ := interruptionCycles(t, time.Hour, 20*time.Minute, time.Hour, []*InterruptedDispatch{nil})
+	dir := filepath.Dir(execPath)
+	at := time.Unix(1_700_000_000, 0).Add(5 * time.Hour)
+	newDriver := func(in *InterruptedDispatch, link *supervise.Link, sp *fakeSpawner) *Driver {
+		d, err := New(Config{
+			WI:             WIInfo{ID: "wi_run", CapsuleDir: dir, BundleName: "b"},
+			ExecPath:       execPath,
+			Workflow:       &Workflow{Steps: []StepSpec{spec("s")}, MaxTotal: 4, MaxPerStep: 2},
+			Spawner:        sp,
+			Log:            &safeLog{},
+			Link:           link,
+			Limits:         supervise.Defaults{StepTimeout: time.Hour},
+			StepCandidates: map[string][]string{"s": {"pi:a"}},
+			Interrupted:    in,
+			Now:            func() time.Time { return at },
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		return d
+	}
+
+	// the resume: a fresh claim whose driver stalls before dispatching
+	link := supervise.NewLink("wi_run")
+	link.Verdict(supervise.DriverStalled{Duration: time.Minute, Phase: "between_steps"})
+	sp := &fakeSpawner{}
+	if err := newDriver(nil, link, sp).Run(context.Background()); !errors.Is(err, ErrDriverStalled) {
+		t.Fatalf("claim driver: %v, want the stall", err)
+	}
+	if len(sp.dispatched()) != 0 {
+		t.Fatal("the claim driver must stall before any dispatch")
+	}
+
+	// the system relaunch: its archive books nothing of the paused dispatch
+	link = supervise.NewLink("wi_run")
+	link.Verdict(supervise.DriverStalled{Duration: time.Minute, Phase: "between_steps"})
+	stalled := &InterruptedDispatch{Detail: "driver_stalled", BookWall: true}
+	if err := newDriver(stalled, link, &fakeSpawner{}).Run(context.Background()); !errors.Is(err, ErrDriverStalled) {
+		t.Fatalf("relaunched driver: %v, want the stall", err)
+	}
+	if got := readExec(t, execPath).Steps["s"].BudgetConsumed.WallMs; got != 0 {
+		t.Fatalf("a relaunch after a pause booked %dms of the paused dispatch", got)
 	}
 }

@@ -622,8 +622,8 @@ func sessionPathFor(capsuleDir, token string) string {
 	return filepath.Join(capsuleDir, capsule.DirSession, "session-"+token+".jsonl")
 }
 
-// randomKey mints an idempotency key (NOT a secret: it only needs
-// uniqueness for the server's D4 replay dedup).
+// randomKey mints the claim's idempotency key (NOT a secret; aihub does
+// not read it — the session secret is the D4 replay key).
 func randomKey() string {
 	b := make([]byte, 12)
 	if _, err := rand.Read(b); err != nil {
@@ -805,8 +805,9 @@ func hubUnavailable(err error) bool {
 // claimIntent answers the session secret and idempotency key this start
 // claims with. With no journal entry for id it mints a fresh pair. An
 // entry left by an earlier attempt is checked first: its session holds
-// the WI → reuse the pair (replay); it does not → drop the entry and mint
-// fresh (a replay could hand back a stale cached answer); verify
+// the WI → reuse the pair (the secret replays the same claim, D4); it
+// does not → drop the entry and mint fresh (aihub would refuse that
+// secret STALE_SESSION); verify
 // unreachable → the typed transient, entry kept.
 func (r *Runtime) claimIntent(id string) (sessionID, key string, replay bool, err error) {
 	if rec := r.loadClaiming()[id]; rec != nil && rec.SessionID != "" && rec.IdempotencyKey != "" {
@@ -889,13 +890,11 @@ func (r *Runtime) claimPlaceholder(ctx context.Context, spelling, sessionID stri
 		verified:           true,
 		git: gitops.Opts{
 			WorkItemID: id,
-			// §1.6 fencing-on-use backup layer: the PUBLIC fingerprint.
-			Fingerprint: fp,
-			GitDir:      r.gitDirFor(id),
-			RemoteURL:   r.remoteURLFor(id),
-			Username:    id,
-			Secret:      sessionID, // v1.5: the session secret IS the push password
-			EventSink:   r.gitEventSink(id),
+			GitDir:     r.gitDirFor(id),
+			RemoteURL:  r.remoteURLFor(id),
+			Username:   id,
+			Secret:     sessionID, // v1.5: the session secret IS the push password
+			EventSink:  r.gitEventSink(id),
 			// once-per-repo carrier_push_failed state: per job, so a
 			// re-claim (a new job) alerts afresh.
 			CarrierAlerts: &gitops.CarrierAlerts{},
@@ -1509,7 +1508,7 @@ func (r *Runtime) pauseNetwork(j *job) error {
 
 // sealPush commits the capsule and pushes it, retrying the push twice.
 func sealPush(j *job, reason string) error {
-	_, _, _, err := gitops.CommitPush(j.git, "seal: "+reason)
+	_, _, _, err := gitops.CommitPush(context.Background(), j.git, "seal: "+reason)
 	for i := 0; i < 2 && err != nil; i++ {
 		_, err = gitops.Push(j.git)
 	}

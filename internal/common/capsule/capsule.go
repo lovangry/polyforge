@@ -238,10 +238,6 @@ type RewindStats struct {
 	ToStep []string `json:"to_step"`
 }
 
-// SeqTrailer is the git commit trailer used by pre-receive hooks to enforce
-// monotonically increasing commit sequence per work item (reference.md §8).
-const SeqTrailer = "Polyforge-Seq"
-
 // MaxBlobBytes is the pre-receive blob size limit for the capsule chain
 // (default 16 MiB; the secret scanner is gone per v1 ruling C1 (archive/v1-architecture-spec.md) but size
 // stays bounded).

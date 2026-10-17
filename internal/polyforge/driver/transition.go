@@ -12,16 +12,20 @@ package driver
 //	4. marshal + persist atomically
 //	5. emit one event (news, never state)
 //
-// A failure before the persist leaves memory and file untouched (the
-// working copy is restored from a snapshot); a persist failure BLOCKS
-// the dependent next action. Event emission is the one best-effort step:
-// once the rename lands the transition is committed, and a logging
-// failure is loud on stderr instead of reverting state.
+// Every apply validates before it mutates, so a refused request leaves
+// memory and file untouched. A failed persist leaves memory ahead of (or
+// unknown against) the file: the driver then fails — every further
+// transition is refused and Run returns the error — and the restart
+// reloads execution.json, the one authority. Nothing is rolled back in
+// memory. Event emission is the one best-effort step: once the rename
+// lands the transition is committed, and a logging failure is loud on
+// stderr instead of reverting state.
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
@@ -60,10 +64,9 @@ var ErrStaleFence = errors.New("driver: stale spawn fence")
 type TransitionKind string
 
 const (
-	TransStepStart    TransitionKind = "step_start"
-	TransStepResult   TransitionKind = "step_result"
-	TransTerminal     TransitionKind = "terminal"
-	TransBudgetUpdate TransitionKind = "budget_update"
+	TransStepStart  TransitionKind = "step_start"
+	TransStepResult TransitionKind = "step_result"
+	TransTerminal   TransitionKind = "terminal"
 	// TransInit and TransAnswer are additions the single-write rule
 	// forces: someone must write the first execution.json (that write is
 	// a mutation like any other), and the D9 answer-consumption write —
@@ -87,6 +90,12 @@ const (
 	// failed dispatch and its death-cause disposal in one atomic write
 	// (applyStepFailedLocked).
 	TransStepFailed TransitionKind = "step_failed"
+	// TransClaimReentry is a claim's re-entry of an in_progress step whose
+	// dispatch never settled (cancelled by an operator pause, a shutdown
+	// or a crash before this claim): it re-stamps step_started_at, so a
+	// later system relaunch books only from the claim and the time before
+	// it never counts toward T (applyClaimReentryLocked).
+	TransClaimReentry TransitionKind = "claim_reentry"
 )
 
 // TransitionRequest is one submitted execution.json mutation. SpawnN is
@@ -98,20 +107,22 @@ const (
 type TransitionRequest struct {
 	Kind       TransitionKind
 	StepID     string
-	Result     *StepResult     // step_result
-	Gate       *GateVerdict    // step_result of a gate_failed outcome: the fail policy (nil = the workflow's on_fail)
-	Budget     *capsule.Budget // budget_update: the ADDITIVE delta
-	Model      string          // step_start: the pinned candidate this dispatch runs under
-	Effort     string          // step_start: that candidate's thinking effort (polyforge#176)
-	Status     string          // terminal: the target workflow_status
-	Reason     string          // terminal/rewind reason; answer: the answer text
-	QuestionID string          // answer: the question id being answered
-	AnsweredBy string          // answer: who answered ("" → "owner")
+	Result     *StepResult  // step_result
+	Gate       *GateVerdict // step_result of a gate_failed outcome: the fail policy (nil = the workflow's on_fail)
+	Model      string       // step_start: the pinned candidate this dispatch runs under
+	Effort     string       // step_start: that candidate's thinking effort (polyforge#176)
+	Status     string       // terminal: the target workflow_status
+	Reason     string       // terminal/rewind reason; answer: the answer text
+	QuestionID string       // answer: the question id being answered
+	AnsweredBy string       // answer: who answered ("" → "owner")
 	// Failure carries a step_failed write's failed-dispatch record.
 	Failure *StepFailure
 	// WallMs is the finished dispatch's wall time folded into the step's
 	// cumulative runtime by a step_result write.
 	WallMs int64
+	// BookWall (interrupted): the system relaunched the dispatch after a
+	// hang, stall or death — book its wall time toward the step's T.
+	BookWall bool
 	// TestFilesCommit is the authored-tests baseline (task repo -> HEAD)
 	// a completed step_result stamps under test_files_commit
 	// (polyforge#164 H4); nil = no stamp. It lands in the result's own
@@ -161,8 +172,8 @@ type appliedEvent struct {
 //
 //   - the fence check runs before anything else, so a stale request can
 //     never observe — let alone mutate — current state;
-//   - apply works on the live copy with a snapshot taken first, so a
-//     validation or persist failure restores the exact prior state;
+//   - apply validates before it mutates the live copy; a persist
+//     failure fails the driver (d.failed) instead of restoring memory;
 //   - the spawn counter advances only WITH the durable step_start write
 //     (crash between persist and counter bump is harmless: the dead
 //     derivation's results can no longer arrive, and the re-dispatch
@@ -180,36 +191,25 @@ func (d *Driver) transition(req TransitionRequest) error {
 			ErrStaleFence, req.Kind, req.SpawnN, d.spawnN)
 	}
 
-	if d.degraded {
-		// checked BEFORE anything is applied or written: a latched driver
-		// must not keep mutating memory and disk while reporting the
-		// transition blocked
-		return fmt.Errorf("driver: degraded (post-rename fsync previously failed); transitions blocked until restart")
+	if d.failed != nil {
+		return d.failed
 	}
 
-	snap := cloneExec(d.exec)
 	info := &appliedInfo{}
 	if err := d.applyLocked(req, info); err != nil {
-		d.exec = snap
 		return err
 	}
 	d.exec.Version++
 	d.exec.UpdatedAt = d.stamp()
 
 	blob, err := json.MarshalIndent(d.exec, "", "  ")
-	if err != nil {
-		d.exec = snap
-		return fmt.Errorf("driver: execution state unserializable: %w", err)
+	if err == nil {
+		err = atomicfile.Write(d.execPath, blob, 0o644)
 	}
-	if err := atomicfile.Write(d.execPath, blob, 0o644); err != nil {
-		if errors.Is(err, atomicfile.ErrDirSync) {
-			// Post-rename failure: disk may hold the new state. Latch
-			// degraded — do NOT roll back memory (review fix 6).
-			d.degraded = true
-			return fmt.Errorf("driver: post-rename durability uncertain (degraded, transitions blocked): %w", err)
-		}
-		d.exec = snap
-		return fmt.Errorf("driver: execution.json persist failed (state reverted, dependent action blocked): %w", err)
+	if err != nil {
+		d.failed = fmt.Errorf("driver: execution.json persist failed; the driver stops and the restart recovers from disk: %w", err)
+		d.wakeLoopLocked()
+		return d.failed
 	}
 	d.initialized = true
 	if req.Kind == TransStepStart {
@@ -237,12 +237,12 @@ func (d *Driver) applyLocked(req TransitionRequest, info *appliedInfo) error {
 		return d.applyStepResultLocked(req, info)
 	case TransTerminal:
 		return d.applyTerminalLocked(req)
-	case TransBudgetUpdate:
-		return d.applyBudgetLocked(req)
 	case TransAnswer:
 		return d.applyAnswerLocked(req)
 	case TransInterrupted:
 		return d.applyInterruptedLocked(req)
+	case TransClaimReentry:
+		return d.applyClaimReentryLocked()
 	case TransStepFailed:
 		return d.applyStepFailedLocked(req, info)
 	default:
@@ -394,6 +394,32 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest, info *appliedInfo)
 	if st.Status != capsule.StepInProgress {
 		return fmt.Errorf("driver: step %q is %s; only an in_progress step accepts results", req.StepID, st.Status)
 	}
+	// Everything that can refuse the result is judged before the first
+	// mutation.
+	var out map[string]any
+	var qid, qtext string
+	var verdict *GateVerdict
+	var err error
+	if res.Outcome == OutcomeNeedsInput {
+		// Shape was validated at staging (ValidateStepResult); the same
+		// helper re-derives the pair here and stays a backstop.
+		qid, qtext, err = needsInputQuestion(res)
+	} else {
+		out, err = parseOutput(res.Output)
+	}
+	if err != nil {
+		return err
+	}
+	if res.Outcome == OutcomeGateFailed {
+		verdict = req.Gate
+		if verdict == nil {
+			verdict = d.verdictFor(req.StepID, res)
+		}
+		if err := d.checkRewindTarget(req.StepID, verdict.TargetStep); err != nil {
+			return err
+		}
+	}
+
 	st.Dispatch = 0
 	if req.WallMs > 0 {
 		// human-wait time is excluded by construction: no process runs
@@ -403,10 +429,6 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest, info *appliedInfo)
 
 	switch res.Outcome {
 	case OutcomeCompleted:
-		out, err := parseOutput(res.Output)
-		if err != nil {
-			return err
-		}
 		// B10: the only accepted command evidence, decoded (known fields
 		// only; ValidateStepResult already proved it decodes)
 		if ev, _ := decodeCommandEvidence(res.CommandEvidence); len(ev) > 0 {
@@ -450,27 +472,13 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest, info *appliedInfo)
 			ArchivedAt: d.stamp(),
 		})
 	case OutcomeGateFailed:
-		out, err := parseOutput(res.Output)
-		if err != nil {
-			return err
-		}
 		st.Output = out // the FAIL verdict stays on the gate; it is never done
 		if d.exec.ReviewRounds == nil {
 			d.exec.ReviewRounds = map[string]int64{}
 		}
 		d.exec.ReviewRounds[req.StepID]++
-		v := req.Gate
-		if v == nil {
-			v = d.verdictFor(req.StepID, res)
-		}
-		return d.applyGateFailLocked(req.StepID, v, info)
+		d.applyGateFailLocked(req.StepID, verdict, info)
 	case OutcomeNeedsInput:
-		// Shape was validated at staging (ValidateStepResult); the same
-		// helper re-derives the pair here and stays a backstop.
-		qid, qtext, qerr := needsInputQuestion(res)
-		if qerr != nil {
-			return qerr
-		}
 		st.PendingQuestion = &capsule.PendingQuestion{
 			ID:       qid,
 			Step:     req.StepID,
@@ -479,10 +487,6 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest, info *appliedInfo)
 			AskedAt:  d.stamp(),
 		}
 	case OutcomeIncomplete:
-		out, err := parseOutput(res.Output)
-		if err != nil {
-			return err
-		}
 		d.exec.WorkflowStatus = StatusBlocked
 		st.Output = out
 	}
@@ -504,26 +508,20 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest, info *appliedInfo)
 // candidates).
 //
 // It runs inside the gate's step_result write, after that write checked
-// the gate is the running current step.
-func (d *Driver) applyGateFailLocked(gate string, v *GateVerdict, info *appliedInfo) error {
+// the gate is the running current step and the target (checkRewindTarget).
+func (d *Driver) applyGateFailLocked(gate string, v *GateVerdict, info *appliedInfo) {
 	target := v.TargetStep
 	if target == "" { // no rewind edge declared: the gate verdict is terminal
 		d.exec.WorkflowStatus = StatusFailedGate
-		return nil
+		return
 	}
-	tIdx, ok := d.workflow.indexOf(target)
-	if !ok {
-		return fmt.Errorf("driver: rewind target %q is not in the workflow", target)
-	}
+	tIdx, _ := d.workflow.indexOf(target)
 	gIdx, _ := d.workflow.indexOf(gate)
-	if tIdx >= gIdx {
-		return fmt.Errorf("driver: rewind target %q must be an earlier step than the gate %q", target, gate)
-	}
 	// Bounds BEFORE any mutation (01 §6.2 step 2: a hit must not rewind).
 	if d.exec.RewindStats.Count >= int64(d.workflow.MaxTotal) ||
 		countToStep(d.exec.RewindStats.ToStep, target) >= int64(d.workflow.MaxPerStep) {
 		d.exec.WorkflowStatus = StatusFailedRewindExhausted
-		return nil
+		return
 	}
 	d.applyRewindRangeLocked(tIdx, gIdx, target, gate, info)
 	// The gate itself stays in_progress, but its verdict closes the human
@@ -548,6 +546,21 @@ func (d *Driver) applyGateFailLocked(gate string, v *GateVerdict, info *appliedI
 	d.exec.Steps[target].PendingRewindInput = &capsule.RewindInput{
 		ToStep: target,
 		Reason: v.VerdictText,
+	}
+}
+
+// checkRewindTarget refuses a gate FAIL policy whose rewind target is not
+// an earlier workflow step ("" = no rewind edge, always valid).
+func (d *Driver) checkRewindTarget(gate, target string) error {
+	if target == "" {
+		return nil
+	}
+	tIdx, ok := d.workflow.indexOf(target)
+	if !ok {
+		return fmt.Errorf("driver: rewind target %q is not in the workflow", target)
+	}
+	if gIdx, _ := d.workflow.indexOf(gate); tIdx >= gIdx {
+		return fmt.Errorf("driver: rewind target %q must be an earlier step than the gate %q", target, gate)
 	}
 	return nil
 }
@@ -612,31 +625,6 @@ func (d *Driver) applyTerminalLocked(req TransitionRequest) error {
 		}
 	}
 	d.exec.WorkflowStatus = req.Status
-	return nil
-}
-
-// applyBudgetLocked adds one delta to both budget layers (reference.md §7.3:
-// step-level authority, workflow-level aggregation — the same atomic
-// write).
-func (d *Driver) applyBudgetLocked(req TransitionRequest) error {
-	if req.Budget == nil {
-		return fmt.Errorf("driver: budget_update without a delta")
-	}
-	if isTerminalStatus(d.exec.WorkflowStatus) {
-		return fmt.Errorf("driver: workflow is terminal (%s); budget is frozen", d.exec.WorkflowStatus)
-	}
-	stepID := req.StepID
-	if stepID == "" {
-		stepID = d.exec.CurrentStep
-	}
-	if stepID == "" {
-		return fmt.Errorf("driver: budget_update without a step and no current step")
-	}
-	st := d.exec.Steps[stepID]
-	if st == nil {
-		return fmt.Errorf("driver: budget_update for unknown step %q", stepID)
-	}
-	d.addWallLocked(st, req.Budget.WallMs)
 	return nil
 }
 
@@ -716,15 +704,73 @@ func (d *Driver) applyInterruptedLocked(req TransitionRequest) error {
 	if req.Reason == FailDaemonRestart {
 		cause = FailDaemonRestart
 	}
+	now := d.stamp()
+	if req.BookWall {
+		// A system relaunch books the interrupted dispatch's runtime so a
+		// hang→relaunch loop reaches T. Only an unsettled dispatch (its
+		// result or failure write books it otherwise), and only the time
+		// since its start or since the last interruption archived for it
+		// — a second relaunch before the next dispatch never re-books.
+		if ms := interruptedWallMs(st, now); ms > 0 && st.Dispatch != 0 {
+			d.addWallLocked(st, ms)
+		}
+	}
 	st.Attempts = append(st.Attempts, capsule.Attempt{
 		Cause:         CauseInfraFailure,
 		FailureCause:  cause,
 		AttemptSeq:    nextAttemptSeq(st),
 		StartedAt:     st.StepStartedAt,
-		InterruptedAt: d.stamp(),
+		InterruptedAt: now,
 		Detail:        req.Reason,
 	})
 	return nil
+}
+
+// applyClaimReentryLocked re-stamps the current step's start when a
+// claim finds its dispatch unsettled; any other state is left as is.
+func (d *Driver) applyClaimReentryLocked() error {
+	if st := d.unsettledStepLocked(); st != nil {
+		st.StepStartedAt = d.stamp()
+	}
+	return nil
+}
+
+// unsettledStepLocked answers the current step when the workflow runs,
+// the step is in_progress with no open question and its dispatch never
+// settled (Step.Dispatch set); nil otherwise.
+func (d *Driver) unsettledStepLocked() *capsule.Step {
+	if d.exec.WorkflowStatus != StatusRunning {
+		return nil
+	}
+	st := d.exec.Steps[d.exec.CurrentStep]
+	if st == nil || st.Status != capsule.StepInProgress || st.PendingQuestion != nil || st.Dispatch == 0 {
+		return nil
+	}
+	return st
+}
+
+// interruptedWallMs answers the wall time from the current dispatch's
+// start, or from a later interruption already archived for that same
+// dispatch, to now; 0 when the start stamp does not parse.
+func interruptedWallMs(st *capsule.Step, now string) int64 {
+	from, err := time.Parse(time.RFC3339Nano, st.StepStartedAt)
+	if err != nil {
+		return 0
+	}
+	for _, a := range st.Attempts {
+		if a.Cause != CauseInfraFailure || a.StartedAt != st.StepStartedAt ||
+			(a.FailureCause != FailDriverRelaunch && a.FailureCause != FailDaemonRestart) {
+			continue
+		}
+		if at, err := time.Parse(time.RFC3339Nano, a.InterruptedAt); err == nil && at.After(from) {
+			from = at
+		}
+	}
+	to, err := time.Parse(time.RFC3339Nano, now)
+	if err != nil {
+		return 0
+	}
+	return to.Sub(from).Milliseconds()
 }
 
 // requireRunningStep is the step_failed precondition: a known,
@@ -809,10 +855,6 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 		kind = "terminal"
 		body["status"] = req.Status
 		body["reason"] = req.Reason
-	case TransBudgetUpdate:
-		kind = "budget_update"
-		body["step"] = req.StepID
-		body["wall_ms"] = d.exec.BudgetConsumed.WallMs
 	case TransAnswer:
 		kind = "answered"
 		body["step"] = d.exec.CurrentStep
@@ -884,8 +926,9 @@ func (d *Driver) failureEventsLocked(req TransitionRequest, info *appliedInfo, b
 	}
 }
 
-// cloneExec deep-copies an execution state (JSON round-trip — every
-// field is JSON-serializable, and RawMessage payloads survive verbatim).
+// cloneExec deep-copies an execution state for Snapshot readers (JSON
+// round-trip — every field is JSON-serializable, and RawMessage payloads
+// survive verbatim).
 func cloneExec(e *capsule.Execution) *capsule.Execution {
 	blob, err := json.Marshal(e)
 	if err != nil {

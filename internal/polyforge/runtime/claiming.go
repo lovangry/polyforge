@@ -14,8 +14,8 @@ package runtime
 //   - an uncleared entry is the start still under way: a later start of
 //     the work item, and the next daemon start (Restart seeds a CLAIMING
 //     placeholder for it), finish it through claimIntent — the journaled
-//     session still holds the WI → the SAME idempotency key hands back the
-//     SAME claim answer (D4); it does not → a fresh claim.
+//     session still holds the WI → the SAME session secret hands back the
+//     SAME claim (D4); it does not → a fresh claim.
 //   - a claim call whose answer is lost (transport error, timeout, hub
 //     5xx) KEEPS the entry: the claim may have landed and the entry is
 //     the only copy of its secret.
@@ -50,7 +50,7 @@ type claimingFile struct {
 type claimingRec struct {
 	WorkItemID     string `json:"work_item_id"`    // the claimed id (an older entry: the submitted spelling)
 	SessionID      string `json:"session_id"`      // the minted SECRET (replay anchor)
-	IdempotencyKey string `json:"idempotency_key"` // the D4 replay token
+	IdempotencyKey string `json:"idempotency_key"` // sent with the claim; aihub does not read it (the secret is the D4 replay key)
 	MachineID      string `json:"machine_id"`
 	At             string `json:"at"`
 	// Models is the manual `pf submit --models` list of this start, so a

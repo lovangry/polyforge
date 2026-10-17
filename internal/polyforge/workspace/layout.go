@@ -336,7 +336,7 @@ func Init(root string) (InitResult, error) {
 	}
 	res.NotesFile = how
 	if how != "unchanged" {
-		if err := atomicfile.Write(notes, []byte(text), mode); err != nil {
+		if err := writeLayoutFile(notes, []byte(text), mode); err != nil {
 			return res, err
 		}
 	}
@@ -345,9 +345,22 @@ func Init(root string) (InitResult, error) {
 		return res, nil
 	}
 	if res.Yaml = yhow; ydata != nil {
-		return res, atomicfile.Write(ypath, ydata, ymode)
+		return res, writeLayoutFile(ypath, ydata, ymode)
 	}
 	return res, nil
+}
+
+// layoutWrite is the layout files' writer (a test seam).
+var layoutWrite = atomicfile.Write
+
+// writeLayoutFile replaces one file `pf init` owns. A failed directory
+// fsync after the rename is not an error: the file is in place, and a
+// lost rename is repaired by running `pf init` again.
+func writeLayoutFile(path string, data []byte, mode fs.FileMode) error {
+	if err := layoutWrite(path, data, mode); err != nil && !errors.Is(err, atomicfile.ErrDirSync) {
+		return err
+	}
+	return nil
 }
 
 // LayoutSection reports whether the workspace's CLAUDE.md exists and,

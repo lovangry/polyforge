@@ -110,7 +110,7 @@ func TestCommitPushCarriesTaskRefs(t *testing.T) {
 	// A task repo with no commits carries nothing (unborn HEAD: honest skip).
 	mustRun(t, "git", "init", "-q", "-b", "main", filepath.Join(o.CapsuleDir, capsule.DirRepos, "empty"))
 
-	sha, _, _, err := CommitPush(o, "boundary")
+	sha, _, _, err := CommitPush(context.Background(), o, "boundary")
 	if err != nil {
 		t.Fatalf("CommitPush: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestTaskRefPushSkipsRepoHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, _, err := CommitPush(o, "boundary"); err != nil {
+	if _, _, _, err := CommitPush(context.Background(), o, "boundary"); err != nil {
 		t.Fatalf("CommitPush: %v", err)
 	}
 	if got, ok := bareRefSHA(t, o.RemoteURL, TaskRefName("demo-src")); !ok || got != workHead {
@@ -162,19 +162,27 @@ func TestTaskRefPushSkipsRepoHooks(t *testing.T) {
 	}
 }
 
+// refuseCarrier installs a pre-receive hook that refuses every
+// refs/pf-task/* update.
+func refuseCarrier(t *testing.T, b *testBare) {
+	t.Helper()
+	refuse := "#!/bin/sh\nwhile read old new ref; do case \"$ref\" in refs/pf-task/*) echo \"carrier refused for the test\" >&2; exit 1 ;; esac; done\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(b.dir, "hooks", "pre-receive"), []byte(refuse), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Best-effort-loud, mechanically: a carrier push REJECTED by the remote
-// (this test's simplified hook enforces the seq trailer on every ref —
-// stricter than production's, which exempts refs/pf-task/*; pinned in
-// package git) must not fail the chain publish. The chain tip lands; the
-// rejected carrier does not; CommitPush answers success.
+// must not fail the chain publish. The chain tip lands; the rejected
+// carrier does not; CommitPush answers success.
 func TestCommitPushTaskRefRejectionNeverBlocksTheChain(t *testing.T) {
 	setIdentity(t)
 	o, base := taskOpts(t, "wi_task2")
-	mkBare(t, o.RemoteURL, true) // hook: seq enforced on EVERY ref
+	refuseCarrier(t, mkBare(t, o.RemoteURL, false))
 	mkTaskCapsule(t, o)
 	mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
 
-	sha, _, _, err := CommitPush(o, "boundary")
+	sha, _, _, err := CommitPush(context.Background(), o, "boundary")
 	if err != nil {
 		t.Fatalf("a rejected task-ref push must never fail the chain publish: %v", err)
 	}
@@ -198,7 +206,7 @@ func TestFetchTaskRefRoundTrip(t *testing.T) {
 	mkTaskCapsule(t, o)
 	origin := filepath.Join(base, "origin", "demo-src")
 	workHead := mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
-	if _, _, _, err := CommitPush(o, "boundary"); err != nil {
+	if _, _, _, err := CommitPush(context.Background(), o, "boundary"); err != nil {
 		t.Fatalf("CommitPush: %v", err)
 	}
 
@@ -241,7 +249,7 @@ func TestPushTaskRefsWithoutReposIsANoop(t *testing.T) {
 	mkBare(t, o.RemoteURL, false)
 	mkTaskCapsule(t, o)
 	writeDirty(t, o, "state.txt", "one\n") // a publishable chain commit
-	if _, _, _, err := CommitPush(o, "boundary"); err != nil {
+	if _, _, _, err := CommitPush(context.Background(), o, "boundary"); err != nil {
 		t.Fatalf("CommitPush: %v", err)
 	}
 	if _, ok := bareRefSHA(t, o.RemoteURL, TaskCarrierNamespace+"x"); ok {
@@ -260,7 +268,7 @@ func TestTaskRefDivergenceIsRejectedAndRaisedAsEvent(t *testing.T) {
 	mkBare(t, o.RemoteURL, false)
 	mkTaskCapsule(t, o)
 	workHead := mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
-	if _, _, _, err := CommitPush(o, "boundary"); err != nil {
+	if _, _, _, err := CommitPush(context.Background(), o, "boundary"); err != nil {
 		t.Fatalf("first CommitPush: %v", err)
 	}
 	if got, ok := bareRefSHA(t, o.RemoteURL, TaskRefName("demo-src")); !ok || got != workHead {
@@ -282,7 +290,7 @@ func TestTaskRefDivergenceIsRejectedAndRaisedAsEvent(t *testing.T) {
 		kinds = append(kinds, kind)
 		body = b
 	}
-	if _, _, _, err := CommitPush(o, "boundary 2"); err != nil {
+	if _, _, _, err := CommitPush(context.Background(), o, "boundary 2"); err != nil {
 		t.Fatalf("a rejected carrier must not fail the chain publish: %v", err)
 	}
 	if got, _ := bareRefSHA(t, o.RemoteURL, TaskRefName("demo-src")); got != workHead {
@@ -382,7 +390,8 @@ func TestIsNonFastForwardOnRealGitOutput(t *testing.T) {
 func TestCarrierPushFailureAlertsOnceUntilSuccess(t *testing.T) {
 	setIdentity(t)
 	o, base := taskOpts(t, "wi_task6")
-	bare := mkBare(t, o.RemoteURL, true) // hook: seq enforced on EVERY ref
+	bare := mkBare(t, o.RemoteURL, false)
+	refuseCarrier(t, bare)
 	mkTaskCapsule(t, o)
 	workHead := mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
 	o.CarrierAlerts = &CarrierAlerts{} // the runtime's per-job state
@@ -395,7 +404,7 @@ func TestCarrierPushFailureAlertsOnceUntilSuccess(t *testing.T) {
 	}
 	publish := func(label string) {
 		t.Helper()
-		if _, _, _, err := CommitPush(o, label); err != nil {
+		if _, _, _, err := CommitPush(context.Background(), o, label); err != nil {
 			t.Fatalf("CommitPush(%s): %v", label, err)
 		}
 	}
@@ -408,7 +417,7 @@ func TestCarrierPushFailureAlertsOnceUntilSuccess(t *testing.T) {
 	if bodies[0]["repo"] != "demo-src" || bodies[0]["ref"] != TaskRefName("demo-src") {
 		t.Fatalf("event body = %v", bodies[0])
 	}
-	if e, _ := bodies[0]["error"].(string); !strings.Contains(e, "Polyforge-Seq") {
+	if e, _ := bodies[0]["error"].(string); !strings.Contains(e, "carrier refused for the test") {
 		t.Fatalf("event body must keep the git error as detail: %v", bodies[0])
 	}
 
@@ -495,7 +504,7 @@ func TestCarrierPushFailedOnlyAfterTheChainLanded(t *testing.T) {
 
 	// Every ref refused: the chain push fails, so does the carrier.
 	setHook("echo 'hub refuses everything' >&2; exit 1\n")
-	if _, _, _, err := CommitPush(o, "boundary 1"); err == nil {
+	if _, _, _, err := CommitPush(context.Background(), o, "boundary 1"); err == nil {
 		t.Fatal("the chain push must fail against a hub refusing every ref")
 	}
 	if len(kinds) != 0 {
@@ -505,7 +514,7 @@ func TestCarrierPushFailedOnlyAfterTheChainLanded(t *testing.T) {
 	// The chain lands, the carrier is still refused: reported now.
 	setHook(`while read old new ref; do case "$ref" in refs/pf-task/*) echo "carrier refused" >&2; exit 1;; esac; done; exit 0
 `)
-	if _, _, _, err := CommitPush(o, "boundary 2"); err != nil {
+	if _, _, _, err := CommitPush(context.Background(), o, "boundary 2"); err != nil {
 		t.Fatalf("CommitPush: %v", err)
 	}
 	if len(kinds) != 1 || kinds[0] != EventCarrierPushFailed {
@@ -548,7 +557,7 @@ func TestCarrierPushRunsFromATempRepo(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { gitArgsProbe = nil })
-	if _, _, _, err := CommitPush(o, "boundary"); err != nil {
+	if _, _, _, err := CommitPush(context.Background(), o, "boundary"); err != nil {
 		t.Fatalf("CommitPush: %v", err)
 	}
 	if len(carrier) == 0 || !strings.HasPrefix(carrier[0], "--git-dir=") {
@@ -616,7 +625,7 @@ func publishCarrier(t *testing.T, o Opts) []string {
 	t.Helper()
 	var kinds []string
 	o.EventSink = func(kind string, _ map[string]any) { kinds = append(kinds, kind) }
-	if _, _, _, err := CommitPush(o, "boundary"); err != nil {
+	if _, _, _, err := CommitPush(context.Background(), o, "boundary"); err != nil {
 		t.Fatalf("CommitPush: %v", err)
 	}
 	return kinds
@@ -829,7 +838,7 @@ func TestCarrierRefusesForeignGitDir(t *testing.T) {
 			var kinds []string
 			var bodies []map[string]any
 			o.EventSink = func(kind string, b map[string]any) { kinds = append(kinds, kind); bodies = append(bodies, b) }
-			if _, _, _, err := CommitPush(o, "boundary"); err != nil {
+			if _, _, _, err := CommitPush(context.Background(), o, "boundary"); err != nil {
 				t.Fatalf("a refused carrier must not fail the chain publish: %v", err)
 			}
 			if _, ok := bareRefSHA(t, o.RemoteURL, TaskRefName("demo-src")); ok {
@@ -883,7 +892,7 @@ func TestCarrierChecksCarrySafeDirectory(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { gitArgsProbe = nil })
-	if _, _, _, err := CommitPush(o, "boundary"); err != nil {
+	if _, _, _, err := CommitPush(context.Background(), o, "boundary"); err != nil {
 		t.Fatalf("CommitPush: %v", err)
 	}
 	seen := 0
@@ -1025,13 +1034,13 @@ func TestIsCredentialRefusedOnRealGitOutput(t *testing.T) {
 	writeDirty(t, o, "a.txt", "a\n")
 	refused := o
 	refused.RemoteURL, _ = attackerServer(t)
-	_, _, _, err := CommitPush(refused, "refused")
+	_, _, _, err := CommitPush(context.Background(), refused, "refused")
 	if err == nil || !IsCredentialRefused(err) {
 		t.Fatalf("a 401 push: err=%v, want a credential refusal", err)
 	}
 	dead := o
 	dead.RemoteURL = filepath.Join(t.TempDir(), "nowhere.git")
-	if _, _, _, err := CommitPush(dead, "dead"); err == nil || IsCredentialRefused(err) {
+	if _, _, _, err := CommitPush(context.Background(), dead, "dead"); err == nil || IsCredentialRefused(err) {
 		t.Fatalf("a push to a missing remote: err=%v, want a failure that is no credential refusal", err)
 	}
 }

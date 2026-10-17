@@ -78,10 +78,6 @@ func TestParseExtendedFrontmatter(t *testing.T) {
 	if ver.OnFail == nil || ver.OnFail.Target != "fix" {
 		t.Fatalf("verification on_fail: %+v", ver.OnFail)
 	}
-	// the defaults chain applies where no per-step chain is declared
-	if got := len(grill.ModelCandidates); got != 2 {
-		t.Fatalf("grill default candidates: %d", got)
-	}
 }
 
 func TestParseContextPolicyDefaultsToInherit(t *testing.T) {

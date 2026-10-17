@@ -255,8 +255,9 @@ func (m *AdminManager) ListAPIKeys() ([]APIKeyInfo, error) {
 // Machines
 
 // MachineHeartbeat is the machines/heartbeat body. First call registers
-// (creates the machine user + issues its key, plaintext once); repeats
-// only refresh the timestamp and the liveness projection. Authorization
+// (creates the machine user and the machines row; no api key is issued —
+// a daemon runs on its operator-issued key); repeats only refresh the
+// timestamp and the liveness projection. Authorization
 // lives at the server face, not here: first registration is a privileged
 // act (global admin or a project maintainer — the hHeartbeat handler
 // passes that gate to HeartbeatAuthorized, which runs it on the register
@@ -278,10 +279,9 @@ type MachineHeartbeat struct {
 
 // HeartbeatResult is the heartbeat response.
 type HeartbeatResult struct {
-	Registered bool       `json:"registered"` // first call created the identity
-	MachineID  string     `json:"machine_id"`
-	UserID     string     `json:"user_id"`
-	Key        *IssuedKey `json:"api_key,omitempty"` // set on first registration only
+	Registered bool   `json:"registered"` // first call created the identity
+	MachineID  string `json:"machine_id"`
+	UserID     string `json:"user_id"`
 }
 
 func (m *AdminManager) Heartbeat(req MachineHeartbeat) (*HeartbeatResult, error) {
@@ -321,7 +321,7 @@ func (m *AdminManager) HeartbeatAuthorized(req MachineHeartbeat, authorizeRegist
 			return nil, err
 		}
 	}
-	// Register: machine user + machines row + first key, one transaction.
+	// Register: machine user + machines row, one transaction.
 	tx, err := m.db.Begin()
 	if err != nil {
 		return nil, err
@@ -344,30 +344,10 @@ func (m *AdminManager) HeartbeatAuthorized(req MachineHeartbeat, authorizeRegist
 		VALUES (?1,?2,?3,?4,?5,?6)`, req.MachineID, uid, req.RuntimeVersion, req.Mode, live, Now()); err != nil {
 		return nil, err
 	}
-	keyID, err := NewID("key_")
-	if err != nil {
-		return nil, err
-	}
-	plain, err := NewSecret(24)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(`INSERT INTO api_keys(id, user_id, project_id, name, key_hash, created_at)
-		VALUES (?1,?2,NULL,'machine registration',?3,?4)`, keyID, uid, Sha256Hex(plain), Now()); err != nil {
-		return nil, err
-	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return &HeartbeatResult{
-		Registered: true,
-		MachineID:  req.MachineID,
-		UserID:     uid,
-		Key: &IssuedKey{
-			Token: api.APIToken{ID: keyID, Name: "machine registration", CreatedAt: Now()},
-			Plain: plain,
-		},
-	}, nil
+	return &HeartbeatResult{Registered: true, MachineID: req.MachineID, UserID: uid}, nil
 }
 
 // MachineRow is one machines read-model row (the admin machines face).

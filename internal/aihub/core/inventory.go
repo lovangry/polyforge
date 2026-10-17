@@ -10,7 +10,7 @@ package core
 // Only names are accepted: every URL the claiming daemon clones (with
 // the machine's git credentials) comes from projects.repos, resolved at
 // claim time — never from the filer. A client-supplied url, a subdir or
-// a frozen base commit is refused at create instead of being stored.
+// any other key is refused at create instead of being stored.
 
 import (
 	"database/sql"
@@ -65,10 +65,6 @@ func resolveRepoInventory(in RepoInventoryInput, projectRepos []api.ProjectRepo)
 			return nil, Fail(api.ErrCoreBadInput, "INVENTORY_SUBDIR_UNSUPPORTED",
 				"repo %q: subdir is not supported; omit it", name)
 		}
-		if _, ok := entry["base"]; ok {
-			return nil, Fail(api.ErrCoreBadInput, "INVENTORY_BASE_UNSUPPORTED",
-				"repo %q: a frozen base commit is not supported; omit base (the work machine clones the repo's default branch)", name)
-		}
 		if len(entry) != 1 {
 			return nil, Fail(api.ErrCoreBadInput, "", "repo %q: unknown repo_inventory key (entries are {name})", name)
 		}
@@ -83,21 +79,6 @@ func resolveRepoInventory(in RepoInventoryInput, projectRepos []api.ProjectRepo)
 		out = append(out, RepoDecl{Name: name})
 	}
 	return out, nil
-}
-
-// refuseRepoInventoryBase refuses the removed second array of the
-// pre-v2.5.0 shape when it carries any entry (absent, null and [] mean
-// "no bases" and pass).
-func refuseRepoInventoryBase(raw json.RawMessage) error {
-	if len(raw) == 0 {
-		return nil
-	}
-	var bases []json.RawMessage
-	if json.Unmarshal(raw, &bases) == nil && len(bases) == 0 {
-		return nil
-	}
-	return Fail(api.ErrCoreBadInput, "INVENTORY_BASE_UNSUPPORTED",
-		"repo_inventory_base is not supported; omit it (the work machine clones each repo's default branch)")
 }
 
 // repoInventoryJSON is the column value of a resolved inventory: NULL

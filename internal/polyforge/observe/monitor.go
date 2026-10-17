@@ -798,7 +798,7 @@ func (m *Monitor) schedulePush() {
 		return // one already in flight; the next tick retries
 	}
 	m.retryAt = time.Time{}
-	version := m.dirtyVersion    // the seq trailer is gitops' single authority (derived in-lock)
+	version := m.dirtyVersion
 	tr := m.transcriptSnapshot() // captured BEFORE the spawn: no shared-field reads
 	go func() {
 		// The transcript sync rides the commit pipeline (F3): the copy

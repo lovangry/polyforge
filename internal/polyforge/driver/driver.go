@@ -70,14 +70,15 @@ type Config struct {
 	// Workflow supplies the execution graph directly (tests, or a
 	// daemon that already parsed it); nil → loaded from BundleDir.
 	Workflow *Workflow
-	// StepCandidates is the polyforge#79 effective per-step candidate
-	// map (post-precedence, computed at claim time; rehydrated or
-	// re-derived at recovery). When non-nil it SUBSTITUTES the parsed
-	// step-level lists for every step it keys — a present-empty entry
-	// governs and means no switchable chain. A step absent from the map
-	// (or a nil map) keeps the bundle's own resolution. Every candidate
-	// is `<harness>:<model>` (polyforge#175): the prefix is the harness
-	// that candidate's dispatch runs on (New refuses any other shape).
+	// StepCandidates is the per-step candidate lists of this claim
+	// (polyforge#79): composed once at claim time over every precedence
+	// level, the bundle's own lists included (workspace.ComposeCandidates),
+	// and rehydrated from the job record at recovery. It is the driver's
+	// only candidate source: a step without an entry, or with an empty
+	// one, has no switchable chain and runs on the harness default. Every
+	// candidate is `<harness>:<model>` (polyforge#175): the prefix is the
+	// harness that candidate's dispatch runs on (New refuses any other
+	// shape).
 	StepCandidates map[string][]string
 	// Interrupted, when set, archives ONE infra_failure attempt on the
 	// current in_progress step before the loop re-dispatches (the
@@ -117,12 +118,25 @@ type Config struct {
 	Sleep func(ctx context.Context, d time.Duration)
 }
 
+// hasUnsettledDispatch reports whether the current step awaits a
+// dispatch that never settled.
+func (d *Driver) hasUnsettledDispatch() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.unsettledStepLocked() != nil
+}
+
 // InterruptedDispatch records one derivation that ended without a
 // result: the recovery cause. The driver archives it as an audit-only
 // infra_failure attempt (never model-class, so never a candidate
 // advance) when the recovery lane re-derives.
 type InterruptedDispatch struct {
 	Detail string
+	// BookWall books the interrupted dispatch's wall time toward the
+	// step's T in the same archive write: set for a relaunch the system
+	// ordered after a hang, stall or death, never for a daemon restart
+	// or an operator resume (the bridge decides from the recovery cause).
+	BookWall bool
 }
 
 // Driver is the per-WI execution driver. One Driver per work item; Run
@@ -143,11 +157,10 @@ type Driver struct {
 
 	cfg Config
 	log EventLogger
-	// degraded latches when atomicfile.Write succeeds at rename but fails
-	// at the post-rename directory fsync: disk may hold the new state
-	// while memory rolled back. All further transitions are refused
-	// until reconciliation (review issue 6).
-	degraded bool
+	// failed is set when a transition's persist failed: memory may be
+	// ahead of execution.json. Every further transition answers it and
+	// Run returns it; the restart reloads the file (transition.go).
+	failed error
 
 	// wake carries the "state changed, re-plan" signal to a Run loop
 	// parked on an open question; one buffered slot, coalescing.
@@ -229,14 +242,9 @@ func New(cfg Config) (*Driver, error) {
 	// polyforge#175: every candidate a step can walk must name its
 	// harness; refuse up front rather than mid-chain.
 	for _, spec := range wf.Steps {
-		list := spec.ModelCandidates
-		where, src := "model_candidates", "the bundle's own list"
-		if l, ok := cfg.StepCandidates[spec.ID]; ok {
-			list, where, src = l, "models", "the claim-time list: yaml, bundle or pf submit --models"
-		}
-		for i, c := range list {
+		for i, c := range cfg.StepCandidates[spec.ID] {
 			if _, err := harness.ParseCandidate(c); err != nil {
-				return nil, fmt.Errorf("driver: step %s: %s[%d] (%s): %w", spec.ID, where, i, src, err)
+				return nil, fmt.Errorf("driver: step %s: models[%d] (the claim-time list: yaml, bundle or pf submit --models): %w", spec.ID, i, err)
 			}
 		}
 	}
@@ -304,11 +312,20 @@ func (d *Driver) Run(ctx context.Context) error {
 	// pointer; an operator shutdown never reaches this hook (the bridge
 	// filters it).
 	collected, collectedN := d.unconsumedResult()
+	if collected == nil && d.cfg.Interrupted == nil && d.hasUnsettledDispatch() {
+		// A claim over a dispatch that never settled — an operator pause
+		// cancelled it, or a shutdown or crash ended it before this claim:
+		// that time is never booked, even by a later system relaunch.
+		if err := d.transition(TransitionRequest{Kind: TransClaimReentry, SpawnN: d.currentSpawnN()}); err != nil {
+			return fmt.Errorf("driver: claim re-entry write failed: %w", err)
+		}
+	}
 	if collected == nil && d.cfg.Interrupted != nil {
 		if err := d.transition(TransitionRequest{
-			Kind:   TransInterrupted,
-			Reason: d.cfg.Interrupted.Detail,
-			SpawnN: d.currentSpawnN(),
+			Kind:     TransInterrupted,
+			Reason:   d.cfg.Interrupted.Detail,
+			BookWall: d.cfg.Interrupted.BookWall,
+			SpawnN:   d.currentSpawnN(),
 		}); err != nil {
 			return fmt.Errorf("driver: interrupted-dispatch archive failed: %w", err)
 		}
@@ -399,11 +416,13 @@ func (d *Driver) Run(ctx context.Context) error {
 		if werr != nil {
 			_ = run.Terminate(5 * time.Second)
 			if ctx.Err() != nil {
-				// Cancellation (shutdown, recovery relaunch): not a failure of
-				// the step — nothing is counted and the candidate pointer
-				// stays; the cumulative runtime is still booked.
+				// Cancellation (pause, recovery relaunch): not a failure of
+				// the step — nothing is counted, the candidate pointer stays
+				// and this driver writes nothing. A dispatch the system
+				// relaunches after a hang, stall or death is booked by the
+				// successor's interrupted archive (Config.Interrupted); a
+				// paused one books nothing.
 				d.announceEnd(stepID, n, supervise.OutcomeExitedWithoutResult, -1, "cancelled")
-				d.bookWall(stepID, dispatchedAt)
 				return fmt.Errorf("driver: step %s dispatch %d ended without a result: %w", stepID, n, werr)
 			}
 			cause, code, detail := classifyWaitFailure(werr)
@@ -570,6 +589,11 @@ func (d *Driver) settle(stepID string, n int64, res *StepResult, run StepRun) (s
 func (d *Driver) plan(ctx context.Context) (stop bool, stepID string, err error) {
 	for {
 		d.mu.Lock()
+		if d.failed != nil {
+			err := d.failed
+			d.mu.Unlock()
+			return false, "", err
+		}
 		status := d.exec.WorkflowStatus
 		stop = isTerminalStatus(status) || status == StatusBlocked
 		var pending bool
@@ -681,9 +705,10 @@ func (d *Driver) awaitAnswer(ctx context.Context) error {
 				pending = st.PendingQuestion != nil
 			}
 		}
+		failed := d.failed != nil
 		d.mu.Unlock()
-		if !pending {
-			return nil
+		if !pending || failed {
+			return nil // plan re-reads the state (and answers a failed driver)
 		}
 		select {
 		case <-ctx.Done():
@@ -1132,27 +1157,17 @@ func skeletonExecution(wi WIInfo, wf *Workflow) *capsule.Execution {
 
 func capsuleIDFor(wi string) string { return "cap_" + wi }
 
-// effectiveCandidates answers the step's effective candidate list (each
-// `<harness>:<model>`, validated by New): the polyforge#79
-// post-precedence map when the claim/recovery supplied one, the
-// bundle's own resolution otherwise. The pointer recomputation, the
+// effectiveCandidates answers the step's claim-time candidate list (each
+// `<harness>:<model>`, validated by New). The pointer recomputation, the
 // switch and the exhaustion paths all walk this list — across harnesses.
 func (d *Driver) effectiveCandidates(stepID string) []string {
-	if list, ok := d.cfg.StepCandidates[stepID]; ok {
-		return list
-	}
-	if spec := d.workflow.step(stepID); spec != nil {
-		return spec.ModelCandidates
-	}
-	return nil
+	return d.cfg.StepCandidates[stepID]
 }
 
 // modelForLocked resolves the step's effective candidate for the NEXT
 // dispatch (the `<harness>:<model>` at the recomputed pointer; "" when
 // no candidate list is in effect). The recomputation runs over the
-// EFFECTIVE list (polyforge#79): the post-precedence list the claim
-// carried — or the recovery re-derived — never the raw bundle parse
-// alone. Model-class infra failures alone advance (bounded, capped at list end), a gate-FAIL
+// claim-time list (polyforge#79). Model-class infra failures alone advance (bounded, capped at list end), a gate-FAIL
 // rewind resets to the head.
 func (d *Driver) modelForLocked(stepID string) string {
 	list := d.effectiveCandidates(stepID)

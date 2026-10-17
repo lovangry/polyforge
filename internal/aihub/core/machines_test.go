@@ -18,36 +18,29 @@ func TestHeartbeatRegistersOnceThenRefreshes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first heartbeat: %v", err)
 	}
-	if !h1.Registered || h1.Key == nil || h1.UserID == "" {
+	if !h1.Registered || h1.UserID == "" {
 		t.Fatalf("first heartbeat must register: %+v", h1)
 	}
-	first := h1.Key.Token.ID
 
-	// Repeat: same identity, no new key, refresh only.
+	// Repeat: same identity, refresh only.
 	h2, err := env.Admin.Heartbeat(MachineHeartbeat{MachineID: "m-reg"})
 	if err != nil {
 		t.Fatalf("second heartbeat: %v", err)
 	}
-	if h2.Registered || h2.Key != nil || h2.UserID != h1.UserID {
+	if h2.Registered || h2.UserID != h1.UserID {
 		t.Fatalf("repeat must refresh in place: %+v", h2)
 	}
 
-	// Exactly one api key was ever issued to the machine identity.
+	// Registration issues no api key: the daemon runs on its
+	// operator-issued key, so nothing could ever use one.
 	keys, err := env.Admin.ListAPIKeys()
 	if err != nil {
 		t.Fatalf("keys: %v", err)
 	}
-	n := 0
 	for _, k := range keys {
 		if k.UserID == h1.UserID {
-			n++
-			if k.ID != first {
-				t.Fatalf("unexpected extra key %s", k.ID)
-			}
+			t.Fatalf("machine registration issued api key %s", k.ID)
 		}
-	}
-	if n != 1 {
-		t.Fatalf("machine identity holds %d keys, want 1", n)
 	}
 
 	// Timestamp refresh: backdate, heartbeat, observe the stamp move to
