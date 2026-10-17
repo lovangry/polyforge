@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"strings"
@@ -54,11 +53,8 @@ var cmdUsers = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.finish(raw, func() {
-				var u api.User
-				if err := json.Unmarshal(raw, &u); err == nil {
-					fmt.Fprintf(ctx.Stdout, "created user %s (%s, %s)\n", u.ID, u.UserType, u.Role)
-				}
+			finishAs(ctx, raw, func(u *api.User) {
+				fmt.Fprintf(ctx.Stdout, "created user %s (%s, %s)\n", u.ID, u.UserType, u.Role)
 			})
 			return nil
 		case "list":
@@ -66,13 +62,8 @@ var cmdUsers = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.finish(raw, func() {
-				var l struct {
-					Items []api.User `json:"items"`
-				}
-				if err := json.Unmarshal(raw, &l); err == nil {
-					renderUsers(ctx.Stdout, l.Items)
-				}
+			finishAs(ctx, raw, func(l *itemList[api.User]) {
+				renderUsers(ctx.Stdout, l.Items)
 			})
 			return nil
 		case "get":
@@ -83,9 +74,7 @@ var cmdUsers = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.finish(raw, func() {
-				printJSON(ctx.Stdout, raw)
-			})
+			ctx.finish(raw, func() { printJSON(ctx.Stdout, raw) })
 			return nil
 		case "patch":
 			f := subFlags(ctx, "users patch")
@@ -105,9 +94,7 @@ var cmdUsers = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.finish(raw, func() {
-				fmt.Fprintf(ctx.Stdout, "user %s updated\n", ids[0])
-			})
+			ctx.finishLine(raw, "user %s updated\n", ids[0])
 			return nil
 		default:
 			return fmt.Errorf("users: unknown action %q", sub)
@@ -176,9 +163,7 @@ var cmdApiKeys = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.finish(raw, func() {
-				fmt.Fprintf(ctx.Stdout, "key %s revoked\n", rest[0])
-			})
+			ctx.finishLine(raw, "key %s revoked\n", rest[0])
 			return nil
 		default:
 			return fmt.Errorf("api-keys: unknown action %q", sub)
@@ -226,11 +211,8 @@ var cmdProjects = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.finish(raw, func() {
-				var p api.Project
-				if err := json.Unmarshal(raw, &p); err == nil {
-					fmt.Fprintf(ctx.Stdout, "created project %s (%s)\n", p.Name, p.ID)
-				}
+			finishAs(ctx, raw, func(p *api.Project) {
+				fmt.Fprintf(ctx.Stdout, "created project %s (%s)\n", p.Name, p.ID)
 			})
 			return nil
 		case "list":
@@ -238,13 +220,8 @@ var cmdProjects = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.finish(raw, func() {
-				var l struct {
-					Items []api.Project `json:"items"`
-				}
-				if err := json.Unmarshal(raw, &l); err == nil {
-					renderProjects(ctx.Stdout, l.Items)
-				}
+			finishAs(ctx, raw, func(l *itemList[api.Project]) {
+				renderProjects(ctx.Stdout, l.Items)
 			})
 			return nil
 		case "get":
@@ -255,9 +232,7 @@ var cmdProjects = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.finish(raw, func() {
-				printJSON(ctx.Stdout, raw)
-			})
+			ctx.finish(raw, func() { printJSON(ctx.Stdout, raw) })
 			return nil
 		case "patch":
 			f := subFlags(ctx, "projects patch")
@@ -290,9 +265,7 @@ var cmdProjects = &Command{
 			if err != nil {
 				return err
 			}
-			ctx.finish(raw, func() {
-				fmt.Fprintf(ctx.Stdout, "project %s updated\n", ids[0])
-			})
+			ctx.finishLine(raw, "project %s updated\n", ids[0])
 			return nil
 		case "members":
 			return projectsMembers(ctx, client, rest)
@@ -331,9 +304,7 @@ func projectsMembers(ctx *Context, client *aihubclient.Client, args []string) er
 		if err != nil {
 			return err
 		}
-		ctx.finish(raw, func() {
-			fmt.Fprintf(ctx.Stdout, "member %s upserted on %s as %s\n", *user, ids[0], *role)
-		})
+		ctx.finishLine(raw, "member %s upserted on %s as %s\n", *user, ids[0], *role)
 		return nil
 	case "remove", "rm":
 		f := subFlags(ctx, "projects members remove")
@@ -351,9 +322,7 @@ func projectsMembers(ctx *Context, client *aihubclient.Client, args []string) er
 		if err != nil {
 			return err
 		}
-		ctx.finish(raw, func() {
-			fmt.Fprintf(ctx.Stdout, "removed from %s: %s\n", ids[0], strings.Join(rem, ","))
-		})
+		ctx.finishLine(raw, "removed from %s: %s\n", ids[0], strings.Join(rem, ","))
 		return nil
 	default:
 		return fmt.Errorf("projects members: unknown action %q", sub)
@@ -378,15 +347,11 @@ var cmdBackup = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.finish(raw, func() {
-			var resp struct {
-				Backup string `json:"backup"`
-			}
-			if err := json.Unmarshal(raw, &resp); err == nil {
-				fmt.Fprintf(ctx.Stdout, "snapshot written: %s\n", resp.Backup)
-			} else {
-				printJSON(ctx.Stdout, raw)
-			}
+		finishOrRaw(ctx, raw, func(resp *struct {
+			Backup string `json:"backup"`
+		}) bool {
+			fmt.Fprintf(ctx.Stdout, "snapshot written: %s\n", resp.Backup)
+			return true
 		})
 		return nil
 	},
@@ -413,11 +378,8 @@ var cmdMachines = &Command{
 		}
 		// House rule: --json is byte-for-byte passthrough of the server
 		// body; human mode decodes the same body for the table render.
-		ctx.finish(raw, func() {
-			var out aihubclient.MachinesList
-			if err := json.Unmarshal(raw, &out); err == nil {
-				renderMachines(ctx.Stdout, &out)
-			}
+		finishAs(ctx, raw, func(out *aihubclient.MachinesList) {
+			renderMachines(ctx.Stdout, out)
 		})
 		return nil
 	},
