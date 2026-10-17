@@ -46,12 +46,12 @@ func pf122Daemon(t *testing.T) (*testDaemon, *answerAgent) {
 	aa := &answerAgent{answered: make(chan string, 4)}
 	td := newTestDaemon(t, func(c *Config) {
 		inner := fakeEngineStarter()
-		c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
+		c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (Agent, error) {
 			h, err := inner(ctx, in)
 			if err != nil {
 				return nil, err
 			}
-			aa.AgentHandle = h
+			aa.Agent = h
 			return aa, nil
 		}
 	})

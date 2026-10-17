@@ -5,7 +5,7 @@ package test
 // ladder, the long-run leak probes). It assembles the SAME production
 // components — runtime.New (lifecycle + recovery engine), observe.New
 // (the per-WI supervisor), runtime.DefaultSpawner (the real pi-spawner
-// that derives the real fakepi process), the driver bridge with its
+// that derives the real fakepi process), the driver with its
 // supervision link — with the observe config injected.
 
 import (
@@ -14,46 +14,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/protocol"
-	"github.com/silgrid/polyforge/internal/polyforge/bridge"
+	"github.com/silgrid/polyforge/internal/polyforge/driver"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
-
-// inprocAdapter bridges runtime.AgentHandle to observe.Handle (the same
-// shape as the daemon's agentAdapter, which is unexported).
-type inprocAdapter struct {
-	h        runtime.AgentHandle
-	exit     chan struct{}
-	pollStop chan struct{}
-	retire   sync.Once
-}
-
-func (a *inprocAdapter) Exit() <-chan struct{} { return a.exit }
-
-func (a *inprocAdapter) retireAdapter() { a.retire.Do(func() { close(a.pollStop) }) }
-
-func (a *inprocAdapter) pollDone(interval time.Duration) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-a.pollStop:
-			return
-		case <-t.C:
-			if a.h.Done() {
-				close(a.exit)
-				return
-			}
-		}
-	}
-}
 
 // inprocRig is the assembled runtime+observe pair with injectable
 // detection windows.
@@ -69,9 +39,7 @@ type inprocRig struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 
-	adaptMu  sync.Mutex
-	adapters map[string]*inprocAdapter
-	sup      *supervise.Registry
+	sup *supervise.Registry
 }
 
 // inprocObsTune is one injected tweak of the rig's observe.Config
@@ -102,9 +70,8 @@ func newInprocRig(t *testing.T, inst *v1Install, obsTune ...inprocObsTune) *inpr
 
 	rig := &inprocRig{
 		t: t, inst: inst, dataDir: dataDir, workspace: workspace,
-		adapters: map[string]*inprocAdapter{},
-		done:     make(chan struct{}),
-		sup:      supervise.NewRegistry(),
+		done: make(chan struct{}),
+		sup:  supervise.NewRegistry(),
 	}
 
 	// The spawner inherits THIS process's environment: the plan dir must
@@ -137,10 +104,10 @@ func newInprocRig(t *testing.T, inst *v1Install, obsTune ...inprocObsTune) *inpr
 	}
 	sp := runtime.DefaultSpawner(&rtCfg)
 	// polyforge#106: the driver IS the engine — the rig binds the real
-	// bridge starter (the production mapping), so the in-process
+	// driver starter (the production mapping), so the in-process
 	// scenarios run the same execution engine the daemon runs.
 	rtCfg.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
-		return bridge.Start(ctx, bridge.Config{
+		h, err := driver.Start(ctx, driver.StartConfig{
 			WI:         in.WI,
 			CapsuleDir: in.CapsuleDir,
 			BundleName: in.BundleName,
@@ -149,16 +116,27 @@ func newInprocRig(t *testing.T, inst *v1Install, obsTune ...inprocObsTune) *inpr
 			Log:        rig.obs.Events(),
 			Link:       rig.sup.Link(in.WI),
 		})
+		if err != nil {
+			return nil, err
+		}
+		return h, nil
 	}
 
 	rtMsgs := supervise.NewQueue[protocol.RTMsg]()
 	obMsgs := supervise.NewQueue[protocol.OBMsg]()
-	attachCh := supervise.NewQueue[observe.Attach]()
 
 	rig.rt = runtime.New(rtCfg, inst.client, sp, rtMsgs, obMsgs)
 	obCfg := observe.Config{
-		RT:           attachCh,
-		OB:           obMsgs,
+		RT: rtMsgs,
+		OB: obMsgs,
+		Agent: func(wi string) (observe.Handle, observe.WIInfo, bool) {
+			ji, ok := rig.rt.Info(wi)
+			h, live := ji.Agent.(observe.Handle)
+			if !ok || !live {
+				return nil, observe.WIInfo{}, false
+			}
+			return h, observe.WIInfo{WorkItem: ji.WorkItem, CapsuleDir: ji.CapsuleDir, Git: ji.Git}, true
+		},
 		DataDir:      dataDir,
 		PollInterval: 50 * time.Millisecond,
 		Registry:     rig.sup,
@@ -175,7 +153,6 @@ func newInprocRig(t *testing.T, inst *v1Install, obsTune ...inprocObsTune) *inpr
 	rig.ctx, rig.cancel = context.WithCancel(context.Background())
 	go func() { _ = rig.rt.Run(rig.ctx) }()
 	go func() { rig.obs.Run(rig.ctx); close(rig.done) }()
-	go rig.bridge(rtMsgs, attachCh)
 
 	t.Cleanup(func() {
 		// Teardown order: cancel the loops, then TERMINATE every live
@@ -197,58 +174,6 @@ func newInprocRig(t *testing.T, inst *v1Install, obsTune ...inprocObsTune) *inpr
 		}
 	})
 	return rig
-}
-
-// installAdapter registers the CURRENT handle and returns its observe face.
-func (r *inprocRig) installAdapter(ji runtime.JobInfo) *inprocAdapter {
-	a := &inprocAdapter{
-		h:        ji.Agent,
-		exit:     make(chan struct{}),
-		pollStop: make(chan struct{}),
-	}
-	r.adaptMu.Lock()
-	if old := r.adapters[ji.WorkItem]; old != nil {
-		old.retireAdapter()
-	}
-	r.adapters[ji.WorkItem] = a
-	r.adaptMu.Unlock()
-	go a.pollDone(50 * time.Millisecond)
-	return a
-}
-
-// bridge translates RT messages into observe attachments (the daemon's
-// bridge shape, minus the daemon-only bookkeeping).
-func (r *inprocRig) bridge(rtMsgs *supervise.Queue[protocol.RTMsg], attachCh *supervise.Queue[observe.Attach]) {
-	for {
-		for {
-			msg, ok := rtMsgs.Pop()
-			if !ok {
-				break
-			}
-			at := observe.Attach{Msg: msg}
-			if msg.Kind == protocol.RTStarted || msg.Kind == protocol.RTRecovered {
-				if ji, live := r.rt.Info(msg.WorkItem); live && ji.Agent != nil {
-					at = observe.Attach{
-						Msg:    msg,
-						Handle: r.installAdapter(ji),
-						WI: observe.WIInfo{
-							WorkItem:   ji.WorkItem,
-							Project:    ji.Project,
-							CapsuleDir: ji.CapsuleDir,
-							BundleName: ji.BundleName,
-							Git:        ji.Git,
-						},
-					}
-				}
-			}
-			attachCh.Push(at)
-		}
-		select {
-		case <-r.ctx.Done():
-			return
-		case <-rtMsgs.Notify():
-		}
-	}
 }
 
 // start claims and runs one work item through the real Runtime.

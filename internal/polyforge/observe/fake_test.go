@@ -38,6 +38,35 @@ func (h *fakeHandle) Exit() <-chan struct{} { return h.exit }
 // dying marks the process as exited (confirmed death signal).
 func (h *fakeHandle) die() { h.once.Do(func() { close(h.exit) }) }
 
+// agentTable is a fake Config.Agent resolver: wi → live handle + capsule.
+type agentTable struct {
+	mu sync.Mutex
+	m  map[string]agentEntry
+}
+
+type agentEntry struct {
+	h   Handle
+	dir string
+}
+
+func newAgentTable() *agentTable { return &agentTable{m: map[string]agentEntry{}} }
+
+func (a *agentTable) set(wi string, h Handle, capsuleDir string) {
+	a.mu.Lock()
+	a.m[wi] = agentEntry{h, capsuleDir}
+	a.mu.Unlock()
+}
+
+func (a *agentTable) lookup(wi string) (Handle, WIInfo, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	e, ok := a.m[wi]
+	if !ok {
+		return nil, WIInfo{}, false
+	}
+	return e.h, WIInfo{WorkItem: wi, CapsuleDir: e.dir}, true
+}
+
 // --- monitor construction ---
 
 func testCfg() monitorCfg {
@@ -74,12 +103,7 @@ func newTestMonitor(t *testing.T, h Handle, mod func(*monitorCfg)) (*Monitor, *s
 		mod(&cfg)
 	}
 	m := &Monitor{
-		wi: WIInfo{
-			WorkItem:   "wi_test",
-			Project:    "proj",
-			CapsuleDir: capsuleDir,
-			BundleName: "bundle-a",
-		},
+		wi:         WIInfo{WorkItem: "wi_test", CapsuleDir: capsuleDir},
 		cfg:        cfg,
 		log:        log,
 		ob:         ob,
@@ -93,7 +117,6 @@ func newTestMonitor(t *testing.T, h Handle, mod func(*monitorCfg)) (*Monitor, *s
 	m.attach(Attach{
 		Msg:    protocol.RTMsg{Kind: protocol.RTStarted, WorkItem: "wi_test", SpawnN: 1},
 		Handle: h,
-		WI:     m.wi,
 	})
 	m.phase = phaseBetween
 	m.phaseSince = m.now()

@@ -58,7 +58,6 @@ func newSessionTestMonitor(t *testing.T, sid string, verifier SessionVerifier, c
 	m.rtQ.Push(Attach{
 		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", SpawnN: 1, SessionID: sid},
 		Handle: h,
-		WI:     m.wi,
 	})
 	soon(t, 2*time.Second, "session attach never adopted", func() bool {
 		m.stateMu.Lock()
@@ -231,7 +230,6 @@ func TestRefusedPushRevalidatesAtOnce(t *testing.T) {
 	m.rtQ.Push(Attach{
 		Msg:    protocol.RTMsg{Kind: protocol.RTRecovered, WorkItem: "wi_test", SpawnN: 1, SessionID: "sess_secret_r"},
 		Handle: h,
-		WI:     m.wi,
 	})
 	soon(t, 2*time.Second, "the first revalidation", func() bool { return verifier.calls.Load() == 1 })
 	ours.Store(false) // taken over at the hub; the next check is an hour away

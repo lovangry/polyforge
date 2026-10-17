@@ -71,18 +71,14 @@ type PushFunc func(ctx context.Context, o gitops.Opts, message string) (localSHA
 // Runtime alongside the RTStarted protocol message.
 type WIInfo struct {
 	WorkItem   string
-	Project    string
 	CapsuleDir string
-	BundleName string
 	Git        gitops.Opts
 }
 
-// Handle is the driver face a monitor watches. Implemented by the
-// daemon's adapter over the runtime's agent handle; Observe owns no
-// process code.
+// Handle is the driver face a monitor watches (the runtime's agent
+// handle); Observe owns no process code.
 type Handle interface {
-	// Exit fires ONCE when the supervised driver has returned. The
-	// adapter waits on the driver first, so the signal is ALREADY the
+	// Exit is closed once the supervised driver has returned: the
 	// confirmed exit.
 	Exit() <-chan struct{}
 }

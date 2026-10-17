@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,7 @@ type fakeAgent struct {
 	mu         sync.Mutex
 	done       bool
 	terminated bool
+	exit       chan struct{} // closed by Terminate; created on first use
 }
 
 func (a *fakeAgent) PID() int          { return 0 } // runtime's kill guard no-ops on pid<=0
@@ -43,8 +45,22 @@ func (a *fakeAgent) isDone() bool {
 	defer a.mu.Unlock()
 	return a.done
 }
+func (a *fakeAgent) Exit() <-chan struct{} {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.exitLocked()
+}
+func (a *fakeAgent) exitLocked() chan struct{} {
+	if a.exit == nil {
+		a.exit = make(chan struct{})
+	}
+	return a.exit
+}
 func (a *fakeAgent) Terminate(time.Duration) error {
 	a.mu.Lock()
+	if !a.done {
+		close(a.exitLocked())
+	}
 	a.done = true
 	a.terminated = true
 	a.mu.Unlock()
@@ -525,15 +541,23 @@ func seedStateFile(t *testing.T, dataDir, machineID string, rec map[string]any) 
 // starter delegates to the job's own spawner (the config knob), so the
 // fake-agent handles and spawn-call assertions keep working — including
 // for tests that swap cfg.Spawner for a wrapping variant.
-func fakeEngineStarter() func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
-	return func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
-		return in.Spawner.Spawn(ctx, runtime.SpawnParams{
+func fakeEngineStarter() AgentStartFunc {
+	return func(ctx context.Context, in runtime.AgentStartInput) (Agent, error) {
+		h, err := in.Spawner.Spawn(ctx, runtime.SpawnParams{
 			WorkItemID:    in.WI,
 			CapsuleDir:    in.CapsuleDir,
 			SessionHandle: capsuleSessionHandle(in.CapsuleDir),
 			SpawnN:        int(in.SpawnN),
 			InitialPrompt: "engine",
 		})
+		if err != nil {
+			return nil, err
+		}
+		a, ok := h.(Agent)
+		if !ok {
+			return nil, fmt.Errorf("fake engine: spawned handle %T has no exit signal", h)
+		}
+		return a, nil
 	}
 }
 
@@ -594,7 +618,6 @@ func newTestDaemon(t *testing.T, mutate func(*Config)) *testDaemon {
 		ObservePoll:   10 * time.Millisecond,
 		DrainInterval: 10 * time.Millisecond,
 		DispatchTick:  10 * time.Millisecond,
-		ExitPoll:      10 * time.Millisecond,
 	}
 	if mutate != nil {
 		mutate(&cfg)

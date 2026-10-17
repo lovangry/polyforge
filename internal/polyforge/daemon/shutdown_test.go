@@ -146,7 +146,7 @@ func TestRestartWiring(t *testing.T) {
 // before it returns and the process exits.
 func TestRunReturnsOnlyAfterTheShutdownSequence(t *testing.T) {
 	td := newTestDaemon(t, func(c *Config) {
-		c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
+		c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (Agent, error) {
 			return &fakeAgent{}, nil
 		}
 	})
@@ -179,7 +179,7 @@ func TestShutdownTerminatesJobsInParallel(t *testing.T) {
 	var mu sync.Mutex
 	var agents []*slowTermAgent
 	td := newTestDaemon(t, func(c *Config) {
-		c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
+		c.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (Agent, error) {
 			a := &slowTermAgent{}
 			mu.Lock()
 			agents = append(agents, a)

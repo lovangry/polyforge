@@ -135,7 +135,7 @@ type InterruptedDispatch struct {
 	// BookWall books the interrupted dispatch's wall time toward the
 	// step's T in the same archive write: set for a relaunch the system
 	// ordered after a hang, stall or death, never for a daemon restart
-	// or an operator resume (the bridge decides from the recovery cause).
+	// or an operator resume (the daemon decides from the recovery cause).
 	BookWall bool
 }
 
@@ -309,7 +309,7 @@ func (d *Driver) Run(ctx context.Context) error {
 	// writer performs it). ONE audit-only infra_failure attempt for the
 	// derivation that died without a result, BEFORE the re-derivation
 	// dispatches. It is not model-class, so it never moves the candidate
-	// pointer; an operator shutdown never reaches this hook (the bridge
+	// pointer; an operator shutdown never reaches this hook (the daemon
 	// filters it).
 	collected, collectedN := d.unconsumedResult()
 	if collected == nil && d.cfg.Interrupted == nil && d.hasUnsettledDispatch() {
@@ -761,7 +761,7 @@ func (d *Driver) Answer(questionID, answer, answeredBy string) error {
 // the re-dispatch the owner asked for lands at the next ordinal with no
 // phantom gap. The verdict alone re-dispatches nothing: it is a state
 // write plus a wake; the caller re-invokes Run (the claim/start path
-// does: bridge.Start → ResumeCurrent → Run).
+// does: Start → ResumeCurrent → Run).
 func (d *Driver) ResumeCurrent() error {
 	d.mu.Lock()
 	blocked := d.exec.WorkflowStatus == StatusBlocked

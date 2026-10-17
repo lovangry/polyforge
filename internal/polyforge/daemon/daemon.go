@@ -29,7 +29,6 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
-	"github.com/silgrid/polyforge/internal/polyforge/bridge"
 	"github.com/silgrid/polyforge/internal/polyforge/driver"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
 	"github.com/silgrid/polyforge/internal/polyforge/mapping"
@@ -117,12 +116,12 @@ type Config struct {
 	// Test/ops knobs.
 	Spawner runtime.Spawner // nil = the production pi spawner
 	// AgentStarter replaces the execution-engine starter the runtime
-	// uses (nil = the production Go driver, bridge.Start). Test seam:
+	// uses (nil = the production Go driver, driver.Start). Test seam:
 	// the in-process daemon tests bind a fake engine so they can script
 	// agent behavior without a real driver. There is no selection and
 	// no fallback — the driver IS the engine; this only swaps which
 	// starter binds it.
-	AgentStarter runtime.AgentStartFunc
+	AgentStarter AgentStartFunc
 	Hub          Hub              // required; aihubclient.Client satisfies
 	PushFunc     observe.PushFunc // nil = the shared gitops choke point
 	ObservePoll  time.Duration    // observe execution.json poll tick
@@ -133,8 +132,17 @@ type Config struct {
 	Supervision   SupervisionConfig
 	DrainInterval time.Duration // drain wave-fetch period (5s)
 	DispatchTick  time.Duration // dispatcher/backfill period (200ms)
-	ExitPoll      time.Duration // adapter exit-poll period (200ms)
 }
+
+// Agent is what the daemon's engine starters return: the runtime's agent
+// handle plus the exit signal the observe monitor selects on.
+type Agent interface {
+	runtime.AgentHandle
+	observe.Handle
+}
+
+// AgentStartFunc starts one agent derivation (driver.Start in production).
+type AgentStartFunc func(ctx context.Context, in runtime.AgentStartInput) (Agent, error)
 
 // SupervisionConfig is the supervisor's global-default surface
 // (v2-converge 2.4): daemon flags map onto it one to one.
@@ -187,9 +195,6 @@ func (c *Config) fill() {
 	if c.DispatchTick == 0 {
 		c.DispatchTick = 200 * time.Millisecond
 	}
-	if c.ExitPoll == 0 {
-		c.ExitPoll = 200 * time.Millisecond
-	}
 }
 
 // Daemon is the assembled local runtime.
@@ -205,16 +210,6 @@ type Daemon struct {
 
 	rt  *runtime.Runtime
 	obs *observe.Observe
-
-	rtMsgs   *supervise.Queue[protocol.RTMsg]
-	obMsgs   *supervise.Queue[protocol.OBMsg]
-	attachCh *supervise.Queue[observe.Attach]
-	// attachedMu guards attached: the work items whose monitor-building
-	// RTStarted attachment went to the observe lane (the bridge) with no
-	// RTFinished since — their monitor exists, or is about to once
-	// observe drains attachCh.
-	attachedMu sync.Mutex
-	attached   map[string]bool
 
 	runCtx    context.Context // the loops' context; the shutdown cancels it
 	cancelRun context.CancelFunc
@@ -242,12 +237,9 @@ type Daemon struct {
 	bundleRefused map[string]string
 
 	// sup hands out the per-WI supervision links shared by the driver
-	// bridge (facts out, verdicts in, harness trackers) and the observe
+	// (facts out, verdicts in, harness trackers) and the observe
 	// monitors.
 	sup *supervise.Registry
-
-	adapMu   sync.Mutex
-	adapters map[string]*agentAdapter
 
 	lst net.Listener
 	srv *http.Server
@@ -344,23 +336,22 @@ func New(cfg Config) (*Daemon, error) {
 	if sp == nil {
 		sp = runtime.DefaultSpawner(&rtCfg)
 	}
-	// v2 (polyforge#106): the Go driver bridge IS the execution engine —
-	// bound unconditionally, no selection flag, no fallback. The
-	// AgentStarter config knob only swaps WHICH starter binds (tests).
+	// v2 (polyforge#106): the Go driver IS the execution engine — bound
+	// unconditionally, no selection flag, no fallback. The AgentStarter
+	// config knob only swaps WHICH starter binds (tests).
 	var d *Daemon // bound below; the starter closure reads it at call time
-	if cfg.AgentStarter != nil {
-		rtCfg.AgentStarter = cfg.AgentStarter
-	} else {
-		rtCfg.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
-			return bridge.Start(ctx, bridge.Config{
-				WI:               in.WI,
-				CapsuleDir:       in.CapsuleDir,
-				BundleName:       in.BundleName,
-				SpawnN:           in.SpawnN,
-				Spawner:          in.Spawner,
-				StepCandidates:   in.StepCandidates,
-				InterruptedCause: in.InterruptedCause,
-				StepEnded:        in.StepEnded,
+	start := cfg.AgentStarter
+	if start == nil {
+		start = func(ctx context.Context, in runtime.AgentStartInput) (Agent, error) {
+			return driver.Start(ctx, driver.StartConfig{
+				WI:             in.WI,
+				CapsuleDir:     in.CapsuleDir,
+				BundleName:     in.BundleName,
+				SpawnN:         in.SpawnN,
+				Spawner:        in.Spawner,
+				StepCandidates: in.StepCandidates,
+				Interrupted:    interruptedFromCause(in.InterruptedCause),
+				StepEnded:      in.StepEnded,
 				// polyforge#171: the resume decision for claude dispatches
 				// locates the native session under the claude-config dir
 				// the spawner hard-set (never the daemon's process env).
@@ -374,6 +365,13 @@ func New(cfg Config) (*Daemon, error) {
 			})
 		}
 	}
+	rtCfg.AgentStarter = func(ctx context.Context, in runtime.AgentStartInput) (runtime.AgentHandle, error) {
+		a, err := start(ctx, in)
+		if err != nil {
+			return nil, err // never a typed-nil handle
+		}
+		return a, nil
+	}
 
 	subs, err := newSubStore(filepath.Join(cfg.DataDir, chatSubsFile))
 	if err != nil {
@@ -386,10 +384,6 @@ func New(cfg Config) (*Daemon, error) {
 		hub:      cfg.Hub,
 		modes:    NewModeCtl(),
 		q:        NewJobQueue(cfg.MaxConcurrent, func() map[string]bool { return d.occupiedSlots() }),
-		rtMsgs:   supervise.NewQueue[protocol.RTMsg](),
-		obMsgs:   supervise.NewQueue[protocol.OBMsg](),
-		attachCh: supervise.NewQueue[observe.Attach](),
-		adapters: map[string]*agentAdapter{},
 		shutDone: make(chan struct{}),
 		sup:      supervise.NewRegistry(),
 	}
@@ -402,10 +396,13 @@ func New(cfg Config) (*Daemon, error) {
 	// rides the runtime config (RecallTopK; 0 keeps the default 10).
 	rtCfg.RecallTopK = cfg.RecallTopK
 	rtCfg.MemoryRecall = recallSnapshot(cfg.Hub)
-	rt := runtime.New(rtCfg, cfg.Hub, sp, d.rtMsgs, d.obMsgs)
+	rtMsgs := supervise.NewQueue[protocol.RTMsg]()
+	obMsgs := supervise.NewQueue[protocol.OBMsg]()
+	rt := runtime.New(rtCfg, cfg.Hub, sp, rtMsgs, obMsgs)
 	obs, err := observe.New(observe.Config{
-		RT:           d.attachCh,
-		OB:           d.obMsgs,
+		RT:           rtMsgs,
+		OB:           obMsgs,
+		Agent:        d.agentOf,
 		DataDir:      cfg.DataDir,
 		PollInterval: cfg.ObservePoll,
 		PushFunc:     cfg.PushFunc,
@@ -544,7 +541,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 	defer stop()
 	go d.rt.Run(d.runCtx)
 	go d.obs.Run(d.runCtx)
-	go d.bridge()
 
 	// Restart (§十一): every recorded job and claiming-journal entry is
 	// handed to its runtime actor — strictly after this process owns the
@@ -643,20 +639,32 @@ func (d *Daemon) closeFace() {
 	}
 }
 
-// buildAttach turns one runtime snapshot into an observe attachment:
-// the protocol message plus the agent handle adapted to observe's face.
-func (d *Daemon) buildAttach(msg protocol.RTMsg, ji runtime.JobInfo) observe.Attach {
-	return observe.Attach{
-		Msg:    msg,
-		Handle: d.installAdapter(ji),
-		WI: observe.WIInfo{
-			WorkItem:   ji.WorkItem,
-			Project:    ji.Project,
-			CapsuleDir: ji.CapsuleDir,
-			BundleName: ji.BundleName,
-			Git:        ji.Git,
-		},
+// agentOf resolves the work item's live agent and the per-WI facts its
+// observe monitor needs (observe.Config.Agent).
+func (d *Daemon) agentOf(wi string) (observe.Handle, observe.WIInfo, bool) {
+	ji, ok := d.rt.Info(wi)
+	if !ok {
+		return nil, observe.WIInfo{}, false
 	}
+	h, ok := ji.Agent.(observe.Handle) // every starter returns an Agent; nil = no live agent
+	if !ok {
+		return nil, observe.WIInfo{}, false
+	}
+	return h, observe.WIInfo{WorkItem: ji.WorkItem, CapsuleDir: ji.CapsuleDir, Git: ji.Git}, true
+}
+
+// interruptedFromCause maps the recovery lane's cause onto the driver's
+// interrupted-dispatch archive: an empty cause or an operator-shutdown
+// attach is a deliberate stop and archives nothing; every other cause is
+// archived verbatim (an audit attempt, never a counted failure). The
+// dispatch's wall time is booked toward the step's T only for a relaunch
+// after a hang, stall or death — never for a daemon restart or an
+// operator resume, so downtime never counts.
+func interruptedFromCause(cause string) *driver.InterruptedDispatch {
+	if cause == "" || cause == runtime.CauseOperatorAttach {
+		return nil
+	}
+	return &driver.InterruptedDispatch{Detail: cause, BookWall: !runtime.LifecycleCause(cause)}
 }
 
 // tapRuntimeEvent lands one runtime-sourced diagnostic event in the
@@ -693,126 +701,6 @@ func (d *Daemon) canonWI(wi string) string {
 	}
 	return wi
 }
-
-// bridge translates Runtime's RTMsg stream into observe.Attach values:
-// the handle and per-WI facts ride WITH the lifecycle message (the
-// observe lane's attachment contract; the five message kinds stay the
-// only control vocabulary).
-func (d *Daemon) bridge() {
-	for {
-		for {
-			msg, ok := d.rtMsgs.Pop()
-			if !ok {
-				break
-			}
-			at := observe.Attach{Msg: msg}
-			if msg.Kind == protocol.RTStarted || msg.Kind == protocol.RTRecovered {
-				ji, live := d.rt.Info(msg.WorkItem)
-				live = live && ji.Agent != nil
-				if msg.Kind == protocol.RTRecovered && !d.isAttached(msg.WorkItem) {
-					if !live {
-						continue // nothing to watch: observe would only log it dropped
-					}
-					// a recovery no monitor watches — a restart's, or a
-					// paused record's resume (the pause released its
-					// monitor): it builds the monitor like a start
-					at.Msg.Kind = protocol.RTStarted
-				}
-				if live {
-					at = d.buildAttach(at.Msg, ji)
-					if at.Msg.Kind == protocol.RTStarted {
-						d.noteAttached(msg.WorkItem, true)
-					}
-				}
-			}
-			if msg.Kind == protocol.RTFinished {
-				d.noteAttached(msg.WorkItem, false)
-			}
-			d.attachCh.Push(at)
-		}
-		select {
-		case <-d.runCtx.Done():
-			return
-		case <-d.rtMsgs.Notify():
-		}
-	}
-}
-
-// noteAttached records (or, on RTFinished, forgets) that wi's
-// monitor-building attachment went to the observe lane.
-func (d *Daemon) noteAttached(wi string, on bool) {
-	d.attachedMu.Lock()
-	defer d.attachedMu.Unlock()
-	if !on {
-		delete(d.attached, wi)
-		return
-	}
-	if d.attached == nil {
-		d.attached = map[string]bool{}
-	}
-	d.attached[wi] = true
-}
-
-func (d *Daemon) isAttached(wi string) bool {
-	d.attachedMu.Lock()
-	defer d.attachedMu.Unlock()
-	return d.attached[wi]
-}
-
-// ---------------------------------------------------------------------------
-// The agent adapter: runtime.AgentHandle → observe.Handle. Runtime owns
-// the process; Observe owns the watching contract. The adapter bridges
-// the two exported faces without either lane knowing the other.
-
-type agentAdapter struct {
-	h        runtime.AgentHandle
-	exit     chan struct{}
-	pollStop chan struct{}
-	retire   sync.Once
-}
-
-// installAdapter registers the CURRENT handle of a work item and returns
-// its observe face. A previous adapter is retired (its exit poll stops).
-func (d *Daemon) installAdapter(ji runtime.JobInfo) *agentAdapter {
-	a := &agentAdapter{
-		h:        ji.Agent,
-		exit:     make(chan struct{}),
-		pollStop: make(chan struct{}),
-	}
-	d.adapMu.Lock()
-	if old := d.adapters[ji.WorkItem]; old != nil {
-		old.retireAdapter()
-	}
-	d.adapters[ji.WorkItem] = a
-	d.adapMu.Unlock()
-	go a.pollDone(d.cfg.ExitPoll)
-	return a
-}
-
-func (a *agentAdapter) retireAdapter() {
-	a.retire.Do(func() { close(a.pollStop) })
-}
-
-// pollDone synthesizes the exit signal from the runtime handle's Done
-// poll (runtime.AgentHandle exposes no channel face; the poll is the
-// adapter's price for staying inside the exported surface).
-func (a *agentAdapter) pollDone(interval time.Duration) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-a.pollStop:
-			return
-		case <-t.C:
-			if a.h.Done() {
-				close(a.exit)
-				return
-			}
-		}
-	}
-}
-
-func (a *agentAdapter) Exit() <-chan struct{} { return a.exit }
 
 // driverLog is the driver's EventLogger: it resolves the observe event
 // log at call time (the log exists only after observe.New).

@@ -8,8 +8,7 @@ package test
 // routes), the process's goroutine count must return to within a small
 // fixed slack of the baseline captured after rig start-up idle-settle
 // and BEFORE job 1. A per-job goroutine leak (a monitor, an agent
-// stdout reader, an exit watcher or an observe adapter that never
-// retires) would instead accumulate one or more goroutines per job and
+// stdout reader or an exit watcher that never retires) would instead accumulate one or more goroutines per job and
 // miss the bar by 20x that.
 //
 // Division of labor (the dual-scenario split): goroutines are IN-PROCESS
@@ -21,7 +20,7 @@ package test
 // daemon binary (process-level reality), and this file carries the
 // goroutine assertion through the rig, the faithful already-existing
 // carrier. Each job here must reach its wrapped/terminal state and its
-// adapters/monitors must retire before the next one starts.
+// monitor must retire before the next one starts.
 
 import (
 	"fmt"
@@ -31,8 +30,8 @@ import (
 )
 
 // Probe constants. The settle windows match the companion s19 scenario:
-// 2s of start-up idle-settle lets the rig's own four standing loops
-// (runtime Run, observe Run, the RT bridge, the UDS http server) reach
+// 2s of start-up idle-settle lets the rig's own standing loops
+// (runtime Run, observe Run, the UDS http server) reach
 // steady state before the baseline; 3s of post-run settle lets the last
 // job's async teardown finish before the final measurement. The
 // goroutine sample takes the MINIMUM of 10 reads 100ms apart so
@@ -69,24 +68,6 @@ func s20MinGoroutines(n int, gap time.Duration) int {
 	return min
 }
 
-// s20RigAdapterRetired reports whether the observe adapter of wi has
-// seen its agent handle finish (pollDone closed the adapter's exit
-// channel) — the adapter half of the per-job retirement.
-func s20RigAdapterRetired(rig *inprocRig, wi string) bool {
-	rig.adaptMu.Lock()
-	a := rig.adapters[wi]
-	rig.adaptMu.Unlock()
-	if a == nil {
-		return false // never installed (job not started yet)
-	}
-	select {
-	case <-a.exit:
-		return true
-	default:
-		return false
-	}
-}
-
 func TestV1S20LongRunGoroutines(t *testing.T) {
 	inst := newV1Install(t)
 	rig := newInprocRig(t, inst)
@@ -105,7 +86,7 @@ func TestV1S20LongRunGoroutines(t *testing.T) {
 	// (one envelope action per step; the last step completes the
 	// workflow and the terminal wiring wraps it), and the next one starts
 	// only after this one reached its terminal state AND its per-job
-	// machinery — runtime job entry, observe monitor, observe adapter,
+	// machinery — runtime job entry, observe monitor,
 	// engine handle and step processes — fully retired.
 	for i := 0; i < s20Jobs; i++ {
 		wi := inst.newWI(t, fmt.Sprintf("s20: long-run goroutine probe job %02d", i+1),
@@ -130,10 +111,6 @@ func TestV1S20LongRunGoroutines(t *testing.T) {
 		waitUntil(t, 30*time.Second, fmt.Sprintf("observe monitor of %s never retired", wi), func() bool {
 			_, monitored := rig.obs.Progress(wi)
 			return !monitored
-		})
-		// The observe adapter saw the agent handle finish.
-		waitUntil(t, 30*time.Second, fmt.Sprintf("observe adapter of %s never retired", wi), func() bool {
-			return s20RigAdapterRetired(rig, wi)
 		})
 		// No agent process survives carrying the work item's identity.
 		waitUntil(t, 10*time.Second, fmt.Sprintf("agent processes of %s survived the wrap", wi), func() bool {

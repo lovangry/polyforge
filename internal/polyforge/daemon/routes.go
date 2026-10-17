@@ -520,7 +520,8 @@ func (d *Daemon) resumePausedRoute(w http.ResponseWriter, r *http.Request) {
 	canonical := d.canonWI(wi)
 	d.rt.NoteAlias(wi, canonical)
 	// the pause close released the job's observe monitor; the resumed
-	// derivation's RTRecovered rebuilds it (the bridge)
+	// derivation's RTRecovered rebuilds it (observe builds a monitor for
+	// a recovery nothing watches)
 	outcome, err := d.rt.ResumePaused(d.runCtx, canonical)
 	if err != nil {
 		writeErrOf(w, err)
@@ -575,7 +576,7 @@ func (d *Daemon) closeJob(w http.ResponseWriter, ctx context.Context, wi, reason
 		return
 	}
 	// The agent's death in this close is expected: arm the monitor's
-	// suppression BEFORE the teardown starts, so a fast exit poll can
+	// suppression BEFORE the teardown starts, so the exit signal can
 	// never win the race against the RTFinished teardown and journal a
 	// spurious needs_recovery for a healthy run (the runtime's SEALING
 	// fence drops the OB message either way — the event log is the

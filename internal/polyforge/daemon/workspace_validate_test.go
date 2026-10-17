@@ -43,7 +43,6 @@ func validateCfg(t *testing.T, ws string) Config {
 		ObservePoll:   10 * time.Millisecond,
 		DrainInterval: 10 * time.Millisecond,
 		DispatchTick:  10 * time.Millisecond,
-		ExitPoll:      10 * time.Millisecond,
 	}
 }
 
