@@ -64,10 +64,9 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 	// One read of every candidate: the WorkItem, its public session block
 	// (m4), the unfinished blockers flag (#161) and the frozen inventory
 	// (reference.md §2.1).
-	rows, err := m.db.Query(wiSelect+`, w.session_fingerprint, w.session_machine, w.session_started_at,
-		w.clean_pause, EXISTS(SELECT 1 FROM wi_dependencies d JOIN work_items b ON b.id=d.blocking_wi_id
-			WHERE d.blocked_wi_id=w.id AND d.kind='blocks' AND b.status <> 'wrapped'),
-		w.repo_inventory`+wiFrom+`
+	rows, err := m.db.Query(wiSelect+`, EXISTS(SELECT 1 FROM wi_dependencies d
+		JOIN work_items b ON b.id=d.blocking_wi_id
+		WHERE d.blocked_wi_id=w.id AND d.kind='blocks' AND b.status <> 'wrapped')`+wiFrom+`
 		WHERE w.project_id=? AND w.status IN ('queued','running','paused') ORDER BY w.rowid`, projectID)
 	if err != nil {
 		return nil, err
@@ -76,21 +75,15 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 	type cand struct {
 		view    WIView
 		blocked bool
-		inv     string
 	}
 	var cands []cand
 	for rows.Next() {
 		var c cand
-		var fp, machine, started, inv sql.NullString
-		wi, err := scanWorkItem(rows.Scan, &fp, &machine, &started, &c.view.CleanPause,
-			&c.blocked, &inv)
+		v, err := scanWorkItem(rows.Scan, &c.blocked)
 		if err != nil {
 			return nil, err
 		}
-		c.view.WorkItem = *wi
-		c.view.SessionFingerprint, c.view.SessionMachine, c.view.SessionStartedAt =
-			fp.String, machine.String, started.String
-		c.inv = inv.String
+		c.view = *v
 		cands = append(cands, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -111,7 +104,7 @@ func (m *WIManager) ReadyQueue(project string) (*ReadyQueue, error) {
 			if waiting || c.blocked {
 				continue // blocked-visible: not executable
 			}
-			gone, err := inventoryRepoGone(c.inv, inProject)
+			gone, err := inventoryRepoGone(c.view.inv, inProject)
 			if err != nil {
 				return nil, err
 			}

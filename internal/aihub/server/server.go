@@ -187,27 +187,38 @@ func (s *Server) authenticate(r *http.Request) (*identity, error) {
 	return &id, nil
 }
 
+// handler is an authenticated endpoint: it writes its answer and returns
+// nil, or returns the error its wrapper renders as the typed envelope
+// (having written nothing).
+type handler func(w http.ResponseWriter, r *http.Request, idn *identity) error
+
 // auth wraps a handler with key authentication.
-func (s *Server) auth(next func(http.ResponseWriter, *http.Request, *identity)) http.HandlerFunc {
+func (s *Server) auth(next handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		idn, err := s.authenticate(r)
+		if err == nil {
+			err = next(w, r, idn)
+		}
 		if err != nil {
 			writeErr(w, err)
-			return
 		}
-		next(w, r, idn)
 	}
 }
 
 // authAdmin additionally requires the global admin role.
-func (s *Server) authAdmin(next func(http.ResponseWriter, *http.Request, *identity)) http.HandlerFunc {
-	return s.auth(func(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) authAdmin(next handler) http.HandlerFunc {
+	return s.auth(func(w http.ResponseWriter, r *http.Request, idn *identity) error {
 		if idn.Role != "admin" {
-			writeErr(w, core.Fail(api.ErrAuthForbidden, "", "admin role required"))
-			return
+			return core.Fail(api.ErrAuthForbidden, "", "admin role required")
 		}
-		next(w, r, idn)
+		return next(w, r, idn)
 	})
+}
+
+// reply writes v as the JSON answer of a handler.
+func reply(w http.ResponseWriter, status int, v any) error {
+	writeJSON(w, status, v)
+	return nil
 }
 
 // memberRole returns the caller's project role ("" when not a member).
@@ -263,34 +274,23 @@ func (s *Server) canWrite(idn *identity, projectID string) (bool, error) {
 	return role == "writer" || role == "maintainer", err
 }
 
-// requireWrite enforces write access to projectID: on error or denial it
-// writes the typed refusal envelope itself and answers false.
-func (s *Server) requireWrite(w http.ResponseWriter, idn *identity, projectID string) bool {
+// mustWrite enforces write access to projectID.
+func (s *Server) mustWrite(idn *identity, projectID string) error {
 	ok, err := s.canWrite(idn, projectID)
-	if err != nil {
-		writeErr(w, err)
-		return false
+	if err == nil && !ok {
+		err = core.Fail(api.ErrAuthForbidden, "", "writer role on the project required")
 	}
-	if !ok {
-		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "writer role on the project required"))
-		return false
-	}
-	return true
+	return err
 }
 
-// requireRead enforces read access to projectID, hiding the object
-// behind the caller-supplied not-found detail on denial.
-func (s *Server) requireRead(w http.ResponseWriter, idn *identity, projectID, notFound string, args ...any) bool {
+// mustRead enforces read access to projectID, hiding the object behind
+// the caller-supplied not-found detail on denial.
+func (s *Server) mustRead(idn *identity, projectID, notFound string, args ...any) error {
 	ok, err := s.canRead(idn, projectID)
-	if err != nil {
-		writeErr(w, err)
-		return false
+	if err == nil && !ok {
+		err = core.Fail(api.ErrCoreNotFound, "", notFound, args...)
 	}
-	if !ok {
-		writeErr(w, core.Fail(api.ErrCoreNotFound, "", notFound, args...))
-		return false
-	}
-	return true
+	return err
 }
 
 // wiProject loads a WI's project id (hidden objects stay hidden).
@@ -309,10 +309,20 @@ func (s *Server) wiProject(idn *identity, idOrSlug string) (string, string, erro
 	return id, projectID, nil
 }
 
+// wiScoped is wiProject plus the api-key project scope check: the
+// prelude of the endpoints that authorize the caller themselves.
+func (s *Server) wiScoped(idn *identity, idOrSlug string) (string, string, error) {
+	id, projectID, err := s.wiProject(idn, idOrSlug)
+	if err == nil {
+		err = scopeCheck(idn, projectID)
+	}
+	return id, projectID, err
+}
+
 // ---------------------------------------------------------------------------
 // Work items
 
-func (s *Server) hCreateWI(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hCreateWI(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	var body struct {
 		core.CreateRequest
 		// RepoInventoryBase is the removed pre-v2.5.0 second array:
@@ -321,36 +331,31 @@ func (s *Server) hCreateWI(w http.ResponseWriter, r *http.Request, idn *identity
 		RepoInventoryBase json.RawMessage `json:"repo_inventory_base"`
 	}
 	if err := decodeBody(r, &body); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	if b := strings.TrimSpace(string(body.RepoInventoryBase)); b != "" && b != "null" && b != "[]" {
-		writeErr(w, core.Fail(api.ErrCoreBadInput, "INVENTORY_BASE_UNSUPPORTED",
-			"repo_inventory_base is not supported; omit it (the work machine clones each repo's default branch)"))
-		return
+		return core.Fail(api.ErrCoreBadInput, "INVENTORY_BASE_UNSUPPORTED",
+			"repo_inventory_base is not supported; omit it (the work machine clones each repo's default branch)")
 	}
 	req := body.CreateRequest
 	req.Reporter = idn.UserID
 	projectID, err := s.projectIDOf(req.Project)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	if !s.requireWrite(w, idn, projectID) {
-		return
+	if err := s.mustWrite(idn, projectID); err != nil {
+		return err
 	}
 	for _, ref := range req.After {
 		if _, err := s.visibleWI(idn, ref); err != nil {
-			writeErr(w, err)
-			return
+			return err
 		}
 	}
 	wi, err := s.WIs.Create(req)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	s.writeWI(w, http.StatusCreated, wi)
+	return reply(w, http.StatusCreated, wi)
 }
 
 // visibleWI resolves a dependency endpoint (id or slug) the caller names.
@@ -384,19 +389,18 @@ func (s *Server) visibleWI(idn *identity, ref string) (string, error) {
 	return id, nil
 }
 
-// writeWI wraps a WorkItem with its public session audit block (m4:
-// session_fingerprint / session_machine / session_started_at /
-// clean_pause; NEVER session_hash, never the secret) and writes it.
-func (s *Server) writeWI(w http.ResponseWriter, status int, wi *api.WorkItem) {
-	view, err := s.WIs.View(wi)
+// replyWI answers the work item's current view: the WorkItem with its
+// public session audit block (m4: session_fingerprint / session_machine /
+// session_started_at / clean_pause; NEVER session_hash, never the secret).
+func (s *Server) replyWI(w http.ResponseWriter, id string) error {
+	wi, err := s.WIs.Get(id, core.GetOptions{})
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, status, view)
+	return reply(w, http.StatusOK, wi)
 }
 
-func (s *Server) hListWIs(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hListWIs(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit")) // 0/absent = core default; clamped there
 	items, err := s.WIs.List(core.ListFilters{
@@ -408,36 +412,28 @@ func (s *Server) hListWIs(w http.ResponseWriter, r *http.Request, idn *identity)
 		Limit:     limit,
 	})
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	// Permission trim: non-admins see only their projects.
-	trimmed := make([]api.WorkItem, 0, len(items))
+	views := make([]core.WIView, 0, len(items))
 	for i := range items {
 		if ok, err := s.canRead(idn, items[i].ProjectID); err == nil && ok {
-			trimmed = append(trimmed, items[i])
+			views = append(views, items[i])
 		}
 	}
-	// m4: each row carries the public session audit block.
-	views, err := s.WIs.Views(trimmed)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, struct {
+	return reply(w, http.StatusOK, struct {
 		Items []core.WIView `json:"items"`
 		Total int           `json:"total"`
 	}{Items: views, Total: len(views)})
 }
 
-func (s *Server) hGetWI(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hGetWI(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	if !s.requireRead(w, idn, projectID, "work item %s", r.PathValue("id")) {
-		return
+	if err := s.mustRead(idn, projectID, "work item %s", r.PathValue("id")); err != nil {
+		return err
 	}
 	opts := core.GetOptions{}
 	for _, inc := range strings.Split(r.URL.Query().Get("include"), ",") {
@@ -446,38 +442,33 @@ func (s *Server) hGetWI(w http.ResponseWriter, r *http.Request, idn *identity) {
 			opts.IncludeEvents = true
 		case "":
 		default:
-			writeErr(w, core.Fail(api.ErrCoreBadInput, "", "unknown include value %q", inc))
-			return
+			return core.Fail(api.ErrCoreBadInput, "", "unknown include value %q", inc)
 		}
 	}
 	wi, err := s.WIs.Get(id, opts)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	s.writeWI(w, http.StatusOK, wi)
+	return reply(w, http.StatusOK, wi)
 }
 
-func (s *Server) hPatchWI(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hPatchWI(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	if !s.requireWrite(w, idn, projectID) {
-		return
+	if err := s.mustWrite(idn, projectID); err != nil {
+		return err
 	}
 	var fields map[string]json.RawMessage
 	if err := decodeBody(r, &fields); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	wi, err := s.WIs.Patch(id, fields)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	s.writeWI(w, http.StatusOK, wi)
+	return reply(w, http.StatusOK, wi)
 }
 
 // ownerMaintainerOrAdmin is the one authorization of the human decisions on
@@ -496,33 +487,26 @@ func (s *Server) ownerMaintainerOrAdmin(idn *identity, projectID, wiID string) b
 	return err == nil && role == "maintainer"
 }
 
-func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity) error {
+	id, projectID, err := s.wiScoped(idn, r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	// Cancel authorization: reporter, project maintainer, or admin (reference.md §2.1).
 	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
-		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "cancel requires reporter, maintainer or admin"))
-		return
+		return core.Fail(api.ErrAuthForbidden, "", "cancel requires reporter, maintainer or admin")
 	}
 	wi, err := s.WIs.Cancel(id, idn.UserID)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	s.writeWI(w, http.StatusOK, wi)
+	return reply(w, http.StatusOK, wi)
 }
 
 // ---------------------------------------------------------------------------
 // v1.5 session endpoints (reference.md §3). The claim path is the machine
 // execution surface (a scope-checked key with writer/maintainer membership
-// or admin — hSessionClaim's requireWrite); force-end-session keeps
+// or admin — hSessionClaim's mustWrite); force-end-session keeps
 // the human decision gate (admin or project maintainer).
 
 // sessionClaimEnvelope is the claim/attach response: the SAME
@@ -537,146 +521,105 @@ type sessionClaimEnvelope struct {
 // ensureBare creates the work item's bare repo (the chain begins here)
 // BEFORE the session transaction: a claim or attach that commits always
 // finds its chain, so a failure here refuses the call with nothing
-// committed. False means the refusal is written.
-func (s *Server) ensureBare(w http.ResponseWriter, id string) bool {
+// committed.
+func (s *Server) ensureBare(id string) error {
 	if err := s.Git.EnsureBare(id); err != nil {
-		writeErr(w, core.Fail(api.ErrCoreInternal, "", "create bare repo: %v", err))
-		return false
+		return core.Fail(api.ErrCoreInternal, "", "create bare repo: %v", err)
 	}
-	return true
+	return nil
 }
 
 // sessionClaimResponse assembles the claim/attach envelope over the
 // committed claim half.
-func (s *Server) sessionClaimResponse(w http.ResponseWriter, id string, claim *api.SessionClaim, err error) {
+func (s *Server) sessionClaimResponse(w http.ResponseWriter, id string, claim *api.SessionClaim, err error) error {
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	wi, err := s.WIs.Get(id, core.GetOptions{})
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	view, err := s.WIs.View(wi)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, sessionClaimEnvelope{Claim: *claim, WorkItem: *view})
+	return reply(w, http.StatusOK, sessionClaimEnvelope{Claim: *claim, WorkItem: *wi})
 }
 
 // hSessionClaim serves POST /api/v1/work-items/{id}/claim (the v1.5 CAS
 // session claim; it replaced the deleted v1 generation-era intent
 // handler).
-func (s *Server) hSessionClaim(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hSessionClaim(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	if !s.requireWrite(w, idn, projectID) {
-		return
+	if err := s.mustWrite(idn, projectID); err != nil {
+		return err
 	}
 	var req api.SessionClaimRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	req.WorkItemID = id
-	if !s.ensureBare(w, id) {
-		return
+	if err := s.ensureBare(id); err != nil {
+		return err
 	}
 	claim, err := s.Sessions.Claim(id, req, idn.UserID)
-	s.sessionClaimResponse(w, id, claim, err)
+	return s.sessionClaimResponse(w, id, claim, err)
 }
 
 // hSessionVerify serves the compare-only holder check (B3: the hub
 // stores only the hash; the secret never echoes, not even on a match).
-func (s *Server) hSessionVerify(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+func (s *Server) hSessionVerify(w http.ResponseWriter, r *http.Request, idn *identity) error {
+	id, _, err := s.wiScoped(idn, r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	var req api.SessionVerifyRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	resp, err := s.Sessions.Verify(id, req.SessionID)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusOK, resp)
+	return reply(w, http.StatusOK, resp)
 }
 
 // hSessionAttach serves the same-session resume of a paused WI (M3).
-func (s *Server) hSessionAttach(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+func (s *Server) hSessionAttach(w http.ResponseWriter, r *http.Request, idn *identity) error {
+	id, _, err := s.wiScoped(idn, r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	var req api.SessionAttachRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	req.WorkItemID = id
-	if !s.ensureBare(w, id) {
-		return
+	if err := s.ensureBare(id); err != nil {
+		return err
 	}
 	claim, err := s.Sessions.Attach(id, req, idn.UserID)
-	s.sessionClaimResponse(w, id, claim, err)
+	return s.sessionClaimResponse(w, id, claim, err)
 }
 
 // hForceEndSession serves the admin/maintainer force-end of a held session
 // (WI -> queued, session cleared, the old secret fenced). Authorization is
 // admin or project maintainer: the human recovery decision.
-func (s *Server) hForceEndSession(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+func (s *Server) hForceEndSession(w http.ResponseWriter, r *http.Request, idn *identity) error {
+	id, projectID, err := s.wiScoped(idn, r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	if !s.adminOrMaintainer(idn, projectID) {
-		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "end-session requires admin or project maintainer"))
-		return
+		return core.Fail(api.ErrAuthForbidden, "", "end-session requires admin or project maintainer")
 	}
 	var req api.ForceEndSessionRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	if err := s.Sessions.ForceEnd(id, req.Reason, idn.UserID); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	wi, err := s.WIs.Get(id, core.GetOptions{})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	view, err := s.WIs.View(wi)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, view)
+	return s.replyWI(w, id)
 }
 
 // adminOrMaintainer is the human recovery gate (no reporter admission).
@@ -692,36 +635,19 @@ func (s *Server) adminOrMaintainer(idn *identity, projectID string) bool {
 // failed|blocked) and — the merge amend — the M3 pause transition
 // ("paused": the session is KEPT, clean_pause rides the same fenced
 // update). It fully replaces the deleted v1 /end-generation endpoint.
-func (s *Server) hSessionEnd(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+func (s *Server) hSessionEnd(w http.ResponseWriter, r *http.Request, idn *identity) error {
+	id, _, err := s.wiScoped(idn, r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	var req api.SessionEndRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	if err := s.Sessions.End(id, req, idn.UserID); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	wi, err := s.WIs.Get(id, core.GetOptions{})
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	view, err := s.WIs.View(wi)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, view)
+	return s.replyWI(w, id)
 }
 
 // hResumeBlockedWI serves the §6.4 owner resume verdict's hub door
@@ -730,143 +656,112 @@ func (s *Server) hSessionEnd(w http.ResponseWriter, r *http.Request, idn *identi
 // the WI's reporter, a project maintainer, or an admin — the same gate as
 // cancel. accept_lost_work clears the blocked seal (core.ResumeBlockedWith)
 // under the same gate.
-func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *identity) {
-	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
+func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *identity) error {
+	id, projectID, err := s.wiScoped(idn, r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
-		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "resume-blocked requires the work item's reporter, a project maintainer or admin"))
-		return
+		return core.Fail(api.ErrAuthForbidden, "", "resume-blocked requires the work item's reporter, a project maintainer or admin")
 	}
 	// The body is optional: an empty one is a plain resume.
 	var req api.ResumeBlockedRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
-		writeErr(w, core.Fail(api.ErrCoreBadInput, "", "invalid JSON body: %v", err))
-		return
+		return core.Fail(api.ErrCoreBadInput, "", "invalid JSON body: %v", err)
 	}
 	wi, err := s.WIs.ResumeBlockedWith(id, idn.UserID, req)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	view, err := s.WIs.View(wi)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, view)
+	return reply(w, http.StatusOK, wi)
 }
 
 // ---------------------------------------------------------------------------
 // Dependencies
 
-func (s *Server) hAddDep(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hAddDep(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	blocked, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	if !s.requireWrite(w, idn, projectID) {
-		return
+	if err := s.mustWrite(idn, projectID); err != nil {
+		return err
 	}
 	var req struct {
 		BlockingWIID string `json:"blocking_wi_id"`
 		Kind         string `json:"kind,omitempty"`
 	}
 	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	// The blocking side accepts an id or a slug, like the path (#161).
 	blocking, err := s.visibleWI(idn, req.BlockingWIID)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	if err := s.WIs.AddDependency(blocking, blocked, req.Kind); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	if deps := s.depsView(w, blocked); deps != nil {
-		writeJSON(w, http.StatusCreated, deps)
-	}
+	return s.replyDeps(w, http.StatusCreated, blocked)
 }
 
-func (s *Server) hDeps(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hDeps(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	if !s.requireRead(w, idn, projectID, "work item %s", id) {
-		return
+	if err := s.mustRead(idn, projectID, "work item %s", id); err != nil {
+		return err
 	}
-	if deps := s.depsView(w, id); deps != nil {
-		writeJSON(w, http.StatusOK, deps)
-	}
+	return s.replyDeps(w, http.StatusOK, id)
 }
 
-// depsView renders the dependency edges of wiID. A query failure is a
-// typed 5xx envelope via writeErr — never a false "no edges" answer
-// (the empty lists stay reserved for a genuinely edge-free work item).
-// Answers nil after writing the error envelope.
-func (s *Server) depsView(w http.ResponseWriter, wiID string) *core.Deps {
+// replyDeps answers the dependency edges of wiID. A query failure is a
+// typed 5xx envelope — never a false "no edges" answer (the empty lists
+// stay reserved for a genuinely edge-free work item).
+func (s *Server) replyDeps(w http.ResponseWriter, status int, wiID string) error {
 	deps, err := s.WIs.Dependencies(wiID)
 	if err != nil {
-		writeErr(w, err)
-		return nil
+		return err
 	}
-	return deps
+	return reply(w, status, deps)
 }
 
-func (s *Server) hDelDep(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hDelDep(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	blocked, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	if !s.requireWrite(w, idn, projectID) {
-		return
+	if err := s.mustWrite(idn, projectID); err != nil {
+		return err
 	}
 	blocking, err := s.visibleWI(idn, r.PathValue("blocking"))
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	if err := s.WIs.RemoveDependency(blocking, blocked, r.PathValue("kind")); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	if deps := s.depsView(w, blocked); deps != nil {
-		writeJSON(w, http.StatusOK, deps)
-	}
+	return s.replyDeps(w, http.StatusOK, blocked)
 }
 
 // ---------------------------------------------------------------------------
 // Ready queue
 
-func (s *Server) hReadyQueue(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hReadyQueue(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	project := r.PathValue("project")
 	projectID, err := s.projectIDOf(project)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	if !s.requireRead(w, idn, projectID, "project %q", project) {
-		return
+	if err := s.mustRead(idn, projectID, "project %q", project); err != nil {
+		return err
 	}
 	q, err := s.WIs.ReadyQueue(project)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusOK, q)
+	return reply(w, http.StatusOK, q)
 }
 
 // ---------------------------------------------------------------------------
@@ -901,18 +796,16 @@ func (s *Server) authorizeMachineRegistration(idn *identity) error {
 	return core.Fail(api.ErrAuthForbidden, "", "machine registration requires admin or project maintainer")
 }
 
-func (s *Server) hHeartbeat(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hHeartbeat(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	var req core.MachineHeartbeat
 	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	res, err := s.Admin.HeartbeatAuthorized(req, func() error { return s.authorizeMachineRegistration(idn) })
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusOK, res)
+	return reply(w, http.StatusOK, res)
 }
 
 // machinesStaleAfter resolves the configured threshold (0 = default).
@@ -923,36 +816,20 @@ func (s *Server) machinesStaleAfter() time.Duration {
 	return s.StaleAfter
 }
 
-// machineStatus is one machines read-face row: the stored liveness
-// projection plus the server-computed stale boolean and age. An
-// unparseable last_heartbeat_at reports stale=false with no age —
-// "cannot judge" is not "dead".
-type machineStatus struct {
-	ID                  string   `json:"id"`
-	UserID              string   `json:"user_id"`
-	RuntimeVersion      string   `json:"runtime_version,omitempty"`
-	Mode                string   `json:"mode,omitempty"`
-	LiveWIIDs           []string `json:"live_wi_ids"`
-	LastHeartbeatAt     string   `json:"last_heartbeat_at"`
-	HeartbeatAgeSeconds *int64   `json:"heartbeat_age_seconds,omitempty"`
-	Stale               bool     `json:"stale"`
-}
-
 // hListMachines is the operators' liveness read face (admin): every
 // registered machine with its last_heartbeat_at and the stale projection
 // computed against StaleAfter. This is the read half the M3 gate metric
 // judges against (--m3-heartbeat-max-age reads the same table offline).
-func (s *Server) hListMachines(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hListMachines(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	rows, err := s.Admin.Machines()
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	staleAfter := s.machinesStaleAfter()
 	now := time.Now()
-	out := make([]machineStatus, 0, len(rows))
+	out := make([]api.MachineStatus, 0, len(rows))
 	for _, m := range rows {
-		st := machineStatus{
+		st := api.MachineStatus{
 			ID:              m.ID,
 			UserID:          m.UserID,
 			RuntimeVersion:  m.RuntimeVersion,
@@ -970,10 +847,10 @@ func (s *Server) hListMachines(w http.ResponseWriter, r *http.Request, idn *iden
 		}
 		out = append(out, st)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"machines":            out,
-		"stale_after_seconds": int64(staleAfter.Seconds()),
-		"count":               len(out),
+	return reply(w, http.StatusOK, api.MachinesList{
+		Count:             len(out),
+		Machines:          out,
+		StaleAfterSeconds: int64(staleAfter.Seconds()),
 	})
 }
 
@@ -1023,20 +900,17 @@ func (s *Server) memReadAllowed(idn *identity, projectID, memID string) error {
 	return nil
 }
 
-func (s *Server) hCreateMemory(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hCreateMemory(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	var req memory.CreateRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	projectID, err := s.projectIDOf(req.Project)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	if err := s.memWriteAllowed(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	// The attributing work item accepts every WI spelling the other faces
 	// do (id or "<project>#<seq>" slug) and is stored as the canonical
@@ -1052,25 +926,22 @@ func (s *Server) hCreateMemory(w http.ResponseWriter, r *http.Request, idn *iden
 	if req.WorkItemID != nil {
 		wiID, wiProjectID, err := s.wiProject(idn, *req.WorkItemID)
 		if err != nil {
-			writeErr(w, err)
-			return
+			return err
 		}
-		if !s.requireRead(w, idn, wiProjectID, "work item %s", *req.WorkItemID) {
-			return
+		if err := s.mustRead(idn, wiProjectID, "work item %s", *req.WorkItemID); err != nil {
+			return err
 		}
 		if wiProjectID != projectID {
-			writeErr(w, core.Fail(api.ErrCoreBadInput, "",
-				"work item %s belongs to another project than %s", *req.WorkItemID, req.Project))
-			return
+			return core.Fail(api.ErrCoreBadInput, "",
+				"work item %s belongs to another project than %s", *req.WorkItemID, req.Project)
 		}
 		req.WorkItemID = &wiID
 	}
 	e, err := s.Mems.Create(req, idn.UserID)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusCreated, e)
+	return reply(w, http.StatusCreated, e)
 }
 
 func (s *Server) memWriteAllowed(idn *identity, projectID string) error {
@@ -1090,19 +961,18 @@ func (s *Server) memWriteAllowed(idn *identity, projectID string) error {
 	return nil
 }
 
-func (s *Server) hGetMemory(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hGetMemory(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	e, content, err := s.memRead(r.PathValue("id"), idn)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	if r.URL.Query().Get("format") == "content" {
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(memory.Body(content)))
-		return
+		return nil
 	}
-	writeJSON(w, http.StatusOK, e)
+	return reply(w, http.StatusOK, e)
 }
 
 // memRead loads an entry and enforces read access in one shot.
@@ -1130,25 +1000,22 @@ func (s *Server) memRead(idOrSlug string, idn *identity) (*memory.Entry, []byte,
 	return e, content, nil
 }
 
-func (s *Server) hRedactMemory(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hRedactMemory(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	memID := r.PathValue("id")
 	e, _, err := s.memRead(memID, idn)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	if e.OwnerUserID != idn.UserID && idn.Role != "admin" {
-		writeErr(w, core.Fail(api.ErrMemForbidden, "", "only the owner (or admin) can redact"))
-		return
+		return core.Fail(api.ErrMemForbidden, "", "only the owner (or admin) can redact")
 	}
 	if err := s.Mems.Redact(memID); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"id": memID, "status": "redacted"})
+	return reply(w, http.StatusOK, map[string]string{"id": memID, "status": "redacted"})
 }
 
-func (s *Server) hSearchMemory(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hSearchMemory(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	q := r.URL.Query()
 	var tags []string
 	if t := q.Get("tags"); t != "" {
@@ -1166,11 +1033,10 @@ func (s *Server) hSearchMemory(w http.ResponseWriter, r *http.Request, idn *iden
 	if p := q.Get("project"); p != "" {
 		projectID, err := s.projectIDOf(p)
 		if err != nil {
-			writeErr(w, err)
-			return
+			return err
 		}
-		if !s.requireRead(w, idn, projectID, "project %q", p) {
-			return
+		if err := s.mustRead(idn, projectID, "project %q", p); err != nil {
+			return err
 		}
 		project = projectID
 	}
@@ -1179,7 +1045,7 @@ func (s *Server) hSearchMemory(w http.ResponseWriter, r *http.Request, idn *iden
 	// any-term — the daemon's claim-time recall over a whole task
 	// description). An unknown mode is refused (MEM-400 from the store),
 	// never silently ANDed.
-	s.hSearchRun(w, q.Get("match"), q.Get("q"), q.Get("type"), tags, project, limit, excerpt, idn)
+	return s.hSearchRun(w, q.Get("match"), q.Get("q"), q.Get("type"), tags, project, limit, excerpt, idn)
 }
 
 // maxMemoryExcerptRunes bounds the content excerpt a search answer may
@@ -1202,7 +1068,7 @@ type memoryHitList struct {
 	Total int         `json:"total"`
 }
 
-func (s *Server) hSearchRun(w http.ResponseWriter, match, query, memType string, tags []string, project string, limit, excerpt int, idn *identity) {
+func (s *Server) hSearchRun(w http.ResponseWriter, match, query, memType string, tags []string, project string, limit, excerpt int, idn *identity) error {
 	// Membership-first filtering: restrict to the projects the caller can
 	// read before visibility tiers apply.
 	allowed := s.memAllowed(idn)
@@ -1226,8 +1092,7 @@ func (s *Server) hSearchRun(w http.ResponseWriter, match, query, memType string,
 	// matches never cost a per-candidate load.
 	items, err := s.Mems.SearchMode(match, project, query, memType, tags, limit, allowed)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	if items == nil {
 		items = []memory.Entry{}
@@ -1247,10 +1112,9 @@ func (s *Server) hSearchRun(w http.ResponseWriter, match, query, memType string,
 			}
 			hits = append(hits, h)
 		}
-		writeJSON(w, http.StatusOK, memoryHitList{Items: hits, Total: len(hits)})
-		return
+		return reply(w, http.StatusOK, memoryHitList{Items: hits, Total: len(hits)})
 	}
-	writeJSON(w, http.StatusOK, api.ListResponse[memory.Entry]{Items: items, Total: len(items)})
+	return reply(w, http.StatusOK, api.ListResponse[memory.Entry]{Items: items, Total: len(items)})
 }
 
 // excerptBody answers the first n runes of the memory's BODY: the
@@ -1280,43 +1144,30 @@ func firstRunes(s string, n int) string {
 // ---------------------------------------------------------------------------
 // Admin face
 
-func (s *Server) hCreateUser(w http.ResponseWriter, r *http.Request, idn *identity) {
-	var req struct {
-		DisplayName string `json:"display_name"`
-		Email       string `json:"email"`
-		Role        string `json:"role"`
-		UserType    string `json:"user_type"`
-	}
+func (s *Server) hCreateUser(w http.ResponseWriter, r *http.Request, idn *identity) error {
+	var req api.UserCreateRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	u, err := s.Admin.CreateUser(req.DisplayName, req.Email, req.Role, req.UserType)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusCreated, u)
+	return reply(w, http.StatusCreated, u)
 }
 
-func (s *Server) hListUsers(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hListUsers(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	users, err := s.Admin.ListUsers()
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusOK, api.ListResponse[api.User]{Items: users, Total: len(users)})
+	return reply(w, http.StatusOK, api.ListResponse[api.User]{Items: users, Total: len(users)})
 }
 
-func (s *Server) hCreateAPIKey(w http.ResponseWriter, r *http.Request, idn *identity) {
-	var req struct {
-		UserID    string  `json:"user_id"`
-		Name      string  `json:"name"`
-		ProjectID *string `json:"project_id,omitempty"`
-	}
+func (s *Server) hCreateAPIKey(w http.ResponseWriter, r *http.Request, idn *identity) error {
+	var req api.APIKeyCreateRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	scope := ""
 	if req.ProjectID != nil {
@@ -1324,125 +1175,106 @@ func (s *Server) hCreateAPIKey(w http.ResponseWriter, r *http.Request, idn *iden
 	}
 	key, err := s.Admin.CreateAPIKey(req.UserID, req.Name, scope)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusCreated, key) // plaintext rides once, here
+	return reply(w, http.StatusCreated, key) // plaintext rides once, here
 }
 
-func (s *Server) hRevokeAPIKey(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hRevokeAPIKey(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	if err := s.Admin.RevokeAPIKey(r.PathValue("id")); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+	return reply(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
 
-func (s *Server) hCreateProject(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hCreateProject(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	var req core.CreateProjectRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	p, err := s.Admin.CreateProject(req)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusCreated, p)
+	return reply(w, http.StatusCreated, p)
 }
 
-func (s *Server) hListProjects(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hListProjects(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	projects, err := s.Admin.ListProjects()
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusOK, api.ListResponse[api.Project]{Items: projects, Total: len(projects)})
+	return reply(w, http.StatusOK, api.ListResponse[api.Project]{Items: projects, Total: len(projects)})
 }
 
-func (s *Server) hGetProject(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hGetProject(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	p, err := s.Admin.GetProject(r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusOK, p)
+	return reply(w, http.StatusOK, p)
 }
 
-func (s *Server) hGetUser(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hGetUser(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	u, err := s.Admin.GetUser(r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusOK, u)
+	return reply(w, http.StatusOK, u)
 }
 
-func (s *Server) hPatchUser(w http.ResponseWriter, r *http.Request, idn *identity) {
-	var req struct {
-		DisplayName string `json:"display_name"`
-		Role        string `json:"role"`
-	}
+func (s *Server) hPatchUser(w http.ResponseWriter, r *http.Request, idn *identity) error {
+	var req api.UserPatchRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	u, err := s.Admin.PatchUser(r.PathValue("id"), req.DisplayName, req.Role)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusOK, u)
+	return reply(w, http.StatusOK, u)
 }
 
-func (s *Server) hListAPIKeys(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hListAPIKeys(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	keys, err := s.Admin.ListAPIKeys()
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusOK, api.ListResponse[core.APIKeyInfo]{Items: keys, Total: len(keys)})
+	return reply(w, http.StatusOK, api.ListResponse[core.APIKeyInfo]{Items: keys, Total: len(keys)})
 }
 
 // hPatchProject serves PATCH /api/v1/projects/{id} (M3): description,
 // visibility and membership. Authorization: global admin or a maintainer
 // of THAT project (02 M3); a project-scoped key may only touch its own.
-func (s *Server) hPatchProject(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hPatchProject(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	projectID, err := s.projectIDOf(r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	if err := scopeCheck(idn, projectID); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	if idn.Role != "admin" {
 		role, merr := s.memberRole(projectID, idn.UserID)
 		if merr != nil || role != "maintainer" {
-			writeErr(w, core.Fail(api.ErrAuthForbidden, "", "project patch requires admin or project maintainer"))
-			return
+			return core.Fail(api.ErrAuthForbidden, "", "project patch requires admin or project maintainer")
 		}
 	}
 	var req core.ProjectPatchRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
 	p, err := s.Admin.PatchProject(r.PathValue("id"), req)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusOK, p)
+	return reply(w, http.StatusOK, p)
 }
 
-func (s *Server) hBackup(w http.ResponseWriter, r *http.Request, idn *identity) {
+func (s *Server) hBackup(w http.ResponseWriter, r *http.Request, idn *identity) error {
 	name, err := s.Admin.Backup(s.DataDir)
 	if err != nil {
-		writeErr(w, err)
-		return
+		return err
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"backup": name})
+	return reply(w, http.StatusOK, map[string]string{"backup": name})
 }

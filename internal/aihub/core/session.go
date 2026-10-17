@@ -116,6 +116,8 @@ type WIView struct {
 	// — who it is waiting for. Never persisted, not a state; omitted
 	// when the WI waits on nobody.
 	WaitingFor []WaitingBlocker `json:"waiting_for,omitempty"`
+	// inv is the raw frozen inventory column (the ready queue's gate).
+	inv string
 }
 
 // WaitingBlocker is one entry of the derived waiting_for list.
@@ -162,104 +164,6 @@ func (db *DB) waitingForBatch(ids []string) (map[string][]WaitingBlocker, error)
 		})
 	}
 	return out, rows.Err()
-}
-
-// sessionPublicOf reads one WI's public session block.
-func (db *DB) sessionPublicOf(wiID string) (SessionPublic, error) {
-	var sp SessionPublic
-	var fp, machine, started sql.NullString
-	err := db.QueryRow(`SELECT session_fingerprint, session_machine,
-		session_started_at, clean_pause FROM work_items WHERE id=?1`, wiID).
-		Scan(&fp, &machine, &started, &sp.CleanPause)
-	if errors.Is(err, sql.ErrNoRows) {
-		return sp, Fail(api.ErrCoreNotFound, "", "work item %s", wiID)
-	}
-	if err != nil {
-		return sp, err
-	}
-	sp.SessionFingerprint, sp.SessionMachine, sp.SessionStartedAt =
-		fp.String, machine.String, started.String
-	return sp, nil
-}
-
-// View wraps one WorkItem with its public session audit block, its
-// frozen repo inventory (§4.6) and its derived waiting_for list
-// (polyforge#161).
-func (m *WIManager) View(wi *api.WorkItem) (*WIView, error) {
-	sp, err := m.db.sessionPublicOf(wi.ID)
-	if err != nil {
-		return nil, err
-	}
-	inv, err := repoInventoryOf(m.db, wi.ID)
-	if err != nil {
-		return nil, err
-	}
-	waiting, err := m.db.waitingForBatch([]string{wi.ID})
-	if err != nil {
-		return nil, err
-	}
-	return &WIView{WorkItem: *wi, SessionPublic: sp, RepoInventory: inv,
-		WaitingFor: waiting[wi.ID]}, nil
-}
-
-// sessionPublicBatch reads many WIs' public session blocks in ONE query.
-// Missing ids simply keep a zero block.
-func (db *DB) sessionPublicBatch(ids []string) (map[string]SessionPublic, error) {
-	out := map[string]SessionPublic{}
-	if len(ids) == 0 {
-		return out, nil
-	}
-	var placeholders []string
-	var args []any
-	for i, id := range ids {
-		placeholders = append(placeholders, "?"+strconv.Itoa(i+1))
-		args = append(args, id)
-	}
-	rows, err := db.Query(`SELECT id, session_fingerprint, session_machine,
-		session_started_at, clean_pause FROM work_items WHERE id IN (`+strings.Join(placeholders, ",")+`)`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		var fp, machine, started sql.NullString
-		var sp SessionPublic
-		if err := rows.Scan(&id, &fp, &machine, &started, &sp.CleanPause); err != nil {
-			return nil, err
-		}
-		sp.SessionFingerprint, sp.SessionMachine, sp.SessionStartedAt =
-			fp.String, machine.String, started.String
-		out[id] = sp
-	}
-	return out, rows.Err()
-}
-
-// Views wraps a batch of WorkItems with their session blocks (one query)
-// and their derived waiting_for lists (one query, polyforge#161).
-// Order is preserved; a WI that vanished mid-read keeps a zero block.
-func (m *WIManager) Views(wis []api.WorkItem) ([]WIView, error) {
-	out := make([]WIView, 0, len(wis))
-	if len(wis) == 0 {
-		return out, nil
-	}
-	ids := make([]string, len(wis))
-	for i := range wis {
-		ids[i] = wis[i].ID
-	}
-	blocks, err := m.db.sessionPublicBatch(ids)
-	if err != nil {
-		return nil, err
-	}
-	waiting, err := m.db.waitingForBatch(ids)
-	if err != nil {
-		return nil, err
-	}
-	for i := range wis {
-		out = append(out, WIView{WorkItem: wis[i], SessionPublic: blocks[wis[i].ID],
-			WaitingFor: waiting[wis[i].ID]})
-	}
-	return out, nil
 }
 
 // ---------------------------------------------------------------------------

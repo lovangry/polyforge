@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 )
@@ -41,13 +40,12 @@ var cmdChat = &Command{
 		if err != nil {
 			return err
 		}
-		ctx.finish(raw, func() {
-			var rec ChatRecord
-			if err := json.Unmarshal(raw, &rec); err == nil && rec.ChatID != "" {
-				fmt.Fprintln(ctx.Stdout, rec.ChatID)
-			} else {
-				printJSON(ctx.Stdout, raw)
+		finishOrRaw(ctx, raw, func(rec *ChatRecord) bool {
+			if rec.ChatID == "" {
+				return false
 			}
+			fmt.Fprintln(ctx.Stdout, rec.ChatID)
+			return true
 		})
 		return nil
 	},

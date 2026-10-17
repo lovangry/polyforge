@@ -41,7 +41,7 @@ func mustClaim(t *testing.T, env *testEnv, wiID string) string {
 }
 
 // patchBundle is the typed PATCH helper for the bundle name field.
-func patchBundle(t *testing.T, env *testEnv, id string, name *string) (*api.WorkItem, error) {
+func patchBundle(t *testing.T, env *testEnv, id string, name *string) (*WIView, error) {
 	t.Helper()
 	fields := map[string]json.RawMessage{}
 	if name != nil {
@@ -395,7 +395,7 @@ func TestPatchWaitingOnValueDomain(t *testing.T) {
 	env := newEnv(t)
 	id := mustCreateWI(t, env, "waiting_on value domain", nil, "")
 
-	patch := func(v string) (*api.WorkItem, error) {
+	patch := func(v string) (*WIView, error) {
 		return env.WIs.Patch(id, map[string]json.RawMessage{
 			"waiting_on": json.RawMessage(`"` + v + `"`),
 		})

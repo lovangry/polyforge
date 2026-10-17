@@ -21,100 +21,21 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/cli"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 	"github.com/silgrid/polyforge/internal/polyforge/supervisor"
 	"github.com/silgrid/polyforge/internal/polyforge/workspace"
 )
 
-// The wire answer shapes — byte-identical to the CLI's decode structs
-// (cli.SubmitResponse etc.); the daemon keeps its own definitions and the
-// tests pin the two together field by field.
-
-type submitResponse struct {
-	Accepted   bool   `json:"accepted"`
-	WorkItemID string `json:"work_item_id"`
-}
-
-type statusJob struct {
-	WorkItemID string `json:"work_item_id"`
-	// Slug is the "<project>#<seq>" display name ("" on a pre-slug record).
-	Slug   string `json:"slug,omitempty"`
-	Status string `json:"status"`
-	// SpawnN is the v1.5 B2 derivation counter; SessionFingerprint is
-	// the PUBLIC session handle (B3) — together they replace the deleted
-	// attempt-id lineage handle.
-	SpawnN             int    `json:"spawn_n,omitempty"`
-	SessionFingerprint string `json:"session_fingerprint,omitempty"`
-	AgentPID           int    `json:"agent_pid,omitempty"`
-	// NeedsInput/QuestionID carry the D6 owner face: the pending question
-	// read from a live driver's execution.json, merged over the runtime
-	// state (a job the runtime calls running but whose step waits on a
-	// human is presented as needs_input — an agent blocked on a human must
-	// never read as merely busy).
-	NeedsInput bool   `json:"needs_input,omitempty"`
-	QuestionID string `json:"question_id,omitempty"`
-	// StepAgeSec / LastWorkAgoSec are the owner liveness face (the ops
-	// status columns): whole seconds since the current dispatch began and
-	// since its harness last did REAL work (nil = no dispatch in flight,
-	// or no work-class signal yet — the CLI renders "-"). UI-noise
-	// records never refresh the work clock, so a wedged-but-chattering
-	// job reads as stale, not fresh.
-	StepAgeSec     *int64 `json:"step_age_sec,omitempty"`
-	LastWorkAgoSec *int64 `json:"last_work_ago_sec,omitempty"`
-	// Candidate is the in-flight dispatch's model candidate,
-	// `<harness>:<model>[:<effort>]` (polyforge#176); absent between
-	// dispatches or on the harness's default model.
-	Candidate string `json:"candidate,omitempty"`
-	// Origin is how the job was submitted; may be absent.
-	Origin *runtime.Origin `json:"origin,omitempty"`
-	// StopReason is the recorded verdict of a close in flight or
-	// settled (wrapped/failed/blocked/paused) — empty while the job
-	// runs.
-	StopReason string `json:"stop_reason,omitempty"`
-}
-
-type queueStats struct {
-	Pending       int `json:"pending"`
-	Running       int `json:"running"`
-	MaxConcurrent int `json:"max_concurrent"`
-}
-
-type statusResponse struct {
-	MachineID string `json:"machine_id"`
-	// DisplayName is the display-only daemon name (default: hostname).
-	DisplayName string `json:"display_name,omitempty"`
-	// Auto is the auto-pull switch (v2-converge §5); the max-jobs number
-	// rides queue.max_concurrent.
-	Auto bool `json:"auto"`
-	// Workspaces is the mapped workspace set (polyforge#113): every
-	// [workspace] path the daemon routes capsules into, in mapping
-	// declaration order. A multi-workspace daemon must never present one
-	// workspace as if it were the only one.
-	Workspaces []string `json:"workspaces"`
-	// WorkflowsDir is the workflows dir bundles run from (absolute; pf
-	// doctor checks the workspace yaml's step-id keys against it).
-	WorkflowsDir string `json:"workflows_dir,omitempty"`
-	// Harnesses is the daemon's view of the step harness binaries
-	// (polyforge#159): found, version, credential variables set/unset —
-	// never a value. Only on request (GET /status?harnesses=1: it may run
-	// `claude --version`); pf doctor judges the claude harness by it.
-	Harnesses    map[string]harnessStatus `json:"harnesses,omitempty"`
-	ShuttingDown bool                     `json:"shutting_down"`
-	// EnvWarnings: retired POLYFORGE_* variables the daemon found set to
-	// a differing value at boot (no longer read; pf doctor relays them).
-	EnvWarnings []string `json:"env_warnings,omitempty"`
-	// EnvNames are the NAMES (never values) of the daemon's own
-	// environment, sorted: pf doctor flags a daemon carrying ANTHROPIC_*
-	// or other credential-looking names outside the ensure allow-list
-	// (supervisor/env.go).
-	EnvNames []string `json:"env_names,omitempty"`
-	// PiModelsEnvRefs are the variable NAMES the step agent dir's
-	// models.json interpolates (`$NAME`); pf doctor warns on those no
-	// ensure-started daemon carries.
-	PiModelsEnvRefs []string    `json:"pi_models_env_refs,omitempty"`
-	Jobs            []statusJob `json:"jobs"`
-	Queue           queueStats  `json:"queue"`
-}
+// The wire answer shapes the CLI decodes are the CLI's own types: one
+// definition per shape.
+type (
+	submitResponse       = cli.SubmitResponse
+	statusJob            = cli.StatusJob
+	statusResponse       = cli.StatusResponse
+	queueStats           = cli.QueueStats
+	resumePausedResponse = cli.ResumePausedResponse
+)
 
 type opsConfigResponse struct {
 	Auto bool `json:"auto"`
@@ -141,20 +62,6 @@ type resumeBlockedResponse struct {
 	// the claim is queued in the persisted submit queue and retried with
 	// backoff, exactly like a submit.
 	Deferred bool `json:"deferred,omitempty"`
-}
-
-// resumePausedResponse is the POST /jobs/{id}/resume-paused answer
-// (wi_seWTgHeKtaa8): the operator's `pf resume` on a work item this
-// daemon holds PAUSED — the live-holder continuation. Attached: the
-// paused session was re-attached (SessionAttach) and the work item
-// continues IN PLACE (same semantics as attaching after a restart,
-// the pending-question re-pose included). AlreadyLive: the work item
-// is already running here (an earlier resume or a live dispatch won).
-type resumePausedResponse struct {
-	Resumed    bool   `json:"resumed"`
-	WorkItemID string `json:"work_item_id"`
-	// Outcome: attached | already_live | closed.
-	Outcome string `json:"outcome,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -640,8 +547,7 @@ func (d *Daemon) statusJobs() ([]statusJob, int) {
 			SpawnN:             ji.SpawnN,
 			SessionFingerprint: ji.SessionFingerprint,
 			AgentPID:           ji.AgentPID,
-			Origin:             ji.Origin,
-			StopReason:         ji.StopReason,
+			Origin:             (*protocol.Origin)(ji.Origin),
 		}
 		if qid, ok := pending[ji.WorkItem]; ok {
 			sj.QuestionID = qid

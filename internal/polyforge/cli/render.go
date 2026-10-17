@@ -39,6 +39,38 @@ func (ctx *Context) finish(raw json.RawMessage, human func()) {
 	}
 }
 
+// finishLine is finish with a one-line human answer.
+func (ctx *Context) finishLine(raw json.RawMessage, format string, args ...any) {
+	ctx.finish(raw, func() { fmt.Fprintf(ctx.Stdout, format, args...) })
+}
+
+// finishAs is finish with the human renderer over the payload decoded as
+// T; a payload that does not decode renders nothing.
+func finishAs[T any](ctx *Context, raw json.RawMessage, human func(*T)) {
+	ctx.finish(raw, func() {
+		var v T
+		if json.Unmarshal(raw, &v) == nil {
+			human(&v)
+		}
+	})
+}
+
+// finishOrRaw is finishAs whose fallback — a payload that does not decode
+// as T, or a renderer answering false — is the pretty-printed raw body.
+func finishOrRaw[T any](ctx *Context, raw json.RawMessage, human func(*T) bool) {
+	ctx.finish(raw, func() {
+		var v T
+		if json.Unmarshal(raw, &v) != nil || !human(&v) {
+			printJSON(ctx.Stdout, raw)
+		}
+	})
+}
+
+// itemList is the {"items":[...]} list answer shape.
+type itemList[T any] struct {
+	Items []T `json:"items"`
+}
+
 // Out writes to stdout.
 func (ctx *Context) Out(data []byte) {
 	ctx.Stdout.Write(data)

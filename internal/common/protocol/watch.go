@@ -64,14 +64,16 @@ type WatchSnapshot struct {
 
 // WatchJob is the daemon-side job bookkeeping of a WI.
 type WatchJob struct {
-	Status             string       `json:"status"`
-	QuestionID         string       `json:"question_id,omitempty"`
-	LastProgressAgoSec *int64       `json:"last_progress_ago_sec,omitempty"`
-	Origin             *WatchOrigin `json:"origin,omitempty"`
+	Status             string  `json:"status"`
+	QuestionID         string  `json:"question_id,omitempty"`
+	LastProgressAgoSec *int64  `json:"last_progress_ago_sec,omitempty"`
+	Origin             *Origin `json:"origin,omitempty"`
 }
 
-// WatchOrigin mirrors the daemon's job origin record.
-type WatchOrigin struct {
+// Origin is how a daemon job was submitted: its kind (chat | auto), the
+// submitting chat id and the owner. It rides /status jobs[] and the
+// watch snapshot.
+type Origin struct {
 	Kind   string `json:"kind"`
 	ChatID string `json:"chat_id,omitempty"`
 	Owner  string `json:"owner,omitempty"`
