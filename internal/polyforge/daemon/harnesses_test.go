@@ -55,8 +55,8 @@ func TestHarnessStatusesNeverCarryValues(t *testing.T) {
 }
 
 // factsProbe runs claudeConfigFacts with one harness root.
-func factsProbe(harnessRoot, dataDir string) (map[string]string, map[string]harnessDirStatus, string) {
-	d := &Daemon{cfg: Config{HarnessRoot: harnessRoot, DataDir: dataDir}}
+func factsProbe(harnessRoot string) (map[string]string, map[string]harnessDirStatus, string) {
+	d := &Daemon{cfg: Config{HarnessRoot: harnessRoot}}
 	return d.claudeConfigFacts()
 }
 
@@ -79,14 +79,8 @@ func TestClaudeConfigFacts(t *testing.T) {
 		}
 	}
 
-	// the dir-path fall-through: an empty harness root uses the data dir
-	_, dirs, _ := factsProbe("", root)
-	if want := filepath.Join(root, "claude-config"); dirs["claude_config"].Path != want {
-		t.Fatalf("fall-through dir path %q, want %q", dirs["claude_config"].Path, want)
-	}
-
 	// absent settings.json: all-unset shape, no warning
-	facts, dirs, warn := factsProbe(root, "")
+	facts, dirs, warn := factsProbe(root)
 	if facts != nil || warn != "" {
 		t.Fatalf("absent settings.json: facts=%v warn=%q", facts, warn)
 	}
@@ -106,7 +100,7 @@ func TestClaudeConfigFacts(t *testing.T) {
 	// the gateway pair: facts set, warning raised, no value in any fact
 	const token = "sk-ant-oat01-SENTINEL-171"
 	write(fmt.Sprintf(`{"env":{"ANTHROPIC_AUTH_TOKEN":%q,"ANTHROPIC_BASE_URL":"https://gw.example"}}`, token))
-	facts, _, warn = factsProbe(root, "")
+	facts, _, warn = factsProbe(root)
 	if facts["ANTHROPIC_AUTH_TOKEN"] != "set" || facts["ANTHROPIC_BASE_URL"] != "set" || facts["CLAUDE_CONFIG_DIR"] != "unset" || facts["ANTHROPIC_API_KEY"] != "unset" {
 		t.Fatalf("gateway facts %v", facts)
 	}
@@ -123,20 +117,20 @@ func TestClaudeConfigFacts(t *testing.T) {
 
 	// the official pair (an oat token, no BASE_URL): no pairing warning
 	write(fmt.Sprintf(`{"env":{"ANTHROPIC_AUTH_TOKEN":%q}}`, token))
-	if _, _, warn := factsProbe(root, ""); warn != "" {
+	if _, _, warn := factsProbe(root); warn != "" {
 		t.Fatalf("official pair warns %q", warn)
 	}
 
 	// a CLAUDE_CONFIG_DIR override
 	write(`{"env":{"ANTHROPIC_AUTH_TOKEN":"tok-SENTINEL","CLAUDE_CONFIG_DIR":"/cfg"}}`)
-	_, _, warn = factsProbe(root, "")
+	_, _, warn = factsProbe(root)
 	if warn == "" || !strings.Contains(warn, "CLAUDE_CONFIG_DIR") || !strings.Contains(warn, "overrides") {
 		t.Fatalf("override warning %q", warn)
 	}
 
 	// both heuristics at once: both warnings, joined
 	write(fmt.Sprintf(`{"env":{"ANTHROPIC_AUTH_TOKEN":%q,"ANTHROPIC_BASE_URL":"https://gw","CLAUDE_CONFIG_DIR":"/cfg"}}`, token))
-	_, _, warn = factsProbe(root, "")
+	_, _, warn = factsProbe(root)
 	for _, frag := range []string{"rejected", "CLAUDE_CONFIG_DIR", "overrides"} {
 		if !strings.Contains(warn, frag) {
 			t.Fatalf("double warning %q misses %q", warn, frag)
@@ -145,14 +139,14 @@ func TestClaudeConfigFacts(t *testing.T) {
 
 	// torn JSON: no facts, a decode warning (never a value)
 	write("{not json")
-	facts, _, warn = factsProbe(root, "")
+	facts, _, warn = factsProbe(root)
 	if len(facts) != 0 || warn == "" || !strings.Contains(warn, "does not parse") {
 		t.Fatalf("torn facts %v %q", facts, warn)
 	}
 
 	// a set credential still never lands in any rendered fact
 	write(`{"env":{"ANTHROPIC_AUTH_TOKEN":"eyJ-SENTINEL-NOT-oat01"}}`)
-	facts, _, warn = factsProbe(root, "")
+	facts, _, warn = factsProbe(root)
 	if facts["ANTHROPIC_AUTH_TOKEN"] != "set" {
 		t.Fatalf("plain token facts %v", facts)
 	}
@@ -162,7 +156,7 @@ func TestClaudeConfigFacts(t *testing.T) {
 
 	// the dirs' existence flips when they are created (daemon-held layout)
 	if err := os.MkdirAll(filepath.Join(root, "step-agent"), 0o755); err == nil {
-		if _, dirs, _ := factsProbe(root, ""); !dirs["step_agent"].Exists {
+		if _, dirs, _ := factsProbe(root); !dirs["step_agent"].Exists {
 			t.Fatal("the created step-agent dir is reported missing")
 		}
 	} else {

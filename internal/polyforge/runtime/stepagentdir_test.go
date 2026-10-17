@@ -68,6 +68,7 @@ func listDirNames(t *testing.T, dir string) []string {
 func TestStepAgentDirMinimalSetAndPlacement(t *testing.T) {
 	src := operatorDirFixture(t)
 	cfg := Config{DataDir: t.TempDir(), OperatorAgentDir: src, OperatorAgentDirExplicit: true}
+	cfg.FillDefaults()
 	if err := cfg.SyncStepAgentDir(); err != nil {
 		t.Fatalf("sync: %v", err)
 	}

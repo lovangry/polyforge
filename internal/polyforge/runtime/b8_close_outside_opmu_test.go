@@ -259,7 +259,7 @@ func TestB8HungRecoveryPushLeavesOtherWorkItemsResponsive(t *testing.T) {
 	// scene under the push, and applies once the recovery settled
 	superseded := make(chan error, 1)
 	go func() {
-		r.handleOB(ctx, protocol.OBMsg{Kind: protocol.OBSuperseded, WorkItem: a, SessionFP: ja.fingerprint()})
+		r.handleOB(ctx, protocol.OBMsg{Kind: protocol.OBSuperseded, WorkItem: a, SessionFP: ja.sessionFingerprint})
 		superseded <- nil
 	}()
 	stillPending(t, "the supersession", superseded)

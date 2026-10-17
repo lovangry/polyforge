@@ -239,14 +239,13 @@ func stateOf(j *job) JobState {
 	return st
 }
 
-// resumeRecord recovers a recorded job through the engine (crash orphans
-// reaped first — single writer): recoveryCause names the trigger the
+// resumeRecord recovers a recorded job through the engine (recoverCore
+// kills and reaps the old tree first — single writer): recoveryCause names the trigger the
 // engine logs and the interrupted-dispatch archive classifies (an
 // operator-shaped cause archives nothing; a daemon_restart re-derivation
 // archives the dispatch the crash interrupted). It answers the live
 // resume door's outcome.
 func (r *Runtime) resumeRecord(j *job, recoveryCause, detail string) (string, error) {
-	r.reapOrphans(j.wi, j.capsuleDir)
 	j.mu.Lock()
 	j.state = StateRunning // the hub is the authority: Paused/Recovering resume as RUNNING
 	j.mu.Unlock()

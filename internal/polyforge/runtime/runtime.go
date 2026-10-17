@@ -467,11 +467,9 @@ func (r *Runtime) persist() error {
 	return err
 }
 
-// persistLog is persist whose failure is only logged.
-func (r *Runtime) persistLog(wi string) { r.persistLogged(wi) }
-
-// persistLogged is persistLog reporting whether the write landed.
-func (r *Runtime) persistLogged(wi string) bool {
+// persistLog is persist whose failure is only logged; it reports
+// whether the write landed.
+func (r *Runtime) persistLog(wi string) bool {
 	if err := r.persist(); err != nil {
 		fmt.Fprintf(os.Stderr, "runtime: %s: state persist failed: %v\n", wi, err)
 		return false
@@ -952,7 +950,7 @@ func (r *Runtime) finishClaim(ctx context.Context, j *job, sceneErr error, note 
 	if err := j.transition(StateRunning); err != nil {
 		return err // unreachable: only the claim leaves CLAIMING
 	}
-	if r.persistLogged(j.wi) {
+	if r.persistLog(j.wi) {
 		r.clearClaiming(j.wi) // the start settled: the journal entry has done its job
 	}
 	// the secret rides in-process to the observe lane only (its M4
@@ -1082,7 +1080,7 @@ func (r *Runtime) pendingClose(j *job, note string) bool {
 	j.mu.Unlock()
 	r.putJob(j)
 	r.retry(j)
-	return r.persistLogged(j.wi)
+	return r.persistLog(j.wi)
 }
 
 // verifySealedHead is the cross-daemon continue guard (v2-converge §7): a
@@ -1204,26 +1202,21 @@ func (r *Runtime) tap(wi, kind string, body map[string]any) {
 
 // claimDeferredError is the typed answer of a start the shutdown stopped
 // (DAEMON-410): nothing turned blocked; a claim that landed stays in the
-// claiming journal and the next daemon start replays it. It unwraps to
-// that *api.Error, so the faces answer it as such.
+// claiming journal and the next daemon start replays it.
 func claimDeferredError(wi string) error {
-	return &claimDeferred{&api.Error{Code: api.ErrDaemonGone,
-		Detail: fmt.Sprintf("%s: the daemon is shutting down; the start is deferred (a landed claim stays in the claiming journal and resumes at the next start)", wi)}}
+	return &api.Error{Code: api.ErrDaemonGone,
+		Detail: fmt.Sprintf("%s: the daemon is shutting down; the start is deferred (a landed claim stays in the claiming journal and resumes at the next start)", wi)}
 }
-
-type claimDeferred struct{ ae *api.Error }
-
-func (e *claimDeferred) Error() string { return e.ae.Error() }
-func (e *claimDeferred) Unwrap() error { return e.ae }
 
 // ErrClaimClosed is the Start answer of a claim an operator close (Stop
 // during CLAIMING) settled: the start is over and must not be retried.
 var ErrClaimClosed = errors.New("runtime: the claim was closed by the operator before its agent started")
 
-// IsClaimDeferred reports whether a Start error is the shutdown deferral.
+// IsClaimDeferred reports whether a Start error is the shutdown deferral
+// (Start's only DAEMON-410 answer).
 func IsClaimDeferred(err error) bool {
-	var cd *claimDeferred
-	return errors.As(err, &cd)
+	var ae *api.Error
+	return errors.As(err, &ae) && ae.Code == api.ErrDaemonGone
 }
 
 // supersede releases a work item another session holds (v1.5 M4 + m3:

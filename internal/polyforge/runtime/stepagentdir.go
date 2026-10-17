@@ -102,27 +102,16 @@ const (
 	stepAgentSubagent   = "subagent" // the ONE extension carried: extensions/subagent
 )
 
-// harnessRootResolved answers the root the Dir() derivations use: the
-// Config's HarnessRoot, else the documented DataDir default (a bare /
-// hand-assembled Config that fill() never saw keeps the pre-#171
-// default paths — the op-observable default never moves).
-func (c *Config) harnessRootResolved() string {
-	if c.HarnessRoot != "" {
-		return c.HarnessRoot
-	}
-	return c.DataDir
-}
-
 // StepAgentDir is the dedicated step agent directory under the harness
 // root (A1: never inside a capsule).
 func (c *Config) StepAgentDir() string {
-	return filepath.Join(c.harnessRootResolved(), StepAgentDirName)
+	return filepath.Join(c.HarnessRoot, StepAgentDirName)
 }
 
 // StepAgentSessionsDir is the step processes' harness session store
 // (PI_CODING_AGENT_SESSION_DIR and the live-transcript locator root).
 func (c *Config) StepAgentSessionsDir() string {
-	return filepath.Join(c.harnessRootResolved(), StepAgentSessionsDirName)
+	return filepath.Join(c.HarnessRoot, StepAgentSessionsDirName)
 }
 
 // ClaudeConfigDir answers the step processes' Claude Code config dir:
@@ -133,7 +122,7 @@ func (c *Config) StepAgentSessionsDir() string {
 // answers "", so neither the spawner injects CLAUDE_CONFIG_DIR nor a
 // locator consults a wrong path.
 func (c *Config) ClaudeConfigDir() string {
-	root := c.harnessRootResolved()
+	root := c.HarnessRoot
 	if root == "" {
 		return ""
 	}
