@@ -363,7 +363,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 
 | # | 裁定（一句话） | 文档落点 |
 |---|---|---|
-| D1 | 就绪队列（`GET /api/v1/projects/{project}/ready-queue`）响应为 `{items, running, paused, pending_bundles}` 四段（`internal/aihub/core/queue.go`）；无 `blocked` 数组，等依赖的票不出现 | `archive/02-aihub-core.md#§5.1b`（重写）及 §5.1 行 4 / §4.2a 行 26 / §7 / §10 关联句；`archive/00-architecture.md#§3.1` 组件表、§3.4b/§3.4c 与 `archive/07-deployment-pilot.md#§9.2` 同步最小修订 |
+| D1 | 就绪队列（`GET /api/v1/projects/{project}/ready-queue`）响应为 `{items, running, paused}` 三段（`internal/aihub/core/queue.go`；`pending_bundles` 段已于 polyforge#194 删除）；无 `blocked` 数组，等依赖的票不出现 | `archive/02-aihub-core.md#§5.1b`（重写）及 §5.1 行 4 / §4.2a 行 26 / §7 / §10 关联句；`archive/00-architecture.md#§3.1` 组件表、§3.4b/§3.4c 与 `archive/07-deployment-pilot.md#§9.2` 同步最小修订 |
 | D2 | `seq` 项目内唯一（`UNIQUE(project_id, seq)`），非全局 | `archive/02-aihub-core.md#§4.2` DDL |
 | D4 | claim 需该 project 的 writer/maintainer membership 或全局 admin（`hSessionClaim`→`requireWrite`，403 otherwise）；key scope 不构成认领授权 | `archive/02-aihub-core.md#§4.10`、`#§8`；`archive/04-local-runtime.md#§6.1` 关联句 |
 | D8 | 先推 capsule 链，再推任务仓库 carrier ref（`refs/pf-task/<name>`）；任务仓库推送失败不回滚 capsule 链（polyforge#158 起另发 `carrier_push_failed` 决策提醒，见本文 §14.2） | `archive/v1-spec-full.md`（单行最小修订）+ 本表登记（“或”：两处都做） |
