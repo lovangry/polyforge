@@ -112,6 +112,17 @@ type Decision struct {
 	// Key identifies a state-derived decision for dedupe ("" for event
 	// decisions, which the cursor dedupes).
 	Key string
+	// Seq is the event seq of an event decision (0 for state-derived ones).
+	Seq int64
+}
+
+// id names the decision's source within the watcher: WI plus the state
+// key, or WI plus the event seq.
+func (d Decision) id() string {
+	if d.Key != "" {
+		return d.WI + " " + d.Key
+	}
+	return fmt.Sprintf("%s #%d", d.WI, d.Seq)
 }
 
 // suffix is the fixed tail of every wake-up line (#122: the agent must not
@@ -261,7 +272,7 @@ func Evaluate(sub protocol.ChatSub, snap *protocol.WatchSnapshot) Result {
 		if !ok || r.StateBacked {
 			continue
 		}
-		d := Decision{WI: snap.WorkItem, Slug: snap.Slug, Class: r.Class, Phrase: r.Phrase}
+		d := Decision{WI: snap.WorkItem, Slug: snap.Slug, Class: r.Class, Phrase: r.Phrase, Seq: e.Seq}
 		if r.NamesRepo {
 			d.Repo = bodyRepo(e.Body)
 		}

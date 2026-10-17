@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -173,5 +174,55 @@ func TestWatcherCrashBeforePrintingOwnedReminderRedelivers(t *testing.T) {
 	_ = run(&out2, 300*time.Millisecond)
 	if out2.Len() != 0 {
 		t.Fatalf("an acked decision must not repeat: %q", out2.String())
+	}
+}
+
+// A work item that becomes the owner's after the watcher started (an
+// auto-pull claim here: no origin, the owner is the reporter) is picked up
+// by the next cycle and its decision printed as its own line, once.
+func TestWatcherPicksUpWIOwnedAfterStart(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	api := clientAPI{d: td.client, chat: "chat_bob"}
+	started, proceed := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	sleep := func(ctx context.Context, d time.Duration) {
+		once.Do(func() { close(started); <-proceed })
+		tm := time.NewTimer(d)
+		defer tm.Stop()
+		select {
+		case <-ctx.Done():
+		case <-tm.C:
+		}
+	}
+	var out bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- watcher.Run(ctx, api, watcher.Options{Owner: "bob", WaitDecision: true, Out: &out, Poll: 20 * time.Millisecond, Sleep: sleep})
+	}()
+	<-started // the first cycle ran with nothing to subscribe
+
+	td.hub.mu.Lock()
+	td.hub.reporters = map[string]string{"wi_late": "bob"}
+	td.hub.mu.Unlock()
+	td.submitClaim(t, "wi_late")
+	td.waitMonitored(t, "wi_late")
+	if err := td.obs.Events().Append("wi_late", "step_dead", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	close(proceed)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); strings.Count(got, "wi_late step_dead") != 1 || strings.Count(got, "\n") != 1 {
+		t.Fatalf("out = %q, want wi_late's step_dead line once", got)
+	}
+	var out2 bytes.Buffer
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel2()
+	_ = watcher.Run(ctx2, api, watcher.Options{Owner: "bob", Out: &out2, Poll: 20 * time.Millisecond})
+	if out2.Len() != 0 {
+		t.Fatalf("the delivered decision must not repeat: %q", out2.String())
 	}
 }
