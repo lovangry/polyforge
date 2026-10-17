@@ -424,20 +424,12 @@ func (m *Monitor) judge() {
 			return
 		}
 		m.cur.verdicted = true
-		_ = m.log.Append(m.wi.WorkItem, EvSupervisorVerdict, map[string]any{
-			"verdict": v.VerdictKind(), "step": v.Step, "spawn_n": v.SpawnN,
-			"cause": v.Cause, "evidence": v.Evidence,
-		})
-		m.link.Verdict(*v)
+		m.link.Verdict(*v) // the driver records it: step_dead + step_failed
 		return
 	}
 	if m.phase == phaseBetween && !m.stalled && m.cfg.DriverStall > 0 {
 		if gap := now.Sub(m.phaseSince); gap >= m.cfg.DriverStall {
 			m.stalled = true
-			_ = m.log.Append(m.wi.WorkItem, EvSupervisorVerdict, map[string]any{
-				"verdict": "driver_stalled", "duration_ms": gap.Milliseconds(),
-				"evidence": "the driver is between steps (not waiting on a human) past the stall bound",
-			})
 			m.link.Verdict(supervise.DriverStalled{Duration: gap, Phase: phaseBetween})
 			// A driver that cannot consume its verdict is the point: the
 			// recovery engine kills its tree (any stuck git/push child with

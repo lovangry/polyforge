@@ -331,9 +331,8 @@ func (d *Driver) Run(ctx context.Context) error {
 		}
 	}
 	for {
-		if v := d.takeStalled(); v != nil {
-			d.emit("driver_stalled", map[string]any{"duration_ms": v.Duration.Milliseconds(), "phase": v.Phase})
-			return ErrDriverStalled
+		if d.takeStalled() != nil {
+			return ErrDriverStalled // the supervisor's needs_recovery records the stall
 		}
 		if collected != nil {
 			res := collected

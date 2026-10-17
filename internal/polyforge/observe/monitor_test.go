@@ -112,9 +112,6 @@ func TestRuleHarnessSilentZeroSignalsAfterSpawn(t *testing.T) {
 	}
 	// the supervisor stays silent for that spawn until step_ended
 	expectNoVerdict(t, m, 150*time.Millisecond, "after the verdict")
-	if n := len(eventsOf(m, EvSupervisorVerdict)); n != 1 {
-		t.Fatalf("supervisor_verdict events: %d, want 1", n)
-	}
 }
 
 func TestRuleHarnessSilentUINoiseDoesNotCountAsWork(t *testing.T) {

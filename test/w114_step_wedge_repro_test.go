@@ -117,15 +117,14 @@ func TestW114StepWedgeDetectedWithoutOperator(t *testing.T) {
 	// The acceptance (polyforge#114): a step process that parks silently
 	// past the window is detected WITHOUT operator intervention — the
 	// supervisor's verdict names rule 2, with evidence.
-	rec := waitForEvent(t, d, wi, "supervisor_verdict", 30*time.Second)
+	rec := waitForEvent(t, d, wi, "step_dead", 30*time.Second)
 	var v struct {
-		Verdict  string `json:"verdict"`
 		Step     string `json:"step"`
 		Cause    string `json:"cause"`
 		Evidence string `json:"evidence"`
 	}
 	eventBody(t, rec, &v)
-	if v.Verdict != "step_dead" || v.Cause != "model_hung" || v.Step != "grill" || v.Evidence == "" {
+	if v.Cause != "model_hung" || v.Step != "grill" || v.Evidence == "" {
 		t.Fatalf("verdict %+v, want step_dead model_hung for grill with evidence.\nobserved state:\n%s",
 			v, w114WedgeDiagnostic(t, d, inst, wi))
 	}
@@ -169,8 +168,8 @@ func TestW114StepWedgeDetectedWithoutOperator(t *testing.T) {
 	}
 	// ONE verdict, ONE failure record for the wedged dispatch.
 	kinds := d.eventKinds(t, wi)
-	if n := countOf(kinds, "supervisor_verdict"); n != 1 {
-		t.Fatalf("supervisor_verdict fired %d times, want 1: %v", n, kinds)
+	if n := countOf(kinds, "step_dead"); n != 1 {
+		t.Fatalf("step_dead fired %d times, want 1: %v", n, kinds)
 	}
 	if n := countOf(kinds, "step_failed"); n != 1 {
 		t.Fatalf("step_failed recorded %d times, want 1: %v", n, kinds)
@@ -222,7 +221,7 @@ func TestW114StepWedgeOperatorKillRecovers(t *testing.T) {
 	if len(spawns) != 4 || spawns[1]["resume"] != true {
 		t.Fatalf("the retry was not an in-place resume: %+v", spawns)
 	}
-	if n := countOf(d.eventKinds(t, wi), "supervisor_verdict"); n != 0 {
+	if n := countOf(d.eventKinds(t, wi), "step_dead"); n != 0 {
 		t.Fatalf("a supervisor verdict raced the operator kill: %v", d.eventKinds(t, wi))
 	}
 }

@@ -4,8 +4,8 @@ package test
 // (v2-converge 2.2/2.3, appendix B), one historical incident per test,
 // against the REAL `pf daemon` + the fakepi step process. Every scenario
 // injects the supervision bounds through the daemon's own flags and
-// asserts on the durable faces: the events log (supervisor_verdict from
-// the supervisor, step_failed / candidate_switched / blocked from the
+// asserts on the durable faces: the events log (step_dead for a
+// supervisor verdict, step_failed / candidate_switched / blocked from the
 // driver), execution.json (the attempts' cause sub-class, the per-step
 // failure ledger, the relaxed bounds) and the fakepi journal (which model
 // each dispatch ran under).
@@ -61,7 +61,6 @@ func stepFailures(t *testing.T, d *v1Daemon, wi string) []failEvent {
 }
 
 type verdictEvent struct {
-	Verdict  string `json:"verdict"`
 	Step     string `json:"step"`
 	SpawnN   int64  `json:"spawn_n"`
 	Cause    string `json:"cause"`
@@ -72,7 +71,7 @@ func verdicts(t *testing.T, d *v1Daemon, wi string) []verdictEvent {
 	t.Helper()
 	var out []verdictEvent
 	for _, e := range d.eventsOf(t, wi) {
-		if e.Kind != "supervisor_verdict" {
+		if e.Kind != "step_dead" {
 			continue
 		}
 		var v verdictEvent
@@ -127,10 +126,10 @@ func TestV2F5FatalProviderErrorThenIdleModelError(t *testing.T) {
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
 
-	rec := waitForEvent(t, d, wi, "supervisor_verdict", 60*time.Second)
+	rec := waitForEvent(t, d, wi, "step_dead", 60*time.Second)
 	var v verdictEvent
 	eventBody(t, rec, &v)
-	if v.Verdict != "step_dead" || v.Cause != "model_error" || !strings.Contains(v.Evidence, "invalid_request_error") {
+	if v.Cause != "model_error" || !strings.Contains(v.Evidence, "invalid_request_error") {
 		t.Fatalf("verdict %+v, want step_dead model_error naming the provider error", v)
 	}
 	// within the grace (not instantly, not never): the verdict lands
@@ -270,7 +269,7 @@ func TestV2StepTimeoutTrickleWedgeSwitchesCandidate(t *testing.T) {
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
 
-	rec := waitForEvent(t, d, wi, "supervisor_verdict", 60*time.Second)
+	rec := waitForEvent(t, d, wi, "step_dead", 60*time.Second)
 	var v verdictEvent
 	eventBody(t, rec, &v)
 	if v.Cause != "step_timeout_slow_model" {
@@ -534,10 +533,10 @@ func TestV2OkEndedTurnWithoutResultRetriesSameModel(t *testing.T) {
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)
 
-	rec := waitForEvent(t, d, wi, "supervisor_verdict", 60*time.Second)
+	rec := waitForEvent(t, d, wi, "step_dead", 60*time.Second)
 	var v verdictEvent
 	eventBody(t, rec, &v)
-	if v.Verdict != "step_dead" || v.Cause != "ended_without_result" {
+	if v.Cause != "ended_without_result" {
 		t.Fatalf("verdict %+v, want step_dead ended_without_result", v)
 	}
 	inst.waitWIStatus(t, wi, "wrapped", 120*time.Second)

@@ -34,8 +34,9 @@ import (
 
 // Event kinds emitted by the supervisor. Driver events (step_started,
 // step_done, needs_input, answered, interrupted, rewind, terminal,
-// step_failed, blocked, ...) land in the same log through the daemon
-// binding. A closed set per emitter: job lifecycle, supervisor verdicts
+// step_dead, step_failed, blocked, ...) land in the same log through the
+// daemon binding — a supervisor verdict is recorded there, by the driver
+// that consumes it. A closed set per emitter: job lifecycle, recovery
 // and the push bookkeeping.
 const (
 	EvJobStarted       = "job_started"
@@ -62,10 +63,6 @@ const (
 	// Advisory only — the commit/push proceed without the transcript;
 	// one event per attempt, never a spam loop.
 	EvTranscriptMissing = "transcript_missing"
-	// EvSupervisorVerdict records one supervisor verdict (step_dead with
-	// its cause and evidence, or driver_stalled) at the moment it is sent
-	// to the driver.
-	EvSupervisorVerdict = "supervisor_verdict"
 	EvJobStopped        = "job_stopped"
 	// EvQueueFetchDenied names the signal it actually carries: a
 	// project's ready-queue fetch was AUTHORIZATION-DENIED (typed aihub

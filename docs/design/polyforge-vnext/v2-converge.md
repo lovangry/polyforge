@@ -588,7 +588,6 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | kind | 发射者 | 含义 |
 |---|---|---|
 | `job_started` / `job_stopped` | observe（`monitor.go`、`observe.go`） | 监督开始 / 结束一个 job |
-| `supervisor_verdict` | observe `monitor.go` | 一条监督裁决（`step_dead` 及其 cause/证据，或 `driver_stalled`）在送达 driver 时落盘 |
 | `needs_recovery` | observe `monitor.go` | 同一 attempt 内的信号要求恢复（reason/detail/spawn_n） |
 | `wi_agent_rederived` | observe `monitor.go` | 恢复后的后继 step 进程已起（spawn_n） |
 | `pending_invalid` | observe `monitor.go` | `execution.json` 的 `pending_question` 缺 `id`，被投影忽略（每次看到一条） |
@@ -605,7 +604,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `missing_midflight_capsule` | runtime `recover.go` | 运行中 capsule 消失，拒绝静默重建（#103） |
 | `manual_models_dropped` | runtime `runtime.go` | 重新领取时丢弃早于 `<harness>:<model>` 格式的 `--models` 记录（#175） |
 | `exec_init` / `step_started` / `step_done` / `gate_verdict` / `needs_input` / `incomplete` / `rewind` / `terminal` / `answered` / `interrupted` / `resumed` / `step_failed` / `blocked` / `candidate_switched` / `candidates_exhausted` | driver `transition.go`（`emitLocked` 按已提交的状态转移发出） | 状态转移的进度新闻；body 带 spawn_n 与 step |
-| `driver_stalled` / `step_dead` / `verdict_stale` / `schema_fault` | driver `driver.go`、`supervision.go` | driver 收到的监督裁决 / 过期裁决被丢弃 / 结果信封持续被拒（契约坏了而非模型问题） |
+| `step_dead` / `verdict_stale` / `schema_fault` | driver `driver.go`、`supervision.go` | driver 收到的监督裁决（cause/证据）/ 过期裁决被丢弃 / 结果信封持续被拒（契约坏了而非模型问题）；`driver_stalled` 只记在 `needs_recovery.reason` |
 | `envelope_rejected` / `gate_verdict_bound` / `human_gate_unasked` | driver `result.go` 常量 | 信封校验拒绝（原文带错误）/ gate 步以 completed 交了 fail 判定，被改绑为 gate_failed / `requires_human_answer: if_asked` 步零提问完成 |
 | `output_schema_violation` / `output_schema_unloadable` | driver `outputschema.go` | 输出不符合声明的 schema / schema 读不出来 |
 | `authored_tests_rebaselined` | driver `testfiles.go` | 人工批准的测试文件改动成为新基线 |
