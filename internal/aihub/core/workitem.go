@@ -854,8 +854,21 @@ func (m *WIManager) Cancel(idOrSlug string, actor string) (*api.WorkItem, error)
 // holder). Effect: status→queued, waiting_on=NULL, event wi_resumed; the
 // claim gate (unchanged: queued only) then admits the WI like any queued
 // ticket. Authorization (server layer, v2-converge §7): the WI's reporter,
-// a project maintainer, or an admin — the same gate as cancel.
+// a project maintainer, or an admin — the same gate as cancel. This is the
+// plain door: ResumeBlockedWith takes the door's options.
 func (m *WIManager) ResumeBlocked(idOrSlug string, actor string) (*api.WorkItem, error) {
+	return m.ResumeBlockedWith(idOrSlug, actor, api.ResumeBlockedRequest{})
+}
+
+// ResumeBlockedWith is ResumeBlocked with the door's options.
+// AcceptLostWork is the owner's override of the blocked seal: in the same
+// transaction the seal is cleared and a blocked_seal_abandoned event
+// records the abandoned head and machine (the event's actor and time say
+// who and when), so the claim that follows carries no seal and a
+// different machine continues from the chain aihub holds. Without it the
+// seal stands and a different machine's continue still refuses
+// (DAEMON-518).
+func (m *WIManager) ResumeBlockedWith(idOrSlug string, actor string, opts api.ResumeBlockedRequest) (*api.WorkItem, error) {
 	id, err := m.Resolve(idOrSlug)
 	if err != nil {
 		return nil, err
@@ -897,6 +910,17 @@ func (m *WIManager) ResumeBlocked(idOrSlug string, actor string) (*api.WorkItem,
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, Fail(api.ErrCoreConflict, "", "state changed concurrently")
+	}
+	if opts.AcceptLostWork {
+		if head, machine := blockedSealTx(tx, id); head != "" {
+			if err := setBlockedSealTx(tx, id, "", "", true); err != nil {
+				return nil, err
+			}
+			if err := appendEventTx(tx, id, now, actor, "blocked_seal_abandoned",
+				map[string]any{"head_sha": head, "machine_id": machine}); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if err := appendEventTx(tx, id, now, actor, "wi_resumed",
 		map[string]any{"from": api.StatusBlocked, "to": api.StatusQueued}); err != nil {

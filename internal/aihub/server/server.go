@@ -718,7 +718,8 @@ func (s *Server) hSessionEnd(w http.ResponseWriter, r *http.Request, idn *identi
 // (polyforge#116): the door `pf resume` exercises on a workflow parked
 // blocked on an honest incomplete result. Authorization (v2-converge §7):
 // the WI's reporter, a project maintainer, or an admin — the same gate as
-// cancel.
+// cancel. accept_lost_work clears the blocked seal (core.ResumeBlockedWith)
+// under the same gate.
 func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *identity) {
 	id, projectID, err := s.wiProject(idn, r.PathValue("id"))
 	if err != nil {
@@ -733,7 +734,13 @@ func (s *Server) hResumeBlockedWI(w http.ResponseWriter, r *http.Request, idn *i
 		writeErr(w, core.Fail(api.ErrAuthForbidden, "", "resume-blocked requires the work item's reporter, a project maintainer or admin"))
 		return
 	}
-	wi, err := s.WIs.ResumeBlocked(id, idn.UserID)
+	// The body is optional: an empty one is a plain resume.
+	var req api.ResumeBlockedRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeErr(w, core.Fail(api.ErrCoreBadInput, "", "invalid JSON body: %v", err))
+		return
+	}
+	wi, err := s.WIs.ResumeBlockedWith(id, idn.UserID, req)
 	if err != nil {
 		writeErr(w, err)
 		return

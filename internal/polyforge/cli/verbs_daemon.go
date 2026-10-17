@@ -234,8 +234,10 @@ var cmdResume = &Command{
 	Name:    "resume",
 	Group:   GroupExec,
 	Summary: "Continue a paused WI (clean_pause=false) or a blocked one (reporter, maintainer or admin); abandon with pf cancel",
-	Usage:   "pf resume <id>",
-	Setup:   func(fs *flag.FlagSet) {},
+	Usage:   "pf resume <id> [--accept-lost-work]",
+	Setup: func(fs *flag.FlagSet) {
+		fs.Bool("accept-lost-work", false, "blocked WI only: accept losing the work the sealing machine never pushed, so any machine continues from aihub's chain (clears the blocked seal; recorded as a blocked_seal_abandoned event)")
+	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 1 {
 			return fmt.Errorf("resume: expected exactly one work item id")
@@ -248,6 +250,10 @@ var cmdResume = &Command{
 			return err
 		}
 		name := api.DisplayName(wi.Slug, args[0])
+		acceptLostWork := boolFlag(fs, "accept-lost-work")
+		if acceptLostWork && wi.Status != api.StatusBlocked {
+			return fmt.Errorf("resume: --accept-lost-work applies only to a blocked work item; %s is %s", name, wi.Status)
+		}
 		// Dispatch order, decided by WI state (v2 merge of D1 + D2):
 		//  1. hub status blocked  -> the human-key resume-blocked door, then
 		//     the daemon's claim/start (below).
@@ -311,8 +317,12 @@ var cmdResume = &Command{
 		// checks reporter / project maintainer / admin against the caller,
 		// and the daemon's machine key is not that caller. Only then does
 		// the local daemon claim and start the WI.
-		if _, err := ctx.aihub().ResumeBlockedWorkItem(args[0]); err != nil {
+		if _, err := ctx.aihub().ResumeBlockedWorkItemWith(args[0], api.ResumeBlockedRequest{AcceptLostWork: acceptLostWork}); err != nil {
 			return err
+		}
+		seal, _ := wi.Attrs["blocked_seal"].(map[string]any)
+		if head, _ := seal["head"].(string); acceptLostWork && head != "" {
+			fmt.Fprintf(ctx.Stderr, "accepted lost work on %s: the blocked seal (capsule head %s on machine %v) is cleared; the work it never pushed is abandoned\n", name, head, seal["machine"])
 		}
 		raw, err := ctx.daemon().ResumeBlocked(args[0])
 		if err != nil {

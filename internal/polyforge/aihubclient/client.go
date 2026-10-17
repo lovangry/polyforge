@@ -495,7 +495,13 @@ func (c *Client) SessionEnd(wi string, req api.SessionEndRequest) error {
 // (polyforge#116): `pf resume` on a workflow parked blocked — status
 // blocked → queued for the owner's immediate re-claim; the daemon then
 // re-establishes execution over the parked capsule. Authorization is
-// server-side (the claim gate: any project member).
+// server-side (the reporter, a project maintainer or an admin).
 func (c *Client) ResumeBlockedWorkItem(idOrSlug string) (json.RawMessage, error) {
-	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/resume-blocked", map[string]any{})
+	return c.ResumeBlockedWorkItemWith(idOrSlug, api.ResumeBlockedRequest{})
+}
+
+// ResumeBlockedWorkItemWith is ResumeBlockedWorkItem with the door's
+// options (AcceptLostWork also clears the blocked seal).
+func (c *Client) ResumeBlockedWorkItemWith(idOrSlug string, req api.ResumeBlockedRequest) (json.RawMessage, error) {
+	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(idOrSlug)+"/resume-blocked", req)
 }
