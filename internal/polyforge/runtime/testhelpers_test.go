@@ -518,10 +518,10 @@ func newTestRuntime(t *testing.T, hub Aihub, sp Spawner) (*Runtime, *supervise.Q
 	toOB := supervise.NewQueue[protocol.RTMsg]()
 	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
-	// Before the temp dirs go, let a background operation still under way
-	// (a retry attempt finishing its persist) release its work item's
-	// lock — bounded, a hung one is the test's own business.
-	t.Cleanup(func() { settleOps(t, r, 10*time.Second) })
+	// Before the temp dirs go, stop the retries and let an operation still
+	// under way finish its message — bounded, a hung one is the test's own
+	// business.
+	t.Cleanup(func() { r.Close(); settleOps(t, r, 10*time.Second) })
 	// The claim-time capsule remote: aihub creates the bare repo at claim
 	// (the fake hub implements the contract; the runtime's no-remote
 	// local init is a typed refusal).
@@ -1003,6 +1003,7 @@ func actorBusy(r *Runtime, wi string) bool {
 // outcome.
 func restartSettled(t testing.TB, r *Runtime) error {
 	t.Helper()
+	t.Cleanup(r.Close) // no retry of this runtime outlives the test
 	err := r.Restart(context.Background())
 	settleOps(t, r, 20*time.Second)
 	return err

@@ -246,7 +246,7 @@ func newTestRuntimeAt(t *testing.T, hub Aihub, sp Spawner, dataDir string) (*Run
 	toOB := supervise.NewQueue[protocol.RTMsg]()
 	fromOB := supervise.NewQueue[protocol.OBMsg]()
 	r := New(cfg, hub, sp, toOB, fromOB)
-	t.Cleanup(func() { settleOps(t, r, 10e9) }) // see newTestRuntime
+	t.Cleanup(func() { r.Close(); settleOps(t, r, 10e9) }) // see newTestRuntime
 	// The claim-time capsule remote (see newTestRuntime): aihub creates
 	// the bare repo at claim; the fake hub implements the contract.
 	if fh, ok := hub.(*fakeHub); ok {
