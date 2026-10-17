@@ -1006,3 +1006,20 @@ func restartSettled(t testing.TB, r *Runtime) error {
 	settleOps(t, r, 20*time.Second)
 	return err
 }
+
+// handleOB applies one OB message through its work item's actor and
+// waits for it.
+func (r *Runtime) handleOB(_ context.Context, msg protocol.OBMsg) {
+	_ = r.call(msg.WorkItem, func() error { r.applyOB(msg); return nil })
+}
+
+// recoverOp runs one recovery of j's current derivation through its work
+// item's actor (a job that settled meanwhile, or left RUNNING, drops it).
+func (r *Runtime) recoverOp(_ context.Context, j *job, cause, detail string) {
+	_ = r.call(j.wi, func() error {
+		if r.jobOf(j.wi) == j && stateOf(j) == StateRunning {
+			r.recoverCore(r.ctx, j, cause, detail)
+		}
+		return nil
+	})
+}

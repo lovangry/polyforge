@@ -29,17 +29,6 @@ import (
 // cleanupBound bounds one teardown's waits inside the six-layer cleanup.
 const cleanupBound = 10 * time.Second
 
-// recoverOp runs one recovery of j's current derivation through its work
-// item's actor (a job that settled meanwhile, or left RUNNING, drops it).
-func (r *Runtime) recoverOp(_ context.Context, j *job, cause, detail string) {
-	_ = r.call(j.wi, func() error {
-		if r.jobOf(j.wi) == j && stateOf(j) == StateRunning {
-			r.recoverCore(r.ctx, j, cause, detail)
-		}
-		return nil
-	})
-}
-
 // recoverCore is the recovery sequence, run by the work item's actor
 // across its pushes and the relaunch. cause
 // names the recovery trigger (the interrupted-dispatch archive's class

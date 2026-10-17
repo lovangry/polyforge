@@ -21,7 +21,7 @@ func TestOriginPersists(t *testing.T) {
 }
 
 func TestNoteOriginIsConsumedOnce(t *testing.T) {
-	r := &Runtime{}
+	r := &Runtime{origins: map[string]Origin{}}
 	r.NoteOrigin("wi_a", Origin{Kind: OriginAuto})
 	if o := r.takeOrigin("wi_a"); o == nil || o.Kind != OriginAuto {
 		t.Fatalf("take: %+v", o)
