@@ -26,27 +26,14 @@
   - 绑定 bundle vs 新增子票：创建事务内父票 bundle 复查 + 绑定的守卫写复查子票；终态不同时出现「有子票 ∧ bundle 非空」。
 - **Claim 无 bundle 票**仍被拒：`CORE-409`，`reason=NOT_CLAIMABLE`（现行路径不变）。
 
-## 3. ready queue「待选 bundle」分段与派生父票状态（响应形状，只做加法） <!-- §3 -->
+## 3. ready queue 与父票（响应形状） <!-- §3 -->
 
-- `GET /api/v1/projects/{p}/ready-queue` 在既有 `project` / `items` / `running` / `paused` 之外新增 **`pending_bundles`** 数组：恰含 **bundle 为空 ∧ 无子票 ∧ queued** 且 `waiting_on` 为空、无未终态 `blocks` 依赖的票（与可执行分段同过滤）。epic（有子票）不出现在任何分段。条目与既有分段同构（`id` / `slug` / `status` / `goal` / `priority` / `bundle_name` 等旧字段全部保留）。解绑（X→NULL）后的票回到本分段。
-- **派生父票状态**（WI 视图与全部 queue 条目新增 `derived` 块；无子票的票整个块省略）：
-
-```json
-"derived": {
-  "has_children": true,
-  "children_total": 3,
-  "children_terminal": 2,
-  "children_wrapped": 1,
-  "completion": "in_progress"
-}
-```
-
-  - `completion = "complete"` 当且仅当全部子票终态（wrapped / failed / canceled）且 ≥1 wrapped；否则 `"in_progress"`。
-  - 派生纯读：父票库内 `status` 恒为 `queued`，任何终态不写；新增子票自动回到 `"in_progress"`，无重开操作。
-  - 存量违规行（bundle 非空且有子票）不迁移、不拒读，按字面数据展示；对称规则只约束新写入。
+- `GET /api/v1/projects/{p}/ready-queue` 响应为 `project` / `items` / `running` / `paused`。无 bundle 的登记票（含 epic，即有子票的票）不出现在任何分段。
+- 父票没有派生完成状态：库内 `status` 恒为 `queued`，任何终态不写；子票进度从子票本身读取。
+- 存量违规行（bundle 非空且有子票）不迁移、不拒读，按字面数据展示；对称规则只约束新写入。
 
 ## 4. 部署与回滚 <!-- §4 -->
 
 - **部署顺序：新 aihub 先于新 pf**。拆分 a 只改 aihub 端；响应只做加法，旧 pf 对新增 JSON 键天然忽略，先部署 aihub 不破坏现行客户端；拆分 b 的客户端改造随后上线。「已绑 bundle 的票不再可作父票」等语义变化属预期，不算回归。
-- **回滚**：本票无 schema 变更、无迁移、无新表新列——**回滚仅需回退 aihub 二进制**。数据面无需清理：R2 窗口内发生过的 bundle 变更是普通 UPDATE，回退后按旧只读语义照常展示；`pending_bundles` 分段与 `derived` 块随二进制一起消失，不落任何持久化痕迹。
+- **回滚**：本票无 schema 变更、无迁移、无新表新列——**回滚仅需回退 aihub 二进制**。数据面无需清理：R2 窗口内发生过的 bundle 变更是普通 UPDATE，回退后按旧只读语义照常展示。
 - **上线验证（本地临时 aihub）**：`go test ./...` 全绿（含 w140 验收套件 `test/w140_wi_kind_contract_acceptance_test.go`）；不触碰生产 aihub、不替换 `/usr/local/bin/pf`、不重启 pf daemon。

@@ -149,13 +149,6 @@ func TestWorkItemCRUD(t *testing.T) {
 	if err != nil || len(items) != 1 {
 		t.Fatalf("list: %v %d", err, len(items))
 	}
-	// Execution-state attrs are rejected at any depth.
-	if _, err := env.WIs.Create(CreateRequest{
-		Project: "alpha", Goal: "bad", Reporter: env.UserID,
-		Attrs: map[string]any{"custom": map[string]any{"current_step": "x"}},
-	}); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "EXECUTION_STATE_REJECTED" {
-		t.Fatalf("execution-state attrs not rejected: %v", err)
-	}
 	// blocked_seal is Core-written (the blocked close): a create cannot
 	// plant one.
 	if _, err := env.WIs.Create(CreateRequest{
@@ -163,6 +156,14 @@ func TestWorkItemCRUD(t *testing.T) {
 		Attrs: map[string]any{"blocked_seal": map[string]any{"head": "abc123", "machine": "m9"}},
 	}); !IsCode(err, api.ErrCoreBadInput) || ErrorReason(err) != "EXECUTION_STATE_REJECTED" {
 		t.Fatalf("a planted blocked_seal not rejected: %v", err)
+	}
+	// Only the top-level reserved key is refused: other attrs, and a
+	// nested blocked_seal (never read as a seal), are business data.
+	if _, err := env.WIs.Create(CreateRequest{
+		Project: "alpha", Goal: "free attrs", Reporter: env.UserID,
+		Attrs: map[string]any{"current_step": "x", "custom": map[string]any{"blocked_seal": "y"}},
+	}); err != nil {
+		t.Fatalf("attrs without a top-level blocked_seal refused: %v", err)
 	}
 	// Execution ticket: bundle_name pins the workflow reference (the name
 	// is the reference — the digest chain is deleted, polyforge#149). The

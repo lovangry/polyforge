@@ -14,7 +14,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -80,41 +79,15 @@ func validPriority(p string) bool {
 	return false
 }
 
-// forbidden attrs keys (execution-state blacklist; reference.md §2.3, kept from v0
-// business semantics): Core never persists workflow execution state.
-// blocked_seal is reserved too: Core itself writes it on a blocked close
-// (setBlockedSealTx, a direct UPDATE that never passes through
-// checkAttrs), so a create must not plant a fake seal that the next
-// cross-machine claim would then check a clone against.
-var executionStateKeys = map[string]bool{
-	blockedSealKey: true,
-	"current_step": true, "step_id": true, "step_attempt_id": true,
-	"attempt": true, "review_round": true, "review_rounds": true,
-	"review_verdict": true, "progress": true, "workflow_status": true,
-	"steps": true, "rewind_stats": true, "budget_consumed": true,
-	"command_count": true, "step_start_refs": true, "pending_question": true,
-}
-
-// checkAttrs recursively rejects execution-state keys at any depth.
-func checkAttrs(v any, path string) error {
-	switch t := v.(type) {
-	case map[string]any:
-		for k, val := range t {
-			p := path + "." + k
-			if executionStateKeys[k] {
-				return Fail(api.ErrCoreBadInput, "EXECUTION_STATE_REJECTED",
-					"attrs key %s carries execution state or a Core-written key; a create cannot set it", p)
-			}
-			if err := checkAttrs(val, p); err != nil {
-				return err
-			}
-		}
-	case []any:
-		for i, val := range t {
-			if err := checkAttrs(val, fmt.Sprintf("%s[%d]", path, i)); err != nil {
-				return err
-			}
-		}
+// checkAttrs refuses a top-level blocked_seal: Core itself writes it on
+// a blocked close (setBlockedSealTx, a direct UPDATE that never passes
+// through checkAttrs) and reads it only at the top level, so a create
+// must not plant a fake seal that the next cross-machine claim would
+// check a clone against.
+func checkAttrs(attrs map[string]any) error {
+	if _, ok := attrs[blockedSealKey]; ok {
+		return Fail(api.ErrCoreBadInput, "EXECUTION_STATE_REJECTED",
+			"attrs key %s is written by Core; a create cannot set it", blockedSealKey)
 	}
 	return nil
 }
@@ -137,7 +110,7 @@ func (m *WIManager) Create(req CreateRequest) (*api.WorkItem, error) {
 	if req.Attrs == nil {
 		req.Attrs = map[string]any{}
 	}
-	if err := checkAttrs(req.Attrs, "attrs"); err != nil {
+	if err := checkAttrs(req.Attrs); err != nil {
 		return nil, err
 	}
 	if req.Labels == nil {
@@ -350,7 +323,6 @@ func resolveWith(q queryRower, idOrSlug string) (string, error) {
 // GetOptions controls detail assembly.
 type GetOptions struct {
 	IncludeEvents bool
-	IncludeDeps   bool
 }
 
 // Get loads one work item (id or slug), with slug/assignee/project filled.
@@ -369,13 +341,6 @@ func (m *WIManager) Get(idOrSlug string, opts GetOptions) (*api.WorkItem, error)
 			return nil, eerr
 		}
 		wi.Attrs["events"] = events // presentation-only; not persisted
-	}
-	if opts.IncludeDeps {
-		deps, derr := m.Dependencies(id)
-		if derr != nil {
-			return nil, derr
-		}
-		wi.Attrs["deps"] = deps
 	}
 	return wi, nil
 }

@@ -415,8 +415,8 @@ func TestMemoryOverHTTP(t *testing.T) {
 	}
 }
 
-// TestMemoryDBOnlyOverHTTP: a memory is served from the database alone
-// (its write-through file is not needed), and an idempotent replay with the same key
+// TestMemoryDBOnlyOverHTTP: a memory is served from the database alone,
+// and an idempotent replay with the same key
 // answers the original entry whose body reads back verbatim (the step
 // summary write compares it with what it sent); after a redact the body
 // is never served and the entry leaves search.
@@ -443,13 +443,6 @@ func TestMemoryDBOnlyOverHTTP(t *testing.T) {
 	id, _ := first["id"].(string)
 	if code, raw := e.do(t, "GET", "/api/v1/memories/"+id+"?format=content", e.key, nil, nil); code != 200 || string(raw) != body {
 		t.Fatalf("content after the replay: %d %q, want %q", code, raw, body)
-	}
-	// The database is the truth: serving does not need the files.
-	if err := os.RemoveAll(filepath.Join(e.dataDir, "memory")); err != nil {
-		t.Fatal(err)
-	}
-	if code, raw := e.do(t, "GET", "/api/v1/memories/"+id+"?format=content", e.key, nil, nil); code != 200 || string(raw) != body {
-		t.Fatalf("content without the file tree: %d %q", code, raw)
 	}
 	var search struct {
 		Total int `json:"total"`

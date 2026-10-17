@@ -22,19 +22,10 @@ package test
 //     (NOT_CLAIMABLE claim gate, bound-parent create refusal, old
 //     queue/CLI shape, race invariants that already hold).
 //
-// Name-agnostic derived-shape assertions: spec Assumption 2 leaves the
-// derived epic/parent-completion field names and the pending-bundle
-// segment key to the implementation ("response shape only additive").
-// The suite therefore discovers NEW response keys relative to the
-// frozen pre-change key set instead of pinning literals, and asserts
-// the spec'd SEMANTICS (value transitions, segment membership) on
-// whatever those new keys are.
-
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os/exec"
 	"strings"
 	"sync"
@@ -167,16 +158,6 @@ func w140ClaimEnd(t *testing.T, inst *v1Install, id, status string) {
 	}
 }
 
-// w140AddDep adds a `blocks` dependency: blocked is held by blocking.
-func w140AddDep(t *testing.T, inst *v1Install, blocked, blocking string) {
-	t.Helper()
-	err := inst.client.Do("POST", "/api/v1/work-items/"+url.PathEscape(blocked)+"/dependencies",
-		map[string]any{"blocking_wi_id": blocking, "kind": "blocks"}, nil)
-	if err != nil {
-		t.Fatalf("add dependency %s blocked-by %s: %v", blocked, blocking, err)
-	}
-}
-
 // w140SegIDs lists the WI ids of one queue segment ("" entries skipped).
 func w140SegIDs(m map[string]any, key string) []string {
 	arr, ok := m[key].([]any)
@@ -194,33 +175,6 @@ func w140SegIDs(m map[string]any, key string) []string {
 	return ids
 }
 
-// w140QueueOldKeys are the pre-change ready-queue top-level keys.
-var w140QueueOldKeys = map[string]bool{"project": true, "items": true, "running": true, "paused": true}
-
-// w140NewSegs returns the NEW queue segments (post-change, additive):
-// top-level keys absent from the old key set whose values are arrays.
-func w140NewSegs(m map[string]any) map[string][]string {
-	out := map[string][]string{}
-	for k, v := range m {
-		if w140QueueOldKeys[k] {
-			continue
-		}
-		if _, ok := v.([]any); ok {
-			out[k] = w140SegIDs(m, k)
-		}
-	}
-	return out
-}
-
-// w140NewSegIDs is the union of ids across all new segments.
-func w140NewSegIDs(m map[string]any) []string {
-	var ids []string
-	for _, seg := range w140NewSegs(m) {
-		ids = append(ids, seg...)
-	}
-	return ids
-}
-
 // w140HasID reports membership.
 func w140HasID(ids []string, id string) bool {
 	for _, x := range ids {
@@ -229,38 +183,6 @@ func w140HasID(ids []string, id string) bool {
 		}
 	}
 	return false
-}
-
-// w140FrozenViewKeys is the pre-change WI detail key set (api.WorkItem
-// + clean_pause + repo_inventory): the additive-only baseline the
-// derived-epic fields must be added on top of.
-var w140FrozenViewKeys = map[string]bool{
-	"id": true, "slug": true, "seq": true, "project_id": true, "project": true,
-	"goal": true, "content": true, "parent_id": true, "status": true,
-	"priority": true, "milestone": true, "labels": true, "attrs": true,
-	"reporter": true, "assignee": true, "waiting_on": true,
-	"bundle_name": true,
-	"created_at":  true, "updated_at": true, "closed_at": true,
-	"session_fingerprint": true, "session_machine": true,
-	"session_started_at": true, "clean_pause": true, "repo_inventory": true,
-}
-
-// w140DerivedKeys lists the view keys beyond the frozen pre-change set.
-func w140DerivedKeys(v map[string]any) []string {
-	var out []string
-	for k := range v {
-		if !w140FrozenViewKeys[k] {
-			out = append(out, k)
-		}
-	}
-	return out
-}
-
-// w140JSONEq compares two decoded JSON values by canonical re-marshalling.
-func w140JSONEq(a, b any) bool {
-	ab, _ := json.Marshal(a)
-	bb, _ := json.Marshal(b)
-	return bytes.Equal(ab, bb)
 }
 
 // w140Race runs two operations concurrently (one barrier release) and
@@ -529,197 +451,6 @@ func w140ProjectIDs(t *testing.T, inst *v1Install, project string) []string {
 		ids = append(ids, it.ID)
 	}
 	return ids
-}
-
-// ---------------------------------------------------------------------------
-// AC 7 (+ the unbind tail of AC 2): ready queue pending-bundle segment.
-// ---------------------------------------------------------------------------
-
-// TestW140ReadyQueuePendingBundleSegment: a NEW segment (name left to
-// the implementation — additive-only) holds exactly the queued,
-// never-blocked, childless, bundle-less tickets; the executable segment
-// and every entry's old fields survive unchanged; epics appear in NO
-// segment; an unbound ticket returns to the pending segment.
-func TestW140ReadyQueuePendingBundleSegment(t *testing.T) {
-	inst := w140Setup(t, "w140-queue")
-
-	x := w140Create(t, inst, "w140-queue", "w140 executable bound", strPtr("w140-q-x"), nil)
-	tt := w140Create(t, inst, "w140-queue", "w140 pending candidate", nil, nil)
-	w := w140Create(t, inst, "w140-queue", "w140 waiting_on excluded", nil, nil)
-	if err := w140Patch(inst, w, map[string]any{"waiting_on": "owner"}); err != nil {
-		t.Fatalf("PATCH waiting_on: %v", err)
-	}
-	bq := w140Create(t, inst, "w140-queue", "w140 blocker", strPtr("w140-q-bq"), nil)
-	d := w140Create(t, inst, "w140-queue", "w140 dependency-blocked excluded", nil, nil)
-	w140AddDep(t, inst, d, bq)
-	e := w140Create(t, inst, "w140-queue", "w140 epic parent", nil, nil)
-	ec := w140Create(t, inst, "w140-queue", "w140 epic bound child", strPtr("w140-q-ec"), strPtr(e))
-	v := w140Create(t, inst, "w140-queue", "w140 later unbound", strPtr("w140-q-v"), nil)
-
-	q := w140Queue(t, inst, "w140-queue")
-
-	// kept face: old segments and their membership.
-	if got := q["project"]; got != "w140-queue" {
-		t.Fatalf("queue project = %v, want w140-queue", got)
-	}
-	items := w140SegIDs(q, "items")
-	for _, id := range []string{x, bq, ec, v} {
-		if !w140HasID(items, id) {
-			t.Fatalf("executable segment lost %s (old membership must survive: got %v)", id, items)
-		}
-	}
-	for _, id := range []string{tt, w, d, e} {
-		if w140HasID(items, id) {
-			t.Fatalf("executable segment gained %s (must stay excluded)", id)
-		}
-	}
-
-	// new face: the pending-bundle segment exists (additive) and holds
-	// exactly the qualifying tickets.
-	segs := w140NewSegs(q)
-	if len(segs) == 0 {
-		t.Fatalf("ready queue has no new segment beyond {project,items,running,paused}: the 待选 bundle segment is missing (spec: response shape only additive)")
-	}
-	pending := w140NewSegIDs(q)
-	if !w140HasID(pending, tt) {
-		t.Fatalf("pending-bundle segment does not contain the qualifying ticket %s (segments %v)", tt, segs)
-	}
-	for _, id := range []string{w, d, e, x, bq, ec, v} {
-		if w140HasID(pending, id) {
-			t.Fatalf("pending-bundle segment contains %s, which must be excluded (waiting_on/dependency/children/bundle rules)", id)
-		}
-	}
-	// the epic appears in NO segment at all.
-	for _, id := range []string{e} {
-		if w140HasID(items, id) || w140HasID(w140SegIDs(q, "running"), id) ||
-			w140HasID(w140SegIDs(q, "paused"), id) || w140HasID(pending, id) {
-			t.Fatalf("epic %s appears in a queue segment, want no segment", id)
-		}
-	}
-
-	// additivity: every entry (old and new segments) keeps the old fields.
-	for key := range segs {
-		for _, entry := range w140SegEntries(t, q, key) {
-			w140RequireOldFields(t, key, entry)
-		}
-	}
-	for _, entry := range w140SegEntries(t, q, "items") {
-		w140RequireOldFields(t, "items", entry)
-	}
-
-	// unbind tail: X→NULL returns the ticket to the pending segment.
-	if err := w140Patch(inst, v, map[string]any{"bundle_name": nil}); err != nil {
-		t.Fatalf("unbind %s in R2 window: %v", v, err)
-	}
-	q2 := w140Queue(t, inst, "w140-queue")
-	if w140HasID(w140SegIDs(q2, "items"), v) {
-		t.Fatalf("unbound ticket %s still in the executable segment", v)
-	}
-	if !w140HasID(w140NewSegIDs(q2), v) {
-		t.Fatalf("unbound ticket %s did not return to the pending-bundle segment", v)
-	}
-}
-
-// w140SegEntries returns the object entries of one queue segment.
-func w140SegEntries(t *testing.T, q map[string]any, key string) []map[string]any {
-	t.Helper()
-	arr, ok := q[key].([]any)
-	if !ok {
-		t.Fatalf("queue segment %q is not an array", key)
-	}
-	var out []map[string]any
-	for _, e := range arr {
-		obj, ok := e.(map[string]any)
-		if !ok {
-			t.Fatalf("queue segment %q entry is not an object: %v", key, e)
-		}
-		out = append(out, obj)
-	}
-	return out
-}
-
-// w140RequireOldFields asserts a queue entry keeps the pre-change fields.
-func w140RequireOldFields(t *testing.T, seg string, entry map[string]any) {
-	t.Helper()
-	for _, k := range []string{"id", "slug", "status", "goal", "priority", "bundle_name"} {
-		if _, ok := entry[k]; !ok {
-			t.Fatalf("queue segment %q entry lost the old field %q (additive-only): %v", seg, k, entry)
-		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// AC 8: derived parent completion status (additive, never a written state).
-// ---------------------------------------------------------------------------
-
-// TestW140DerivedParentStatus: the WI view of a parent gains derived
-// keys (beyond the frozen pre-change set) whose values track the
-// children: they change when all children go terminal (≥1 wrapped =
-// complete), and change again when a new child lands (auto back to
-// in-progress) — while the stored `status` stays queued throughout,
-// and the parent appears in no queue segment.
-func TestW140DerivedParentStatus(t *testing.T) {
-	inst := w140Setup(t, "w140-derive")
-
-	p := w140Create(t, inst, "w140-derive", "w140 derive parent", nil, nil)
-	c1 := w140Create(t, inst, "w140-derive", "w140 derive child one", strPtr("w140-d-c1"), strPtr(p))
-	c2 := w140Create(t, inst, "w140-derive", "w140 derive child two", strPtr("w140-d-c2"), strPtr(p))
-
-	// stage 0: children queued → in progress.
-	v0 := w140View(t, inst, p)
-	for _, k := range []string{"id", "status", "bundle_name", "parent_id"} {
-		if _, ok := v0[k]; !ok {
-			t.Fatalf("stage 0: view lost the old field %q", k)
-		}
-	}
-
-	// stage 1: all children terminal with ≥1 wrapped → complete.
-	w140ClaimEnd(t, inst, c1, "wrapped")
-	w140ClaimEnd(t, inst, c2, "wrapped")
-	v1 := w140View(t, inst, p)
-	if got := v1["status"]; got != "queued" {
-		t.Fatalf("stage 1: parent status = %v, want queued (no terminal state is ever written)", got)
-	}
-	derived := w140DerivedKeys(v1)
-	if len(derived) == 0 {
-		t.Fatalf("stage 1: WI view gained no derived keys beyond the frozen field set (spec: derived epic/parent status exposed additively)")
-	}
-	changed := false
-	for _, k := range derived {
-		if !w140JSONEq(v0[k], v1[k]) {
-			changed = true
-		}
-	}
-	if !changed {
-		t.Fatalf("stage 1: no derived key changed when all children became terminal (derived status must react)")
-	}
-
-	// stage 2: a new child lands → auto back to in-progress, no reopen op.
-	c3 := w140Create(t, inst, "w140-derive", "w140 derive child three", strPtr("w140-d-c3"), strPtr(p))
-	v2 := w140View(t, inst, p)
-	if got := v2["status"]; got != "queued" {
-		t.Fatalf("stage 2: parent status = %v, want queued", got)
-	}
-	for _, k := range derived {
-		if _, ok := v2[k]; !ok {
-			t.Fatalf("stage 2: derived key %q disappeared (fields must not be removed)", k)
-		}
-	}
-	reverted := false
-	for _, k := range derived {
-		if !w140JSONEq(v1[k], v2[k]) {
-			reverted = true
-		}
-	}
-	if !reverted {
-		t.Fatalf("stage 2: no derived key changed back when child %s landed (auto return to in-progress, no reopen op)", c3)
-	}
-
-	// the parent (epic, queued, unbound) appears in no queue segment.
-	q := w140Queue(t, inst, "w140-derive")
-	if w140HasID(w140SegIDs(q, "items"), p) || w140HasID(w140NewSegIDs(q), p) {
-		t.Fatalf("derived parent %s appears in a queue segment, want none", p)
-	}
 }
 
 // ---------------------------------------------------------------------------

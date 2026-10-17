@@ -363,7 +363,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 
 | # | 裁定（一句话） | 文档落点 |
 |---|---|---|
-| D1 | 就绪队列（`GET /api/v1/projects/{project}/ready-queue`）响应为 `{items, running, paused, pending_bundles}` 四段（`internal/aihub/core/queue.go`）；无 `blocked` 数组，等依赖的票不出现 | `archive/02-aihub-core.md#§5.1b`（重写）及 §5.1 行 4 / §4.2a 行 26 / §7 / §10 关联句；`archive/00-architecture.md#§3.1` 组件表、§3.4b/§3.4c 与 `archive/07-deployment-pilot.md#§9.2` 同步最小修订 |
+| D1 | 就绪队列（`GET /api/v1/projects/{project}/ready-queue`）响应为 `{items, running, paused}` 三段（`internal/aihub/core/queue.go`；`pending_bundles` 段已于 polyforge#194 删除）；无 `blocked` 数组，等依赖的票不出现 | `archive/02-aihub-core.md#§5.1b`（重写）及 §5.1 行 4 / §4.2a 行 26 / §7 / §10 关联句；`archive/00-architecture.md#§3.1` 组件表、§3.4b/§3.4c 与 `archive/07-deployment-pilot.md#§9.2` 同步最小修订 |
 | D2 | `seq` 项目内唯一（`UNIQUE(project_id, seq)`），非全局 | `archive/02-aihub-core.md#§4.2` DDL |
 | D4 | claim 需该 project 的 writer/maintainer membership 或全局 admin（`hSessionClaim`→`requireWrite`，403 otherwise）；key scope 不构成认领授权 | `archive/02-aihub-core.md#§4.10`、`#§8`；`archive/04-local-runtime.md#§6.1` 关联句 |
 | D8 | 先推 capsule 链，再推任务仓库 carrier ref（`refs/pf-task/<name>`）；任务仓库推送失败不回滚 capsule 链（polyforge#158 起另发 `carrier_push_failed` 决策提醒，见本文 §14.2） | `archive/v1-spec-full.md`（单行最小修订）+ 本表登记（“或”：两处都做） |
@@ -623,7 +623,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 
 - `work_items.attrs.blocked_seal = {"head": <sha>, "machine": <id>}`（`core/session.go` `blockedSealKey`）：带 head 的 `End(blocked)` 写入，其他任何 End/Pause 清除；不改 schema，搭在业务 attrs JSON 上。
 - 领取应答的 `sealed_head` / `sealed_machine`（`api/types.go` `SessionClaim`）由它读出：另一台机器继续一个 blocked WI 时，其 clone 里必须恰好有这个 head，否则拒绝（第 7 节"跨 daemon 继续"）。`attrs` 不在 PATCH 可更新键中（`core/workitem.go` `patchableFields`，只在 create 时写入），用户无法改写或删掉它（2026-10-16 wave 4 按代码更正：原文称 PATCH 可删）。
-- 与 `archive/02-aihub-core.md#§2.6` INV-2c（attrs 不得承载执行态字段）的关系：02 已归档，不再是权威；现行代码是权威。代码里 INV-2c 的落地是 create 时的执行态键黑名单（`core/workitem.go` `executionStateKeys`）；`blocked_seal` 也在黑名单里（作为保留键，不是因为它是执行态），create 带它即 `CORE-400 EXECUTION_STATE_REJECTED`。现行行为：`blocked_seal` 只由 aihub 在 session 事务里读写（`setBlockedSealTx` 直接 UPDATE，不经 create 校验 / `blockedSealTx`），daemon 只能经 `End(blocked)` 间接写入，用户既不能在 create 时带入也不能 PATCH；它不是执行态（执行态的唯一权威仍是 capsule 的 `runtime-state/execution.json`），只记录 blocked 封存时的交接点——哪台机器、哪个 head。读不到它（键不存在或 attrs 解析失败）时领取应答的 `sealed_head` 为空，跨机继续不做 head 校验（fail open）。不做迁移（G17 选 A，I-5 不做 D）。
+- 与 `archive/02-aihub-core.md#§2.6` INV-2c（attrs 不得承载执行态字段）的关系：02 已归档，不再是权威；现行代码是权威。代码里 create 只拒顶层保留键 `blocked_seal`（`core/workitem.go` `checkAttrs`；保留键，不是执行态），带它即 `CORE-400 EXECUTION_STATE_REJECTED`；执行态不进 attrs 由 daemon 只写 capsule 保证。现行行为：`blocked_seal` 只由 aihub 在 session 事务里读写（`setBlockedSealTx` 直接 UPDATE，不经 create 校验 / `blockedSealTx`），daemon 只能经 `End(blocked)` 间接写入，用户既不能在 create 时带入也不能 PATCH；它不是执行态（执行态的唯一权威仍是 capsule 的 `runtime-state/execution.json`），只记录 blocked 封存时的交接点——哪台机器、哪个 head。读不到它（键不存在或 attrs 解析失败）时领取应答的 `sealed_head` 为空，跨机继续不做 head 校验（fail open）。不做迁移（G17 选 A，I-5 不做 D）。
 
 ### E.4 daemon data dir（默认 `~/.local/share/polyforge`）
 

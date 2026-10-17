@@ -285,15 +285,17 @@ func upgradeStatements(block string) []string {
 
 // sqlVer is the first in-window instance directory: the release tag that
 // ships polyforge#149's schema delta (the next release after v2.3.0).
-// sqlVer250 ships polyforge#157's (the repo inventory column).
+// sqlVer250 ships polyforge#157's (the repo inventory column);
+// sqlVer2140 drops the memories freshness columns and claim_idempotency.
 const (
-	sqlVer    = "v2.4.0"
-	sqlVer250 = "v2.5.0"
+	sqlVer     = "v2.4.0"
+	sqlVer250  = "v2.5.0"
+	sqlVer2140 = "v2.14.0"
 )
 
 // sqlVers lists every deploy/sql version in ascending order: a pre-#149
 // database needs all of them before the current code runs on it.
-var sqlVers = []string{sqlVer, sqlVer250}
+var sqlVers = []string{sqlVer, sqlVer250, sqlVer2140}
 
 // loadSQLFile reads one file of deploy/sql/v2.4.0/.
 func loadSQLFile(t *testing.T, name string) string { return loadSQLFileOf(t, sqlVer, name) }

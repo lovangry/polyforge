@@ -53,7 +53,6 @@ const (
 	ErrMemNotFound    = "MEM-404"
 	ErrMemConflict    = "MEM-409"
 	ErrMemTooLarge    = "MEM-413"
-	ErrMemInternal    = "MEM-500"
 	ErrMemUpstream    = "MEM-502"
 	ErrMemUnavailable = "MEM-503"
 

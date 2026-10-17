@@ -68,18 +68,15 @@ The blocked WI has exactly two exits: `pf resume` (continue = resume-blocked + a
 
 - Edge kinds `blocks` (default), `supersedes`, `related` (`core/workitem.go` `AddDependency`); same project only; no self-edge; a `blocks` blocker must be an execution ticket (`CORE-400 BLOCKER_NOT_EXECUTABLE`); non-`related` edges refuse cycles (`CORE-409 DEPENDENCY_CYCLE`). Only a **wrapped** blocker releases a `blocks` edge (`core/owner.go`, #161).
 - Parent/child and bundle binding rules: `wi-kind-contract.md#§2` (one nesting level, `PARENT_NOT_REGISTRY`, `HAS_CHILDREN_NO_BUNDLE`, bundle frozen at first claim).
-- Ready queue `GET /projects/{p}/ready-queue` (`core/queue.go`): `{project, items, running, paused, pending_bundles}`; `items` = queued ∧ `waiting_on` empty ∧ no unfinished `blocks` edge ∧ has a bundle ∧ inventory repos still exist; ordered priority (`urgent high normal low`) then `created_at`. No `blocked` segment.
+- Ready queue `GET /projects/{p}/ready-queue` (`core/queue.go`): `{project, items, running, paused}`; `items` = queued ∧ `waiting_on` empty ∧ no unfinished `blocks` edge ∧ has a bundle ∧ inventory repos still exist; ordered priority (`urgent high normal low`) then `created_at`. No `blocked` segment.
 
 ### 2.3 attrs: no execution state <!-- §2.3 -->
 
 `attrs` is a free JSON object written at create; aihub never stores workflow execution state in it.
-Create refuses these keys (at any nesting depth) with `CORE-400 EXECUTION_STATE_REJECTED` (`core/workitem.go`
-`executionStateKeys`): `current_step step_id step_attempt_id attempt review_round review_rounds
-review_verdict progress workflow_status steps rewind_stats budget_consumed command_count
-step_start_refs pending_question blocked_seal`. Execution state lives only in the capsule's `execution.json`
-(§7.3). `blocked_seal` is not execution state but is reserved: aihub itself writes it when a
-daemon's session-end reports `blocked` with a head (§3.5), through a direct update that bypasses
-this create-time check; a create cannot plant one.
+Execution state lives only in the capsule's `execution.json` (§7.3). The one reserved key is a
+top-level `blocked_seal`: aihub itself writes it when a daemon's session-end reports `blocked` with a
+head (§3.5), through a direct update that bypasses the create-time check, so create refuses it with
+`CORE-400 EXECUTION_STATE_REJECTED` (`core/workitem.go` `checkAttrs`); a create cannot plant one.
 
 ## 3. Sessions and fencing <!-- §3 -->
 
@@ -140,7 +137,7 @@ health route. All paths under `/api/v1` except `/git/`.
 |---|---|---|---|
 | POST | `/work-items` | key + project writer | create (`bundle_name`, `repo_inventory`, `parent_id`, …) |
 | GET | `/work-items` | key; rows filtered by read access | `limit` (default 500, max 1000), `project`, `status`, `assignee`, `priority`, `milestone` |
-| GET | `/work-items/{id}` | key + read | `include=events,deps` (anything else `CORE-400`); `derived` block for parents |
+| GET | `/work-items/{id}` | key + read | `include=events` (anything else `CORE-400`) |
 | PATCH | `/work-items/{id}` | key + writer | `goal content labels priority milestone waiting_on clean_pause`, `bundle_name` in the R2 window (`patchableFields`; `attrs` only at create) |
 | POST | `/work-items/{id}/cancel` | reporter/maintainer/admin | §2.1 |
 | POST | `/work-items/{id}/claim` | writer | §3.2 |
@@ -174,8 +171,7 @@ drains for 10s. SQLite (`core/store.go` `Open`): WAL, `foreign_keys(1)`, `busy_t
 `deploy/sql/<tag>/` (`docs/upgrade.md`) — except `memories.content`, which the one-time memory content
 migration adds (§9). Data dir: `aihub.db`, `git/<wi>.git` (bare chain repos with the pre-receive hook,
 `git/repo.go`), `backups/`, and the memory files `memory/<project>/[_redacted/]<mem>/memory.md`
-(read once by the migration; still written through by create/redact for rollback safety, never read
-while serving).
+of a database from before `memories.content` (read only by the migration, never written).
 Startup runs the memory content migration after listening and before serving (§9). In production aihub runs as a docker
 compose service (`deploy/docker-compose.yml`, `restart: unless-stopped`).
 
@@ -208,7 +204,6 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 | `MEM-404` | Memory missing or read-denied |
 | `MEM-409` | Idempotency key reused; redact of a non-active memory |
 | `MEM-413` | Content over 1 MiB |
-| `MEM-500` | Memory write-through file failure (stage, rename, redact move) |
 | `MEM-503` | FTS query/scan failure |
 | `AUTH-401` | Missing/invalid API key |
 | `AUTH-403` | Not admin; key scoped to another project; not a writer |
@@ -404,9 +399,8 @@ grace 1m; per-step failure bound 3 (`DefaultMaxStepFailures`). Timeouts relax (d
 Detail: `06-memory-search.md#§1`. Summary (`internal/aihub/memory`): a memory is one `memories` row whose
 `content` column holds the document (frontmatter + body; `content_sha`/`content_len` describe it) plus an
 FTS5 trigram row (`memory_fts`). Create = one transaction (row + FTS); redact = one transaction (status +
-FTS removal; the document stays, never served). Transitional write-through (`memory/writethrough.go`):
-create still writes the `memory.md` file and redact still moves it to `_redacted/`, so an older aihub
-rolled back onto the data dir keeps every row; files are never read while serving. On start, `MigrateContent` fills `content` from the
+FTS removal; the document stays, never served); no memory file is written or read while serving.
+On start, `MigrateContent` fills `content` from the
 former memory files for rows that lack it (file bytes verbatim; a file differing from `content_sha` wins;
 a missing file leaves the row unserved and is retried next start; the files are not deleted). Search needs `q`;
 `match=all` (default) ANDs every token (≥3 runes as FTS phrases, shorter ones as substrings);

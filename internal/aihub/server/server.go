@@ -444,8 +444,6 @@ func (s *Server) hGetWI(w http.ResponseWriter, r *http.Request, idn *identity) {
 		switch strings.TrimSpace(inc) {
 		case "events":
 			opts.IncludeEvents = true
-		case "deps":
-			opts.IncludeDeps = true
 		case "":
 		default:
 			writeErr(w, core.Fail(api.ErrCoreBadInput, "", "unknown include value %q", inc))

@@ -83,6 +83,12 @@ func TestDependencyEndpointsBySlug(t *testing.T) {
 		t.Fatalf("list view lacks waiting_for for %s: %+v", b, list.Items)
 	}
 
+	// The detail has no include=deps: the dependencies endpoint is the
+	// one dependency read path.
+	if code, raw := e.do(t, "GET", "/api/v1/work-items/"+url.PathEscape(b)+"?include=deps", e.key, nil, nil); code != 400 {
+		t.Fatalf("include=deps: %d %s, want 400", code, raw)
+	}
+
 	// Cycle: CORE-409 DEPENDENCY_CYCLE.
 	if _, err := c.AddBlocksDependency(b, a); !isWire(err, "CORE-409", "DEPENDENCY_CYCLE") {
 		t.Fatalf("cycle: %v", err)
