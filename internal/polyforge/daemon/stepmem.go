@@ -241,6 +241,16 @@ func (d *Daemon) stepRememberRoute(w http.ResponseWriter, r *http.Request) {
 		writeErrOf(w, err)
 		return
 	}
+	// aihub replays the key's first memory without comparing bodies: a
+	// different body is a second summary, refused rather than dropped
+	var m struct{ ID string }
+	cr, ok := d.hub.(interface{ GetMemoryContent(string) ([]byte, error) })
+	if json.Unmarshal(stored, &m) == nil && m.ID != "" && ok {
+		if prev, err := cr.GetMemoryContent(m.ID); err == nil && strings.TrimSpace(string(prev)) != strings.TrimSpace(req.Content) {
+			writeErr(w, api.ErrDaemonConflict, fmt.Sprintf("this step already stored its summary %s; summaries are not edited — put corrections into the one call", m.ID))
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(stored)
 }

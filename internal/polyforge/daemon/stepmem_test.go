@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 )
 
@@ -141,6 +142,17 @@ type memHub struct {
 	fail  error
 	posts []map[string]any
 	byKey map[string]string
+	body  map[string]string // id → stored content
+}
+
+// content serves GetMemoryContent from the stored bodies.
+func (m *memHub) content(id string) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if b, ok := m.body[id]; ok {
+		return []byte(b), nil
+	}
+	return nil, &api.Error{Code: api.ErrMemNotFound}
 }
 
 func (m *memHub) do(method, path string, body, out any) error {
@@ -162,6 +174,10 @@ func (m *memHub) do(method, path string, body, out any) error {
 	if !ok {
 		id = fmt.Sprintf("mem_%d", len(m.byKey)+1)
 		m.byKey[key] = id
+		if m.body == nil {
+			m.body = map[string]string{}
+		}
+		m.body[id] = b["content"].(string)
 	}
 	return json.Unmarshal([]byte(`{"id":"`+id+`","type":"`+b["type"].(string)+`","visibility":"project"}`), out)
 }
@@ -175,6 +191,7 @@ func TestStepRememberStoresAttributedAndIdempotent(t *testing.T) {
 	mh := &memHub{}
 	td.hub.mu.Lock()
 	td.hub.memDo = mh.do
+	td.hub.memContent = mh.content
 	td.hub.mu.Unlock()
 	code, body := stepDo(t, td.sock, "POST", "/step/memories", wrapBody(`,"project":"proj","work_item":"wi_sr1"`))
 	if code != 200 || !strings.Contains(body, `"id":"mem_1"`) {
@@ -191,6 +208,12 @@ func TestStepRememberStoresAttributedAndIdempotent(t *testing.T) {
 	}
 	if len(mh.byKey) != 1 {
 		t.Fatalf("a retry stored a second memory: %v", mh.byKey)
+	}
+	// a second, different summary in the same attempt is refused, not
+	// silently answered with the first
+	other := `{"type":"experience.wrap","title":"proj#1: another","content":"something else"}`
+	if code, body := stepDo(t, td.sock, "POST", "/step/memories", other); code != 409 || !strings.Contains(body, "already stored its summary mem_1") {
+		t.Fatalf("different body = %d %s", code, body)
 	}
 }
 

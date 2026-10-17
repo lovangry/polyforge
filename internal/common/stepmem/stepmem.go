@@ -4,6 +4,7 @@ package stepmem
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -61,14 +62,18 @@ var secretValueRes = []*regexp.Regexp{
 	regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}`),
 	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
 	regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9-]{10,}`),
+	regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}\b`),
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`),
 }
 
-var longToken = regexp.MustCompile(`[A-Za-z0-9_+=-]{32,}`)
+var (
+	longToken  = regexp.MustCompile(`[A-Za-z0-9+=_-]{40,}`)
+	identifier = regexp.MustCompile(`^[A-Za-z][a-z0-9]*([A-Z_][a-z0-9]+)+$`)
+)
 
 // SecretValueDefect answers why text looks like a credential value ("" =
-// it does not): a known shape, a PEM key, or a 32+ run mixing upper,
-// lower and digits (a git sha or uuid does not).
+// it does not): a known key shape, a JWT, a PEM key, or a 40+ character
+// run of high entropy that is no CamelCase/snake identifier.
 func SecretValueDefect(text string) string {
 	for _, re := range secretValueRes {
 		if re.MatchString(text) {
@@ -76,15 +81,22 @@ func SecretValueDefect(text string) string {
 		}
 	}
 	for _, tok := range longToken.FindAllString(text, -1) {
-		var up, low, dig bool
-		for _, r := range tok {
-			up = up || (r >= 'A' && r <= 'Z')
-			low = low || (r >= 'a' && r <= 'z')
-			dig = dig || (r >= '0' && r <= '9')
-		}
-		if up && low && dig {
+		if !identifier.MatchString(tok) && entropy(tok) > 4.0 {
 			return "the memory carries a long high-entropy token — name where the secret lives, never the value"
 		}
 	}
 	return ""
+}
+
+// entropy is the Shannon entropy of s in bits per character.
+func entropy(s string) float64 {
+	n := map[rune]float64{}
+	for _, r := range s {
+		n[r]++
+	}
+	h, l := 0.0, float64(len(s))
+	for _, c := range n {
+		h -= c / l * math.Log2(c/l)
+	}
+	return h
 }

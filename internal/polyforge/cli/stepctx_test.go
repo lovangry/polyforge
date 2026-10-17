@@ -31,6 +31,11 @@ func stepEnv(t *testing.T) (map[string]string, *reqRecorder, *reqRecorder) {
 	})
 	mux.HandleFunc("POST /step/memories", func(w http.ResponseWriter, r *http.Request) {
 		drec.record(r)
+		if strings.Contains(drec.last().Body, "second summary") {
+			w.WriteHeader(409)
+			io.WriteString(w, `{"code":"DAEMON-409","detail":"this step already stored its summary mem_9; summaries are not edited — put corrections into the one call"}`)
+			return
+		}
 		io.WriteString(w, `{"id":"mem_9","type":"experience.wrap","visibility":"project"}`)
 	})
 	sock := newFakeDaemon(t, mux)
@@ -94,6 +99,10 @@ func TestStepRememberGoesToTheDaemon(t *testing.T) {
 		if len(drec.all()) != n {
 			t.Fatalf("%v: a refused memory reached the daemon", tc.args)
 		}
+	}
+	// a second, different summary: the daemon's refusal is printed
+	if code, _, stderr := runPf(t, env, "remember", "--project", "polyforge", "--type", "experience.wrap", "--title", "t", "second summary"); code != 1 || !strings.Contains(stderr, "already stored its summary mem_9") {
+		t.Fatalf("second summary: exit %d %s", code, stderr)
 	}
 	// the daemon unreachable: a clear error, nothing else
 	env["PF_DAEMON_SOCKET"] = filepath.Join(t.TempDir(), "gone.sock")
