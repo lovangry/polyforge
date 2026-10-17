@@ -431,12 +431,30 @@ func TestBundleCandidateFormatRefusedBeforeEnqueue(t *testing.T) {
 	td.waitLive(t, "wi_a1")
 }
 
-// TestMaxCapPersistedOnlyWhenExplicit (decision 2026-10-16 G2): only an
-// explicit `pf ops max N` is persisted; a daemon that never had one
-// writes no cap (so the next boot takes the configured one); --reset
-// returns to the configured cap and clears the persisted one; a cap an
-// older daemon persisted is read as explicit.
-func TestMaxCapPersistedOnlyWhenExplicit(t *testing.T) {
+// TestOpsMaxLastsUntilRestart (owner ruling 2026-10-17): `pf ops max N`
+// changes the cap of the running daemon only; the state file never
+// carries a cap, and every start takes the configured one — also over a
+// state file an older daemon wrote with a cap in it.
+func TestOpsMaxLastsUntilRestart(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	seven := 7
+	raw, err := td.client.OpsConfig(cli.OpsConfigRequest{Max: &seven})
+	if err != nil || !strings.Contains(string(raw), `"max":7`) {
+		t.Fatalf("ops max 7: %s %v", raw, err)
+	}
+	var st cli.StatusResponse
+	if raw, err = td.client.Status(); err != nil || json.Unmarshal(raw, &st) != nil || st.Queue.MaxConcurrent != 7 {
+		t.Fatalf("status after ops max 7: %s %v", raw, err)
+	}
+	on := true
+	if _, err := td.client.OpsConfig(cli.OpsConfigRequest{Auto: &on}); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := os.ReadFile(filepath.Join(td.cfg.DataDir, daemonStateFile))
+	if !strings.Contains(string(state), `"auto": true`) || strings.Contains(string(state), "max") {
+		t.Fatalf("daemon-state.json = %s, want the auto switch and no cap", state)
+	}
+
 	dir := t.TempDir()
 	boot := func(configured int) *Daemon {
 		d := &Daemon{cfg: Config{DataDir: dir, MaxConcurrent: configured}, modes: NewModeCtl(),
@@ -446,70 +464,10 @@ func TestMaxCapPersistedOnlyWhenExplicit(t *testing.T) {
 		}
 		return d
 	}
-	readState := func() string {
-		raw, _ := os.ReadFile(filepath.Join(dir, daemonStateFile))
-		return string(raw)
-	}
-	d := boot(5)
-	if err := d.persistDaemonState(); err != nil { // a graceful shutdown
+	if err := os.WriteFile(filepath.Join(dir, daemonStateFile), []byte(`{"version":1,"auto":true,"max_concurrent_jobs":3}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(readState(), "max_concurrent_jobs") {
-		t.Fatalf("a configured cap was persisted: %s", readState())
-	}
-	if d = boot(6); d.q.MaxConcurrent() != 6 || d.q.MaxSource() != "config" {
-		t.Fatalf("the next boot must take the configured cap, got %d (%s)", d.q.MaxConcurrent(), d.q.MaxSource())
-	}
-	if err := d.q.SetExplicitMax(2); err != nil {
-		t.Fatal(err)
-	}
-	_ = d.persistDaemonState()
-	if d = boot(6); d.q.MaxConcurrent() != 2 || d.q.MaxSource() != "ops" {
-		t.Fatalf("an explicit cap must survive restarts, got %d (%s)", d.q.MaxConcurrent(), d.q.MaxSource())
-	}
-	d.q.ResetMax(d.cfg.MaxConcurrent)
-	_ = d.persistDaemonState()
-	if d.q.MaxConcurrent() != 6 || strings.Contains(readState(), "max_concurrent_jobs") {
-		t.Fatalf("reset: cap %d state %s", d.q.MaxConcurrent(), readState())
-	}
-	// an older daemon's every-shutdown cap: explicit
-	if err := os.WriteFile(filepath.Join(dir, daemonStateFile), []byte(`{"version":1,"auto":false,"max_concurrent_jobs":3}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if d = boot(6); d.q.MaxConcurrent() != 3 || d.q.MaxSource() != "ops" {
-		t.Fatalf("a legacy persisted cap must read as explicit, got %d (%s)", d.q.MaxConcurrent(), d.q.MaxSource())
-	}
-}
-
-// TestOpsMaxResetRoute: POST /ops/config max (explicit, source "ops"),
-// max_reset (back to the configured cap, source "config"), and the two
-// together refused.
-func TestOpsMaxResetRoute(t *testing.T) {
-	td := newTestDaemon(t, nil)
-	seven := 7
-	raw, err := td.client.OpsConfig(cli.OpsConfigRequest{Max: &seven})
-	if err != nil || !strings.Contains(string(raw), `"max":7`) || !strings.Contains(string(raw), `"max_source":"ops"`) {
-		t.Fatalf("explicit max: %s %v", raw, err)
-	}
-	raw, err = td.client.OpsConfig(cli.OpsConfigRequest{MaxReset: true})
-	if err != nil || !strings.Contains(string(raw), `"max":4`) || !strings.Contains(string(raw), `"max_source":"config"`) {
-		t.Fatalf("reset: %s %v", raw, err)
-	}
-	if _, err := td.client.OpsConfig(cli.OpsConfigRequest{Max: &seven, MaxReset: true}); err == nil {
-		t.Fatal("max together with max_reset must be refused")
-	}
-}
-
-// TestCapOverrideNotice: a persisted cap that differs from the configured
-// one is announced once at boot, naming pf ops max --reset; an equal or
-// absent one is silent.
-func TestCapOverrideNotice(t *testing.T) {
-	if n := capOverrideNotice(3, 6); !strings.Contains(n, "job cap 3") || !strings.Contains(n, "configured cap 6") || !strings.Contains(n, "pf ops max --reset") {
-		t.Fatalf("notice = %q", n)
-	}
-	for _, c := range [][2]int{{0, 6}, {6, 6}} {
-		if n := capOverrideNotice(c[0], c[1]); n != "" {
-			t.Fatalf("persisted %d / configured %d must be silent, got %q", c[0], c[1], n)
-		}
+	if d := boot(6); d.q.MaxConcurrent() != 6 || !d.modes.Auto() {
+		t.Fatalf("boot over a state file with a cap: max %d auto %v, want the configured 6 and auto on", d.q.MaxConcurrent(), d.modes.Auto())
 	}
 }

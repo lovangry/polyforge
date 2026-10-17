@@ -85,8 +85,8 @@ type DaemonSettings struct {
 	// --operator-agent-dir.
 	OperatorAgentDir string
 	// MaxConcurrentJobs is the configured job cap (>= 1; 0 = unset,
-	// daemon default 4); flag --max-concurrent-jobs. An explicit
-	// `pf ops max N` (persisted until `pf ops max --reset`) wins over it.
+	// daemon default 4); flag --max-concurrent-jobs. `pf ops max N`
+	// overrides it until the daemon restarts.
 	MaxConcurrentJobs int
 }
 

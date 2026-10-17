@@ -416,7 +416,7 @@ var cmdOps = &Command{
 	Summary: "Daemon ops: local job status, auto-pull switch, max concurrent jobs, graceful shutdown; end-session recovery",
 	Usage: "pf ops status\n" +
 		"pf ops auto [on|off]    # off = only explicit pf submit; on = the daemon also pulls the ready queue itself (bare = show)\n" +
-		"pf ops max [N|--reset]  # max concurrent jobs on this machine, N >= 1, persisted; --reset = back to cli.toml [daemon] max_concurrent_jobs (bare = show)\n" +
+		"pf ops max [N]          # max concurrent jobs on this machine, N >= 1, until the daemon restarts (then cli.toml [daemon] max_concurrent_jobs again); bare = show\n" +
 		"pf ops shutdown         # graceful shutdown (quiesce); the restart loop ends with it — start again with `pf daemon ensure`\n" +
 		"pf ops end-session <wi> --reason <text>  # admin/maintainer: force-end a stuck holder's session (WI -> queued; then `pf submit <wi>` anywhere)",
 	Setup: func(fs *flag.FlagSet) {},
@@ -503,27 +503,21 @@ func opsAuto(ctx *Context, d *DaemonClient, args []string) error {
 	return fmt.Errorf("ops auto: expected on|off")
 }
 
-// opsMax handles `pf ops max [N|--reset]`.
+// opsMax handles `pf ops max [N]`.
 func opsMax(ctx *Context, d *DaemonClient, args []string) error {
 	switch len(args) {
 	case 0:
 		return opsShow(ctx, d, func(s *StatusResponse) string {
-			if s.Queue.MaxSource == "ops" {
-				return fmt.Sprintf("max: %d (persisted cap — pf ops max --reset returns to the configured cap)", s.Queue.MaxConcurrent)
-			}
 			return fmt.Sprintf("max: %d", s.Queue.MaxConcurrent)
 		})
 	case 1:
-		if args[0] == "--reset" {
-			return opsApply(ctx, d, OpsConfigRequest{MaxReset: true})
-		}
 		n, err := strconv.Atoi(args[0])
 		if err != nil || n < 1 {
-			return fmt.Errorf("ops max: N must be an integer >= 1 (or --reset)")
+			return fmt.Errorf("ops max: N must be an integer >= 1")
 		}
 		return opsApply(ctx, d, OpsConfigRequest{Max: &n})
 	}
-	return fmt.Errorf("ops max: expected a single N or --reset")
+	return fmt.Errorf("ops max: expected a single N")
 }
 
 func onOff(b bool) string {
@@ -577,8 +571,8 @@ live in the config's [daemon] table, which the daemon reads itself from
   stall_window = "10m"          # --stall-window (non-zero; negative disables)
   harness_root = "/abs/path"    # --harness-root
   operator_agent_dir = "/abs"   # --operator-agent-dir
-  max_concurrent_jobs = 6       # --max-concurrent-jobs (an explicit
-                                #   pf ops max N wins until pf ops max --reset)
+  max_concurrent_jobs = 6       # --max-concurrent-jobs (pf ops max N
+                                #   overrides it until the daemon restarts)
 
 Every pf command, ensure and the daemon validate the table on load (a bad
 value names the file, line and key). A change applies at the next daemon

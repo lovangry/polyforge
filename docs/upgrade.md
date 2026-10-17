@@ -1264,3 +1264,15 @@ it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
   the old way (rows == `memory.md` files in the backup).
 - `pf backup` (`VACUUM INTO`) now holds every memory; it still does not
   include the git repos.
+
+## Work machines: `pf ops max` lasts until the daemon restarts (polyforge#183)
+
+- `pf ops max N` changes the cap of the running daemon only; every daemon
+  start takes the configured cap (`--max-concurrent-jobs`, else cli.toml
+  `[daemon] max_concurrent_jobs`, else 4). `pf ops max --reset` is gone
+  (nothing to reset), and so are the boot line about a persisted cap and
+  `max_source` in the `GET /status` and `POST /ops/config` answers.
+- A `max_concurrent_jobs` an older daemon left in
+  `<data-dir>/daemon-state.json` is ignored from the first start of this
+  version on. A machine that relied on it: put the number into the
+  `[daemon]` table before upgrading.

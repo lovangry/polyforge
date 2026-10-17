@@ -568,7 +568,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 
 **规则 ① 与 T 的后续修订（集成分支）**：规则 ① 扩展到正常结束的轮次（`ended_without_result`，见 2.3 表）；T 取 `max(3 × wall_minutes, 全局默认)`（见 2.4）。
 
-**阈值配置名**：旗标 `--silence-window`（X）、`--tool-window`（Y）、`--step-timeout`（T）、`--stall-window`（N）、`--model-error-grace`（规则 ① 宽限）；step 级覆盖在 workflow.md 只剩 `budget.wall_minutes`（T）——polyforge#147 C5 删除了从未被 bundle 使用的 `silence_minutes` / `tool_minutes` 键，X、Y 只有全局默认。旧旗标 `--hang-window/--idle-window/--probe-timeout/--wall-window` 已删，传入即解析失败。生产中 daemon 只经 `pf daemon ensure` 启动：T、N 来自 cli.toml `[daemon]` 表的 `step_timeout` / `stall_window`，由 daemon 从 `--config` 自行读取，ensure 的 argv 保持固定（2026-10-16 G2；优先级：显式命令行旗标 > `[daemon]` 表 > 内建默认；同表还有 `harness_root`、`operator_agent_dir`、`max_concurrent_jobs`——显式 `pf ops max N` 持久化并优先，`pf ops max --reset` 回到配置值）；X、Y、规则 ① 宽限及其余旗标只供测试/开发。
+**阈值配置名**：旗标 `--silence-window`（X）、`--tool-window`（Y）、`--step-timeout`（T）、`--stall-window`（N）、`--model-error-grace`（规则 ① 宽限）；step 级覆盖在 workflow.md 只剩 `budget.wall_minutes`（T）——polyforge#147 C5 删除了从未被 bundle 使用的 `silence_minutes` / `tool_minutes` 键，X、Y 只有全局默认。旧旗标 `--hang-window/--idle-window/--probe-timeout/--wall-window` 已删，传入即解析失败。生产中 daemon 只经 `pf daemon ensure` 启动：T、N 来自 cli.toml `[daemon]` 表的 `step_timeout` / `stall_window`，由 daemon 从 `--config` 自行读取，ensure 的 argv 保持固定（2026-10-16 G2；优先级：显式命令行旗标 > `[daemon]` 表 > 内建默认；同表还有 `harness_root`、`operator_agent_dir`、`max_concurrent_jobs`——`pf ops max N` 即时生效、不持久化，daemon 重启后回到配置值）；X、Y、规则 ① 宽限及其余旗标只供测试/开发。
 
 **与正文的实现差异（均为补充，不改契约语义）**
 - 事实集合多一条 `exec_committed{version}`：事件触发推送需要"driver 提交了新 Version"的提示，否则只能回到轮询 `execution.json`。
@@ -632,7 +632,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | `daemon-id` | daemon `identity.go` | 首次启动记录的 daemon id；之后与 flag/env 不一致即拒绝启动 |
 | `daemon.lock` / `ensure.lock` | daemon `daemon.go` / `ensure.go` | 单 daemon flock / `pf daemon ensure` 与安装器互斥 |
 | `daemon.log` | `pf daemon ensure` 的重启循环 | daemon 输出，超过 10 MiB 轮转为 `.1` |
-| `daemon-state.json` | daemon `modes.go` | auto 开关与并发上限 |
+| `daemon-state.json` | daemon `modes.go` | auto 开关 |
 | `submit-queue.json` | daemon `modes.go` | 已接受、待派发的 submit 队列（重启后重放） |
 | `runtime-state.json` | runtime `runtime.go` | runtime 的 job 记录（旧文档称作 `state.json`） |
 | `claiming.json` | runtime `claiming.go` | 领取前的持久化意图日志（B1，`reference.md#§3.5`），崩溃后重放 |

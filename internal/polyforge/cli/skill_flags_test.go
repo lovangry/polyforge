@@ -5,7 +5,7 @@ package cli
 // teaches after `pf <verb>` must exist in the CLI: the global flag set,
 // the verb's own Setup flag set, or — for sub-actions that parse their
 // own flags (`ops end-session`, `chat init`, `file create`, `watch`
-// subcommands, `ops max --reset`) — a flag literal defined in this
+// subcommands) — a flag literal defined in this
 // package. A renamed or deleted flag that the skill still teaches fails
 // here instead of in a user's session. `pf daemon` flags live in the
 // daemon package and are matched against the help text that documents
@@ -123,7 +123,7 @@ func TestSkillTaughtFlagsExistInCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, must := range []string{"--statusline", "--harness-session", "--wait-decision", "--reset", "--reason"} {
+	for _, must := range []string{"--statusline", "--harness-session", "--wait-decision", "--reason"} {
 		if !pkg[must] && !verbFlags["watch"][must] && !verbFlags["ops"][must] {
 			t.Errorf("the CLI defines no %s flag, but the skill relies on it", must)
 		}

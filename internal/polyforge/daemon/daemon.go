@@ -441,14 +441,11 @@ func New(cfg Config) (*Daemon, error) {
 	}
 	d.q.persist = d.persistQueue
 
-	// The persisted mode/concurrency bookkeeping (the daemon's OWN state
-	// file; jobs/attempts bookkeeping is Runtime's state.json and is
-	// never duplicated here).
+	// The persisted auto switch (the daemon's OWN state file;
+	// jobs/attempts bookkeeping is Runtime's state.json and is never
+	// duplicated here).
 	if err := d.loadDaemonState(); err != nil {
 		return nil, err
-	}
-	if note := capOverrideNotice(d.q.ExplicitMax(), cfg.MaxConcurrent); note != "" {
-		fmt.Fprintln(os.Stderr, note)
 	}
 	// cfg.Auto is an EXPLICIT flag override only (#18): nil keeps the
 	// persisted switch — an auto daemon restarting stays auto — and

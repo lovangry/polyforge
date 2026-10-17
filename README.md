@@ -508,15 +508,10 @@ the file, the line and the key (`config …: line N: [daemon] step_timeout:
 78. Edit the table, then restart the daemon (`pf ops shutdown`, wait,
 `pf daemon ensure`) for it to apply.
 
-Job cap: an explicit `pf ops max N` applies at once and is persisted in
-`<data-dir>/daemon-state.json`; it wins over `max_concurrent_jobs` until
-`pf ops max --reset`, which returns to the configured cap (an explicit
-`--max-concurrent-jobs`, else the table, else 4) and clears the persisted
-value. Nothing else persists the cap. A cap an older daemon persisted (it
-wrote one at every graceful shutdown) counts as persisted too: the daemon
-logs once at boot when a persisted cap overrides a different configured
-one, and `pf ops max` shows `(persisted cap — pf ops max --reset …)`
-while one is in force.
+Job cap: `pf ops max N` applies at once and lasts until the daemon
+restarts; every start takes the configured cap (an explicit
+`--max-concurrent-jobs`, else the table, else 4). The cap is never
+persisted; `pf ops max` and `pf ops status` show the one in force.
 
 Every other flag is test/dev-only: nothing in production sets it. The
 table lists the production flags; `pf help daemon` lists every flag,
@@ -544,7 +539,7 @@ resolved (stderr, a `retired_env_ignored` event, `env_warnings` in
 | `--claude-bin PATH` | `claude_bin` | `claude` | Claude Code binary for steps whose harness is `claude` (run as `claude -p --bare`). The daemon never manages its credentials: the `<harness-root>/claude-config/settings.json` env block is the authority layer. |
 | `--operator-agent-dir DIR` | `[daemon] operator_agent_dir` | `~/.pi/agent` | SOURCE of the dedicated step agent dir — a credential surface: the daemon copies the minimal set (`auth.json`, `models.json`, `agents/`, `extensions/subagent/`) from here into `<harness-root>/step-agent`, and every pi step runs against that copy — the operator's own packages and settings never reach a step. A configured source without a readable `auth.json` refuses the start. |
 | `--harness-root DIR` | `[daemon] harness_root` | `<data-dir>` | Parent root of the step harness dirs: `<DIR>/step-agent` (dedicated agent dir), `/step-agent-sessions` (pi sessions) and `/claude-config` (claude config dir; its settings.json env block is the credential authority layer). The former `--harness-sessions-root` was renamed — old deployments fail loudly at startup. |
-| `--max-concurrent-jobs N` | `[daemon] max_concurrent_jobs` | `4` | Configured cap on concurrently running jobs; an explicit `pf ops max N` wins until `pf ops max --reset` (see above). |
+| `--max-concurrent-jobs N` | `[daemon] max_concurrent_jobs` | `4` | Configured cap on concurrently running jobs; `pf ops max N` overrides it until the daemon restarts (see above). |
 
 The workspace mapping (polyforge#113) replaces the retired workspace and
 project launch surfaces: the `[workspace."<path>"]` sections of the
