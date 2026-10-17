@@ -339,6 +339,12 @@ func checkLocalGitlink(env []string, dir string) error {
 // is agent residue.
 func refuseGitlink(env []string, dir, found, path string) error {
 	_, _ = git(env, dir, "reset", "-q")
+	return gitlinkRefusal(found, "No commit was created. ", path)
+}
+
+// gitlinkRefusal is the typed GIT-412 refusal: what was found, what the
+// daemon did (done) and the cleanup recipe for path.
+func gitlinkRefusal(found, done, path string) error {
 	remedy := "Clean it: move the embedded repository out of the capsule (or add " + path + " to the capsule .gitignore); " +
 		"if, and only if, its history is disposable, delete its .git directory (" + filepath.Join(path, ".git") + ") instead. " +
 		"Then `git rm --cached " + path + "` if it is still staged, and retry; " +
@@ -350,7 +356,44 @@ func refuseGitlink(env []string, dir, found, path string) error {
 	}
 	return &api.Error{Code: api.ErrGitGitlink, Detail: localGitlinkPrefix + ": " + found +
 		" — an embedded git repository would poison the capsule chain (aihub's pre-receive rejects mode 160000 on every push, forever). " +
-		"No commit was created. " + remedy}
+		done + remedy}
+}
+
+// pushedRef records the chain head the hub last accepted from this
+// capsule: the clone's tracking ref, moved after every chain push that
+// landed.
+const pushedRef = "refs/remotes/origin/main"
+
+// checkUnpushedGitlinks refuses, before the chain push, any commit about
+// to be pushed (pushedRef..HEAD; all of HEAD's history when the ref is
+// absent) that records a gitlink — a step's own `git commit` in the
+// capsule root included, which the commit-time precheck never sees. The
+// hook would refuse that push forever; the typed GIT-412 names the
+// commit, and nothing is pushed or rewritten.
+func checkUnpushedGitlinks(o Opts) error {
+	env := o.Env()
+	rng := "HEAD"
+	if _, err := git(env, o.CapsuleDir, "rev-parse", "--verify", "-q", pushedRef); err == nil {
+		rng = pushedRef + "..HEAD"
+	}
+	out, err := git(env, o.CapsuleDir, "log", "--no-renames", "--raw", "--format=commit %H", rng)
+	if err != nil {
+		return nil // unborn HEAD: the push answers for itself
+	}
+	commit := ""
+	for _, line := range strings.Split(out, "\n") {
+		if c, ok := strings.CutPrefix(line, "commit "); ok {
+			commit = c
+			continue
+		}
+		meta, path, ok := strings.Cut(line, "\t")
+		f := strings.Fields(meta) // :oldmode newmode oldsha newsha status
+		if ok && len(f) == 5 && f[1] == "160000" && f[4] != "D" {
+			return gitlinkRefusal("unpushed commit "+commit+" records a gitlink (mode 160000) at "+path,
+				"Nothing was pushed. Undo the unpushed commits first: `git reset --soft "+pushedRef+"` in the capsule (the work stays staged), then: ", path)
+		}
+	}
+	return nil
 }
 
 // uncheckedOutPath answers the path git's "error: '<path>/' does not
@@ -383,10 +426,13 @@ type PushTimings struct {
 // including the retry-after-failed-push one a wrap/seal re-drive needs:
 // a commit that landed locally on a failed push finally reaches the
 // server HERE, and a still-dead server answers with its error, not a
-// fake success. ctx bounds the chain push: when it ends the push's git
-// process group is killed, the task-repo lane is skipped and the per-WI
-// lock is released before CommitPush returns. The local status, add and
+// fake success. ctx is checked once the per-WI lock is held (already
+// ended: nothing is committed) and bounds the chain push itself: when it
+// ends the push's git process group is killed. The local status, add and
 // commit are not cut short (a killed one would leave index.lock behind).
+// The task-repo lane runs only when ctx has not ended by the time the
+// chain push returns, and then on its own per-call timeouts (o.Ctx when
+// set), not ctx.
 // Returns the local commit SHA, whether the push reached the server, and
 // the commit/push wall-clock timings.
 func CommitPush(ctx context.Context, o Opts, message string) (string, bool, PushTimings, error) {
@@ -394,6 +440,9 @@ func CommitPush(ctx context.Context, o Opts, message string) (string, bool, Push
 	defer release()
 
 	var timings PushTimings
+	if err := ctx.Err(); err != nil {
+		return "", false, timings, err // ended while waiting for the lock: commit nothing that would not be pushed
+	}
 
 	if err := cleanStaleLocks(o.GitDir); err != nil {
 		return "", false, timings, err
@@ -476,6 +525,9 @@ func pushLocked(ctx context.Context, o Opts) (bool, int64, error) {
 	if o.RemoteURL == "" {
 		return false, 0, &api.Error{Code: api.ErrGitUnauthorized, Detail: "no push remote configured"}
 	}
+	if err := checkUnpushedGitlinks(o); err != nil {
+		return false, 0, err
+	}
 	args := []string{"push", o.RemoteURL, "HEAD:refs/heads/main"}
 	additions, cleanup, err := credentialEnv(o)
 	if err != nil {
@@ -487,6 +539,9 @@ func pushLocked(ctx context.Context, o Opts) (bool, int64, error) {
 	pushMS := time.Since(pushStart).Milliseconds()
 	if perr != nil {
 		perr = &api.Error{Code: api.ErrGitInternal, Detail: strings.TrimSpace(out) + ": " + perr.Error()}
+	} else {
+		// the hub now holds HEAD: the next gitlink scan starts above it
+		_, _ = git(o.Env(), o.CapsuleDir, "update-ref", pushedRef, "HEAD")
 	}
 	if ctx.Err() != nil {
 		fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push skipped: the publish ended (%v)\n", o.WorkItemID, ctx.Err())

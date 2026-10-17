@@ -247,6 +247,57 @@ func TestCommitPushPublishesAForeignCommitAsIs(t *testing.T) {
 	}
 }
 
+// A publish whose context ended while it waited for the per-WI lock
+// commits nothing (a local commit it would never push).
+func TestCommitPushEndedContextCommitsNothing(t *testing.T) {
+	setIdentity(t)
+	o, barePath := testOpts(t, "wi_ended")
+	bare := mkBare(t, barePath, true)
+	mkCapsule(t, o)
+	writeDirty(t, o, "a.txt", "a\n")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, pushed, _, err := CommitPush(ctx, o, "observe: v1"); err == nil || pushed {
+		t.Fatalf("an ended context must refuse the publish: pushed=%v err=%v", pushed, err)
+	}
+	if _, err := run("git", "--git-dir", o.GitDir, "rev-parse", "--verify", "-q", "HEAD"); err == nil {
+		t.Fatal("a commit was created under an ended context")
+	}
+	if bare.hasMain(t) {
+		t.Fatal("something was pushed under an ended context")
+	}
+}
+
+// A step's own commit in the capsule root that records a gitlink is
+// refused locally with the typed GIT-412 before the push (the hook would
+// refuse it on every push), and nothing reaches the hub.
+func TestCommitPushRefusesAnUnpushedGitlinkCommit(t *testing.T) {
+	setIdentity(t)
+	o, barePath := testOpts(t, "wi_agentlink")
+	bare := mkBare(t, barePath, true)
+	mkCapsule(t, o)
+	writeDirty(t, o, "a.txt", "a\n")
+	if _, pushed, _, err := CommitPush(context.Background(), o, "observe: v1"); err != nil || !pushed {
+		t.Fatalf("CommitPush: pushed=%v err=%v", pushed, err)
+	}
+	if out, err := run("git", "-C", o.CapsuleDir, "update-index", "--add", "--cacheinfo", "160000,0123456789012345678901234567890123456789,vendored"); err != nil {
+		t.Fatalf("agent update-index: %v: %s", err, out)
+	}
+	if out, err := run("git", "-C", o.CapsuleDir, "commit", "-q", "-m", "agent commit with a gitlink"); err != nil {
+		t.Fatalf("agent commit: %v: %s", err, out)
+	}
+	_, pushed, _, err := CommitPush(context.Background(), o, "observe: v2")
+	if pushed || !IsLocalGitlink(err) {
+		t.Fatalf("want the typed local gitlink refusal, got pushed=%v err=%v", pushed, err)
+	}
+	if !strings.Contains(err.Error(), "vendored") || !strings.Contains(err.Error(), "git reset --soft") {
+		t.Fatalf("the refusal must name the path and the undo: %v", err)
+	}
+	if got := bare.commits(t); got != 1 {
+		t.Fatalf("hub main has %d commits, want only the first", got)
+	}
+}
+
 func TestCommitPushRetryCarriesTheStandingCommit(t *testing.T) {
 	setIdentity(t)
 	o, barePath := testOpts(t, "wi_retry")
