@@ -10,7 +10,7 @@ package daemon
 //     (execution.json authority + events after a cursor + job bookkeeping).
 //
 // Notification routing: nothing here pushes. A submit subscribes its chat;
-// a watcher's start subscribes its chat to every held WI the chat
+// every watcher cycle subscribes its chat to every held WI the chat
 // submitted or its owner owns (subscribe-owned). Decisions stay un-acked
 // (cursor not advanced) until a watcher of a subscribed chat prints them.
 
@@ -133,6 +133,15 @@ func (s *subStore) SubscribeNew(chat, wi, slug string, cursor int64) (bool, erro
 	return true, s.persistLocked()
 }
 
+// Has reports whether the chat has a subscription (live or finished)
+// for wi.
+func (s *subStore) Has(chat, wi string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.chatLocked(chat, false)
+	return c != nil && c.Subs[wi] != nil
+}
+
 func (s *subStore) Unsubscribe(chat, wi string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -249,13 +258,15 @@ func (d *Daemon) ackRoute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-// subscribeOwnedRoute is POST /chats/{id}/subscribe-owned {"owner"}: a
-// watcher's start subscribes its chat to every held work item the chat
-// submitted or the owner owns (origin owner, else the WI reporter) that
-// the chat has no subscription for, and gets the added ones back. A new
-// subscription's cursor sits just before the WI's newest decision event,
-// so a decision nobody has been told about yet is replayed; the
-// state-backed decisions come from the snapshot anyway.
+// subscribeOwnedRoute is POST /chats/{id}/subscribe-owned {"owner"}:
+// every watcher cycle subscribes its chat to every held work item the
+// chat submitted or the owner owns (origin owner, else the WI reporter)
+// that the chat has no subscription for, and gets the added ones back. A
+// new subscription's cursor sits just before the WI's newest decision
+// event, so a decision nobody has been told about yet is replayed; the
+// state-backed decisions come from the snapshot anyway. A WI the chat is
+// already subscribed to costs one map lookup, and a reporter is fetched
+// from the hub once per WI, so the per-cycle call stays cheap.
 func (d *Daemon) subscribeOwnedRoute(w http.ResponseWriter, r *http.Request) {
 	id, ok := chatID(w, r)
 	if !ok {
@@ -271,6 +282,9 @@ func (d *Daemon) subscribeOwnedRoute(w http.ResponseWriter, r *http.Request) {
 	added := []protocol.ChatSub{}
 	jobs, _ := d.statusJobs()
 	for _, j := range jobs {
+		if d.subs.Has(id, j.WorkItemID) {
+			continue
+		}
 		mine := j.Origin != nil && j.Origin.ChatID == id
 		if !mine && !(owner != "" && d.ownerOf(j) == owner) {
 			continue
@@ -291,13 +305,18 @@ func (d *Daemon) subscribeOwnedRoute(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, protocol.ChatSubscriptions{ChatID: id, Subscriptions: added})
 }
 
-// ownerOf answers a WI's owner: the origin owner, else the WI reporter.
+// ownerOf answers a WI's owner: the origin owner, else the WI reporter
+// (a WI's reporter never changes: the first successful hub read is kept).
 func (d *Daemon) ownerOf(j statusJob) string {
 	if j.Origin != nil && j.Origin.Owner != "" {
 		return j.Origin.Owner
 	}
+	if r, ok := d.reporters.Load(j.WorkItemID); ok {
+		return r.(string)
+	}
 	if d.hub != nil {
 		if item, err := d.hub.GetWorkItem(j.WorkItemID); err == nil && item != nil {
+			d.reporters.Store(j.WorkItemID, item.Reporter)
 			return item.Reporter
 		}
 	}

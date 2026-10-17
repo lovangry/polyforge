@@ -221,6 +221,42 @@ func TestSubscribeOwnedRoutingAndOwnerFallback(t *testing.T) {
 	}
 }
 
+// Every watcher cycle calls subscribe-owned, so a repeated call costs no
+// hub read: a WI's reporter is fetched once, and a WI the chat already
+// holds a subscription for is skipped before any owner lookup.
+func TestSubscribeOwnedRepeatedCallReadsTheHubOnce(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.hub.mu.Lock()
+	td.hub.reporters = map[string]string{"wi_auto": "bob"}
+	td.hub.mu.Unlock()
+	td.submitClaim(t, "wi_auto") // no origin: the owner is the reporter
+	td.waitMonitored(t, "wi_auto")
+	gets := func() int {
+		td.hub.mu.Lock()
+		defer td.hub.mu.Unlock()
+		return td.hub.gets["wi_auto"]
+	}
+	for _, owner := range []string{"carol", "carol", "bob"} {
+		if _, err := td.client.ChatSubscribeOwned("chat_c", owner); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := gets()
+	for i := 0; i < 3; i++ {
+		for _, chat := range []string{"chat_c", "chat_d"} {
+			if _, err := td.client.ChatSubscribeOwned(chat, "carol"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if n := gets(); n != base {
+		t.Fatalf("repeated subscribe-owned read the hub %d more times, want 0", n-base)
+	}
+	if subs := mustSubs(t, td, "chat_c"); len(subs) != 1 || subs[0].WI != "wi_auto" {
+		t.Fatalf("chat_c subscriptions: %+v", subs)
+	}
+}
+
 func waitNeedsInput(t *testing.T, td *testDaemon, wis ...string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

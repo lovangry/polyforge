@@ -137,6 +137,8 @@ type fakeHub struct {
 	// probeFails, when > 0, makes the next N GetWorkItem calls fail with a
 	// transport-class error (a transient hub blip).
 	probeFails int
+	// gets counts GetWorkItem calls per canonical id.
+	gets map[string]int
 	// claimLost, when > 0, makes the next N SessionClaim calls COMMIT the
 	// claim and then fail with a transport-class error (the answer lost
 	// in transit, repo review 2026-10-16 B-1).
@@ -335,6 +337,10 @@ func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 		return nil, errors.New("connection refused")
 	}
 	id := h.canonicalID(idOrSlug)
+	if h.gets == nil {
+		h.gets = map[string]int{}
+	}
+	h.gets[id]++
 	if h.unknown[id] {
 		return nil, &api.Error{Code: api.ErrCoreNotFound, Detail: "work item not found"}
 	}
