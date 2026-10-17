@@ -530,10 +530,10 @@ resolved (stderr, a `retired_env_ignored` event, `env_warnings` in
 | Flag | Production source | Default | Controls |
 | --- | --- | --- | --- |
 | `--config PATH` | ensure | `~/.config/polyforge/cli.toml` | Shared CLI config file: the `PF_*` fallbacks, `claude_bin` and the `[workspace]` mapping. |
-| `--socket PATH` | ensure (`daemon_socket` / `PF_DAEMON_SOCKET`) | `/run/polyforge.sock` | Unix socket the daemon's UDS HTTP face listens on. |
+| `--socket PATH` | ensure (`daemon_socket` / `PF_DAEMON_SOCKET`) | `daemon.sock` in `$POLYFORGE_DATA_DIR`, else `~/.local/share/polyforge` (`--data-dir` does not move it) | Unix socket the daemon's UDS HTTP face listens on. |
 | `--server URL` | `server` / `PF_SERVER` | — | aihub base URL the daemon talks to. |
 | `--api-key KEY` | `api_key` / `PF_API_KEY` | — | Machine aihub credential (never reaches an agent env). |
-| `--machine-id ID` | ensure (recorded id, else `m-<short hostname>`) | `m-<hostname>` | Machine identity claims and leases are recorded under; recorded in `<data-dir>/daemon-id` on first start, after which that file wins (a differing value refuses to start). |
+| `--machine-id ID` | ensure (recorded id, else `m-<short hostname>`) | `m-<short hostname>` | Machine identity claims and leases are recorded under; recorded in `<data-dir>/daemon-id` on first start, after which that file wins (a differing value refuses to start). |
 | `--data-dir DIR` | ensure (`POLYFORGE_DATA_DIR`) | `~/.local/share/polyforge` | Daemon state, events log and derived data. |
 | `--workflows-dir DIR` | ensure | `./workflows` | Workflow-bundle checkout the in-process Go driver loads step definitions from (`pf daemon ensure` passes `<data-dir>/release/current/workflows`). |
 | `--claude-bin PATH` | `claude_bin` | `claude` | Claude Code binary for steps whose harness is `claude` (run as `claude -p --bare`). The daemon never manages its credentials: the `<harness-root>/claude-config/settings.json` env block is the authority layer. |

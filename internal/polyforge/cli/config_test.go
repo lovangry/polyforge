@@ -46,8 +46,8 @@ func TestConfigPriorityMatrix(t *testing.T) {
 	if cfg.Server != defaultServer {
 		t.Errorf("default Server = %q, want %q", cfg.Server, defaultServer)
 	}
-	if cfg.DaemonSocket != defaultDaemonSocket {
-		t.Errorf("default DaemonSocket = %q, want %q", cfg.DaemonSocket, defaultDaemonSocket)
+	if want := filepath.Join(DataDir(os.Getenv("HOME")), "daemon.sock"); cfg.DaemonSocket != want {
+		t.Errorf("default DaemonSocket = %q, want %q", cfg.DaemonSocket, want)
 	}
 	if cfg.Mapping == nil || !cfg.Mapping.Empty() {
 		t.Errorf("missing file must yield an empty (non-nil) mapping, got %+v", cfg.Mapping)

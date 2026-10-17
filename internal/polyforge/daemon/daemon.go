@@ -65,7 +65,8 @@ type Config struct {
 	MachineID string
 	// DisplayName is the display-only daemon name (default: hostname).
 	DisplayName string
-	SocketPath  string
+	// SocketPath is required (main.go resolves it like the CLI does).
+	SocketPath string
 	// Mapping is the REQUIRED workspace→projects plan of record
 	// (polyforge#113), assembled in main.go from the shared config's
 	// [workspace."<path>"] sections. Capsules route per project through
@@ -169,9 +170,6 @@ func (c SupervisionConfig) limits() supervise.Defaults {
 }
 
 func (c *Config) fill() {
-	if c.SocketPath == "" {
-		c.SocketPath = "/run/polyforge.sock"
-	}
 	// The Go execution driver is THE engine (polyforge#106): the legacy
 	// WI-Agent selection surface is deleted — there is nothing to
 	// default and nothing to flip.

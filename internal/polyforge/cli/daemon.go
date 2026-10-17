@@ -18,7 +18,7 @@ import (
 )
 
 // DaemonClient speaks the daemon's UDS HTTP face: HTTP over the local
-// unix socket (/run/polyforge.sock by default). The authoritative route
+// unix socket (<data-dir>/daemon.sock by default). The authoritative route
 // list is the mount list in internal/polyforge/daemon/routes.go (mirrored
 // in README "Daemon UDS routes"); the core of it:
 //

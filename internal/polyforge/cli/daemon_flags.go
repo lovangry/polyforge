@@ -28,10 +28,10 @@ type DaemonFlags struct {
 func DefineDaemonFlags(fs *flag.FlagSet) *DaemonFlags {
 	return &DaemonFlags{
 		Config:           fs.String("config", "", "shared config file: its [workspace] mapping is the capsule placement source (default ~/.config/polyforge/cli.toml)"),
-		Socket:           fs.String("socket", "", "unix socket path to listen on (env PF_DAEMON_SOCKET; default /run/polyforge.sock)"),
+		Socket:           fs.String("socket", "", "unix socket path to listen on (env PF_DAEMON_SOCKET; default daemon.sock in $POLYFORGE_DATA_DIR, else ~/.local/share/polyforge — the CLI's default; -data-dir does not move it)"),
 		Server:           fs.String("server", "", "aihub base URL (env PF_SERVER)"),
 		APIKey:           fs.String("api-key", "", "machine aihub api key (env PF_API_KEY)"),
-		MachineID:        fs.String("machine-id", "", "daemon id (default m-<hostname>); recorded in <data-dir>/daemon-id on first start, which then wins — a differing value refuses to start"),
+		MachineID:        fs.String("machine-id", "", "daemon id (default m-<short hostname>); recorded in <data-dir>/daemon-id on first start, which then wins — a differing value refuses to start"),
 		DisplayName:      fs.String("display-name", "", "test/dev-only: daemon display name shown by pf ops status (default hostname)"),
 		DataDir:          fs.String("data-dir", "", "daemon data dir (env POLYFORGE_DATA_DIR; default ~/.local/share/polyforge)"),
 		WorkflowsDir:     fs.String("workflows-dir", "", "workflows/ checkout dir (default ./workflows)"),

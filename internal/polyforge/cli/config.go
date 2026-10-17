@@ -38,9 +38,23 @@ import (
 // Default aihub listen address.
 const defaultServer = "http://localhost:8420"
 
-// Default daemon unix domain socket (reference.md §6.1: local machine only, no
-// network face).
-const defaultDaemonSocket = "/run/polyforge.sock"
+// DataDir is the daemon data dir for the given home: $POLYFORGE_DATA_DIR,
+// else <home>/.local/share/polyforge (tools/install.sh's).
+func DataDir(home string) string {
+	if d := os.Getenv("POLYFORGE_DATA_DIR"); d != "" {
+		return d
+	}
+	return filepath.Join(home, ".local", "share", "polyforge")
+}
+
+// defaultDaemonSocket is the daemon's unix domain socket when nothing
+// names one: daemon.sock in DataDir — the same for pf and the daemon, so
+// a daemon's -data-dir does not move it (reference.md §6.1: local
+// machine only, no network face).
+func defaultDaemonSocket() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(DataDir(home), "daemon.sock")
+}
 
 // Config holds the resolved CLI configuration.
 type Config struct {
@@ -211,7 +225,7 @@ func DefaultConfigPath() string {
 func LoadConfig(path string) (Config, error) {
 	cfg := Config{
 		Server:       defaultServer,
-		DaemonSocket: defaultDaemonSocket,
+		DaemonSocket: defaultDaemonSocket(),
 		Mapping:      &mapping.Plan{},
 	}
 	if path == "" {

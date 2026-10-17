@@ -285,7 +285,6 @@ else
   ( umask 077; cat > "$CFG" ) <<CFGEOF
 server = "$API"
 api_key = "$KEY"
-daemon_socket = "$DAEMON_SOCKET"
 
 # Workspace mapping (polyforge#113): one section per workspace, each
 # listing the projects whose capsules live under it. UNCOMMENT and edit

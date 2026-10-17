@@ -182,7 +182,7 @@ server-stamped `last_heartbeat_at`. A new `machine_id` creates (one transaction)
 and the machines row; no API key is issued (the daemon runs on its operator-issued key). Daemon cadence
 `-heartbeat-every` 60s (`daemon/heartbeat.go`), log-only failures with backoff. `GET /machines`
 returns `{machines:[{id,user_id,runtime_version,mode,live_wi_ids,last_heartbeat_at,heartbeat_age_seconds,stale}], stale_after_seconds, count}`, oldest first.
-The daemon id is the machine id: default `m-<hostname>`, persisted in `<data-dir>/daemon-id`
+The daemon id is the machine id: default `m-<short hostname>` (lower-cased, anything but `a-z0-9-` replaced by `-`; `daemon/ensure.go` `hostMachineID`), persisted in `<data-dir>/daemon-id`
 (`daemon/identity.go`, `v2-converge.md#§4`).
 
 ## 5. Error codes <!-- §5 -->
@@ -255,7 +255,7 @@ non-read request (including a `GET /chats/{id}/attention` with `mark=1` or `ack=
 | GET | `/chats/{id}/attention?ack=1` | pending human decisions, each with a key; listed until acked (no `ack=1`: `mark=1` marks shown at fetch, legacy). With `mark=1`/`ack=1` it records state and is step-origin guarded (DAEMON-403); a plain list stays an open read | resident `pf watch --chat` |
 | POST | `/chats/{id}/attention/ack` | `{"keys"}` the watcher printed; idempotent, unknown keys ignored | resident `pf watch --chat` |
 
-Socket: `--socket` > `PF_DAEMON_SOCKET` > cli.toml `daemon_socket` > `/run/polyforge.sock`
+Socket: `--socket` > `PF_DAEMON_SOCKET` > cli.toml `daemon_socket` > `daemon.sock` in `$POLYFORGE_DATA_DIR`, else `~/.local/share/polyforge` (`cli.DataDir`; the same default for `pf` and the daemon, so `-data-dir` does not move it)
 (`cli/config.go`, `daemon/main.go`).
 
 ### 6.2 Lifecycle <!-- §6.2 -->

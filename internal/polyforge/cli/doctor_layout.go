@@ -51,17 +51,9 @@ var v1PkgRe = regexp.MustCompile(`(?i)ieops-aihub`)
 // v1ExtFileRe matches a settings-listed v1 bridge extension file.
 var v1ExtFileRe = regexp.MustCompile(`(^|/)polyforge/index\.(js|ts)$`)
 
-// polyforgeDataDir is the daemon data dir tools/install.sh uses.
-func polyforgeDataDir(home string) string {
-	if d := os.Getenv("POLYFORGE_DATA_DIR"); d != "" {
-		return d
-	}
-	return filepath.Join(home, ".local", "share", "polyforge")
-}
-
 // releaseCurrent is the stable release checkout link.
 func releaseCurrent(home string) string {
-	return filepath.Join(polyforgeDataDir(home), "release", "current")
+	return filepath.Join(DataDir(home), "release", "current")
 }
 
 // piSettings is the slice of pi's settings.json the doctor reads.
@@ -340,7 +332,7 @@ func shellQuote(s string) string {
 // really gone — the same test tools/install.sh's daemon_running uses),
 // then ensure.
 func ensureFixCommand(home string) string {
-	lock := shellQuote(filepath.Join(polyforgeDataDir(home), "daemon.lock"))
+	lock := shellQuote(filepath.Join(DataDir(home), "daemon.lock"))
 	return "pf ops shutdown && while pf ops status >/dev/null 2>&1 || ! flock -n " + lock + " true; do sleep 2; done; pf daemon ensure"
 }
 
