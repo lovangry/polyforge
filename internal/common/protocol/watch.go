@@ -126,6 +126,17 @@ type ChatSub struct {
 	// Done is set once the WI's terminal decision was delivered: the
 	// watcher stops polling it.
 	Done bool `json:"done,omitempty"`
+	// OriginChat is set on a subscription owner routing added to a chat
+	// that did not submit the WI: the submitting (origin) chat, the one
+	// the WI's decisions wake (polyforge#199). Empty = this chat is a
+	// wake target itself (it submitted the WI, subscribed explicitly, or
+	// the WI has no origin chat).
+	OriginChat string `json:"origin_chat,omitempty"`
+	// Passive is computed per subscriptions answer, never stored: another
+	// chat is woken for this WI (the origin chat while its watcher is
+	// live, else the fallback chat), so this chat's watcher keeps the
+	// WI's progress and prints none of its decisions.
+	Passive bool `json:"passive,omitempty"`
 }
 
 // ChatSubscriptions is the GET /chats/{id}/subscriptions answer, and the

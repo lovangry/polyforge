@@ -251,10 +251,10 @@ non-read request whose peer (or its ancestors / process-group leader) carries th
 | POST | `/shutdown` | async shutdown (§6.2) | `pf ops shutdown` |
 | POST | `/chat/init` | harness session → chat id | `pf chat init` |
 | GET | `/jobs/{wi}/watch?after=N` | per-WI snapshot + events | `pf watch <wi> --once` |
-| GET | `/chats/{id}/subscriptions` | list | `pf watch` |
+| GET | `/chats/{id}/subscriptions` | list; a subscription owner routing added to a chat that did not submit the WI carries `origin_chat` and is answered `passive` (progress only, no decision line) while that origin chat's watcher is live and subscribed — when it is gone, the lowest-id live subscribed chat is the fallback; a WI with no origin chat wakes every subscribed chat (polyforge#199) | `pf watch` |
 | POST | `/chats/{id}/subscribe`, `/unsubscribe` | manage subscriptions; an unsubscribe also mutes the WI for the chat (subscribe-owned skips it until a subscribe) | `pf watch subscribe|unsubscribe` |
 | POST | `/chats/{id}/ack` | cursor advance | resident `pf watch --chat` |
-| POST | `/chats/{id}/subscribe-owned` | `{"owner"}`: subscribe the chat to every held WI it submitted or `owner` owns (origin owner, else reporter) that it has no subscription for; answers the added ones (cursor just before the WI's newest decision event) | resident `pf watch --chat`, every poll |
+| POST | `/chats/{id}/subscribe-owned` | `{"owner"}`: subscribe the chat to every held WI it submitted or `owner` owns (origin owner, else reporter) that it has no subscription for; answers the added ones (cursor just before the WI's newest decision event); the call also marks the chat live (in memory, for one minute; a chat not seen since the daemon started counts as live for its first minute) | resident `pf watch --chat`, every poll |
 
 Socket: `--socket` > `PF_DAEMON_SOCKET` > cli.toml `daemon_socket` > `daemon.sock` in `$POLYFORGE_DATA_DIR`, else `~/.local/share/polyforge` (`cli.DataDir`; the same default for `pf` and the daemon, so `-data-dir` does not move it)
 (`cli/config.go`, `daemon/main.go`).

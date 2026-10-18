@@ -411,3 +411,82 @@ func TestLastSeqAndOwnedCursorPastHistoryCap(t *testing.T) {
 		t.Fatalf("owned subscription %+v err=%v, want the cursor just before step_dead (%d)", added, err, n-1)
 	}
 }
+
+// polyforge#199: an owner-routed subscription is passive while the WI's
+// origin chat is live and subscribed; when the origin chat's watcher is
+// gone, only the lowest-id live subscribed chat is the fallback; a
+// daemon start does not hand a WI to a fallback before the origin chat
+// had a chatLiveFor to reconnect; an explicit subscribe makes the chat a
+// wake target of its own.
+func TestSubStoreWakesTheOriginChatElseOneFallback(t *testing.T) {
+	s, err := newSubStore(filepath.Join(t.TempDir(), chatSubsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := s.born
+	s.now = func() time.Time { return now }
+	passive := func(chat string) bool {
+		t.Helper()
+		l := s.List(chat)
+		if len(l) != 1 {
+			t.Fatalf("%s: %+v", chat, l)
+		}
+		return l[0].Passive
+	}
+	if _, err := s.Subscribe("chat_o", "wi_1", "", 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []string{"chat_b", "chat_c"} {
+		if _, err := s.SubscribeNew(c, "wi_1", "", "chat_o", 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// just after a daemon start nobody was seen yet: the origin chat
+	// still counts as live
+	if passive("chat_o") || !passive("chat_b") || !passive("chat_c") {
+		t.Fatal("after a start: only the origin chat wakes")
+	}
+	s.Seen("chat_o")
+	s.Seen("chat_b")
+	s.Seen("chat_c")
+	now = now.Add(chatLiveFor / 2)
+	s.Seen("chat_b")
+	s.Seen("chat_c")
+	if passive("chat_o") || !passive("chat_b") || !passive("chat_c") {
+		t.Fatal("origin live: only the origin chat wakes")
+	}
+	// the origin chat's watcher stopped polling a chatLiveFor ago
+	now = now.Add(chatLiveFor / 2)
+	s.Seen("chat_b")
+	s.Seen("chat_c")
+	if passive("chat_b") || !passive("chat_c") {
+		t.Fatal("origin gone: the lowest-id live chat is the one fallback")
+	}
+	// the fallback goes too: the next live chat takes over
+	now = now.Add(chatLiveFor)
+	s.Seen("chat_c")
+	if passive("chat_c") {
+		t.Fatal("the only live chat must be the fallback")
+	}
+	// the origin chat is back: the others are passive again
+	s.Seen("chat_o")
+	if !passive("chat_c") {
+		t.Fatal("a returning origin chat is the wake target again")
+	}
+	// an explicit subscribe makes chat_c a wake target of its own
+	if ch, err := s.Subscribe("chat_c", "wi_1", "", 0); err != nil || !ch {
+		t.Fatalf("explicit subscribe: %v %v", ch, err)
+	}
+	if passive("chat_c") {
+		t.Fatal("an explicitly subscribed chat is not passive")
+	}
+	// a WI without an origin chat wakes every subscribed chat
+	if _, err := s.SubscribeNew("chat_b", "wi_2", "", "", 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, sub := range s.List("chat_b") {
+		if sub.WI == "wi_2" && sub.Passive {
+			t.Fatal("an origin-less WI must not be passive")
+		}
+	}
+}

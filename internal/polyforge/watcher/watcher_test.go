@@ -1033,3 +1033,56 @@ func TestFailedReminderAckIsRetriedWithoutReprint(t *testing.T) {
 		t.Fatalf("the ack must be retried until it lands: %+v", api.acks)
 	}
 }
+
+// polyforge#199: a Passive subscription (another chat is woken for its
+// WI) shows progress and prints none of its decisions; nothing it saw
+// counts as delivered, so once it becomes the wake target (the origin
+// chat is gone) the still-pending question fires there.
+func TestPassiveSubscriptionShowsProgressOnly(t *testing.T) {
+	snap := running("wi_1", "plan")
+	snap.Execution.PendingQuestion = &protocol.WatchPendingQuestion{ID: "q-1", Step: "plan"}
+	snap.Events = []protocol.EventEntry{ev(3, "step_dead")}
+	passive := sub("wi_1", 0, "needs_input:q-0") // q-0: answered since
+	passive.Passive = true
+	api := &fakeAPI{
+		subs:  protocol.ChatSubscriptions{Subscriptions: []protocol.ChatSub{passive}},
+		snaps: map[string]*protocol.WatchSnapshot{"wi_1": snap},
+	}
+	var out bytes.Buffer
+	var status []string
+	ctx, cancel := context.WithCancel(context.Background())
+	cycles := 0
+	err := Run(ctx, api, Options{Out: &out, Status: func(l []string) error { status = l; return nil },
+		Sleep: func(context.Context, time.Duration) {
+			if cycles++; cycles == 2 {
+				cancel()
+			}
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("a passive subscription must print no decision: %q", out.String())
+	}
+	if len(status) != 1 || !strings.Contains(status[0], "wi_1") {
+		t.Fatalf("a passive subscription keeps its progress line: %q", status)
+	}
+	if len(api.acks) == 0 {
+		t.Fatal("the passive cycle must still ack (cursor, dropped keys)")
+	}
+	if a := api.acks[0]; a.Cursor != 3 || len(a.Notified) != 0 {
+		t.Fatalf("passive ack = %+v, want cursor 3 and no key counted as delivered", a)
+	}
+
+	// the same chat becomes the wake target: the pending question fires
+	api.mu.Lock()
+	api.subs.Subscriptions = []protocol.ChatSub{sub("wi_1", 3)}
+	api.mu.Unlock()
+	out.Reset()
+	if err := Run(context.Background(), api, Options{WaitDecision: true, Out: &out, Sleep: func(context.Context, time.Duration) {}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "wi_1 needs_input q-1") {
+		t.Fatalf("the wake target must get the still-pending question: %q", out.String())
+	}
+}
