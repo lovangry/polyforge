@@ -149,7 +149,10 @@ func TestS12ManualModelsSurviveReclaim(t *testing.T) {
 	d.pf(t, "submit", wi, "--models", "pi:s12-r1,pi:s12-r2")
 	waitStepStatus(t, d, wi, "verification", "in_progress", 90*time.Second)
 	capA := d.capsuleDir(wi)
-	waitUntil(t, 60*time.Second, "the hub chain never carried capsule.json and the fix step done", func() bool {
+	// The verification step_start (in_progress with its dispatch ordinal)
+	// reaches the hub by its own push: crashing before it lands would make
+	// the re-claim re-derive that dispatch and replay its 120s action.
+	waitUntil(t, 60*time.Second, "the hub chain never carried capsule.json, the fix step done and the verification step_start", func() bool {
 		if !inst.bareHasPath(t, wi, "capsule.json") || !inst.bareHasPath(t, wi, "runtime-state/execution.json") {
 			return false
 		}
@@ -157,8 +160,9 @@ func TestS12ManualModelsSurviveReclaim(t *testing.T) {
 		if json.Unmarshal([]byte(inst.bareFileAtMain(t, wi, "runtime-state/execution.json")), &x) != nil {
 			return false
 		}
-		fix := x.Steps["fix"]
-		return fix != nil && fix.Status == "done"
+		fix, ver := x.Steps["fix"], x.Steps["verification"]
+		return fix != nil && fix.Status == "done" &&
+			ver != nil && ver.Status == "in_progress" && ver.Dispatch > 0
 	})
 
 	if strings.Contains(inst.bareFileAtMain(t, wi, "capsule.json"), "manual_candidates") {

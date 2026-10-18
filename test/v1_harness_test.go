@@ -1444,6 +1444,9 @@ type execStepView struct {
 	// Supervision is the driver-owned failure ledger and relaxed bounds
 	// (v2-converge 2.3/2.4).
 	Supervision map[string]any `json:"supervision"`
+	// Dispatch is the ordinal of the dispatch the step awaits (set by
+	// its step_start, cleared once settled).
+	Dispatch int64 `json:"dispatch"`
 }
 
 // executionView is the loose read shape of runtime-state/execution.json.
