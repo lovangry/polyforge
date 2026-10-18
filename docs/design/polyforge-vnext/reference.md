@@ -201,7 +201,7 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 | `CORE-500` | Untyped server error (default mapping) |
 | `CORE-507` | Admin backup `VACUUM INTO` failed |
 | `CORE-508` | Another aihub holds `service.lock` |
-| `MEM-400` | Bad memory input (empty `q`, bad frontmatter, client-supplied id) |
+| `MEM-400` | Bad memory input (empty `q`, type kind outside `typeKinds`, bad frontmatter, client-supplied id) |
 | `MEM-403` | No write role; redact by a non-owner |
 | `MEM-404` | Memory missing or read-denied |
 | `MEM-409` | Idempotency key reused; redact of a non-active memory |

@@ -17,7 +17,12 @@ the project memory so a later `recall` finds it.
 pf remember --project P --type T [--title S] [--visibility V] [--tags a,b] [--work-item ID] <content | - (stdin) | @file>
 ```
 
-`--type` is required (e.g. `experience.debug`, `fact.note`). Without
+`--type` is required and has the form `kind.name` (e.g. `experience.debug`,
+`fact.note`). The aihub server owns the type namespace: the kind (before
+the first dot) must be one of `experience|fact|doc|rule|methodology`; any
+other type (an invented one like `project-learnings`) is refused with
+`MEM-400` naming the valid kinds, and nothing is stored. Pick the closest
+existing kind; never invent a top-level type. Without
 `--title` aihub derives one from the content's first line (markdown
 markers stripped, cut to 80 characters). The content
 is the positional text; `-` reads it from stdin, `@file` from a file.
@@ -84,7 +89,7 @@ visibility V)`.
 | Code | When | What to tell the user |
 |---|---|---|
 | `AUTH-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / the config's `api_key`. |
-| `MEM-400` | Blank content, missing `--type`, or an invalid type/visibility | Give real content and a valid type/visibility — read `detail` for the exact field. |
+| `MEM-400` | Blank content, missing `--type`, a type whose kind is not one of the server's kinds, or an invalid visibility | Give real content, a `kind.name` type with a kind the error names, and a valid visibility — read `detail` for the exact field. |
 | `CORE-404` | Unknown project (the server's project lookup) | The project does not exist — check `--project` (there is no default project; it must also be listed in a cli.toml `[workspace]` section). |
 | `MEM-403` | You lack the writer (or maintainer) role on the project | Ask a project maintainer for the writer role; nothing was saved. |
 | `MEM-413` | Content (or the whole authority document) exceeds 1 MiB | Split the memory or trim the content. |
