@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -50,6 +51,37 @@ func TestMainIsolatesGitConfig(t *testing.T) {
 	}
 	if os.Getenv("GIT_CONFIG_NOSYSTEM") != "1" {
 		t.Fatal("the system git config must be off")
+	}
+}
+
+// Inside a Main-isolated binary TMPDIR is the run's private dir (short,
+// under /tmp), so every temp entry a test makes is checked at exit.
+func TestMainIsolatesTmpdir(t *testing.T) {
+	tmp := os.TempDir()
+	if filepath.Dir(tmp) != "/tmp" || len(filepath.Base(tmp)) != 6 || !strings.HasPrefix(filepath.Base(tmp), "pf") {
+		t.Fatalf("TMPDIR=%q is not the run's private /tmp/pfXXXX dir", tmp)
+	}
+}
+
+// leftovers names every entry, sorted, and caps a long list with a count.
+func TestLeftoversListsEntries(t *testing.T) {
+	dir := t.TempDir()
+	if got, err := leftovers(dir, 2); got != nil || err != nil {
+		t.Fatalf("empty dir: %v %v", got, err)
+	}
+	for _, n := range []string{"c", "a", "b"} {
+		if err := os.WriteFile(filepath.Join(dir, n), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _ := leftovers(dir, 5); strings.Join(got, ",") != "a,b,c" {
+		t.Fatalf("leftovers = %q, want a,b,c", got)
+	}
+	if got, _ := leftovers(dir, 2); strings.Join(got, ",") != "a,b,... and 1 more" {
+		t.Fatalf("capped leftovers = %q", got)
+	}
+	if _, err := leftovers(filepath.Join(dir, "gone"), 2); err == nil {
+		t.Fatal("a missing dir must be an error, not a clean pass")
 	}
 }
 

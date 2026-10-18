@@ -94,7 +94,7 @@ func TestS12ManualModelsSurviveDaemonRestart(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
 	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [pi:s12-y1, pi:s12-y2] }\n")
-	sock := filepath.Join(shortTmp(t, "/tmp", "s12sock"), "d.sock")
+	sock := filepath.Join(shortTmp(t, "s12sock"), "d.sock")
 	dataDir := t.TempDir()
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
 		inst.url, inst.adminKey, "",

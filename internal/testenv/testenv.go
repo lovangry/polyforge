@@ -18,20 +18,46 @@
 // operator setting (core.hooksPath, url.insteadOf, ...) changes what a
 // test observes. Main also guards the real file: its content is hashed
 // before and after the run and a change fails the package.
+//
+// TMPDIR is private to the run (GOTMPDIR is unset, so t.TempDir() uses it
+// too) and must be empty again at its end: temp files and dirs the tests —
+// or the processes they start with the inherited environment — make land
+// there, so anything left is this run's leak, attributable even while
+// other test processes share the machine's /tmp. A leftover fails the
+// package; tests use t.TempDir() or remove what they made in t.Cleanup.
+// Output meant to outlive the run goes under OrigTempDir().
 package testenv
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"testing"
 )
 
 const activeEnv = "TESTENV_ISOLATED"
+
+// origTmpEnv carries the temp dir the test binary started with (see
+// OrigTempDir) into re-exec'd helpers as well.
+const origTmpEnv = "TESTENV_ORIG_TMPDIR"
+
+// OrigTempDir is the temp dir the test binary was started with, before
+// Main pointed TMPDIR at the run's private one: the place for output that
+// must outlive the run (instrumented-coverage data, say), which the
+// leftover check would otherwise report and delete.
+func OrigTempDir() string {
+	if d := os.Getenv(origTmpEnv); d != "" {
+		return d
+	}
+	return os.TempDir()
+}
 
 // Test git identity written into the scratch global config.
 const (
@@ -73,6 +99,17 @@ func run(m *testing.M, atExit []func() error) (int, error) {
 		return 0, err
 	}
 	defer os.RemoveAll(home)
+	os.Setenv(origTmpEnv, os.TempDir())
+	tmp, err := shortTmpDir()
+	if err != nil {
+		// no usable /tmp (a sandbox, a minimal container): the caller's
+		// temp dir still works, only long socket paths may not
+		fmt.Fprintf(os.Stderr, "testenv: warning: %v; the private TMPDIR goes under %s instead (unix socket paths may exceed 107 bytes)\n", err, os.TempDir())
+		if tmp, err = os.MkdirTemp("", "pf"); err != nil {
+			return 0, err
+		}
+	}
+	defer os.RemoveAll(tmp)
 
 	// Hermetic git: a scratch global config holding only the test
 	// identity (commits in test repos need one), and no system config.
@@ -119,11 +156,15 @@ func run(m *testing.M, atExit []func() error) (int, error) {
 		"XDG_RUNTIME_DIR":    runtimeDir,
 		"POLYFORGE_DATA_DIR": filepath.Join(home, ".local", "share", "polyforge"),
 		"TMUX_TMPDIR":        tmuxDir,
+		"TMPDIR":             tmp,
+		// node keeps its compile cache in os.tmpdir() unless told otherwise
+		"NODE_COMPILE_CACHE": filepath.Join(home, ".cache", "node-compile-cache"),
 	} {
 		os.Setenv(k, v)
 	}
 	// Ambient daemon/connection settings must not leak in either.
-	for _, k := range []string{"PF_DAEMON_SOCKET", "PF_WI_ID", "PF_DAEMON_ID", "POLYFORGE_MACHINE_ID", "TMUX", "TMUX_PANE", "PI_CODING_AGENT_DIR"} {
+	// (GOTMPDIR too: t.TempDir() prefers it to the private TMPDIR)
+	for _, k := range []string{"PF_DAEMON_SOCKET", "PF_WI_ID", "PF_DAEMON_ID", "POLYFORGE_MACHINE_ID", "TMUX", "TMUX_PANE", "PI_CODING_AGENT_DIR", "GOTMPDIR"} {
 		os.Unsetenv(k)
 	}
 	code := m.Run()
@@ -137,7 +178,59 @@ func run(m *testing.M, atExit []func() error) (int, error) {
 		fmt.Fprintf(os.Stderr, "testenv: FAIL: the operator's real global git config changed during the test run (%v): a test wrote past the hermetic GIT_CONFIG_GLOBAL\n", guarded)
 		code = 1
 	}
+	if left, lerr := leftovers(tmp, 20); lerr != nil {
+		fmt.Fprintf(os.Stderr, "testenv: FAIL: the private TMPDIR %s cannot be checked (a test removed or locked it?): %v\n", tmp, lerr)
+		code = 1
+	} else if len(left) > 0 {
+		fmt.Fprintf(os.Stderr, "testenv: FAIL: the tests left temp entries in their private TMPDIR %s — a test (or a process it started) made them and never removed them; use t.TempDir() or remove them in t.Cleanup:\n  %s\n", tmp, strings.Join(left, "\n  "))
+		code = 1
+	}
 	return code, nil
+}
+
+// shortTmpDir makes the run's private TMPDIR as /tmp/pfXXXX (4 random
+// alphanumerics) — under /tmp rather than $TMPDIR, and as short as that:
+// tests bind unix sockets inside t.TempDir() (TMPDIR + a test name cut to
+// 64 bytes + up to 10 digits + /001), and a Linux socket path is bound to
+// 107 bytes. With this prefix "<that>/polyforge.sock" peaks at 105.
+func shortTmpDir() (string, error) {
+	const abc = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, 4)
+	for range 100 {
+		if _, err := rand.Read(b); err != nil {
+			return "", err
+		}
+		for i := range b {
+			b[i] = abc[int(b[i])%len(abc)]
+		}
+		dir := "/tmp/pf" + string(b)
+		err := os.Mkdir(dir, 0o700)
+		if err == nil {
+			return dir, nil
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			return "", err
+		}
+	}
+	return "", errors.New("no free /tmp/pfXXXX name after 100 tries")
+}
+
+// leftovers lists the entries of dir by name (at most max, then a count of
+// the rest); nil when dir is empty.
+func leftovers(dir string, max int) ([]string, error) {
+	ents, err := os.ReadDir(dir)
+	if err != nil || len(ents) == 0 {
+		return nil, err
+	}
+	names := make([]string, 0, len(ents))
+	for _, e := range ents {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	if len(names) > max {
+		names = append(names[:max], fmt.Sprintf("... and %d more", len(names)-max))
+	}
+	return names, nil
 }
 
 // realGitConfigs names the operator's real global git config files: the

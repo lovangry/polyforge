@@ -36,6 +36,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
+	"github.com/silgrid/polyforge/internal/testenv"
 )
 
 // ---------------------------------------------------------------------------
@@ -72,7 +73,13 @@ func v1Root(t *testing.T) string {
 func v1Bins(t *testing.T) string {
 	t.Helper()
 	v1BinOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "pfv1-bins")
+		// the instrumented round keeps its coverage data in the bin dir:
+		// outside the run's private TMPDIR, which must end empty
+		parent := ""
+		if os.Getenv("PFV1_COVER_BINS") != "" {
+			parent = testenv.OrigTempDir()
+		}
+		dir, err := os.MkdirTemp(parent, "pfv1-bins")
 		if err != nil {
 			v1BinErr = err
 			return
@@ -739,12 +746,13 @@ func optServerURL(url string) daemonOpt {
 	return func(d *v1Daemon) { d.serverURL = url }
 }
 
-// shortTmp makes a short temp path (unix socket paths are bound to ~104
-// bytes; t.TempDir() paths can exceed that with nested test names),
-// removed when t ends — after the cleanups registered later, so after
-// the daemon that binds a socket in it has stopped.
-func shortTmp(t *testing.T, parent, prefix string) string {
-	d, err := os.MkdirTemp(parent, prefix)
+// shortTmp makes a short temp path (unix socket paths are bound to 107
+// bytes on Linux; t.TempDir() paths can exceed that with nested test names) in the
+// run's private TMPDIR (internal/testenv: short, under /tmp), removed when
+// t ends — after the cleanups registered later, so after the daemon that
+// binds a socket in it has stopped.
+func shortTmp(t *testing.T, prefix string) string {
+	d, err := os.MkdirTemp("", prefix)
 	if err != nil {
 		t.Fatalf("shortTmp: %v", err)
 	}
@@ -756,7 +764,7 @@ func shortTmp(t *testing.T, parent, prefix string) string {
 // own socket, data dir and workspace.
 func newV1Daemon(t *testing.T, inst *v1Install, opts ...daemonOpt) *v1Daemon {
 	t.Helper()
-	sockBase := shortTmp(t, "/tmp", "pfv1sock")
+	sockBase := shortTmp(t, "pfv1sock")
 	sock := filepath.Join(sockBase, "d.sock")
 	dataDir := t.TempDir()
 	workspace := t.TempDir()

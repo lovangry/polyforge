@@ -789,7 +789,7 @@ func TestW079RestartKeepsClaimTimeSnapshot(t *testing.T) {
 	inst := newV1Install(t)
 	ws := t.TempDir()
 	w079Yaml(t, ws, "steps:\n  e2e:\n    fix: { models: [pi:w079-m1, pi:w079-m2] }\n")
-	sock := filepath.Join(shortTmp(t, "/tmp", "w079sock"), "d.sock")
+	sock := filepath.Join(shortTmp(t, "w079sock"), "d.sock")
 	dataDir := t.TempDir()
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
 		inst.url, inst.adminKey, "",
