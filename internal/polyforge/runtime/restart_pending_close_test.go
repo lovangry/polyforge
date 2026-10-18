@@ -12,10 +12,14 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/protocol"
@@ -65,6 +69,9 @@ func seedPendingCloseOfRetainedPause(t *testing.T, wi string, reason string) (*R
 	if recs[0].State != string(StatePaused) || !recs[0].CleanPause || recs[0].StopReason != reason {
 		t.Fatalf("the crash-window record must be the retained paused shape carrying the pending %s intent, got %+v", reason, recs[0])
 	}
+	// the crash itself: nothing of the first daemon runs on (its pending
+	// close's retry would otherwise race the restarted daemon)
+	r.Close()
 	return r, hub, j, sess
 }
 
@@ -75,19 +82,29 @@ func seedPendingCloseOfRetainedPause(t *testing.T, wi string, reason string) (*R
 // non-nil) keeps the SessionEnd outage going through the replay too.
 func restartOver(t *testing.T, r *Runtime, wi, sess string, endErr error, events *[]string) (*Runtime, *fakeHub, error) {
 	t.Helper()
+	r2, hub2, _, err := restartOverHub(t, r, wi, sess, api.StatusPaused, true, endErr, events)
+	return r2, hub2, err
+}
+
+// restartOverHub is restartOver with the hub's answer for the session
+// scripted (status, clean_pause), and the restarted daemon's spawner.
+func restartOverHub(t *testing.T, r *Runtime, wi, sess, status string, clean bool, endErr error, events *[]string) (*Runtime, *fakeHub, *scriptedSpawner, error) {
+	t.Helper()
 	cfg2 := r.cfg
 	cfg2.EventTap = func(wiID, kind string, body map[string]any) {
 		*events = append(*events, wiID+"/"+kind)
 	}
 	hub2 := newFakeHub()
-	hub2.hold(wi, sess, api.StatusPaused)
-	hub2.cleanPause[wi] = true
+	hub2.hold(wi, sess, status)
+	hub2.cleanPause[wi] = clean
 	if endErr != nil {
 		hub2.end[wi] = endErr
 	}
 	sp2 := &scriptedSpawner{}
+	// a real (scripted) engine: a resume would spawn through sp2
+	cfg2.AgentStarter = scriptedEngineStarter(sp2)
 	r2 := New(cfg2, hub2, sp2, supervise.NewQueue[protocol.RTMsg](), supervise.NewQueue[protocol.OBMsg]())
-	return r2, hub2, restartSettled(t, r2)
+	return r2, hub2, sp2, restartSettled(t, r2)
 }
 
 // TestRestartReplaysPendingFailedAndBlockedCloseOfRetainedPausedRecord:
@@ -247,5 +264,144 @@ func TestRestartPlainRetainedPauseIsNotReplayed(t *testing.T) {
 	}
 	if recs[0].StopReason != protocol.FinishPaused {
 		t.Fatalf("the retained pause's stop_reason must stay the pause's own, got %+v", recs[0])
+	}
+}
+
+// TestRestartReplaysPendingCloseWhateverTheHubSaysOfTheLiveSession
+// (polyforge#197): a retained Paused record carrying a terminal
+// stop_reason is replayed as that close whenever the hub still shows the
+// session live — running (the pause's own SessionEnd never landed either)
+// or paused with clean_pause cleared (a pf resume landed at the hub) as
+// well as paused + clean — and is never resumed: no agent is spawned.
+func TestRestartReplaysPendingCloseWhateverTheHubSaysOfTheLiveSession(t *testing.T) {
+	hubs := []struct {
+		name   string
+		status string
+		clean  bool
+	}{
+		{"running", api.StatusRunning, false},
+		{"paused, clean_pause cleared", api.StatusPaused, false},
+		{"paused + clean_pause", api.StatusPaused, true},
+	}
+	for _, h := range hubs {
+		for _, reason := range []string{protocol.FinishWrapped, protocol.FinishFailed, protocol.FinishBlocked} {
+			name := h.name + "/" + reason
+			wi := "wi_197_" + reason
+			r1, _, _, sess := seedPendingCloseOfRetainedPause(t, wi, reason)
+			var events []string
+			r2, hub2, sp2, err := restartOverHub(t, r1, wi, sess, h.status, h.clean, nil, &events)
+			if err != nil {
+				t.Fatalf("%s: Restart: %v", name, err)
+			}
+			hub2.mu.Lock()
+			ends, status := append([]api.SessionEndRequest(nil), hub2.ends...), hub2.status[wi]
+			hub2.mu.Unlock()
+			replayed := false
+			for _, e := range ends {
+				if e.Status == reason && e.SessionID == sess {
+					replayed = true
+				}
+			}
+			if !replayed || status != reason {
+				t.Fatalf("%s: the pending close must be replayed (SessionEnd(%s) on the record's session), got ends=%v hub=%q events=%v", name, reason, ends, status, events)
+			}
+			sp2.mu.Lock()
+			spawned := len(sp2.calls)
+			sp2.mu.Unlock()
+			if spawned != 0 {
+				t.Fatalf("%s: a work item with a pending %s close must never be resumed, got %d spawn(s)", name, reason, spawned)
+			}
+			if recs := loadRecords(t, r2); len(recs) != 0 {
+				t.Fatalf("%s: the replayed close must drop the record, got %+v", name, recs)
+			}
+			if !slices.Contains(events, wi+"/pending_close_replay") {
+				t.Fatalf("%s: the replay must be surfaced as pending_close_replay, got %v", name, events)
+			}
+		}
+	}
+}
+
+// TestResumeRefusedWhileACloseIsPending (polyforge#197): pf resume on a
+// paused record whose terminal close has not reached aihub is refused —
+// a resume must not race the close it would cancel — and nothing spawns.
+func TestResumeRefusedWhileACloseIsPending(t *testing.T) {
+	wi := "wi_197_resume"
+	r1, _, _, sess := seedPendingCloseOfRetainedPause(t, wi, protocol.FinishWrapped)
+	var events []string
+	// the hub still unreachable for SessionEnd: the restart's replay fails
+	// and keeps the record (and arms its retry)
+	r2, _, sp2, err := restartOverHub(t, r1, wi, sess, api.StatusPaused, false, fmt.Errorf("SessionEnd outage (scripted)"), &events)
+	if err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if !slices.Contains(events, wi+"/pending_close_replay_failed") {
+		t.Fatalf("a failed replay must be surfaced as its own event, got %v", events)
+	}
+	_, rerr := r2.ResumePaused(context.Background(), wi)
+	var ae *api.Error
+	if !errors.As(rerr, &ae) || ae.Code != api.ErrDaemonConflict || !strings.Contains(ae.Detail, "wrapped close of the paused record is pending") {
+		t.Fatalf("pf resume must be refused naming the pending close, got %v", rerr)
+	}
+	sp2.mu.Lock()
+	defer sp2.mu.Unlock()
+	if len(sp2.calls) != 0 {
+		t.Fatalf("a refused resume must spawn nothing, got %d", len(sp2.calls))
+	}
+}
+
+// TestPausedCloseSessionEndFailureIsRetriedLive (polyforge#197): a wrap
+// of a retained paused record whose SessionEnd fails is retried by the
+// running daemon (not only by the next restart) until it lands.
+func TestPausedCloseSessionEndFailureIsRetriedLive(t *testing.T) {
+	setGitIdentity(t)
+	wi := "wi_197_live"
+	dir := t.TempDir()
+	cfg := Config{
+		MachineID:    "m-test",
+		Mapping:      mappingFor(filepath.Join(dir, "ws")),
+		DataDir:      filepath.Join(dir, "data"),
+		EndRetryBase: 10 * time.Millisecond,
+	}
+	hub := newFakeHub()
+	toOB := supervise.NewQueue[protocol.RTMsg]()
+	r := New(cfg, hub, &scriptedSpawner{}, toOB, supervise.NewQueue[protocol.OBMsg]())
+	t.Cleanup(r.Close)
+	sess := fakeSession(wi)
+	hub.hold(wi, sess, api.StatusRunning)
+	j := seedJob(r, wi)
+	initGitCapsule(t, j)
+	if err := r.Stop(context.Background(), wi, protocol.FinishPaused); err != nil {
+		t.Fatalf("pause close: %v", err)
+	}
+	recvRT(t, toOB)
+
+	hub.mu.Lock()
+	hub.end[wi] = fmt.Errorf("SessionEnd outage (scripted)")
+	hub.mu.Unlock()
+	if err := r.Stop(context.Background(), wi, protocol.FinishWrapped); err == nil {
+		t.Fatal("the wrap close must surface the scripted session-end failure")
+	}
+	// a repeat close (or a verdict swap) while it is pending is refused
+	err := r.Stop(context.Background(), wi, protocol.FinishFailed)
+	var ae *api.Error
+	if !errors.As(err, &ae) || ae.Code != api.ErrDaemonConflict || !strings.Contains(ae.Detail, "wrapped close is already in progress") {
+		t.Fatalf("a close over a pending close must be refused naming it, got %v", err)
+	}
+	hub.mu.Lock()
+	delete(hub.end, wi) // aihub is back
+	hub.mu.Unlock()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		hub.mu.Lock()
+		status := hub.status[wi]
+		hub.mu.Unlock()
+		if status == protocol.FinishWrapped && len(loadRecords(t, r)) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the failed close was never retried: hub %q, records %+v", status, loadRecords(t, r))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
