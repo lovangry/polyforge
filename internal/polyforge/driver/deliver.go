@@ -365,18 +365,12 @@ func checkCommand(seg []string, i int, branch string, depth int, gitEnv []string
 			}
 		}
 	case "gh":
-		j := 0
-		for j < len(args) && strings.HasPrefix(args[j], "-") {
-			if args[j] == "-R" || args[j] == "--repo" {
-				j++
-			}
-			j++
-		}
-		if j+1 < len(args) && args[j] == "pr" && args[j+1] == "merge" {
-			if err := checkGHMerge(args[j+2:]); err != nil {
+		if mergeArgs, ok := ghPRMergeArgs(args); ok {
+			if err := checkGHMerge(mergeArgs); err != nil {
 				return where(err)
 			}
 		}
+		j := ghSubcommand(args)
 		if j+1 < len(args) && args[j] == "repo" && args[j+1] == "sync" {
 			return where(errors.New("gh repo sync is forbidden in delivery (it can move the default branch)"))
 		}
@@ -391,6 +385,29 @@ func checkCommand(seg []string, i int, branch string, depth int, gitEnv []string
 		}
 	}
 	return nil
+}
+
+// ghSubcommand answers the index of the subcommand in gh's arguments
+// (the words after `gh`), past its global flags.
+func ghSubcommand(args []string) int {
+	j := 0
+	for j < len(args) && strings.HasPrefix(args[j], "-") {
+		if args[j] == "-R" || args[j] == "--repo" {
+			j++
+		}
+		j++
+	}
+	return j
+}
+
+// ghPRMergeArgs answers whether gh's arguments are `pr merge`, and the
+// arguments after it.
+func ghPRMergeArgs(args []string) ([]string, bool) {
+	j := ghSubcommand(args)
+	if j+1 < len(args) && args[j] == "pr" && args[j+1] == "merge" {
+		return args[j+2:], true
+	}
+	return nil, false
 }
 
 // gitSubcommand answers the index of the subcommand in git's arguments

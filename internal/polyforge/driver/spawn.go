@@ -645,8 +645,11 @@ func deliveryContract(p promptParts) string {
 	b.WriteString("; a `needs_input` result carries `question_id` (1–64 chars of `A-Za-z0-9._-`) and `question` instead. End your turn once the file is written.\n")
 	if p.RequireCommandEvidence {
 		b.WriteString("\nCommand evidence: this step requires `command_evidence` — a list of OBJECTS " +
-			"`{\"argv\": [\"go\", \"test\", \"./...\"], \"exit_code\": 0, \"duration_ms\": 1200}`, never strings. " +
-			"Run at least one real check command and report every command you ran with its measured `duration_ms` (> 0); " +
+			"`{\"argv\": [\"go\", \"test\", \"./...\"], \"cwd\": \"repos/<name>\", \"exit_code\": 0, \"duration_ms\": 1200}`, never strings. " +
+			"`cwd` is the directory the command ran in, capsule-relative: record each command where it ran — with that `cwd`, " +
+			"or with the `cd` you ran it after (`[\"bash\", \"-c\", \"cd repos/<name> && go test ./...\"]`); " +
+			"a command recorded with neither counts as run at the capsule root, not in a repo. " +
+			"Run at least one real check command and report every command you ran, in the order you ran it, with its measured `duration_ms` (> 0); " +
 			"an empty list, an entry without `argv`, or one without a positive `duration_ms` is rejected. Never fabricate an entry.\n")
 	}
 	if p.RequiresHumanAnswer {

@@ -13,7 +13,7 @@ package driver
 //     passed on, OR this dispatch's command evidence — in recorded order —
 //     ran every command of verification's test_bar for that repo, in that
 //     repo, with exit 0, after the dispatch's last `git merge`/`git pull`
-//     there. No timestamps (started_at stays optional and ignored).
+//     there and before the `gh pr merge` of its PR. No timestamps (started_at stays optional and ignored).
 //     Evidence of an earlier, crashed dispatch is gone, so it never
 //     counts; a missing test_bar is "not shown" — the human's call.
 //   - hand-resolved: every first-parent commit in <verified>..HEAD must be
@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
@@ -87,8 +88,8 @@ func mergeBlocker(spec ResultSpec, r deliverRepo, branch string, ev []CommandEvi
 		return "the step reports an LLM-resolved conflict"
 	case r.TestsPassed != nil && !*r.TestsPassed:
 		return "the step reports failing tests"
-	case head != verified && !testBarRerun(r.Name, spec.VerifiedTestBar, evidenceEvents(ev, filepath.Dir(spec.ReposDir))):
-		return "the tests are not shown to pass on the pushed head (it differs from the commit verification passed on and this dispatch did not re-run verification's test_bar in that repo after its last merge)"
+	case head != verified && !testBarRerun(r.Name, strings.TrimSpace(r.PRURL), spec.VerifiedTestBar, evidenceEvents(ev, filepath.Dir(spec.ReposDir))):
+		return "the tests are not shown to pass on the pushed head (it differs from the commit verification passed on and this dispatch did not re-run verification's test_bar in that repo after its last merge and before its gh pr merge)"
 	}
 	return ""
 }
@@ -179,12 +180,39 @@ type testBarCmd struct {
 
 // evEvent is one simple command of the dispatch's evidence, in recorded
 // order: the repo it ran in (from the entry's cwd, `cd` and `git -C`),
-// its words, and its entry's exit code.
+// its words, its comparison key and its entry's exit code.
 type evEvent struct {
-	repo  string
-	words []string
-	exit  int
-	merge bool // git merge / git pull
+	repo    string
+	words   []string // commandWords: finds cd / git / gh
+	key     string   // barKey: compared with the test bar
+	exit    int
+	merge   bool // git merge / git pull
+	prMerge bool // gh pr merge
+}
+
+// barKey is a simple command as the test-bar comparison sees it, on
+// both sides alike: redirections dropped, quotes and whitespace
+// normalised (by shellSegments), nothing else removed. Leading
+// NAME=value assignments and wrapper words stay, so `GOWORK=off go build`
+// or `E2E_RUN=a sh e2e.sh` is matched only by that exact command.
+func barKey(seg []string) string {
+	return strings.Join(dropRedirections(seg), " ")
+}
+
+// commandWords is a simple command's command word onward: redirections
+// dropped, and the leading NAME=value assignments, shell keywords and
+// wrapper words (env, timeout, …) skipped. It identifies cd / git / gh;
+// it is never the test-bar comparison key (barKey). nil = no command word.
+func commandWords(seg []string) []string {
+	seg = dropRedirections(seg)
+	i := 0
+	for i < len(seg) && (isAssignment(seg[i]) || shellKeywords[seg[i]] || commandWrappers[filepath.Base(seg[i])]) {
+		i++
+	}
+	if i >= len(seg) {
+		return nil
+	}
+	return seg[i:]
 }
 
 // evidenceEvents flattens command evidence into simple commands in order.
@@ -202,22 +230,17 @@ func evidenceEvents(ev []CommandEvidence, capsuleRoot string) []evEvent {
 			segs = [][]string{e.Argv}
 		}
 		for _, seg := range segs {
-			seg = dropRedirections(seg)
-			i := 0
-			for i < len(seg) && (isAssignment(seg[i]) || shellKeywords[seg[i]] || commandWrappers[filepath.Base(seg[i])]) {
-				i++
-			}
-			if i >= len(seg) {
+			words := commandWords(seg)
+			if words == nil {
 				continue
 			}
-			words := seg[i:]
 			if words[0] == "cd" {
 				if len(words) > 1 {
 					dir = joinRel(dir, words[1], capsuleRoot)
 				}
 				continue
 			}
-			ev := evEvent{repo: repoOfRel(dir), words: words, exit: e.ExitCode}
+			ev := evEvent{repo: repoOfRel(dir), words: words, key: barKey(seg), exit: e.ExitCode}
 			if filepath.Base(words[0]) == "git" {
 				j, opts := gitSubcommand(words[1:])
 				for _, o := range opts {
@@ -226,6 +249,9 @@ func evidenceEvents(ev []CommandEvidence, capsuleRoot string) []evEvent {
 					}
 				}
 				ev.merge = j+1 < len(words) && (words[j+1] == "merge" || words[j+1] == "pull")
+			}
+			if filepath.Base(words[0]) == "gh" {
+				_, ev.prMerge = ghPRMergeArgs(words[1:])
 			}
 			out = append(out, ev)
 		}
@@ -267,14 +293,25 @@ func repoOfRel(dir string) string {
 // testBarRerun: every test-bar command verification named for repo
 // appears in this dispatch's evidence, run in that repo with exit 0,
 // in order, AFTER the dispatch's last merge in that repo (no merge in
-// this dispatch: anywhere in it). Commands compare as normalised words
-// (quotes stripped, whitespace collapsed; a leading `cd` sets the repo).
-// No test bar for the repo means nothing to prove it with.
-func testBarRerun(repo string, bar []testBarCmd, events []evEvent) bool {
+// this dispatch: anywhere in it) and BEFORE the first `gh pr merge` of
+// that repo's PR after that merge — run in the repo or naming prURL —
+// since the PR merge is what the re-run must cover (polyforge#203).
+// Both sides compare exactly, as barKey (quotes stripped, whitespace
+// collapsed, redirections dropped, leading assignments and wrappers
+// kept; a leading `cd` sets the repo). No test bar for the repo
+// means nothing to prove it with.
+func testBarRerun(repo, prURL string, bar []testBarCmd, events []evEvent) bool {
 	start := 0
 	for i, e := range events {
 		if e.merge && e.repo == repo {
 			start = i + 1
+		}
+	}
+	end := len(events)
+	for i := start; i < len(events); i++ {
+		if events[i].prMerge && (events[i].repo == repo || prURL != "" && slices.Contains(events[i].words, prURL)) {
+			end = i
+			break
 		}
 	}
 	need := 0
@@ -283,16 +320,17 @@ func testBarRerun(repo string, bar []testBarCmd, events []evEvent) bool {
 			continue
 		}
 		for _, seg := range shellSegments(tb.Command) {
-			seg = dropRedirections(seg)
-			if len(seg) == 0 || seg[0] == "cd" {
+			words := commandWords(seg)
+			if words == nil || words[0] == "cd" {
 				continue
 			}
+			key := barKey(seg)
 			need++
 			found := false
-			for start < len(events) {
+			for start < end {
 				e := events[start]
 				start++
-				if e.repo == repo && e.exit == 0 && strings.Join(e.words, " ") == strings.Join(seg, " ") {
+				if e.repo == repo && e.exit == 0 && e.key == key {
 					found = true
 					break
 				}
