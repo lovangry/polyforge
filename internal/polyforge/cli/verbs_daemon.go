@@ -289,7 +289,7 @@ var cmdResume = &Command{
 				// succeeded, so the answer says so (same code, so the exit
 				// status and --json envelope are unchanged).
 				return &api.Error{Code: ae.Code, Extra: ae.Extra, Detail: ae.Detail +
-					"; the hub side succeeded (clean_pause is cleared) — the daemon refused the in-place resume, so the holder daemon's next start reconciles it (and resumes it unless the refusal above blocked the work item)"}
+					"; the hub side succeeded (clean_pause is cleared) — the daemon refused the in-place resume, so the holder daemon's next start reconciles it (it resumes, unless the refusal above blocked the work item or names a pending close, which is replayed instead)"}
 			}
 			raw, _ := json.Marshal(res)
 			ctx.finish(raw, func() {

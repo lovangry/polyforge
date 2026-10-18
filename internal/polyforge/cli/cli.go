@@ -71,7 +71,8 @@ type Command struct {
 // daemon UDS face (submit, watch, answer, pause, resume, wrap, ops) — with
 // `chat` (the harness chat identity, also GroupExec, so the help face shows
 // 8 exec verbs) between ops and watch, then the management face M1–M5, then the
-// machine health face (doctor, #113) and the workspace layout (init,
+// machine health face (doctor, #113), the build version (version, #196:
+// the verb form of the `--version` flag) and the workspace layout (init,
 // #177), then the daemon
 // placeholder (help-only: cmd/pf/main.go intercepts the real launch).
 var commands = []*Command{
@@ -95,6 +96,7 @@ var commands = []*Command{
 	cmdProjects,
 	cmdBackup,
 	cmdDoctor,
+	cmdVersion,
 	cmdInit,
 	cmdDaemon,
 }
@@ -126,7 +128,8 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// --version is handled before verb dispatch (and before the
 	// empty-positional usage branch): with no verb left after the flag,
 	// Run would otherwise fall into the usage dump. Exit 0, print the
-	// build-injected version string, never usage.
+	// build-injected version string, never usage. The verb form of this
+	// face is `pf version` (verbs_version.go): same source, same shapes.
 	if *versionFlag {
 		if *jsonFlag {
 			fmt.Fprintf(stdout, "{\"version\":%q}\n", version.Version)
