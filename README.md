@@ -409,7 +409,7 @@ error caught by the global / verb-level flag parse. The routing skill's fragment
 | Data-plane verbs (direct to aihub) | `file`, `queue`, `cancel`, `recall`, `remember`, `memory` |
 | Execution-plane verbs (local daemon UDS face) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`), `answer`, `pause`, `resume`, `wrap`, `ops` (`status`, `auto`, `max`, `shutdown`, and `end-session` — aihub-direct, admin/maintainer), `chat init` |
 | Management face (M1–M5) | `users`, `api-keys`, `projects`, `machines`, `backup` (database snapshot, see below) |
-| Diagnostics | `doctor` (`--prune-scratch` removes stale `scratch/` entries), `init` (a workspace's local layout) |
+| Diagnostics | `doctor` (`--prune-scratch` removes stale `scratch/` entries), `version` (the verb form of `pf --version`), `init` (a workspace's local layout) |
 | Process | `daemon` (run the work machine; `pf daemon ensure` starts it) |
 
 `pf backup` writes a consistent snapshot of the database (`VACUUM INTO`) under

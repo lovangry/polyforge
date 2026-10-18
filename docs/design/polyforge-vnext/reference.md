@@ -431,9 +431,9 @@ The script headers are the contract; this section only points.
 
 `internal/polyforge/cli/cli.go` `commands`: aihub-direct `file queue cancel recall remember memory`;
 daemon `submit answer pause resume wrap ops chat watch`; admin `users api-keys machines projects backup`;
-`doctor`, `init`, `daemon` (`daemon ensure`; `cmd/pf/main.go` routes `pf daemon …` to
+`doctor`, `version`, `init`, `daemon` (`daemon ensure`; `cmd/pf/main.go` routes `pf daemon …` to
 `daemon.Main`). Exit codes: 0 ok, 1 client-class (4xx, validation, transport, a sub-action's flag error), 2
-server-class (5xx, unknown verb, a global or verb flag parse error). The skill (`skills/polyforge/SKILL.md`) routes the 13 verbs + doctor/help/init,
+server-class (5xx, unknown verb, a global or verb flag parse error). The skill (`skills/polyforge/SKILL.md`) routes the 13 verbs + doctor/version/help/init,
 one fragment per verb under `verbs/` (`ship.md` only says delivery is the workflow's `deliver` step);
 `pf help` is the quick reference. Progress/notification design: `v2-converge.md#§3`.
 
