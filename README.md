@@ -276,7 +276,7 @@ credential is unavailable, with `DAEMON-403` (polyforge#122 accident guard).
 | GET | `/chats/{id}/subscriptions` | A chat's daemon-held subscriptions. | user |
 | POST | `/chats/{id}/subscribe`, `/unsubscribe` | Subscribe / drop a work item for a chat. | user |
 | POST | `/chats/{id}/ack` | Acknowledge consumed events / delivered decisions (advances the cursor). | user |
-| POST | `/chats/{id}/subscribe-owned` | A watcher's start: subscribe the chat to the held work items it submitted or its owner owns. | user |
+| POST | `/chats/{id}/subscribe-owned` | Every watcher poll: subscribe the chat to the held work items it submitted or its owner owns (a work item submitted from another chat is shown as progress only; only its origin chat — or, while that chat's watcher is silent, one fallback chat — is woken), and mark the chat live. | user |
 
 Authoritative source for this table is the code itself — the
 `mux.Handle`/`mux.HandleFunc` mount list in `internal/polyforge/daemon/routes.go`;

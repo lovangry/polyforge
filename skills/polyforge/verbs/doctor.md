@@ -48,6 +48,7 @@ fails, 2 usage errors. `--json` emits one machine document:
 | `workspace yaml` | every mapped `.polyforge.yaml` loads and every candidate (yaml and installed bundles) is `<harness>:<model>` (see below) | the refusal a claim would meet (DAEMON-414), file and key named |
 | `harness claude` | when some resolved candidate is `claude:…`: the daemon finds the claude binary (see below) | the binary the daemon could not resolve |
 | `aihub projects` | every mapped project is known to aihub (the project read face) | the project AND its workspace, named (an ambiguous inverse or duplicate surfaces through the config check, both workspaces named) |
+| `workspace repo clones` | no uncovered uncommitted change or unpushed local commit in the `.repo/` git clones of every existing mapped workspace and their linked worktrees (see below); `warn` at most — never `fail`, never moves the exit code; `skip` naming the unit and its reason when the covering WI state could not be read | the clone AND its owning workspace, named, with the remediation (see below) |
 | `server reach` | aihub answers at all (any HTTP answer counts) | the dial failure |
 | `daemon socket` | the local daemon answers GET /status over its unix socket | the socket path and the dial error — the daemon is down: run `pf daemon ensure` (starts it under its restart loop), then re-run the doctor |
 | `auth` | the api key gets past aihub's auth boundary (the same signed read the projects check uses) | the typed 401/403 answer — fix `api_key` |
@@ -113,6 +114,44 @@ anyone may run at any time, so deletion stays an explicit act.
 Move legacy `.polyforge/*.md` documents into memories (docs/upgrade.md);
 `pf init` (see `init.md`) creates `scratch/` and the CLAUDE.md layout
 section.
+
+## Workspace repo clones (polyforge#198 — `warn` at most, out of `--harness`)
+
+One row (reported with each workspace's other layout checks, warn-only, never part
+of `--harness`) scans every git unit directly under each existing mapped workspace's
+`.repo/`: a clone (its `.git` a directory) or a linked worktree of one (its `.git` a
+pointer file — a worktree sitting directly under `.repo/` is itself a unit; a wrapper
+directory like `pi-web-worktrees/` is not, its member worktrees are reached through
+the owning clone's `git worktree list`, wherever they live). Every unit is scanned
+read-only (short-timeout git commands, no fetch, no optional locks); a command that
+fails reports that unit "not checked" with the reason — never a silently clean face.
+
+- **What is uncovered**: a unit's `git status --porcelain` non-empty (tracked
+  modified/staged plus untracked non-ignored, the ruling-4 shape), or — never committed
+  — a **local commit whose HEAD exists on no remote-tracking ref**
+  (`git branch -r --contains HEAD` empty; remote-tracking refs only, no network: a
+  repo with no remotes at all flags unpushed). Clean, pushed units pass.
+- **What covers**: the unit checked out on its work item's **delivery branch**
+  `polyforge/<project>-<seq>` and that WI read from aihub as **in flight**
+  (`queued` / `running` / `paused` / `blocked`). Everything else is uncoverage:
+  any other branch or a detached HEAD, and a terminal delivery face (`wrapped` /
+  `failed` / `canceled`) or a 404 answer (the WI does not exist — a definitive fact,
+  never an unknown) warn.
+- **aihub-unreachable split**: without a reachable aihub, a delivery-branch unit's
+  cover is not decidable — that unit is reported `skip` naming it (the row is `skip`
+  when nothing locally decidable remains, `warn` annotating its skips when both fire);
+  a locally decidable unit (any non-delivery branch, a detached HEAD) still warns.
+- **Assignment facts (enrich only)**: the registry is read from aihub (`GET /projects/<p>`,
+  each mapped project) only when a warning fires — and only for detail: `--project P
+  --repo R` in the remediation when R is registered by exactly one project;
+  "not registered in any mapped project" when every assignment face answered and R is
+  recorded by none; the bare remediation when the assignment face went unread (the
+  row notes the incompleteness). The assign face never moves warn/skip.
+- **What the warning says** (each unit's sentence, nothing auto-done — the doctor
+  stays read-only): file a WI first (`pf file create --project <P> --repo <R>`,
+  the assignment facts), then carry the dirty work on its `polyforge/<project>-<seq>`
+  delivery branch, or discard it. The companion chat-agent rule for the same fence
+  is SKILL.md session rule 6 (polyforge#198).
 
 ## Workspace yaml
 

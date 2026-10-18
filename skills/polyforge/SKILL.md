@@ -138,10 +138,18 @@ per-chat read cursors live in the daemon, not in any file you can write. There
 is no arming, no script copying and no adoption prompt: a new session simply
 subscribes to the work items it wants. A running watcher also subscribes its
 chat, every poll, to every work item the daemon holds that the chat submitted
-or its owner (`PF_USER_ID`; the reporter when the job has no owner) owns;
-decisions the work items found at its start already hold surface as
-`[polyforge] N WIs need you: ...`, those of a work item that becomes the
-owner's later as their own lines.
+or its owner (`PF_USER_ID`; the reporter when the job has no owner) owns.
+A work item's decisions wake ONE chat: the chat that submitted it. Your
+other chats (another tab, another session) show its progress only; if the
+submitting chat's watcher has been silent for a minute, one of them is woken
+instead, but only for decisions the submitting chat has not received — a
+decision is delivered once, in whichever chat printed it. A work item with no
+submitting chat (auto-pulled, a CLI submit without a chat, or one the
+submitting chat unsubscribed) wakes every chat of its owner. An explicit
+`pf watch subscribe <wi>` makes this chat a wake target of its own, so a
+second chat subscribed that way is woken too. Decisions the work items found
+at the watcher's start already hold surface as
+`[polyforge] N WIs need you: ...`, later ones as their own lines.
 
 ### Rules for you (every harness)
 
@@ -201,7 +209,7 @@ the turn arrives.
 
 ## Session rules
 
-Five standing rules, binding on every polyforge session:
+Six standing rules, binding on every polyforge session:
 
 1. **Surface discipline — the `pf` CLI is the only client.** All AIHub
    data-plane interaction goes through the `pf` CLI; never issue a raw
@@ -257,6 +265,25 @@ Five standing rules, binding on every polyforge session:
    other data-plane verb is refused (DAEMON-403).
    The repo inventory and clone URLs always come from the aihub project
    registry; the cli.toml `[workspace]` mapping is the only placement source.
+6. **No unticketed writes into `.repo/` clones (polyforge#198).** This rule binds
+   interactive chat sessions only — step agents never load this skill (pi steps run
+   against the daemon's own agent dir, claude steps run `--bare` — and they work
+   inside a capsule whose work item is the ticket). Before your FIRST write into a
+   mapped workspace's `.repo/<repo>` clone — any change to a tracked or untracked
+   non-ignored file, or creating a commit (NOT read-only ops, fetch/pull, checkout of
+   an existing branch, or gitignored build/test output) — name an attributable,
+   not-yet-closed work item to the user (any existing WI whose goal the write serves,
+   named before the write; this covers integrator manual delivery and ship-PR
+   merge-conflict resolution, the 2026-10-10 standing ruling — ruling 2,
+   mem_IbqTum3Y50sf). With none, propose
+   filing one first (`pf file create`) and never proceed silently — carry on only on
+   the user's EXPLICIT override ("just edit it, no ticket"). `pf doctor`'s
+   "workspace repo clones" warning surfaces uncovered changes in clones and their
+   linked worktrees regardless of who made them (the doctor cannot attribute
+   authorship; owner ruling 13 named the two guards: this rule and the doctor row).
+   Basis: this WI polyforge#198 — the owner's explicit approval notwithstanding the
+   frozen feature set and the C14 audit item — and incident pi#108 (the manually
+   committed hand work in a workspace clone that went nowhere).
 
 ## The `pf` CLI: shared invocation contract
 
