@@ -1170,6 +1170,11 @@ func (r *Runtime) Stop(ctx context.Context, wi, reason string) error {
 			return fmt.Errorf("runtime: %s: no active job", wi)
 		}
 		switch st, _ := j.snapshot(); {
+		case st == StatePaused && closePending(j.record()):
+			// one close at a time: a repeat would arm another retry, or
+			// swap the pending verdict mid-close
+			return &api.Error{Code: api.ErrDaemonConflict,
+				Detail: fmt.Sprintf("%s: its %s close is already in progress (retrying until aihub takes it)", id, j.record().StopReason)}
 		case st == StatePaused && reason == protocol.FinishPaused:
 			return nil // the pause already holds
 		case st == StateSealing, st == StateEndPending:
@@ -1299,8 +1304,10 @@ func (r *Runtime) release(wi string) {
 // is the human-facing elaboration the SessionEnd carries. alreadySealing
 // resumes a recorded close (a retry, a restart): its seal push is skipped
 // when it already reached the hub. A SessionEnd the hub does not take
-// leaves the job SEALING, persisted with its verdict, and the actor
-// retries the close (reconcile) — never a silent half-seal.
+// leaves the close pending — the job SEALING, or a retained PAUSED record
+// holding its terminal stop_reason (closePending) — persisted with its
+// verdict, and the actor retries the close (reconcile) — never a silent
+// half-seal.
 func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySealing bool, note string) error {
 	if reason == protocol.FinishPaused && !alreadySealing {
 		return r.pauseOp(j)
@@ -1327,11 +1334,14 @@ func (r *Runtime) stopOp(ctx context.Context, j *job, reason string, alreadySeal
 	r.killAgentTree(j)
 	finalReason, endErr := r.sealNetwork(j, reason, note, alreadyPushed)
 	if endErr != nil {
-		if st, _ := j.snapshot(); st == StateSealing {
+		// the close stays pending — SEALING, or a retained PAUSED record
+		// holding its terminal stop_reason — and reconcile replays it; a
+		// replay (alreadySealing) is retried by the reconcile that runs it
+		if st, _ := j.snapshot(); st == StateSealing || (st == StatePaused && !alreadySealing) {
 			r.persistLog(j.wi)
 			r.retry(j)
 		}
-		return fmt.Errorf("runtime: %s: session-end failed (job left sealing, retrying): %w", j.wi, endErr)
+		return fmt.Errorf("runtime: %s: session-end failed (the close stays pending, retrying): %w", j.wi, endErr)
 	}
 	crashpoint.At("seal.ended")
 	if err := sealReadOnly(j.capsuleDir); err != nil {

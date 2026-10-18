@@ -5,7 +5,9 @@
 > **注意（2026-10-12）**：`docs/pilot/` 已删除；本文引用的 pilot 路径请到 git 历史查看（tag `v2.1.0`）。
 >
 > **Superseded marks (repo review 2026-10-16 wave 4)**: entries whose *mechanism* no longer exists carry a
-> `〔SUPERSEDED …〕` line naming what replaced it; the lesson itself still applies. Paths such as
+> `〔SUPERSEDED …〕` line naming what replaced it; the lesson itself still applies. Open entries fixed
+> later carry a `〔FIXED …〕` line naming the change, and one still open in a changed form an `〔OPEN …〕`
+> line giving its current form and ticket (marked 2026-10-18). Paths such as
 > `03-execution-capsule` now live under [archive/](archive/); the current system is [reference.md](reference.md).
 
 ## Protocol/harness class
@@ -261,12 +263,14 @@ F19 M6 观测字段从未随事件面发出：整个窗口 events.log 共 33 条
     面（2026-10-16 前版本的 06-memory-search §4.5 p99 ≤ 5s，见 git 历史）全程不可观测。状态注记：
     未修——已登记为 phase-1 输入（`docs/pilot/v1-phase-0-report.md`
     §5.2「M6 样本集边界」：需新事件 kind 或样本面补齐，未获授权前不动）。
+    〔SUPERSEDED (2026-10-18): since v1 (b1839e23) memories are written through aihub only — Store.Create inserts the row and its FTS row in one transaction (06-memory-search.md §2), so a memory is searchable the moment `pf remember` returns; no write-to-search latency is left to observe, and the p99 ≤ 5s goal (060c9f9a), the M6 gate and docs/pilot are deleted. The lesson stands.〕
 
 F20 M3 心跳面未接线：整个窗口 aihub.db machines 表 0 行——机器心跳面
     从未被写入，M3 只剩 step 时长面（in_progress > 24h）可判，机器失联
     面（last_heartbeat_at 超存活阈值）无数据，`--m3-heartbeat-max-age`
     无真实数据可配。状态注记：未修——已登记为 phase-1 输入
     （`docs/pilot/v1-phase-0-report.md` §5.2「M3 心跳面未接线」）。
+    〔FIXED (2026-10-02, 65b33708 "daemon+aihub: wire the M3 heartbeat face"): the daemon heartbeats aihub on its own goroutine (internal/polyforge/daemon/heartbeat.go) and `pf machines list` reads machines.last_heartbeat_at — e2e test/v1_s24_machines_cli_test.go.〕
 
 F21 V4 证据契约机械强制（PILOT-V4 否决门槛的修复面；对应发现 F17）：
     三层同一谓词硬强制 verification 步的结构化命令证据——驱动契约
@@ -394,6 +398,7 @@ v1.5 session-model 实施期间的设计裁定、评审轨迹与残余未修项�
    RTStarted 之后送达并无条件删 latestSpawn、Forget 答案台账、
    停掉新 monitor；另注：长寿非 daemon Runtime 不 Close 则 lane
    goroutine 泊住。
+   〔SUPERSEDED (2026-10-18): the residual is moot — latestSpawn and the answer ledger are deleted (b1f336e8; 34fdf867), the release lane became unbounded FIFO mailboxes (f0f8cd36, v2.2.0), and since the per-work-item actor (bd17b6af, #190) all of a work item's RT messages are pushed from its one actor goroutine into a single-consumer FIFO, so a stale RTFinished cannot arrive after its successor's RTStarted. The observe handler is still spawn-agnostic and relies on that ordering. The lesson stands.〕
 
 7. NEW-3：姊妹胶囊 wi_YONafuu9hiy9（已 wrap）——commits 01ddc26
    「runtime: replay a pending terminal close of a retained Paused
@@ -403,6 +408,8 @@ v1.5 session-model 实施期间的设计裁定、评审轨迹与残余未修项�
    restartResume 的 StatePaused 分支仍忽略 pending terminal close
    （需仿 retain 分支的修复、咨询 isTerminalStopReason）；FAILED
    pending-close 回放无独立失败事件（仅 stderr 呈现）。
+   〔OPEN (2026-10-18): restartResume is deleted (bd17b6af, #190), but reconcileRecord still resumes a Paused record carrying a terminal stop_reason when the hub answers running, or paused without clean_pause — only paused + clean_pause replays the close — and #190 dropped 735a9ad9's resume guard; a failed fromPaused SessionEnd is not retried during the run, and a failed replay still emits no failure event. Tracked in polyforge#197.〕
+   〔FIXED (2026-10-18, PR #205 "a pending terminal close is replayed, never resumed"): a pending close replays whenever the hub shows the session live, whatever clean_pause says; pf resume and a repeat close are refused while it is pending; a failed close of a retained Paused record is retried during the run; a failed replay emits pending_close_replay_failed.〕
 
 8. NEW-9：跨机 spawn_n ordinal 碰撞，保持 open，cosmetic/audit-only。
    状态注记：未修（故意接受，仅审计面）。
