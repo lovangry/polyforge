@@ -409,6 +409,7 @@ v1.5 session-model 实施期间的设计裁定、评审轨迹与残余未修项�
    （需仿 retain 分支的修复、咨询 isTerminalStopReason）；FAILED
    pending-close 回放无独立失败事件（仅 stderr 呈现）。
    〔OPEN (2026-10-18): restartResume is deleted (bd17b6af, #190), but reconcileRecord still resumes a Paused record carrying a terminal stop_reason when the hub answers running, or paused without clean_pause — only paused + clean_pause replays the close — and #190 dropped 735a9ad9's resume guard; a failed fromPaused SessionEnd is not retried during the run, and a failed replay still emits no failure event. Tracked in polyforge#197.〕
+   〔FIXED (2026-10-18, PR #205 "a pending terminal close is replayed, never resumed"): a pending close replays whenever the hub shows the session live, whatever clean_pause says; pf resume and a repeat close are refused while it is pending; a failed close of a retained Paused record is retried during the run; a failed replay emits pending_close_replay_failed.〕
 
 8. NEW-9：跨机 spawn_n ordinal 碰撞，保持 open，cosmetic/audit-only。
    状态注记：未修（故意接受，仅审计面）。
