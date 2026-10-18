@@ -51,7 +51,9 @@ func w174NewEnv(t *testing.T, withMapping bool) *w174Env {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	e := &w174Env{pf: filepath.Join(v1Bins(t), "pf"), home: t.TempDir(), tmuxDir: t.TempDir(), path: os.Getenv("PATH")}
+	// short home and tmux dirs: the daemon socket sits at
+	// <home>/.local/share/polyforge/daemon.sock, tmux's at <tmuxDir>/tmux-<uid>/default
+	e := &w174Env{pf: filepath.Join(v1Bins(t), "pf"), home: shortTmp(t, "h"), tmuxDir: shortTmp(t, "x"), path: os.Getenv("PATH")}
 	e.data = filepath.Join(e.home, ".local", "share", "polyforge")
 	e.sock = filepath.Join(e.data, "daemon.sock")
 	e.cfg = filepath.Join(e.home, ".config", "polyforge", "cli.toml")

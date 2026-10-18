@@ -16,7 +16,7 @@ import (
 func TestV1S04Wrap(t *testing.T) {
 	inst := newV1Install(t)
 	// The inventory repo's origin: a real bare repo the test owns.
-	originDir := shortTmp(t, "/tmp", "pfv1origin")
+	originDir := shortTmp(t, "pfv1origin")
 	origin := filepath.Join(originDir, "demo.git")
 	gitRun(t, "", "init", "--bare", "-b", "main", origin)
 

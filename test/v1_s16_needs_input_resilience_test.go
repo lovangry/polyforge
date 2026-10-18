@@ -158,6 +158,11 @@ func TestV1S16EmptyQuestionIDRefused(t *testing.T) {
 	// malformed envelope — the QUESTION column shows only the
 	// well-formed follow-up (the recovery re-dispatch parked there).
 	waitQuestion(t, d, wi, goodQID, 60*time.Second)
+	// the needs_input event is written asynchronously (observe), so it may
+	// land after the pending question is visible
+	waitUntil(t, 10*time.Second, "the needs_input event never landed", func() bool {
+		return countOf(d.eventKinds(t, wi), "needs_input") >= 1
+	})
 	if n := countOf(d.eventKinds(t, wi), "needs_input"); n != 1 {
 		t.Fatalf("needs_input fired %d times, want 1 (only the well-formed question): %v",
 			n, d.eventKinds(t, wi))
@@ -222,6 +227,11 @@ func TestV1S16DuplicateDropSameIDIsIdempotent(t *testing.T) {
 	if pq == nil || pq.ID != qid || !strings.Contains(pq.Question, "one pending or two") {
 		t.Fatalf("the duplicate write disturbed the pending: %+v", pq)
 	}
+	// the needs_input event is written asynchronously (observe), so it may
+	// land after the pending question is visible
+	waitUntil(t, 10*time.Second, "the needs_input event never landed", func() bool {
+		return countOf(d.eventKinds(t, wi), "needs_input") >= 1
+	})
 	if n := countOf(d.eventKinds(t, wi), "needs_input"); n != 1 {
 		t.Fatalf("needs_input fired %d times, want 1 (the duplicate drop is consumed once)", n)
 	}
