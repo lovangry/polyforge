@@ -267,7 +267,7 @@ func w113NewDaemon(t *testing.T, inst *v1Install, opts ...w113DOpt) *w113Daemon 
 		pfPath:    filepath.Join(v1Bins(t), "pf"),
 		fakepi:    filepath.Join(v1Bins(t), "fakepi"),
 		root:      v1Root(t),
-		sock:      filepath.Join(shortTmp("/tmp", "w113sock"), "d.sock"),
+		sock:      filepath.Join(shortTmp(t, "/tmp", "w113sock"), "d.sock"),
 		dataDir:   t.TempDir(),
 		machineID: "m-w113",
 		apiKey:    "w113key",
@@ -1367,7 +1367,7 @@ func TestW113InflightCapsulesKeepHomesAcrossRestart(t *testing.T) {
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"),
 		inst.url, inst.adminKey, "",
 		[]w113WS{{key: wsA, projects: []string{"e2e"}}})
-	sock := filepath.Join(shortTmp("/tmp", "w113sock"), "d.sock")
+	sock := filepath.Join(shortTmp(t, "/tmp", "w113sock"), "d.sock")
 	dataDir := t.TempDir()
 
 	wi := inst.newWI(t, "w113 in-flight capsule keeps its home",
@@ -1437,7 +1437,7 @@ func TestW113UnmappedMidflightWIBlocksThenResumes(t *testing.T) {
 			{key: wsA, projects: []string{"e2e"}},
 			{key: wsX, projects: []string{"ieops"}},
 		})
-	sock := filepath.Join(shortTmp("/tmp", "w113sock"), "d.sock")
+	sock := filepath.Join(shortTmp(t, "/tmp", "w113sock"), "d.sock")
 	dataDir := t.TempDir()
 
 	wi := w113NewWI(t, inst, "ieops", "w113 unmapped mid-flight work item",

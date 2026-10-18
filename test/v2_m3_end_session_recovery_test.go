@@ -316,7 +316,7 @@ func assertStaleWritesRejected(t *testing.T, inst *v1Install, wi, secret, holder
 			(holderFP == "" || strings.Contains(body, holderFP))
 	})
 
-	pushTmp := shortTmp("/tmp", "pfm3push")
+	pushTmp := shortTmp(t, "/tmp", "pfm3push")
 	gitRun(t, "", "init", "-q", "-b", "main", pushTmp)
 	gitRun(t, pushTmp, "commit", "--allow-empty", "-m", "stale push attempt")
 	askpass := filepath.Join(pushTmp, "askpass.sh")

@@ -87,7 +87,7 @@ type deliverWorld struct {
 
 func newDeliverWorld(t *testing.T) *deliverWorld {
 	t.Helper()
-	root := shortTmp("/tmp", "pfw166")
+	root := shortTmp(t, "/tmp", "pfw166")
 	t.Cleanup(func() { os.RemoveAll(root) })
 	w := &deliverWorld{t: t, root: root, state: filepath.Join(root, "gh"), bin: filepath.Join(root, "bin")}
 	for _, d := range []string{w.bin, w.state} {

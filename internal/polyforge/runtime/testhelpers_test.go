@@ -877,12 +877,8 @@ type orphaningAgent struct {
 	orphanPID int
 }
 
-func spawnOrphaningSleeper(wi string) (*orphaningAgent, error) {
-	dir, err := os.MkdirTemp("", "pf-orphan-")
-	if err != nil {
-		return nil, err
-	}
-	pidFile := filepath.Join(dir, "child.pid")
+func spawnOrphaningSleeper(t *testing.T, wi string) (*orphaningAgent, error) {
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := exec.Command("sh", "-c", "sleep 300 & echo $! > "+pidFile)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Env = append(os.Environ(), "PF_WI_ID="+wi, "PF_DAEMON_ID=m-test", testOwnerEnv)

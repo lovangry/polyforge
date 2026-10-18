@@ -32,7 +32,7 @@ const w159Token = "w159-SENTINEL-token"
 // anthropic_auth_token refuses the boot (TestConfigResidualAuthTokenRefused).
 func w159HarnessRoot(t *testing.T, inst *v1Install, ws, claudeBin string) (*w113Daemon, string, string) {
 	t.Helper()
-	sock := filepath.Join(shortTmp("/tmp", "w159sock"), "d.sock")
+	sock := filepath.Join(shortTmp(t, "/tmp", "w159sock"), "d.sock")
 	cfg := w113ConfigFile(t, filepath.Join(t.TempDir(), "cli.toml"), inst.url, inst.adminKey, sock,
 		[]w113WS{{key: ws, projects: []string{"e2e"}}})
 	root := t.TempDir() // an explicit --harness-root: the settings live outside the data dir

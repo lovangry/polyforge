@@ -201,7 +201,7 @@ func TestShutdownRestartFullChainPushIdempotency(t *testing.T) {
 	// Capture everything the daemons write to stderr: the rejection the
 	// incident logged ("commit-dirty-on-recover push failed ... cannot
 	// lock ref") must never appear in the whole chain's output.
-	capFile, err := os.CreateTemp("", "pf-e2e-stderr-*.log")
+	capFile, err := os.CreateTemp(t.TempDir(), "stderr-*.log")
 	if err != nil {
 		t.Fatal(err)
 	}
