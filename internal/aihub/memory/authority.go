@@ -44,8 +44,9 @@ func errf(code, reason, format string, args ...any) *APIError {
 var visibilities = map[string]bool{"admin": true, "private": true, "project": true, "public": true, "team": true}
 
 // typeKinds is the memory type namespace: a type is kind or kind.name,
-// its kind (before the first dot) one of these. This list is the one
-// authority (polyforge#210); clients and docs name it, never copy it.
+// its kind (before the first dot) one of these. This var is the one
+// authority (polyforge#210); docs that list the kinds mirror it and
+// change with it.
 var typeKinds = []string{"experience", "fact", "doc", "rule", "methodology"}
 
 // checkType refuses a type outside the namespace with MEM-400 naming the
