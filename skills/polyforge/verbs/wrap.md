@@ -5,14 +5,15 @@ is a terminal outcome: the session ends for good, the capsule is
 sealed read-only and pushed, and no re-claim happens automatically.
 
 **A work item with no bundle** (a design, decision or tracking ticket
-that never runs a workflow) has no daemon job. When the daemon cannot
-wrap the work item, the CLI reads it at AIHub; if it has no bundle and is
+that never runs a workflow) has no daemon job. When the daemon is not
+running or has no local job for it, the CLI reads it at AIHub; if it has no bundle and is
 queued, paused or blocked, AIHub records the verdict: `wrapped` (or
 `failed` with `--fail`), `closed_at` set, and a `work_item_closed` event
 with the actor and `--note`. The same people as `pf cancel` may do this
 (the reporter, a project maintainer or an admin). Use `wrap` for "it is
 done"; `pf cancel` records *canceled* (abandoned). A work item with a
-bundle is never closed this way.
+bundle is never closed this way, and an epic only once all its children
+are terminal.
 
 **Closes arbitrate.** The human path is this verb (or `pause`); the
 workflow's own terminal exit is closed by the daemon's recovery engine.
@@ -76,7 +77,8 @@ wrap answers the graceful `already_terminal` shape, not an error.
 | `DAEMON-500` | The close failed on the daemon side | The job is left mid-seal, recorded as such; the next daemon start finishes the close. Check the daemon log before retrying. |
 | `dial unix …` | Daemon not running | Nothing is executing here — run `pf daemon ensure`, then retry once (or check `--socket`). A work item with no bundle needs no daemon. |
 | `AUTH-403` | A work item with no bundle, and you are not its reporter, a project maintainer or an admin | Ask one of them to wrap it. |
-| `CORE-409` / `CORE-410` | A work item with no bundle changed state between the read and the wrap (a session now holds it, or it became terminal) | Check `pf file show <id>`; if it is already terminal there is nothing to do. |
+| `CORE-409` `OPEN_CHILDREN` | A work item with no bundle that has child tickets not yet terminal (an epic) | Wrap, fail or cancel the children first, then wrap the epic. |
+| `CORE-409` / `CORE-410` | A work item with no bundle changed between the read and the wrap: a bundle was bound to it, or it became terminal | Check `pf file show <id>`: with a bundle it is an execution ticket (its daemon wraps it); if terminal, there is nothing to do. |
 | `HTTP-404` `… upgrade aihub first` | A work item with no bundle, and the AIHub is older than this `pf` (no wrap route for it) | AIHub must be upgraded first (it ships before the CLI); until then the ticket cannot be wrapped. |
 
 A `--fail` close is permanent for this work item: the CLI refuses any later

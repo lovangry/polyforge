@@ -380,10 +380,14 @@ var cmdWrap = &Command{
 		// owner-move hint below and still exits non-zero.
 		raw, err := ctx.daemon().Wrap(args[0], reason)
 		if err != nil {
-			if done, herr := hubWrapNoBundle(ctx, args[0], reason == "fail", stringFlag(fs, "note")); done {
-				return herr
-			}
 			var ae *api.Error
+			// No daemon here, or no local job: the work item may be a
+			// ticket with no bundle. Any other daemon answer stands.
+			if !errors.As(err, &ae) || ae.Code == api.ErrDaemonNotFound {
+				if done, herr := hubWrapNoBundle(ctx, args[0], reason == "fail", stringFlag(fs, "note")); done {
+					return herr
+				}
+			}
 			if reason == "fail" && errors.As(err, &ae) && ae.Code == api.ErrDaemonNotFound {
 				// A WI parked blocked has no
 				// local job to fail. The owner's moves are exactly two —
@@ -399,7 +403,7 @@ var cmdWrap = &Command{
 			return err
 		}
 		ctx.finishLine(raw, "%s requested for %s\n", reason, closeName(raw, args[0]))
-		if stringFlag(fs, "note") != "" && !ctx.JSON {
+		if stringFlag(fs, "note") != "" {
 			fmt.Fprintln(ctx.Stderr, "note not recorded: --note is kept only when aihub wraps a work item with no bundle; this wrap went through the daemon")
 		}
 		return nil
@@ -407,9 +411,9 @@ var cmdWrap = &Command{
 }
 
 // hubWrapNoBundle is wrap's second path: a work item with no bundle (a
-// design, decision or tracking ticket) never has a daemon job, so after
-// the daemon could not wrap it the CLI asks aihub, and when the work item
-// is open, unheld and has no bundle, aihub records the verdict. done=false
+// design, decision or tracking ticket) never has a daemon job, so when
+// the daemon is unreachable or has no local job the CLI asks aihub, and
+// when the work item is open and has no bundle, aihub records the verdict. done=false
 // leaves the daemon's error standing (an execution ticket, a lookup
 // failure, a step). A step never takes this path: step agents hold no
 // aihub access.

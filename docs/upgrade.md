@@ -155,13 +155,6 @@ the v2.4.x DDL. `deploy/sql/v2.5.0/probe.sql` answers 0 when the table is
 gone and the column exists (a database created by v2.5.0 is already in
 that shape).
 
-## `pf wrap` of a work item with no bundle
-
-Deploy aihub before upgrading `pf`: `pf wrap` of a work item with no
-bundle calls the new `POST /api/v1/work-items/{id}/wrap`, which an older
-hub answers with a bare 404 (the CLI then says to upgrade aihub first).
-No schema change.
-
 ## v2.14.0
 
 **Deploy aihub first, then upgrade the work machines** (`tools/install.sh`
@@ -1379,3 +1372,10 @@ execution.json and the hub. The watcher's progress file moves to
 start subscribes its chat to the work items it or its owner holds (the
 attention and heartbeat routes are gone): restart running `pf watch
 --chat` processes with the new `pf`.
+
+## v2.16.0: `pf wrap` closes a work item with no bundle
+
+Deploy aihub before upgrading `pf`: `pf wrap` of a work item with no
+bundle calls the new `POST /api/v1/work-items/{id}/wrap`, which an older
+hub answers with a bare 404 (the CLI then says to upgrade aihub first).
+No schema change.

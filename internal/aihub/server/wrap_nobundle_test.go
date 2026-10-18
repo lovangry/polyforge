@@ -151,6 +151,40 @@ func TestHubWrapRefusesExecutionAndHeldWorkItems(t *testing.T) {
 	}
 }
 
+// TestHubWrapEpicWaitsForChildren: an epic (a ticket with children) wraps
+// only once every child is terminal.
+func TestHubWrapEpicWaitsForChildren(t *testing.T) {
+	e := newSrvEnv(t)
+	epic := createPlainWI(t, e, e.key, "epic")
+	var kids [2]string
+	for i := range kids {
+		var wi wrappedWI
+		if code, raw := e.do(t, "POST", "/api/v1/work-items", e.key,
+			map[string]any{"project": "alpha", "goal": "child", "parent_id": epic}, &wi); code != 201 {
+			t.Fatalf("child: %d %s", code, raw)
+		}
+		kids[i] = wi.ID
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+kids[0]+"/wrap", e.key, nil, nil); code != 200 {
+		t.Fatalf("wrap child: %d %s", code, raw)
+	}
+	code, raw := e.do(t, "POST", "/api/v1/work-items/"+epic+"/wrap", e.key, nil, nil)
+	if c, reason := errEnvelope(t, raw); code != 409 || c != api.ErrCoreConflict || reason != "OPEN_CHILDREN" ||
+		!strings.Contains(string(raw), "1 child ticket(s)") {
+		t.Fatalf("wrap of an epic with an open child: %d %s", code, raw)
+	}
+	if ev := closedEvents(t, e, epic); len(ev) != 0 {
+		t.Fatalf("refused wrap recorded %v", ev)
+	}
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+kids[1]+"/cancel", e.key, map[string]any{}, nil); code != 200 {
+		t.Fatalf("cancel child: %d %s", code, raw)
+	}
+	var got wrappedWI
+	if code, raw := e.do(t, "POST", "/api/v1/work-items/"+epic+"/wrap", e.key, nil, &got); code != 200 || got.Status != api.StatusWrapped {
+		t.Fatalf("wrap of an epic with terminal children: %d %s", code, raw)
+	}
+}
+
 func TestHubWrapAuthorizationMatchesCancel(t *testing.T) {
 	e := newSrvEnv(t)
 	mk := func(name string) (string, string) {

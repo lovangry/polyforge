@@ -259,8 +259,10 @@ func (m *WIManager) Create(req CreateRequest) (*WIView, error) {
 // checkBlockerTx enforces the blocker-side rules of a `blocks` edge
 // (polyforge#161): the blocker exists, lives in projectID (dependency
 // edges never cross projects) and is an execution ticket — a ticket with
-// no bundle (registration ticket or epic) can never wrap, so an edge
-// onto it would wait forever. ref is the caller's spelling for errors.
+// no bundle (registration ticket or epic) runs nothing: it closes only
+// when someone runs `pf wrap` on it once done (an epic only after its
+// children are terminal), so nothing would release the edge on its own.
+// ref is the caller's spelling for errors.
 func checkBlockerTx(q queryRower, blockingID, ref, projectID string) error {
 	var proj string
 	var bundle sql.NullString
@@ -276,7 +278,7 @@ func checkBlockerTx(q queryRower, blockingID, ref, projectID string) error {
 	}
 	if !bundle.Valid || bundle.String == "" {
 		return Fail(api.ErrCoreBadInput, "BLOCKER_NOT_EXECUTABLE",
-			"blocker %s must be an execution ticket — bind a bundle first (a registration ticket or epic never wraps)", ref)
+			"blocker %s must be an execution ticket — bind a bundle first (a ticket with no bundle runs nothing; it closes only when someone runs `pf wrap` on it, so nothing would release the edge)", ref)
 	}
 	return nil
 }
@@ -583,7 +585,8 @@ func diagnoseR2Window(q queryRower, wiID string) error {
 
 // refuseUnbindWhileBlockingTx refuses unbinding the bundle of a work item
 // that is still the blocker of a `blocks` edge (polyforge#161): without a
-// bundle it can never wrap, so its dependents would wait forever.
+// bundle it runs nothing and closes only by a hand `pf wrap`, so its
+// dependents would wait on no run.
 // Rebinding to another bundle stays allowed.
 func refuseUnbindWhileBlockingTx(tx *sql.Tx, wiID string) error {
 	rows, err := tx.Query(`SELECT p.name, w.seq FROM wi_dependencies d
@@ -737,7 +740,7 @@ func (m *WIManager) Patch(idOrSlug string, fields map[string]json.RawMessage) (*
 				return nil, err
 			}
 		} else if err := refuseUnbindWhileBlockingTx(tx, id); err != nil {
-			// polyforge#161: an unbound blocker could never wrap.
+			// polyforge#161: an unbound blocker runs nothing to release its dependents.
 			return nil, err
 		}
 		name := bundleRef(bp.Name)
@@ -830,7 +833,8 @@ func (m *WIManager) Cancel(idOrSlug string, actor string) (*WIView, error) {
 // event work_item_closed {status, note?} — one transaction. Refused: a
 // terminal WI (CORE-410 TERMINAL_STATE), a WI a session holds (CORE-409),
 // a WI with a bundle (CORE-409: an execution ticket is wrapped by its
-// daemon). Authorization (server layer): the same gate as cancel.
+// daemon), an epic whose children are not all terminal (CORE-409
+// OPEN_CHILDREN). Authorization (server layer): the same gate as cancel.
 func (m *WIManager) Wrap(idOrSlug, actor string, opts api.WrapRequest) (*WIView, error) {
 	id, err := m.Resolve(idOrSlug)
 	if err != nil {
@@ -859,6 +863,15 @@ func (m *WIManager) Wrap(idOrSlug, actor string, opts api.WrapRequest) (*WIView,
 	if bundle.Valid && bundle.String != "" {
 		return nil, Fail(api.ErrCoreConflict, "",
 			"work item has bundle %q: an execution ticket is wrapped by the daemon running it, not by the hub", bundle.String)
+	}
+	var open int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM work_items WHERE parent_id=?1 AND status NOT IN (?2,?3,?4)`,
+		id, api.StatusWrapped, api.StatusFailed, api.StatusCanceled).Scan(&open); err != nil {
+		return nil, err
+	}
+	if open > 0 {
+		return nil, Fail(api.ErrCoreConflict, "OPEN_CHILDREN",
+			"work item has %d child ticket(s) that are not terminal: wrap it after they are wrapped, failed or canceled", open)
 	}
 	to := api.StatusWrapped
 	if opts.Fail {

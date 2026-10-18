@@ -49,7 +49,7 @@ func TestVerbFileCreateAfter(t *testing.T) {
 func TestVerbFileCreateAfterRefused(t *testing.T) {
 	srv := newFakeAihub(t, &reqRecorder{}, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		io.WriteString(w, `{"code":"CORE-400","detail":"blocker polyforge#9 must be an execution ticket — bind a bundle first (a registration ticket or epic never wraps)","extra":{"reason":"BLOCKER_NOT_EXECUTABLE"}}`)
+		io.WriteString(w, `{"code":"CORE-400","detail":"blocker polyforge#9 must be an execution ticket — bind a bundle first (a ticket with no bundle runs nothing; it closes only when someone runs `+"`pf wrap`"+` on it, so nothing would release the edge)","extra":{"reason":"BLOCKER_NOT_EXECUTABLE"}}`)
 	})
 	env := withMappingConfig(t)
 	env["PF_SERVER"] = srv.URL

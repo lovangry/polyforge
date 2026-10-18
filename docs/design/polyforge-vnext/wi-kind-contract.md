@@ -29,7 +29,7 @@
 ## 3. ready queue 与父票（响应形状） <!-- §3 -->
 
 - `GET /api/v1/projects/{p}/ready-queue` 响应为 `project` / `items` / `running` / `paused`。无 bundle 的登记票（含 epic，即有子票的票）不出现在任何分段。
-- 父票没有派生完成状态：库内 `status` 恒为 `queued`，任何终态不写；子票进度从子票本身读取。
+- 父票没有派生完成状态：aihub 不自动写终态，子票进度从子票本身读取；子票全部终态后，由 owner 用 `pf wrap` 关单（`POST …/wrap`，无 bundle 的票才可用；仍有非终态子票 → `CORE-409`，`reason=OPEN_CHILDREN`）。
 - 存量违规行（bundle 非空且有子票）不迁移、不拒读，按字面数据展示；对称规则只约束新写入。
 
 ## 4. 部署与回滚 <!-- §4 -->

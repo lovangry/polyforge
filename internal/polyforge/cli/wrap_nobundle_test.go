@@ -72,7 +72,7 @@ func TestWrapNoBundleClosesAtHub(t *testing.T) {
 
 // TestWrapRunningStaysOnTheDaemon: the daemon wraps a running work item
 // exactly as before — aihub is not contacted; a --note it cannot keep is
-// said on stderr.
+// said on stderr (in --json mode too).
 func TestWrapRunningStaysOnTheDaemon(t *testing.T) {
 	var rec reqRecorder
 	hub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +84,40 @@ func TestWrapRunningStaysOnTheDaemon(t *testing.T) {
 		"wrap", "wi_abc", "--note", "done")
 	if code != 0 || stdout != "wrap requested for pf-42\n" || !strings.Contains(stderr, "note not recorded") {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	code, stdout, stderr = runPf(t, map[string]string{"PF_SERVER": hub.URL, "PF_DAEMON_SOCKET": d.sock},
+		"--json", "wrap", "wi_abc", "--note", "done")
+	if code != 0 || !strings.Contains(stdout, `"outcome":"sealed"`) || !strings.Contains(stderr, "note not recorded") {
+		t.Fatalf("json: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if n := len(rec.all()); n != 0 {
+		t.Fatalf("hub contacted %d time(s)", n)
+	}
+}
+
+// TestWrapDaemonRefusalStands: a daemon answer other than "no local job"
+// (a conflict, a server failure) is returned as before — same exit code,
+// and aihub is not contacted.
+func TestWrapDaemonRefusalStands(t *testing.T) {
+	var rec reqRecorder
+	hub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("the hub must not be contacted: %s %s", r.Method, r.URL.Path)
+	})
+	for _, tc := range []struct {
+		status int
+		code   string
+		exit   int
+	}{{409, "DAEMON-409", 1}, {500, "DAEMON-500", 2}} {
+		d := newDaemonFixture(t)
+		d.answers["POST /jobs/wi_abc/wrap"] = func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(tc.status)
+			io.WriteString(w, `{"code":"`+tc.code+`","detail":"refused"}`)
+		}
+		code, _, stderr := runPf(t, map[string]string{"PF_SERVER": hub.URL, "PF_DAEMON_SOCKET": d.sock}, "wrap", "wi_abc")
+		if code != tc.exit || !strings.Contains(stderr, tc.code) {
+			t.Fatalf("%s: code=%d stderr=%s", tc.code, code, stderr)
+		}
 	}
 	if n := len(rec.all()); n != 0 {
 		t.Fatalf("hub contacted %d time(s)", n)
@@ -126,8 +160,11 @@ func TestWrapNoBundleNotOpen(t *testing.T) {
 	}
 }
 
+// TestStepWrapNeverReachesAihub: even with no daemon to answer, a step's
+// wrap does not take the hub path (step agents hold no aihub access).
 func TestStepWrapNeverReachesAihub(t *testing.T) {
 	env, _, arec := stepEnv(t)
+	env["PF_DAEMON_SOCKET"] = filepath.Join(t.TempDir(), "gone.sock")
 	if code, _, _ := runPf(t, env, "wrap", "wi_st"); code == 0 {
 		t.Fatal("a step wrap with no daemon job must fail")
 	}

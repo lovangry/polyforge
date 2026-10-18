@@ -853,7 +853,7 @@ func TestDependencyOnlyWrappedBlockerReleases(t *testing.T) {
 }
 
 // polyforge#161: a work item that still blocks another cannot unbind its
-// bundle (it could never wrap); rebinding stays allowed, and unbinding
+// bundle (it would run nothing to release them); rebinding stays allowed, and unbinding
 // works once the edge is gone.
 func TestUnbindRefusedWhileBlocking(t *testing.T) {
 	env := newEnv(t)
