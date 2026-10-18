@@ -358,10 +358,11 @@ var cmdResume = &Command{
 var cmdWrap = &Command{
 	Name:    "wrap",
 	Group:   GroupExec,
-	Summary: "Wrap a running WI as terminal success (--fail = the owner's failed verdict; to abandon a blocked WI use pf cancel)",
-	Usage:   "pf wrap <id> [--fail]",
+	Summary: "Wrap a running WI, or a WI with no bundle, as terminal success (--fail = the owner's failed verdict; to abandon a blocked WI use pf cancel)",
+	Usage:   "pf wrap <id> [--fail] [--note TEXT]",
 	Setup: func(fs *flag.FlagSet) {
 		fs.Bool("fail", false, "end the session with reason=fail instead of wrap (the owner's failed verdict; to abandon a blocked WI use pf cancel)")
+		fs.String("note", "", "why it is done; recorded by aihub when it wraps a work item with no bundle")
 	},
 	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
 		if len(args) != 1 {
@@ -379,6 +380,9 @@ var cmdWrap = &Command{
 		// owner-move hint below and still exits non-zero.
 		raw, err := ctx.daemon().Wrap(args[0], reason)
 		if err != nil {
+			if done, herr := hubWrapNoBundle(ctx, args[0], reason == "fail", stringFlag(fs, "note")); done {
+				return herr
+			}
 			var ae *api.Error
 			if reason == "fail" && errors.As(err, &ae) && ae.Code == api.ErrDaemonNotFound {
 				// A WI parked blocked has no
@@ -395,8 +399,47 @@ var cmdWrap = &Command{
 			return err
 		}
 		ctx.finishLine(raw, "%s requested for %s\n", reason, closeName(raw, args[0]))
+		if stringFlag(fs, "note") != "" && !ctx.JSON {
+			fmt.Fprintln(ctx.Stderr, "note not recorded: --note is kept only when aihub wraps a work item with no bundle; this wrap went through the daemon")
+		}
 		return nil
 	},
+}
+
+// hubWrapNoBundle is wrap's second path: a work item with no bundle (a
+// design, decision or tracking ticket) never has a daemon job, so after
+// the daemon could not wrap it the CLI asks aihub, and when the work item
+// is open, unheld and has no bundle, aihub records the verdict. done=false
+// leaves the daemon's error standing (an execution ticket, a lookup
+// failure, a step). A step never takes this path: step agents hold no
+// aihub access.
+func hubWrapNoBundle(ctx *Context, id string, fail bool, note string) (done bool, err error) {
+	if ctx.Step != "" {
+		return false, nil
+	}
+	hub := ctx.aihub()
+	wi, gerr := hub.GetWorkItem(id)
+	if gerr != nil || (wi.BundleName != nil && *wi.BundleName != "") {
+		return false, nil
+	}
+	switch wi.Status {
+	case api.StatusQueued, api.StatusPaused, api.StatusBlocked:
+	default:
+		return false, nil
+	}
+	raw, err := hub.WrapWorkItem(id, api.WrapRequest{Fail: fail, Note: note})
+	if err != nil {
+		var ae *api.Error
+		if errors.As(err, &ae) && ae.Code == "HTTP-404" {
+			return true, &api.Error{Code: ae.Code, Detail: fmt.Sprintf(
+				"%s has no bundle, so aihub wraps it, but this aihub has no wrap route for it (older than this pf) — upgrade aihub first, then retry", api.DisplayName(wi.Slug, id))}
+		}
+		return true, err
+	}
+	finishAs(ctx, raw, func(w *api.WorkItem) {
+		fmt.Fprintf(ctx.Stdout, "%s closed at aihub (no bundle): status %s\n", api.DisplayName(w.Slug, id), w.Status)
+	})
+	return true, nil
 }
 
 // ---------------------------------------------------------------------------

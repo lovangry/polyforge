@@ -823,6 +823,74 @@ func (m *WIManager) Cancel(idOrSlug string, actor string) (*WIView, error) {
 	return m.load(id)
 }
 
+// Wrap is the terminal verdict on a work item with no bundle: a
+// registration ticket (design, decision, tracking) never runs a workflow,
+// so no daemon ever holds it and no session end can close it.
+// queued/paused/blocked -> wrapped (failed with opts.Fail), closed_at set,
+// event work_item_closed {status, note?} — one transaction. Refused: a
+// terminal WI (CORE-410 TERMINAL_STATE), a WI a session holds (CORE-409),
+// a WI with a bundle (CORE-409: an execution ticket is wrapped by its
+// daemon). Authorization (server layer): the same gate as cancel.
+func (m *WIManager) Wrap(idOrSlug, actor string, opts api.WrapRequest) (*WIView, error) {
+	id, err := m.Resolve(idOrSlug)
+	if err != nil {
+		return nil, err
+	}
+	tx, err := m.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var status string
+	var bundle, session sql.NullString
+	if err := tx.QueryRow(`SELECT status, bundle_name, session_hash FROM work_items WHERE id=?1`, id).
+		Scan(&status, &bundle, &session); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, Fail(api.ErrCoreNotFound, "", "work item %s", id)
+		}
+		return nil, err
+	}
+	if isTerminal(status) {
+		return nil, Fail(api.ErrCoreGone, "TERMINAL_STATE", "work item is already terminal (%s)", status)
+	}
+	if status == api.StatusRunning || session.Valid {
+		return nil, Fail(api.ErrCoreConflict, "", "a session holds this work item (%s): its daemon wraps it", status)
+	}
+	if bundle.Valid && bundle.String != "" {
+		return nil, Fail(api.ErrCoreConflict, "",
+			"work item has bundle %q: an execution ticket is wrapped by the daemon running it, not by the hub", bundle.String)
+	}
+	to := api.StatusWrapped
+	if opts.Fail {
+		to = api.StatusFailed
+	}
+	now := Now()
+	// Guarded: only a no-bundle, unheld, open row flips; 0 rows = a
+	// concurrent transition.
+	res, err := tx.Exec(`UPDATE work_items SET status=?, closed_at=?, updated_at=?,
+		waiting_on=NULL, clean_pause=0
+		WHERE id=? AND status IN (?,?,?) AND session_hash IS NULL
+		AND (bundle_name IS NULL OR bundle_name='')`,
+		to, now, now, id, api.StatusQueued, api.StatusPaused, api.StatusBlocked)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, Fail(api.ErrCoreConflict, "", "state changed concurrently")
+	}
+	payload := map[string]any{"status": to}
+	if opts.Note != "" {
+		payload["note"] = opts.Note
+	}
+	if err := appendEventTx(tx, id, now, actor, "work_item_closed", payload); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return m.load(id)
+}
+
 // ResumeBlocked is the §6.4 owner resume verdict's hub door (polyforge#116):
 // the door the owner's `pf resume` exercises on a workflow parked blocked on
 // an honest incomplete result. It is NOT a pool return for a

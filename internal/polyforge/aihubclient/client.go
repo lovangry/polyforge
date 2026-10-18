@@ -178,6 +178,12 @@ func (c *Client) CancelWorkItem(id string) (json.RawMessage, error) {
 	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(id)+"/cancel", map[string]any{})
 }
 
+// WrapWorkItem is the hub's terminal verdict on a work item with no
+// bundle (queued/paused/blocked -> wrapped, or failed with req.Fail).
+func (c *Client) WrapWorkItem(id string, req api.WrapRequest) (json.RawMessage, error) {
+	return c.raw("POST", "/api/v1/work-items/"+url.PathEscape(id)+"/wrap", req)
+}
+
 // ListWorkItemsRaw lists work items undecoded (0 limit = the server
 // default cap).
 func (c *Client) ListWorkItemsRaw(project, status string, limit int) (json.RawMessage, error) {

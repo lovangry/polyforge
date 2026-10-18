@@ -418,7 +418,7 @@ only as part of a deploy, so an ad-hoc full backup is these manual steps (or a
 copy of the whole data dir while aihub is stopped).
 
 Human moves: continue = `pf resume <id>` (a paused or blocked
-WI), abandon = `pf cancel <id>` (queued, paused or blocked), owner's failed verdict on a live run = `pf wrap <id> --fail` (refused on a blocked WI). These run with the
+WI), abandon = `pf cancel <id>` (queued, paused or blocked), owner's failed verdict on a live run = `pf wrap <id> --fail` (refused on a blocked WI), done for a work item with no bundle (design, decision, tracking) = `pf wrap <id> [--fail] [--note …]` (aihub records it; no daemon needed). These run with the
 human's own api key: aihub's door checks the WI's reporter, a project
 maintainer or an admin.
 

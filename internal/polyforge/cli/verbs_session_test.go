@@ -64,15 +64,23 @@ func TestResumeFlagClearSemantics(t *testing.T) {
 	}
 }
 
-// TestWrapFailOnBlockedPrintsResumeOrCancelHint: `pf wrap --fail` on a
-// WI with no local job (the parked-blocked shape — the daemon answers the wrap probe with DAEMON-404) prints the
-// dedicated resume-or-cancel hint, exits non-zero (the wrap did not
-// happen) and touches NOTHING else: no hub door, no termination — the owner continues with `pf resume` or abandons with
-// `pf cancel`. A plain wrap on the same shape stays the typed error.
+// TestWrapFailOnBlockedPrintsResumeOrCancelHint: `pf wrap --fail` on an
+// execution ticket with no local job (the parked-blocked shape — the
+// daemon answers the wrap probe with DAEMON-404) prints the dedicated
+// resume-or-cancel hint, exits non-zero (the wrap did not happen) and
+// touches NOTHING else: the hub is only read (the work item has a
+// bundle, so the hub wrap door is not taken), no termination — the owner
+// continues with `pf resume` or abandons with `pf cancel`. A plain wrap
+// on the same shape stays the typed error.
 func TestWrapFailOnBlockedPrintsResumeOrCancelHint(t *testing.T) {
 	var rec reqRecorder
+	execWI := strings.Replace(strings.Replace(cannedWI, `"queued"`, `"blocked"`, 1),
+		`"labels"`, `"bundle_name":"demo-bundle","labels"`, 1)
 	hub := newFakeAihub(t, &rec, func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("the hub must not be contacted: %s %s", r.Method, r.URL.Path)
+		if r.Method != "GET" {
+			t.Errorf("the hub may only be read: %s %s", r.Method, r.URL.Path)
+		}
+		io.WriteString(w, execWI)
 	})
 	d := newDaemonFixture(t) // wrap route unmatched -> DAEMON-404
 	code, stdout, stderr := runPf(t, map[string]string{
@@ -91,8 +99,10 @@ func TestWrapFailOnBlockedPrintsResumeOrCancelHint(t *testing.T) {
 	if got := d.rec.last(); got.Path != "/jobs/wi_blocked/wrap" || !strings.Contains(got.Body, `"reason":"fail"`) {
 		t.Errorf("only the wrap probe may reach the daemon: %+v", d.rec.all())
 	}
-	if n := len(rec.all()); n != 0 {
-		t.Errorf("the hub must not be contacted: %v", rec.all())
+	for _, r := range rec.all() {
+		if r.Method != "GET" {
+			t.Errorf("the hub may only be read: %v", rec.all())
+		}
 	}
 
 	// plain wrap (no --fail) on the same no-local-job shape: the typed error

@@ -66,6 +66,9 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/v1/work-items/{id}", s.auth(s.hGetWI))
 	m.HandleFunc("PATCH /api/v1/work-items/{id}", s.auth(s.hPatchWI))
 	m.HandleFunc("POST /api/v1/work-items/{id}/cancel", s.auth(s.hCancelWI))
+	// The terminal verdict on a work item with no bundle (no daemon ever
+	// holds one); an execution ticket is wrapped through its session end.
+	m.HandleFunc("POST /api/v1/work-items/{id}/wrap", s.auth(s.hWrapWI))
 	m.HandleFunc("POST /api/v1/work-items/{id}/claim", s.auth(s.hSessionClaim))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-verify", s.auth(s.hSessionVerify))
 	m.HandleFunc("POST /api/v1/work-items/{id}/session-attach", s.auth(s.hSessionAttach))
@@ -497,6 +500,28 @@ func (s *Server) hCancelWI(w http.ResponseWriter, r *http.Request, idn *identity
 		return core.Fail(api.ErrAuthForbidden, "", "cancel requires reporter, maintainer or admin")
 	}
 	wi, err := s.WIs.Cancel(id, idn.UserID)
+	if err != nil {
+		return err
+	}
+	return reply(w, http.StatusOK, wi)
+}
+
+// hWrapWI is the terminal verdict on a work item with no bundle
+// (core.Wrap). Same authorization as cancel: reporter, project
+// maintainer, or admin. The body is optional ({"fail":bool,"note":"..."}).
+func (s *Server) hWrapWI(w http.ResponseWriter, r *http.Request, idn *identity) error {
+	id, projectID, err := s.wiScoped(idn, r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+	if !s.ownerMaintainerOrAdmin(idn, projectID, id) {
+		return core.Fail(api.ErrAuthForbidden, "", "wrap requires reporter, maintainer or admin")
+	}
+	var req api.WrapRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		return core.Fail(api.ErrCoreBadInput, "", "invalid JSON body: %v", err)
+	}
+	wi, err := s.WIs.Wrap(id, idn.UserID, req)
 	if err != nil {
 		return err
 	}
