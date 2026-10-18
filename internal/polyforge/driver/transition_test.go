@@ -552,21 +552,25 @@ func TestTransitionGateFailRewind(t *testing.T) {
 	}
 	snap := d.Snapshot()
 	// [build, polish] archived + reset to pending with output cleared.
-	for _, id := range []string{"build", "polish"} {
-		st := snap.Steps[id]
+	// The target is archived as gate_fail_rewind; polish, strictly
+	// between the target and the gate, failed nothing and is archived as
+	// superseded_by_rewind (owner ruling grill-201-r1, polyforge#201).
+	for _, tc := range []struct{ id, cause string }{
+		{"build", CauseGateFailRewind}, {"polish", CauseSupersededByRewind},
+	} {
+		st := snap.Steps[tc.id]
 		if st.Status != capsule.StepPending || st.Output != nil {
-			t.Fatalf("%s must be reset pending with cleared output: %+v", id, st)
+			t.Fatalf("%s must be reset pending with cleared output: %+v", tc.id, st)
 		}
-		// Attempts now include "accepted" records (R14); find the rewind entry.
-		var att capsule.Attempt
-		for _, a := range st.Attempts {
-			if a.Cause == CauseGateFailRewind {
-				att = a
-				break
-			}
+		// Attempts include the "accepted" record (R14) first; the rewind
+		// archive is the newest entry.
+		if n := len(st.Attempts); n != 2 || st.Attempts[0].Cause != "accepted" {
+			t.Fatalf("%s attempts: want [accepted, rewind archive], got %+v", tc.id, st.Attempts)
 		}
-		if att.Cause != CauseGateFailRewind || att.RewindGate != "check" || att.ArchivedAt == "" {
-			t.Fatalf("bad rewind archive on %s: %+v", id, att)
+		att := st.Attempts[1]
+		if att.Cause != tc.cause || att.RewindGate != "check" || att.ArchivedAt == "" ||
+			att.AttemptSeq != 2 || att.ConsumedBudget == nil {
+			t.Fatalf("bad rewind archive on %s (want cause %s): %+v", tc.id, tc.cause, att)
 		}
 		if string(att.Result) != `{"ok":true}` {
 			t.Fatalf("the archived attempt carries the prior result: %s", att.Result)

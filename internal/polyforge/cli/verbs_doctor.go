@@ -108,6 +108,7 @@ var doctorChecks = []struct {
 	}},
 	{docChLayout, needMapping, func(r *doctorRun) (string, string) { return workspaceLayoutCheck(r.present).row() }},
 	{docChScratch, needMapping, func(r *doctorRun) (string, string) { return scratchCheck(r.present, time.Now(), r.prune).row() }},
+	{docChRepoClones, needMapping, func(r *doctorRun) (string, string) { return repoClonesCheck(r) }},
 	{docChMemPolicy, needMapping, func(r *doctorRun) (string, string) { return memoryPolicyCheck(r.present).row() }},
 	{docChServer, needConfig, func(r *doctorRun) (string, string) { return passOrFail(r.reachOK), r.reachMsg }},
 	{docChSocket, needConfig, func(r *doctorRun) (string, string) { return passOrFail(r.sockOK), r.sockMsg }},
