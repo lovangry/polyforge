@@ -439,6 +439,8 @@ func renderStatus(w io.Writer, s *StatusResponse) {
 			origin = j.Origin.Kind
 			if j.Origin.ChatID != "" {
 				origin += ":" + j.Origin.ChatID
+			} else if j.Origin.Kind == "chat" { // polyforge#208: chat-less chat origin (runtime.OriginChat with no id)
+				origin += ":none"
 			}
 		}
 		row := []string{api.DisplayName(j.Slug, j.WorkItemID), j.Status, sess, spawn, pid, question, stepAge, lastWork}

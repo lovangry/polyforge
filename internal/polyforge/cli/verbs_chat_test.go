@@ -61,6 +61,38 @@ func TestConfigReadsChatIDFromEnv(t *testing.T) {
 	}
 }
 
+func TestStatusRendersChatNoneForChatlessChatOrigin(t *testing.T) {
+	// polyforge#208: a chat-kind origin with an empty chat id renders the
+	// whole ORIGIN cell as `chat:none` (bare `chat` is deleted); `:none` is
+	// pinned to kind chat, so an id-less `auto` stays `auto` and a chat with
+	// an id stays `chat:<full id>`.
+	var b strings.Builder
+	renderStatus(&b, &StatusResponse{
+		MachineID: "m-h", DisplayName: "laptop",
+		Jobs: []StatusJob{
+			{WorkItemID: "wi_chatless", Status: "running", Origin: &protocol.Origin{Kind: "chat"}},
+			{WorkItemID: "wi_auto", Status: "running", Origin: &protocol.Origin{Kind: "auto"}},
+			{WorkItemID: "wi_chat", Status: "running", Origin: &protocol.Origin{Kind: "chat", ChatID: "chat_z"}},
+		},
+	})
+	originCells := map[string]string{}
+	for _, line := range strings.Split(b.String(), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 1 && strings.HasPrefix(fields[0], "wi_") {
+			originCells[fields[0]] = fields[len(fields)-1]
+		}
+	}
+	for wi, want := range map[string]string{
+		"wi_chatless": "chat:none",
+		"wi_auto":     "auto",
+		"wi_chat":     "chat:chat_z",
+	} {
+		if got := originCells[wi]; got != want {
+			t.Errorf("ORIGIN cell for %s = %q, want %q\n%s", wi, got, want, b.String())
+		}
+	}
+}
+
 func TestStatusRendersDaemonNameAndOrigin(t *testing.T) {
 	var b strings.Builder
 	renderStatus(&b, &StatusResponse{
