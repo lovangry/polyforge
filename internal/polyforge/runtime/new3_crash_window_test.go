@@ -94,6 +94,9 @@ func TestRestartForgetsPendingWrapOfRetainedPausedRecord(t *testing.T) {
 	if recs[0].StopReason != protocol.FinishWrapped {
 		t.Fatalf("the crash-window record must carry the pending wrap intent (stop_reason), got %+v", recs[0])
 	}
+	// the crash itself: nothing of the first daemon runs on (its pending
+	// close's retry would otherwise race the restarted daemon)
+	r1.Close()
 
 	// -- Phase 3: daemon restart. The hub never heard the wrap: it still
 	// answers paused + clean_pause=true under our session.

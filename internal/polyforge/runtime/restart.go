@@ -504,6 +504,15 @@ func pausePending(rec *jobRecord) bool {
 	return rec.State == string(StatePaused) && rec.CleanPause && rec.StopReason == protocol.FinishPaused
 }
 
+// closePending reports a retained Paused record whose terminal close
+// (wrap/fail/block after an operator pause) has not reached aihub: the
+// close persists its stop_reason before its SessionEnd, so the record
+// keeps that verdict until the SessionEnd lands. The verdict stands —
+// the close is replayed, the record never resumes.
+func closePending(rec *jobRecord) bool {
+	return rec.State == string(StatePaused) && isTerminalStopReason(rec.StopReason)
+}
+
 // isTerminalStopReason reports whether a persisted stop_reason is a
 // TERMINAL close verdict (wrapped|failed|blocked) — as opposed to the
 // retained operator pause's own "paused" reason or an unset one.
@@ -528,11 +537,11 @@ func conflict(format string, a ...any) error {
 //	verify refused (4xx) → the WI parks blocked naming the refusal.
 //	not ours → an end_pending close is settled; anything else notOurs.
 //	end_pending → push the chain and retry the blocked close.
+//	running or paused + a pending close (closePending: the daemon died, or
+//	  the SessionEnd failed, between a retained record's close persist and
+//	  its SessionEnd) → the close is replayed, whatever clean_pause says.
 //	running → a pending pause replays its network half; a sealing record
 //	  finishes its close; anything else recovers in place.
-//	paused + clean + a terminal stop_reason → the NEW-3 crash window (the
-//	  daemon died between a retained record's close persist and its
-//	  SessionEnd): the close is replayed.
 //	paused + clean → the operator pause stands: nothing resumes.
 //	paused + clean_pause cleared (the operator's pf resume) → attach and
 //	  resume in place (M3).
@@ -580,6 +589,21 @@ func (r *Runtime) reconcileRecord(j *job, attachCause string) (string, error) {
 		return ResumeClosed, nil
 	}
 	switch {
+	case (v.Status == api.StatusRunning || v.Status == api.StatusPaused) && closePending(rec):
+		r.tap(rec.WorkItemID, "pending_close_replay", map[string]any{
+			"reason":              rec.StopReason,
+			"session_fingerprint": rec.SessionFingerprint,
+			"note":                "a retained record's terminal close persisted without its SessionEnd landing; the close is replayed",
+		})
+		if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
+			r.blockUnrecoverable(j, err)
+			return "", conflict("%s", err.Error())
+		}
+		if err := r.stopOp(r.ctx, j, rec.StopReason, true, ""); err != nil {
+			r.tap(rec.WorkItemID, "pending_close_replay_failed", map[string]any{"reason": rec.StopReason, "error": err.Error()})
+			return "", &api.Error{Code: api.ErrDaemonHubUnavailable, Detail: fmt.Sprintf("%s: pending close replay failed (record kept, retrying): %v", rec.WorkItemID, err)}
+		}
+		return ResumeClosed, nil
 	case v.Status == api.StatusRunning && pausePending(rec):
 		r.reapOrphans(rec.WorkItemID, j.capsuleDir)
 		r.tap(rec.WorkItemID, "pending_pause_replay", map[string]any{
@@ -601,20 +625,6 @@ func (r *Runtime) reconcileRecord(j *job, attachCause string) (string, error) {
 			return ResumeClosed, nil
 		}
 		return r.resumeRecord(j, causeDaemonRestart, "daemon restart (crash mid-run)")
-	case v.Status == api.StatusPaused && v.CleanPause && isTerminalStopReason(rec.StopReason):
-		r.tap(rec.WorkItemID, "pending_close_replay", map[string]any{
-			"reason":              rec.StopReason,
-			"session_fingerprint": rec.SessionFingerprint,
-			"note":                "crash between the retained-record close persist and SessionEnd; terminal close replayed at restart",
-		})
-		if err := r.requireMidflightCapsule(rec.WorkItemID, rec.Project, rec.CapsuleDir); err != nil {
-			r.blockUnrecoverable(j, err)
-			return "", conflict("%s", err.Error())
-		}
-		if err := r.stopOp(r.ctx, j, rec.StopReason, true, ""); err != nil {
-			return "", &api.Error{Code: api.ErrDaemonHubUnavailable, Detail: fmt.Sprintf("%s: pending close replay failed (record kept, retrying): %v", rec.WorkItemID, err)}
-		}
-		return ResumeClosed, nil
 	case v.Status == api.StatusPaused && v.CleanPause:
 		// the operator pause stands (a torn record reads Paused again —
 		// the hub is the authority)
@@ -674,8 +684,9 @@ func (r *Runtime) attach(j *job) error {
 // (reconcileRecord: verify → attach → recovery continuation) runs NOW,
 // as a message of the work item's actor. It answers ResumeAttached /
 // ResumeAlreadyLive / ResumeClosed or a typed refusal: DAEMON-404 (no
-// record here), DAEMON-409 (not a paused record, clean_pause still set,
-// the session no longer holds the WI), DAEMON-503 (hub unreachable —
+// record here), DAEMON-409 (not a paused record, a terminal close of the
+// record still pending, clean_pause still set, the session no longer
+// holds the WI), DAEMON-503 (hub unreachable —
 // nothing was resumed), DAEMON-410 (the shutdown came).
 func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 	id := r.CanonicalID(wi)
@@ -692,6 +703,10 @@ func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 		case StatePaused:
 		default:
 			return conflict("work item is %s; only a paused record resumes in place", st)
+		}
+		if rec := j.record(); closePending(rec) {
+			// a resume must not race the close it would cancel
+			return conflict("a %s close of the paused record is pending (its SessionEnd has not reached aihub); the daemon keeps retrying it — nothing was resumed", rec.StopReason)
 		}
 		var err error
 		out, err = r.reconcileRecord(j, causeOperatorResume)
