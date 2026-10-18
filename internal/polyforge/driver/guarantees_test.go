@@ -318,6 +318,12 @@ func TestDeliveryContractStatesGuaranteesOnlyWhenTheyApply(t *testing.T) {
 	if !strings.Contains(ev, evLine) || !strings.Contains(ev, `"duration_ms": 1200`) || !strings.Contains(ev, "(> 0)") {
 		t.Fatalf("evidence step must state the object shape and rule:\n%s", ev)
 	}
+	// polyforge#203: an example without cwd taught agents to drop the
+	// repo a command ran in, so the deliver merge rule could not
+	// attribute their test-bar re-run.
+	if !strings.Contains(ev, `"cwd": "repos/<name>"`) || !strings.Contains(ev, "counts as run at the capsule root") {
+		t.Fatalf("evidence step must state that each command is recorded with the directory it ran in:\n%s", ev)
+	}
 	if strings.Contains(ev, humanLine) {
 		t.Fatal("evidence step must not carry the human-answer line")
 	}
