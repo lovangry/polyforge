@@ -50,7 +50,7 @@ FTS；active 行的文件只在 `_redacted/` 下（redact 在挪文件后、提�
 
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
-| POST | `/api/v1/memories` | 项目 writer/maintainer 或 admin，否则 `MEM-403`；key 限定在其他项目 → `AUTH-403`；项目不存在 → `CORE-404` | body `{project, type, title, visibility, content, tags, related, work_item_id, idempotency_key}`；`work_item_id` 接受 id 或 `<project>#<seq>`，须同项目；`title` 缺省或空白时由服务端从正文派生（§3）；同一 `idempotency_key`（同 owner、同项目）重放返回原条目，键属于他人或他项目 → `MEM-409 IDEMPOTENCY_KEY_REUSED` |
+| POST | `/api/v1/memories` | 项目 writer/maintainer 或 admin，否则 `MEM-403`；key 限定在其他项目 → `AUTH-403`；项目不存在 → `CORE-404` | body `{project, type, title, visibility, content, tags, related, work_item_id, idempotency_key}`；`work_item_id` 接受 id 或 `<project>#<seq>`，须同项目；`type` 须为 `kind` 或 `kind.name`，kind（第一个 `.` 之前）属于 `authority.go` `typeKinds`（experience/fact/doc/rule/methodology），否则 `MEM-400` 并点名被拒类型与合法 kind（polyforge#210，类型命名空间的唯一权威）；`title` 缺省或空白时由服务端从正文派生（§3）；同一 `idempotency_key`（同 owner、同项目）重放返回原条目，键属于他人或他项目 → `MEM-409 IDEMPOTENCY_KEY_REUSED` |
 | GET | `/api/v1/memories/search` | 任意 key；结果按可见性过滤 | `q`（必填）、`match`（`all` 缺省 / `any`，其他值 → `MEM-400`）、`type`（精确值，或 `X.*` 前缀匹配 `X.`）、`tags`（逗号）、`limit`（缺省 50；≤0 或 >200 时取 50）、`project`（先过读权限再作过滤）、`excerpt`（>0 时每条带 `content_excerpt`，上限 8192 字符）；只返回 `status='active'` |
 | GET | `/api/v1/memories/{id}` | 读权限；无权与不存在同为 `MEM-404` | 元数据；`?format=content` 返回原始 Markdown 正文 |
 | POST | `/api/v1/memories/{id}/redact` | 先过读门（`memRead`）：无读权限 → `MEM-404`；能读但非 owner 且非 admin → `MEM-403` | 软删除；非 active → `MEM-409` |
@@ -76,7 +76,7 @@ rowid 与 rank，再沿 rank 顺序分批读取条目元数据，直到下界 (1
 
 ### 5.2 错误码 <!-- §5.2 -->
 
-`MEM-400` 输入不合法（缺 `q`/`type`/`content`、可见性越界、frontmatter 不合法）；`MEM-403` 无写权限 / 能读但非 owner
+`MEM-400` 输入不合法（缺 `q`/`type`/`content`、`type` 不在命名空间内、可见性越界、frontmatter 不合法）；`MEM-403` 无写权限 / 能读但非 owner
 的 redact；`MEM-404` 不存在或无权读（含 redact 时无读权限）；`MEM-409` 幂等键复用、redact 非 active 条目；`MEM-413` 正文超 1 MiB；
 `MEM-503` FTS 查询/扫描失败；数据库事务失败 → `CORE-500`（未分类的服务端错误）（常量见 `internal/common/api/errors.go` `ErrMem*`）。另：key 限定在其他项目 → `AUTH-403`；
 创建时项目不存在 → `CORE-404`。
