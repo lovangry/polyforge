@@ -201,7 +201,7 @@ the turn arrives.
 
 ## Session rules
 
-Five standing rules, binding on every polyforge session:
+Six standing rules, binding on every polyforge session:
 
 1. **Surface discipline — the `pf` CLI is the only client.** All AIHub
    data-plane interaction goes through the `pf` CLI; never issue a raw
@@ -257,6 +257,24 @@ Five standing rules, binding on every polyforge session:
    other data-plane verb is refused (DAEMON-403).
    The repo inventory and clone URLs always come from the aihub project
    registry; the cli.toml `[workspace]` mapping is the only placement source.
+6. **No unticketed writes into `.repo/` clones (polyforge#198).** This rule binds
+   interactive chat sessions only — step agents never load this skill (pi steps run
+   against the daemon's own agent dir, claude steps run `--bare` — and they work
+   inside a capsule whose work item is the ticket). Before your FIRST write into a
+   mapped workspace's `.repo/<repo>` clone — any change to a tracked or untracked
+   non-ignored file, or creating a commit (NOT read-only ops, fetch/pull, checkout of
+   an existing branch, or gitignored build/test output) — name an attributable,
+   not-yet-closed work item to the user (any existing WI whose goal the write serves,
+   named before the write; this covers integrator manual delivery and ship-PR
+   merge-conflict resolution, owner ruling 2026-10-16 standing). With none, propose
+   filing one first (`pf file create`) and never proceed silently — carry on only on
+   the user's EXPLICIT override ("just edit it, no ticket"). `pf doctor`'s
+   "workspace repo clones" warning surfaces uncovered changes in clones and their
+   linked worktrees regardless of who made them (the doctor cannot attribute
+   authorship; owner ruling 13 named the two guards: this rule and the doctor row).
+   Basis: this WI polyforge#198 — the owner's explicit approval notwithstanding the
+   frozen feature set and the C14 audit item — and incident pi#108 (the manually
+   committed hand work in a workspace clone that went nowhere).
 
 ## The `pf` CLI: shared invocation contract
 
