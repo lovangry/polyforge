@@ -71,7 +71,9 @@ its dependency block.
 
 A dependency is a `blocks` edge inside one project: "B runs after A". A
 must be an execution ticket (a bundle is bound) — a registration ticket or
-an epic never wraps, so aihub refuses it as a blocker. B
+an epic runs nothing: it closes only when someone runs `pf wrap` on it once
+done (an epic only after its children are terminal), so aihub refuses it
+as a blocker. B
 stays queued — out of the ready queue, its claim refused — until A is
 **wrapped**. A failed or canceled A keeps B waiting; nobody releases it
 automatically. When only the order mattered, remove the edge (`pf file
@@ -126,8 +128,8 @@ adds the dependency block. `dep add|rm|list` print the dependency view
 | `CORE-400` `REPO_NOT_IN_PROJECT` | A `--repo` name is not one of the project's repos | Name a repo the project has (`pf projects get <project>` lists them); a maintainer adds new repos to the project. |
 | `CORE-400` `INVENTORY_DUPLICATE_NAME` / `INVENTORY_URL_NOT_ALLOWED` / `INVENTORY_SUBDIR_UNSUPPORTED` / `INVENTORY_BASE_UNSUPPORTED` | The same repo named twice; a `--stdin` entry carrying `url`, `subdir` or any key other than `name`; a `--stdin` body carrying the removed `repo_inventory_base` array | Drop the duplicate; give names only. |
 | `CORE-400` (dependency) | An edge across two projects, or a work item depending on itself | Dependencies stay inside one project; name a work item of the same project. |
-| `CORE-400` `BLOCKER_STILL_BLOCKS` | `pf file edit <id> --bundle ""` (unbind) on a work item that still blocks others (`detail` names them) | Without a bundle it could never wrap — remove those edges first (`pf file dep rm`), or rebind to another bundle instead (allowed). |
-| `CORE-400` `BLOCKER_NOT_EXECUTABLE` | The blocker (`--after` / the first `dep add` argument) has no bundle: a registration ticket or an epic | It can never wrap — name the execution ticket that does the work, or bind a bundle to it first (`pf file edit <id> --bundle NAME`). |
+| `CORE-400` `BLOCKER_STILL_BLOCKS` | `pf file edit <id> --bundle ""` (unbind) on a work item that still blocks others (`detail` names them) | Without a bundle it runs nothing, so nothing would release them — remove those edges first (`pf file dep rm`), or rebind to another bundle instead (allowed). |
+| `CORE-400` `BLOCKER_NOT_EXECUTABLE` | The blocker (`--after` / the first `dep add` argument) has no bundle: a registration ticket or an epic | It runs nothing (it closes only by a hand `pf wrap`) — name the execution ticket that does the work, or bind a bundle to it first (`pf file edit <id> --bundle NAME`). |
 | `CORE-404` | Unknown or invisible work item id, unknown project; `dep rm` of an edge that does not exist | No such work item (or you cannot see it) — check the `wi_` id or slug and the project name. |
 | `CORE-409` `DEPENDENCY_CYCLE` | The new edge would close a loop (B already waits, directly or not, for the other side) | Refused — the order you asked for contradicts an existing one; `pf file dep list` shows the chain. |
 | `CORE-409` | Create-time conflict (e.g. duplicate) | The state machine refuses this write — read `detail`. |

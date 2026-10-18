@@ -157,7 +157,8 @@ func TestDependencyDuplicateEdgeIdempotent(t *testing.T) {
 }
 
 // A `blocks` blocker must be an execution ticket: a registration ticket
-// or an epic never wraps (POST and create body alike).
+// or an epic runs nothing that would release the edge (POST and create
+// body alike).
 func TestDependencyBlockerMustBeExecutionTicket(t *testing.T) {
 	e := newSrvEnv(t)
 	c := aihubclient.New(e.ts.URL, e.key)

@@ -59,6 +59,7 @@ PATCH never sets status (`patchableFields`). Every transition is one guarded UPD
 | running/paused → queued | `POST …/force-end-session` → `ForceEnd` | admin or project maintainer; reason required; terminal → `CORE-410`, no session → `CORE-409 NOT_HELD`; clears session + seal; event `session_superseded` (old fingerprint). CLI: `pf ops end-session <wi> --reason …` |
 | blocked → queued | `POST …/resume-blocked` `{accept_lost_work?}` → `ResumeBlockedWith` | reporter/maintainer/admin; terminal → `CORE-410`; status blocked (`NOT_BLOCKED`) ∧ no session (`SESSION_HELD`); event `wi_resumed`; `accept_lost_work:true` also clears `attrs.blocked_seal` in the same transaction with event `blocked_seal_abandoned` `{head_sha, machine_id}` (§3.5). CLI: `pf resume <wi> [--accept-lost-work]` |
 | queued/paused/blocked → canceled | `POST …/cancel` → `Cancel` | reporter/maintainer/admin; running → `CORE-409`; terminal → `CORE-410`; event `work_item_canceled` |
+| queued/paused/blocked → wrapped/failed (no bundle) | `POST …/wrap` `{fail?, note?}` → `Wrap` | reporter/maintainer/admin; terminal → `CORE-410 TERMINAL_STATE`; session held → `CORE-409`; bundle bound → `CORE-409` (the daemon wraps execution tickets); a child not terminal → `CORE-409 OPEN_CHILDREN`; sets `closed_at`; event `work_item_closed` `{status, note?}`. CLI: `pf wrap <wi> [--fail] [--note …]` when the daemon is unreachable or has no local job for it |
 
 The blocked WI has exactly two exits: `pf resume` (continue = resume-blocked + a fresh claim) and
 `pf cancel` (abandon) — `v2-converge.md#§6`. `end_pending`, `recovering`, `sealing`, `claiming` are
@@ -140,6 +141,7 @@ health route. All paths under `/api/v1` except `/git/`.
 | GET | `/work-items/{id}` | key + read | `include=events` (anything else `CORE-400`) |
 | PATCH | `/work-items/{id}` | key + writer | `goal content labels priority milestone waiting_on clean_pause`, `bundle_name` in the R2 window (`patchableFields`; `attrs` only at create) |
 | POST | `/work-items/{id}/cancel` | reporter/maintainer/admin | §2.1 |
+| POST | `/work-items/{id}/wrap` | reporter/maintainer/admin | §2.1; work items with no bundle only |
 | POST | `/work-items/{id}/claim` | writer | §3.2 |
 | POST | `/work-items/{id}/session-verify`, `/session-attach`, `/session-end` | key (scope check) + secret | §3.3 |
 | POST | `/work-items/{id}/force-end-session` | admin/maintainer | §2.1 |

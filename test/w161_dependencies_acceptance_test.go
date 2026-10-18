@@ -88,7 +88,7 @@ func TestW161DependenciesEndToEnd(t *testing.T) {
 		t.Fatalf("cross-project refusal:\n%s", out)
 	}
 
-	// --after is atomic: a blocker that can never wrap (registration
+	// --after is atomic: a blocker that runs nothing (registration
 	// ticket) refuses the create and nothing is filed.
 	reg := w140Create(t, inst, project, "w161 registration ticket", nil, nil)
 	before := len(w140SegIDs(w161List(t, inst, project), "items"))

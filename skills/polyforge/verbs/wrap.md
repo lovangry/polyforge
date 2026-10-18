@@ -1,8 +1,19 @@
-# wrap — close a running work item as terminal
+# wrap — close a work item as terminal
 
 Execution-plane verb: routed to the local daemon (the wrap route). `wrap`
 is a terminal outcome: the session ends for good, the capsule is
 sealed read-only and pushed, and no re-claim happens automatically.
+
+**A work item with no bundle** (a design, decision or tracking ticket
+that never runs a workflow) has no daemon job. When the daemon is not
+running or has no local job for it, the CLI reads it at AIHub; if it has no bundle and is
+queued, paused or blocked, AIHub records the verdict: `wrapped` (or
+`failed` with `--fail`), `closed_at` set, and a `work_item_closed` event
+with the actor and `--note`. The same people as `pf cancel` may do this
+(the reporter, a project maintainer or an admin). Use `wrap` for "it is
+done"; `pf cancel` records *canceled* (abandoned). A work item with a
+bundle is never closed this way, and an epic only once all its children
+are terminal.
 
 **Closes arbitrate.** The human path is this verb (or `pause`); the
 workflow's own terminal exit is closed by the daemon's recovery engine.
@@ -15,16 +26,21 @@ commit+push and ends the session exactly once.
 
 ## Triggers
 
-- EN: wrap it up / we're done / call it finished / mark it failed / close it
-  out / end it
-- 中文: 收尾 / 完事了 / 结束 / 判完成 / 收工 / 判失败 / 结束这个任务
+- EN: wrap it up / we're done / call it finished / mark it done / close this
+  ticket / mark it failed / close it out / end it
+- 中文: 收尾 / 完事了 / 结束 / 判完成 / 关掉这张票 / 标记完成 / 收工 / 判失败 /
+  结束这个任务
 
 ## Command
 
 ```
 pf wrap <id>          # close with reason=wrap  → terminal success
 pf wrap <id> --fail   # close with reason=fail  → terminal failure
+pf wrap <id> [--fail] --note "shipped in v2.16"   # a work item with no bundle: the note is recorded
 ```
+
+`--note` is kept only when AIHub wraps a work item with no bundle; on a
+daemon wrap the CLI says on stderr that it was not recorded.
 
 No other outcomes exist on this verb. `--fail` is the owner's failed
 verdict on a RUNNING job. It is not a door into a parked workflow: a
@@ -38,6 +54,9 @@ no agent ran, so the capsule chain is unchanged. If the hub refuses that
 close, the daemon falls back to a blocked close (retried until it lands).
 
 ## Success
+
+A work item with no bundle: `<slug> closed at aihub (no bundle): status
+wrapped` (or `failed`); `--json` prints AIHub's work item record.
 
 Human mode: `wrap requested for <slug>` (or `fail requested for <slug>`);
 `--json` prints the daemon's raw answer instead — `sealed`, or
@@ -56,7 +75,11 @@ wrap answers the graceful `already_terminal` shape, not an error.
 | `DAEMON-409` | The job's close is already in progress (sealing, or retrying the session end until aihub takes it) | Wait for the in-flight close to settle, then check `pf watch <id> --once`; the work item is being closed exactly once either way. |
 | `CORE-*` passthrough (e.g. `CORE-403`, `CORE-409`) | The server-side session end was refused | The typed Core verdict arrives verbatim — typically the session is no longer this daemon's to end; act per its detail. |
 | `DAEMON-500` | The close failed on the daemon side | The job is left mid-seal, recorded as such; the next daemon start finishes the close. Check the daemon log before retrying. |
-| `dial unix …` | Daemon not running | Nothing is executing here — run `pf daemon ensure`, then retry once (or check `--socket`). |
+| `dial unix …` | Daemon not running | Nothing is executing here — run `pf daemon ensure`, then retry once (or check `--socket`). A work item with no bundle needs no daemon. |
+| `AUTH-403` | A work item with no bundle, and you are not its reporter, a project maintainer or an admin | Ask one of them to wrap it. |
+| `CORE-409` `OPEN_CHILDREN` | A work item with no bundle that has child tickets not yet terminal (an epic) | Wrap, fail or cancel the children first, then wrap the epic. |
+| `CORE-409` / `CORE-410` | A work item with no bundle changed between the read and the wrap: a bundle was bound to it, or it became terminal | Check `pf file show <id>`: with a bundle it is an execution ticket (its daemon wraps it); if terminal, there is nothing to do. |
+| `HTTP-404` `… upgrade aihub first` | A work item with no bundle, and the AIHub is older than this `pf` (no wrap route for it) | AIHub must be upgraded first (it ships before the CLI); until then the ticket cannot be wrapped. |
 
 A `--fail` close is permanent for this work item: the CLI refuses any later
 submit of it up front (`terminal (failed)`), and only a brand-new work item

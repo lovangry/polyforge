@@ -19,7 +19,8 @@ Nothing else. The split between the target faces is fixed (the architecture's ro
   <api_key>`); the daemon is not involved.
 - **Execution-plane verbs** (`submit`, `watch`, `answer`,
   `pause`, `resume`, `wrap`, `ops`): semantically bound to this machine's local
-  execution scene. The `pf` CLI talks to the **local daemon over its unix
+  execution scene (one exception: `wrap` of a work item with no bundle,
+  which no daemon ever holds, is recorded by AIHub). The `pf` CLI talks to the **local daemon over its unix
   domain socket** (default `daemon.sock` in `$POLYFORGE_DATA_DIR`, else `~/.local/share/polyforge`); the daemon translates each
   route into its Runtime (lifecycle) and Observe (supervision) modules.
 - **Delivery** is not a verb — the workflow's own `deliver` step (`verbs/ship.md`).
@@ -77,7 +78,7 @@ EXTENDED_GLOB and starts a comment after whitespace.
 | answer the question / reply to needs_input / 回答问题 / 它在问我 / 答一下 | `verbs/answer.md` | daemon |
 | pause it / stop for now / hold on / 暂停 / 先停一下 / 挂起 | `verbs/pause.md` | daemon |
 | resume it / continue the paused or blocked one / 恢复执行 / 接着跑（已暂停或已阻塞的）/ 继续 | `verbs/resume.md` | daemon |
-| wrap it up / we're done / mark it failed / 收尾 / 完事了 / 判完成 / 判失败 | `verbs/wrap.md` | daemon |
+| wrap it up / we're done / mark it done / close this ticket / mark it failed / 收尾 / 完事了 / 判完成 / 关掉这张票 / 标记完成 / 判失败 | `verbs/wrap.md` (a running work item, or a ticket with no bundle — design, decision, tracking; "don't want it" stays `cancel`) | daemon; AIHub for a ticket with no bundle |
 | ship it / deliver / push the branch / open the PR / merge it / 推上去 / 交付 | `verbs/ship.md` (deliver-step note: no verb; point at the workflow's `deliver` step and `pf watch`) | — |
 | cut a release / publish a version / deploy it / 发版 / 发布新版本 / 部署上线 | `verbs/file.md` (create, `--bundle release`) | AIHub |
 | daemon status / what's this machine running / what's happening / global state / 看看什么情况 / 全局状态 / auto-pull on/off / max concurrent jobs / shutdown / start the daemon / the daemon is down / 升级前自检 / 启停 / 拉起 daemon / 自动领取开关 / 调并发 / 优雅停机 | `verbs/ops.md` (start = `pf daemon ensure`) | daemon |

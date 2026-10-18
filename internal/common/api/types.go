@@ -295,6 +295,14 @@ type ResumeBlockedRequest struct {
 	AcceptLostWork bool `json:"accept_lost_work,omitempty"`
 }
 
+// WrapRequest is the hub wrap door's body (a work item with no bundle):
+// Fail records the failed verdict instead of wrapped; Note lands in the
+// work_item_closed event.
+type WrapRequest struct {
+	Fail bool   `json:"fail,omitempty"`
+	Note string `json:"note,omitempty"`
+}
+
 // SessionAttachRequest resumes a paused WI under the SAME session (M3:
 // same-machine restart resume; clean_pause WIs refuse attach).
 type SessionAttachRequest struct {
