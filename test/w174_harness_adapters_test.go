@@ -76,16 +76,23 @@ else { delete env.PF_WI_ID; delete process.env.PF_WI_ID; }
 
 const handlers = {};
 const ui = { widget: undefined, setWidget(_k, c) { this.widget = c; } };
+// inflight counts pi.exec children not yet exited: the extension's code
+// after an awaited exec runs in the microtasks of that exit, so a
+// macrotask that sees 0 sees every follow-up exec already spawned.
+let inflight = 0;
 const pi = {
   on: (ev, fn) => { handlers[ev] = fn; },
   exec: (cmd, args, opts) => new Promise((resolve) => {
+    inflight++;
+    let done = false;
+    const settle = (r) => { if (!done) { done = true; inflight--; resolve(r); } };
     const child = spawn(cmd, args, { env, stdio: ["ignore", "pipe", "pipe"] });
     let out = "", err = "", timer;
     if (opts && opts.timeout) timer = setTimeout(() => child.kill("SIGKILL"), opts.timeout);
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (err += d));
-    child.on("exit", (code) => { clearTimeout(timer); resolve({ code: code ?? -1, stdout: out, stderr: err }); });
-    child.on("error", (e) => resolve({ code: -1, stdout: "", stderr: String(e) }));
+    child.on("exit", (code) => { clearTimeout(timer); settle({ code: code ?? -1, stdout: out, stderr: err }); });
+    child.on("error", (e) => settle({ code: -1, stdout: "", stderr: String(e) }));
   }),
   sendMessage: () => {},
 };
@@ -115,7 +122,16 @@ if (!stepAgent) {
   verdict.sessionStartMs = Date.now() - t0;
   await sleep(1500);
   verdict.at1500 = snap();
-  await sleep(process.env.W174_SCENARIO === "ensure-fails" ? 9000 : 2500);
+  if (process.env.W174_SCENARIO === "ensure-fails") {
+    // the failed ensure hands over to the RESTART_MS (5s) retry loop: wait
+    // (at most 9s more, as before) until its first retry — the second
+    // init — has run to its end with nothing left in flight, so a retry
+    // that re-ran ensure has spawned it by then
+    const by = Date.now() + 9000;
+    while (Date.now() < by && !(snap().inits >= 2 && inflight === 0)) await sleep(100);
+  } else {
+    await sleep(2500);
+  }
   const ev = { toolName: "bash", input: { command: "echo hi" } };
   await handlers["tool_call"](ev, {});
   verdict.bash = ev.input.command;
