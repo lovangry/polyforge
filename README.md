@@ -373,9 +373,14 @@ service host with seconds of downtime (no startup auto-migration, see
 ## Build & test
 
     make check     # build + vet + fmt + xrefs + test, all packages
+    make test      # unit packages, then the e2e suite in parallel
     make xrefs     # design-doc cross-references only
     go build ./...
-    go test ./...
+    go test ./...  # the same, with the e2e suite serial (~15 min)
+
+`make test` runs the `./test` e2e package through `test/e2e-parallel.sh`:
+one process per test, `E2E_JOBS` at a time (default: the CPU count, at most
+8), slowest first; `E2E_RUN=<regexp>` narrows it to matching tests.
 
 `make xrefs` checks the cross-references and section anchors of
 `docs/design/polyforge-vnext/` (archived docs excluded); it skips with a

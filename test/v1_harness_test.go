@@ -64,12 +64,26 @@ func v1Root(t *testing.T) string {
 // <dir>/covdata so every spawned aihub/daemon/CLI/agent process emits
 // its coverage there — the manual instrumented round for the e2e
 // coverage report (merge with `go tool covdata textfmt`).
+//
+// PFV1_PREBUILT_BINS=<dir> (test/e2e-parallel.sh) skips the build: the
+// three binaries are hard-linked (copied across filesystems) into this
+// run's own dir, so the bin sweep's exe-path match still sees only the
+// processes this test binary started.
 func v1Bins(t *testing.T) string {
 	t.Helper()
 	v1BinOnce.Do(func() {
 		dir, err := os.MkdirTemp("", "pfv1-bins")
 		if err != nil {
 			v1BinErr = err
+			return
+		}
+		if pre := os.Getenv("PFV1_PREBUILT_BINS"); pre != "" && os.Getenv("PFV1_COVER_BINS") == "" {
+			for _, name := range []string{"aihub", "pf", "fakepi"} {
+				if v1BinErr = linkOrCopy(filepath.Join(pre, name), filepath.Join(dir, name)); v1BinErr != nil {
+					return
+				}
+			}
+			v1BinDir = dir
 			return
 		}
 		build := exec.Command("go", "build", "-o", dir+"/",
@@ -97,6 +111,32 @@ func v1Bins(t *testing.T) string {
 	}
 	registerBinSweep(t, v1BinDir)
 	return v1BinDir
+}
+
+// linkOrCopy hard-links src to dst, copying (mode kept) when a link is
+// impossible.
+func linkOrCopy(src, dst string) error {
+	if os.Link(src, dst) == nil {
+		return nil
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	fi, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fi.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // ---------------------------------------------------------------------------

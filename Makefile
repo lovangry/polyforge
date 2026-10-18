@@ -18,10 +18,11 @@ test:
 	# `make test` does NOT show which tests skipped; run `go test -v ./...` when
 	# that evidence matters. Opt-in tests (skipped unless their env var is set):
 	#   POLYFORGE_TEST_SYSTEM_INSTALL=1    installer scenarios: write /usr/local/bin/pf
-	# Explicit -timeout: the ./test acceptance package runs longer than go's
-	# default 10m per-package timeout, which would panic on wall clock while
-	# every test passes on content. 20m relaxes only that per-package watchdog.
-	go test ./... -count=1 -timeout 20m
+	# The ./test acceptance package runs through test/e2e-parallel.sh: one
+	# process per test, E2E_JOBS at a time (`go test ./test/` still runs it
+	# serially, in about 15 minutes).
+	go test $$(go list ./... | grep -v '/test$$') -count=1
+	sh test/e2e-parallel.sh
 
 fmt:
 	@out=$$(gofmt -l .); \
