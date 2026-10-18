@@ -66,6 +66,13 @@ func w174NewEnv(t *testing.T, withMapping bool) *w174Env {
 	if err := os.Symlink("v0", filepath.Join(e.data, "release", "current")); err != nil {
 		t.Fatal(err)
 	}
+	// a test-owned daemon id: without it the scratch daemon derives
+	// m-<short host>, the real daemon's id, and when this suite runs under a
+	// step agent that daemon's step-origin guard refuses every mutation from
+	// the test (the step's PF_WI_ID/PF_DAEMON_ID sit on our ancestors)
+	if err := os.WriteFile(filepath.Join(e.data, "daemon-id"), []byte("m-w174-scratch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	body := "server = \"http://127.0.0.1:1\"\napi_key = \"w174key\"\ndaemon_socket = \"" + e.sock + "\"\n"
 	if withMapping {
 		body += "\n[workspace.\"" + ws + "\"]\nprojects = [\"e2e\"]\n"
