@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -41,6 +42,25 @@ func errf(code, reason, format string, args ...any) *APIError {
 
 // Visibility tiers (06 §6; membership-first filtering is the server's).
 var visibilities = map[string]bool{"admin": true, "private": true, "project": true, "public": true, "team": true}
+
+// typeKinds is the memory type namespace: a type is kind or kind.name,
+// its kind (before the first dot) one of these. This list is the one
+// authority (polyforge#210); clients and docs name it, never copy it.
+var typeKinds = []string{"experience", "fact", "doc", "rule", "methodology"}
+
+// checkType refuses a type outside the namespace with MEM-400 naming the
+// rejected type and the valid kinds.
+func checkType(typ string) error {
+	if typ == "" {
+		return errf(api.ErrMemBadInput, "", "type required")
+	}
+	kind, _, _ := strings.Cut(typ, ".")
+	if !slices.Contains(typeKinds, kind) {
+		return errf(api.ErrMemBadInput, "", "type %q: kind (before the first dot) must be one of %s",
+			typ, strings.Join(typeKinds, "|"))
+	}
+	return nil
+}
 
 // maxContentBytes is the MEM-413 body limit (≤ 1 MiB).
 const maxContentBytes = 1 << 20

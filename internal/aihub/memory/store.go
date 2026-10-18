@@ -76,8 +76,8 @@ func (s *Store) Create(req CreateRequest, owner string) (*Entry, error) {
 	if strings.TrimSpace(req.Content) == "" {
 		return nil, errf(api.ErrMemBadInput, "", "content required")
 	}
-	if req.Type == "" {
-		return nil, errf(api.ErrMemBadInput, "", "type required")
+	if err := checkType(req.Type); err != nil {
+		return nil, err
 	}
 	if !visibilities[req.Visibility] {
 		return nil, errf(api.ErrMemBadInput, "", "bad visibility %q", req.Visibility)

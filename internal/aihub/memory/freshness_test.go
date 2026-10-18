@@ -390,7 +390,7 @@ func TestSearchModeExactOrder(t *testing.T) {
 	if err := e.db.QueryRow(`SELECT id FROM projects WHERE name='alpha'`).Scan(&alpha); err != nil {
 		t.Fatal(err)
 	}
-	types := []string{"experience.debug", "fact.note", "rule.ops", "doc.review", "doc.design", "other"}
+	types := []string{"experience.debug", "fact.note", "rule.ops", "doc.review", "doc.design", "methodology.review"}
 	words := []string{"wallaby", "lantern", "harbour", "cobalt"}
 	tagged := map[string]bool{}
 	typeOf := map[string]string{}
