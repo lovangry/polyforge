@@ -720,7 +720,8 @@ and the failure codes are in [skills/polyforge/verbs/recall.md](skills/polyforge
 
 Change coverage is tiered by the change's **behavior face**, not by a
 "e2e on every ticket" blanket rule (owner ruling 2026-10-02). The existing
-e2e suite (`go test ./test/`) is the regression net for every
+e2e suite (`make test`, or `sh test/e2e-parallel.sh` for the e2e package
+alone) is the regression net for every
 change — each ticket's verification step runs it — and the three disciplines
 below govern when **new** coverage must be added. This section is the authority (the original
 Chinese record, `docs/design/polyforge-vnext/archive/v1.5-change-coverage-rules.md`,

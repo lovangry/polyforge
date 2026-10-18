@@ -740,12 +740,15 @@ func optServerURL(url string) daemonOpt {
 }
 
 // shortTmp makes a short temp path (unix socket paths are bound to ~104
-// bytes; t.TempDir() paths can exceed that with nested test names).
-func shortTmp(parent, prefix string) string {
+// bytes; t.TempDir() paths can exceed that with nested test names),
+// removed when t ends — after the cleanups registered later, so after
+// the daemon that binds a socket in it has stopped.
+func shortTmp(t *testing.T, parent, prefix string) string {
 	d, err := os.MkdirTemp(parent, prefix)
 	if err != nil {
-		panic("shortTmp: " + err.Error())
+		t.Fatalf("shortTmp: %v", err)
 	}
+	t.Cleanup(func() { os.RemoveAll(d) })
 	return d
 }
 
@@ -753,7 +756,7 @@ func shortTmp(parent, prefix string) string {
 // own socket, data dir and workspace.
 func newV1Daemon(t *testing.T, inst *v1Install, opts ...daemonOpt) *v1Daemon {
 	t.Helper()
-	sockBase := shortTmp("/tmp", "pfv1sock")
+	sockBase := shortTmp(t, "/tmp", "pfv1sock")
 	sock := filepath.Join(sockBase, "d.sock")
 	dataDir := t.TempDir()
 	workspace := t.TempDir()

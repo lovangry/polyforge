@@ -432,7 +432,7 @@ func TestRecoverDeadOldAgentWithOrphans(t *testing.T) {
 	j := seedJob(r, wi)
 
 	// an "agent" that forks a long-lived child and dies without reaping it
-	old, err := spawnOrphaningSleeper(wi)
+	old, err := spawnOrphaningSleeper(t, wi)
 	if err != nil {
 		t.Fatal(err)
 	}
