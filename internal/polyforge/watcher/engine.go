@@ -85,8 +85,9 @@ var ErrParentGone = errors.New("parent process gone")
 // after a daemon restart needs no special case). Decisions print as
 // fixed-template lines on Out — those of the work items the first
 // cycle subscribed fold into one "N WIs need you" line; progress goes to the
-// status file. With WaitDecision the first non-empty batch is printed,
-// acked and Run returns nil.
+// status file. A Passive subscription (another chat is woken for its WI)
+// gets its progress line, none of its decisions and no ack. With WaitDecision
+// the first non-empty batch is printed, acked and Run returns nil.
 //
 // Delivery is fetch-then-ack: nothing the daemon hands out counts as
 // delivered until the watcher acks it after printing, so a crash between
@@ -285,6 +286,13 @@ func cycle(d API, o *Options, fresh map[string]bool) ([]string, batch, error) {
 			continue
 		}
 		lines = append(lines, ProgressLine(snap, now))
+		if sub.Passive {
+			// another chat is woken for this WI (polyforge#199): progress
+			// only. No ack either — the record is that chat's, so what it
+			// has not delivered stays undelivered for whichever chat
+			// becomes the wake target.
+			continue
+		}
 		res := Evaluate(sub, snap)
 		if fresh[sub.WI] {
 			if len(res.Decisions) > 0 {
