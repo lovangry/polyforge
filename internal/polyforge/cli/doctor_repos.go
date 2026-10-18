@@ -3,12 +3,18 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/polyforge/aihubclient"
 )
 
 // doctor_repos.go: the read-only git probe layer behind `pf doctor`'s
@@ -186,4 +192,211 @@ func probeGit(dir string, args ...string) (string, error) {
 		return "", fmt.Errorf("git %v: %v", args, msg)
 	}
 	return stdout.String(), nil
+}
+
+// The check. One aggregated doctor row for every mapped workspace's
+// `.repo/` clone units, registered in doctorChecks (verbs_doctor.go)
+// with prerequisite needMapping — NOT needAihub: the row runs when aihub
+// is unreachable so locally decidable uncoverage still fires, and every
+// unit the row cannot decide by aihub becomes a skip note instead (one
+// faked pass is one silent uncovered clone). Warn-only: the row never
+// moves the exit code, and `--harness` skips doctorChecks wholesale.
+
+// docChRepoClones is the row name (sibling convention: one const beside
+// the layer it implements, the workspace-family rows in
+// doctor_workspace.go).
+const docChRepoClones = "workspace repo clones"
+
+// w198InFlightWI are the WI states that cover a delivery-branch unit
+// (ruling 8: queued, running, paused and blocked all say the WI is in
+// flight; every terminal state never covers).
+var w198InFlightWI = []string{
+	api.StatusQueued, api.StatusRunning, api.StatusPaused, api.StatusBlocked,
+}
+
+// cloneEntry is one unit's verdict: kind "" none (clean, or covered),
+// "warn" a locally decidable or terminal-WI uncoverage with its ONE
+// remediation sentence, "skip" a unit honoured in the detail but firing
+// no warning — its cover went unread, never a silently clean face.
+type cloneEntry struct {
+	kind string
+	note string
+}
+
+// cloneUnitVerdict answers one scanned unit's verdict.
+func cloneUnitVerdict(u repoUnit, aihub *aihubclient.Client, reg *repoRegistry) cloneEntry {
+	if u.Checked != "" {
+		return cloneEntry{kind: "skip", note: u.Dir + ": git facts not checked: " + u.Checked + " (skipped without a faked green)"}
+	}
+	if !u.Dirty && !u.Unpushed {
+		return cloneEntry{} // clean and pushed: nothing to cover
+	}
+	var facts []string
+	if u.Dirty {
+		facts = append(facts, "uncommitted tracked change(s)")
+	}
+	if u.Unpushed {
+		facts = append(facts, "local commit(s) on no remote-tracking ref")
+	}
+	if proj, seq, ok := repoDeliveryBranchFace(u.Branch); ok {
+		slug := proj + "#" + seq
+		wi, err := aihub.GetWorkItem(slug)
+		if err != nil {
+			var ae *api.Error
+			if errors.As(err, &ae) && ae.HTTPStatus() == 404 {
+				return cloneEntry{kind: "warn", note: u.Dir + ": branch " + u.Branch + " names work item " + slug +
+					" (aihub answers 404: it does not exist — the delivery face covers nothing) with " + strings.Join(facts, " and ") +
+					"; " + cloneRemediation(u.CloneName, reg)}
+			}
+			return cloneEntry{kind: "skip", note: u.Dir + ": branch " + u.Branch + " names work item " + slug +
+				" (the delivery face): WI state not decidable — aihub answered: " + err.Error() + " (skipped without a faked green)"}
+		}
+		if slices.Contains(w198InFlightWI, wi.Status) {
+			return cloneEntry{} // the in-flight WI covers it (silence)
+		}
+		return cloneEntry{kind: "warn", note: u.Dir + ": branch " + u.Branch + " names work item " + slug +
+			" (status " + wi.Status + " — a terminal state never covers) with " + strings.Join(facts, " and ") +
+			"; " + cloneRemediation(u.CloneName, reg)}
+	}
+	// Locally decidable: any non-delivery branch or detached HEAD — the
+	// branch face covers nothing WI-wise.
+	branch := u.Branch
+	if branch == "" {
+		branch = "a detached HEAD"
+	}
+	return cloneEntry{kind: "warn", note: u.Dir + ": branch " + branch + " with " + strings.Join(facts, " and ") +
+		"; " + cloneRemediation(u.CloneName, reg)}
+}
+
+// repoDeliveryBranchFace classifies a branch as the delivery face
+// polyforge/<project>-<seq> (api.PathName's documented shape: the seq is
+// the part after the last '-'; project names never carry '#').
+func repoDeliveryBranchFace(branch string) (proj, seq string, ok bool) {
+	rest, has := strings.CutPrefix(branch, "polyforge/")
+	if !has {
+		return "", "", false
+	}
+	i := strings.LastIndex(rest, "-")
+	if i <= 0 {
+		return "", "", false
+	}
+	proj, seq = rest[:i], rest[i+1:]
+	if !isDigits(seq) || strings.ContainsAny(proj, "# ") {
+		return "", "", false
+	}
+	return proj, seq, true
+}
+
+// isDigits answers s as one non-empty digit run.
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// repoRegistry is the clone→project-repo assignment face (plan decision
+// 2), read only when a warning fires: enrich-only, never warn/skip-moving.
+type repoRegistry struct {
+	client   *aihubclient.Client
+	projects []string
+	read     bool
+	answer   error               // the read face's outcome when attempted
+	all      map[string][]string // repo name → registering projects, config order
+}
+
+// assigned reads (once) every mapped project's repos and answers the
+// registering projects of name, plus whether the read succeeded.
+func (reg *repoRegistry) assigned(name string) (ps []string, read bool) {
+	if !reg.read {
+		reg.read = true
+		reg.answer = nil
+		reg.all = map[string][]string{}
+		for _, proj := range reg.projects {
+			raw, err := reg.client.GetProject(proj)
+			if err != nil {
+				if reg.answer == nil {
+					reg.answer = err // the first unanswerable read: the assignment face is incomplete this run
+				}
+				continue
+			}
+			var projRec api.Project
+			if err := json.Unmarshal(raw, &projRec); err == nil {
+				for _, repo := range projRec.Repos {
+					if repo.Name != "" {
+						reg.all[repo.Name] = append(reg.all[repo.Name], proj)
+					}
+				}
+			}
+		}
+	}
+	if reg.all == nil {
+		return nil, false
+	}
+	return reg.all[name], true
+}
+
+// cloneRemediation is ruling 11's remediation sentence with the
+// assignment facts as read (assigned: the full pf file create face;
+// readable-unassigned: the not-registered note; assignment unreadable:
+// the bare face — the detail silently says nothing aihub did not answer).
+func cloneRemediation(name string, reg *repoRegistry) string {
+	rem := "file a WI first (`pf file create"
+	ps, _ := reg.assigned(name) // assignment-read honesty lives in reg.answer
+	switch {
+	case len(ps) == 1:
+		rem += " --project " + ps[0] + " --repo " + name + "`, then carry the dirty work on its `polyforge/<project>-<seq>` delivery branch, or discard it"
+	case len(ps) > 1:
+		rem += " --project " + ps[0] + " --repo " + name + "` (also registered by projects " + strings.Join(ps[1:], ", ") +
+			"), then carry the dirty work on its `polyforge/<project>-<seq>` delivery branch, or discard it"
+	case reg.answer == nil: // every assignment face answered: name's absence is a fact
+		rem += " --repo " + name + "` (" + name + " is not registered in any mapped project), then carry the dirty work on its `polyforge/<project>-<seq>` delivery branch, or discard it"
+	default: // the assignment face went partially or wholly unread: the detail keeps the bare face
+		rem += " --repo " + name + "`, then carry the dirty work on its `polyforge/<project>-<seq>` delivery branch, or discard it"
+	}
+	return rem
+}
+
+// repoClonesCheck is the doctor row body: scan every present mapped
+// workspace's .repo/ units through the layer above, aggregate their
+// verdicts into ONE row (status pass|skip|warn as plan decision 6 —
+// never fail; pass says how many were scanned).
+func repoClonesCheck(r *doctorRun) (string, string) {
+	aihub := aihubclient.New(r.cfg.Server, r.cfg.APIKey)
+	reg := repoRegistry{client: aihub, projects: r.cfg.Mapping.Projects()}
+	var warnNotes, skipNotes []string
+	scanned := 0
+	for _, ws := range r.present {
+		for _, u := range workspaceRepoUnits(ws) {
+			scanned++
+			e := cloneUnitVerdict(u, aihub, &reg)
+			switch e.kind {
+			case "warn":
+				warnNotes = append(warnNotes, e.note)
+			case "skip":
+				skipNotes = append(skipNotes, e.note)
+			}
+		}
+	}
+	switch {
+	case len(warnNotes) > 0:
+		var parts []string
+		parts = append(parts, fmt.Sprintf("%d .repo clone unit(s) with uncovered change(s): %s — nothing is moved or committed; the remediation is each unit's", len(warnNotes), strings.Join(capRows(warnNotes), "; ")))
+		if reg.answer != nil {
+			parts = append(parts, fmt.Sprintf("the assignment face is incomplete: %v", reg.answer))
+		}
+		if len(skipNotes) > 0 {
+			parts = append(parts, fmt.Sprintf("also skipped (no faked green): %s", strings.Join(capRows(skipNotes), "; ")))
+		}
+		return "warn", strings.Join(parts, "; ")
+	case len(skipNotes) > 0:
+		return "skip", fmt.Sprintf("WI state not decidable, %d unit(s) reported without a faked green: %s", len(skipNotes), strings.Join(capRows(skipNotes), "; "))
+	default:
+		return "pass", fmt.Sprintf("%d .repo clone unit(s) scanned, all clean or covered (no uncovered change)", scanned)
+	}
 }

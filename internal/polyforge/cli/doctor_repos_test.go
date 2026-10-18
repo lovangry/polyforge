@@ -1,11 +1,17 @@
 package cli
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/silgrid/polyforge/internal/common/api"
 )
 
 // doctor_repos_test.go: the read-only git probe layer fixtures — real git
@@ -267,5 +273,373 @@ func TestRepoUnitsGoneWorktreeCarriesReason(t *testing.T) {
 	wu := reposUnit(t, units, filepath.Base(wt))
 	if wu.Checked == "" {
 		t.Fatalf("gone worktree: probe must carry a reason, not fake clean: %+v", wu)
+	}
+}
+
+// Doctor-row scenario fixtures. The fake aihub serves the project face
+// (the assignment facts) and the work-item face (coverage); the config
+// maps ONE workspace to project "e2e", with repo "pi-web" registered —
+// the acceptance suite's registry shape.
+
+// reposAihub is the small aihub the doctor-row scenarios drive.
+type reposAihub struct {
+	known    map[string][]api.ProjectRepo // project → repos (GET /api/v1/projects/<p>)
+	items    map[string]string            // slug → status (GET /api/v1/work-items/<slug>); 404 otherwise
+	projFail map[string]bool              // project names served unanswerable (mid-response close)
+	slugged  map[string]bool              // slug faces served unanswerable
+}
+
+// reposAihubUrl closes the fixture's transport mid-response for the
+// forced-fail faces so the CLI sees a transport failure, never a typed
+// one (which would read as a definitive answer).
+func hijackClose(w http.ResponseWriter) {
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		return
+	}
+	if conn, _, err := hj.Hijack(); err == nil {
+		conn.Close()
+	}
+}
+
+func (f *reposAihub) server(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/work-items/") {
+			slug, _ := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/api/v1/work-items/"))
+			if f.slugged[slug] {
+				hijackClose(w)
+				return
+			}
+			if st, ok := f.items[slug]; ok {
+				w.Header().Set("Content-Type", "application/json")
+				io.WriteString(w, `{"id":"wi_x","slug":"`+slug+`","project":"e2e","status":"`+st+`"}`)
+				return
+			}
+			w.WriteHeader(404)
+			io.WriteString(w, `{"code":"CORE-404","detail":"no such work item"}`)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/v1/projects/") {
+			p, _ := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/api/v1/projects/"))
+			if f.projFail[p] {
+				hijackClose(w)
+				return
+			}
+			repos, ok := f.known[p]
+			if !ok {
+				w.WriteHeader(404)
+				io.WriteString(w, `{"code":"CORE-404","detail":"no such project"}`)
+				return
+			}
+			var rows []string
+			for _, rr := range repos {
+				rows = append(rows, `{"name":"`+rr.Name+`","url":"`+rr.URL+`"}`)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"id":"prj_1","name":"`+p+`","repos":[`+strings.Join(rows, ",")+`]}`)
+			return
+		}
+		w.WriteHeader(404)
+		io.WriteString(w, `{"code":"CORE-404","detail":"?"}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// reposAihubDefault: project "e2e" with repo "pi-web" registered; WI
+// status map empty (delivery branches 404 unless a slug is pinned).
+func reposAihubDefault(t *testing.T) string {
+	t.Helper()
+	f := &reposAihub{
+		known: map[string][]api.ProjectRepo{"e2e": {{Name: "pi-web", URL: "file:///nonexistent/pi-web.git"}}},
+		items: map[string]string{},
+	}
+	return f.server(t)
+}
+
+// reposDoctor runs pf --json doctor over a config that maps ws to the
+// e2e project (the registry shape; the config's socket is a gone path so
+// the daemon-flavored rows skip/fail — the scenarios assert the repos
+// clones row itself). server overrides the config server ("" = srv).
+func reposDoctor(t *testing.T, srv, server, ws string, extra ...string) doctorDoc {
+	t.Helper()
+	dir := t.TempDir()
+	xdg := filepath.Join(dir, "xdg")
+	if err := os.MkdirAll(filepath.Join(xdg, "polyforge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if server == "" {
+		server = srv
+	}
+	sock := filepath.Join(dir, "gone.sock")
+	var b strings.Builder
+	b.WriteString("server = \"" + server + "\"\napi_key = \"k\"\ndaemon_socket = \"" + sock + "\"\n")
+	b.WriteString("\n[workspace.\"" + ws + "\"]\nprojects = [\"e2e\"]\n")
+	if err := os.WriteFile(filepath.Join(xdg, "polyforge", "cli.toml"), []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, doc := doctorStatus(t, map[string]string{"XDG_CONFIG_HOME": xdg}, append([]string{"--json", "doctor"}, extra...)...)
+	return doc
+}
+
+// reposFind (reposStamp): asserts the repos clones row in detail with the
+// expected status and answers it.
+func reposRow(t *testing.T, doc doctorDoc, want string) (string, string) {
+	t.Helper()
+	for _, c := range doc.Checks {
+		if c.Name == docChRepoClones {
+			if c.Status != want {
+				t.Fatalf("check %q = %q (%q), want %q", docChRepoClones, c.Status, c.Detail, want)
+			}
+			return c.Status, c.Detail
+		}
+	}
+	t.Fatalf("no %q check in %+v", docChRepoClones, doc.Checks)
+	return "", ""
+}
+
+// The wired row: today's real pi-web shape — a dirty clone on a
+// release branch warns, and the warning names ruling 11's remediation
+// (pf file create + the polyforge/ delivery-branch shape + or-discard).
+func TestRepoClonesDirtyReleaseWarns(t *testing.T) {
+	srv := reposAihubDefault(t)
+	ws := t.TempDir()
+	reposDirty(t, reposClone(t, ws, "pi-web", "release/v0.0.27"))
+	doc := reposDoctor(t, srv, "", ws)
+	_, detail := reposRow(t, doc, "warn")
+	for _, tok := range []string{"pf file create", "polyforge/", "discard", "--project e2e --repo pi-web"} {
+		if !strings.Contains(detail, tok) {
+			t.Fatalf("the pi-web warning does not name remediation token %q: %q", tok, detail)
+		}
+	}
+}
+
+// A clean-pushed clone's committed-but-unpushed commit flags like
+// uncommitted changes.
+func TestRepoClonesUnpushedLocalCommitWarns(t *testing.T) {
+	srv := reposAihubDefault(t)
+	ws := t.TempDir()
+	dir := reposClone(t, ws, "cl-unpushed", "feature/w198")
+	reposDirty(t, dir)
+	reposGit(t, dir, "add", ".")
+	reposGit(t, dir, "commit", "-q", "-m", "local only")
+	doc := reposDoctor(t, srv, "", ws)
+	_, detail := reposRow(t, doc, "warn")
+	if !strings.Contains(detail, "cl-unpushed") || !strings.Contains(detail, "remote-tracking ref") {
+		t.Fatalf("the unpushed-commit warning does not name the clone and the remote facts: %q", detail)
+	}
+}
+
+// Coverage: a dirty delivery-branch clone whose WI is queued (in flight)
+// covers it — the row warns for nothing over it; the anchoring dirty
+// release clone in the same workspace still warns.
+func TestRepoClonesCoveredInFlightSilent(t *testing.T) {
+	srv := (&reposAihub{
+		known: map[string][]api.ProjectRepo{"e2e": {{Name: "pi-web", URL: "file:///n/pi-web.git"}}},
+		items: map[string]string{"e2e#9": api.StatusQueued},
+	}).server(t)
+	ws := t.TempDir()
+	reposDirty(t, reposClone(t, ws, "cl-covered", "polyforge/e2e-9"))
+	reposDirty(t, reposClone(t, ws, "cl-anchor", "release/v0.0.27"))
+	doc := reposDoctor(t, srv, "", ws)
+	_, detail := reposRow(t, doc, "warn")
+	if strings.Contains(detail, "cl-covered") {
+		t.Fatalf("a queued WI's delivery face covered the clone (reported anyway?): %q", detail)
+	}
+	if !strings.Contains(detail, "cl-anchor") {
+		t.Fatalf("the anchor clone went unreported: %q", detail)
+	}
+}
+
+// The delivery face of a terminal WI never covers; a detached HEAD is
+// decidable uncovered. Both warn, remediation named.
+func TestRepoClonesTerminalAndDetachedWarn(t *testing.T) {
+	// The registry shape with one WI pinned to its terminal status (the
+	// default fixture's delivery faces answer 404 — see the 404 test).
+	srv := (&reposAihub{
+		known: map[string][]api.ProjectRepo{"e2e": {{Name: "pi-web", URL: "file:///n/pi-web.git"}}},
+		items: map[string]string{"e2e#9": api.StatusCanceled},
+	}).server(t)
+	ws := t.TempDir()
+	reposDirty(t, reposClone(t, ws, "cl-canceled", "polyforge/e2e-9"))
+	det := reposClone(t, ws, "cl-detached", "main")
+	reposGit(t, det, "checkout", "-q", "--detach")
+	reposDirty(t, det)
+	doc := reposDoctor(t, srv, "", ws)
+	_, detail := reposRow(t, doc, "warn")
+	if !strings.Contains(detail, "cl-canceled") || !strings.Contains(detail, api.StatusCanceled) {
+		t.Fatalf("the canceled-WI warning does not name the clone and the terminal WI: %q", detail)
+	}
+	if !strings.Contains(detail, "cl-detached") {
+		t.Fatalf("a detached-HEAD dirty clone went unreported: %q", detail)
+	}
+}
+
+// An unregistered dirty clone warns with the assignment face as fact.
+func TestRepoClonesUnregisteredWarns(t *testing.T) {
+	srv := reposAihubDefault(t)
+	ws := t.TempDir()
+	reposDirty(t, reposClone(t, ws, "cl-stray", "main"))
+	doc := reposDoctor(t, srv, "", ws)
+	_, detail := reposRow(t, doc, "warn")
+	if !strings.Contains(detail, "cl-stray") || !strings.Contains(detail, "not registered in any mapped project") {
+		t.Fatalf("the unregistered clone's warning lacks the assignment fact: %q", detail)
+	}
+	if strings.Contains(detail, "--project e2e --repo cl-stray") {
+		t.Fatalf("the unregistered clone was assigned a project anyway: %q", detail)
+	}
+}
+
+// Clean clones on any branch and a plain (non-git) .repo entry never
+// warn; the anchor dirty clone in the same workspace still warns.
+func TestRepoClonesCleanAndPlainSilent(t *testing.T) {
+	srv := reposAihubDefault(t)
+	ws := t.TempDir()
+	reposClone(t, ws, "cl-clean", "release/v0.0.27")
+	plain := filepath.Join(ws, ".repo", "cl-plain")
+	if err := os.MkdirAll(plain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reposDirty(t, reposClone(t, ws, "cl-anchor", "main"))
+	doc := reposDoctor(t, srv, "", ws)
+	_, detail := reposRow(t, doc, "warn")
+	if strings.Contains(detail, "cl-clean") || strings.Contains(detail, "cl-plain") {
+		t.Fatalf("a clean clone or a plain entry was warned over: %q", detail)
+	}
+	if !strings.Contains(detail, "cl-anchor") {
+		t.Fatalf("the anchor clone went unreported: %q", detail)
+	}
+}
+
+// A linked worktree living in a notable wrapper dir is scanned through
+// its owning clone's worktree list; the wrapper itself is never a unit.
+func TestRepoClonesLinkedWorktreeScanned(t *testing.T) {
+	srv := reposAihubDefault(t)
+	ws := t.TempDir()
+	parent := reposClone(t, ws, "cl-parent", "main")
+	nested := filepath.Join(ws, ".repo", "cl-wrap", "cl-wtree")
+	reposGit(t, parent, "worktree", "add", "-q", "-b", "feature/wt", nested)
+	if err := os.WriteFile(filepath.Join(nested, "scratch-edit.txt"), []byte("untracked hand work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	doc := reposDoctor(t, srv, "", ws)
+	_, detail := reposRow(t, doc, "warn")
+	if !strings.Contains(detail, "cl-wtree") || !strings.Contains(detail, "cl-parent is not registered") {
+		t.Fatalf("the linked worktree's warning does not name it under its owning clone: %q", detail)
+	}
+}
+
+// Warn-only: the warning never moves the exit code and `doctor
+// --harness` never runs the check (it does not mention the clone).
+func TestRepoClonesWarnOnlyNotInHarness(t *testing.T) {
+	srv := reposAihubDefault(t)
+	ws := t.TempDir()
+	reposDirty(t, reposClone(t, ws, "cl-exit", "release/v0.0.27"))
+
+	// The healthy machine's fixture (TestDoctorHealthyMachineAllPassExit0's
+	// shape) with the daemon socket: a warn must leave ok true and the
+	// exit code 0.
+	sock := liveDaemonSocket(t, "m-w")
+	dir := t.TempDir()
+	xdg := filepath.Join(dir, "xdg")
+	if err := os.MkdirAll(filepath.Join(xdg, "polyforge"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "server = \"" + srv + "\"\napi_key = \"k\"\ndaemon_socket = \"" + sock + "\"\n" +
+		"\n[workspace.\"" + ws + "\"]\nprojects = [\"e2e\"]\n"
+	if err := os.WriteFile(filepath.Join(xdg, "polyforge", "cli.toml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"XDG_CONFIG_HOME": xdg}
+	env["HOME"] = displayHome(t, `{"statusLine":{"type":"command","command":"pf watch --statusline --harness-session -"}}`,
+		`{"packages":["~/.local/share/polyforge/release/current"]}`)
+	layoutRelease(t, env["HOME"])
+	layoutClaudeLink(t, env["HOME"])
+	env["PATH"] = fakeTmuxPath(t, 0)
+	code, _, doc := doctorStatus(t, env, "--json", "doctor")
+	if code != 0 || !doc.OK {
+		t.Fatalf("pf doctor: exit %d ok=%t with only a clone warning, want 0/true (%+v)", code, doc.OK, doc.Checks)
+	}
+	if _, detail := reposRow(t, doc, "warn"); !strings.Contains(detail, "cl-exit") {
+		t.Fatalf("the only-warning report does not name the clone: %q", detail)
+	}
+
+	// harness run: no repos clones row and no clone name.
+	code, _, hdoc := doctorStatus(t, env, "--json", "doctor", "--harness")
+	for _, c := range hdoc.Checks {
+		if c.Name == docChRepoClones || strings.Contains(c.Detail, "cl-exit") {
+			t.Fatalf("doctor --harness ran or mentioned the clone check: %q (%+v)", c.Detail, code)
+		}
+	}
+}
+
+// aihub unreachable: the delivery-branch dirty clone's warning needs the
+// WI state that could not be read — it becomes a skip note naming the
+// clone and the reason (never an "uncovered" warning); a release-branch
+// dirty clone in a sibling workspace still warns (locally decidable).
+func TestRepoClonesUnreachableSplit(t *testing.T) {
+	srv := reposAihubDefault(t)
+	wsA := t.TempDir()
+	reposDirty(t, reposClone(t, wsA, "cl-delivery", "polyforge/e2e-7"))
+	doc := reposDoctor(t, srv, "http://127.0.0.1:59997", wsA)
+	_, detail := reposRow(t, doc, "skip")
+	if !strings.Contains(detail, "cl-delivery") {
+		t.Fatalf("the delivery face's skip note does not name the clone: %q", detail)
+	}
+
+	wsB := t.TempDir()
+	reposDirty(t, reposClone(t, wsB, "cl-local", "release/v0.0.27"))
+	doc = reposDoctor(t, srv, "http://127.0.0.1:59997", wsB)
+	_, detail = reposRow(t, doc, "warn")
+	if !strings.Contains(detail, "cl-local") {
+		t.Fatalf("the locally decidable dirty release clone went unreported: %q", detail)
+	}
+	if strings.Contains(detail, "not registered in any mapped project") {
+		t.Fatalf("sans answer the assignment fact is wrongly stated as named: %q", detail)
+	}
+}
+
+// A healthy run without .repo at all (every acceptance machine's baseline
+// shape) answers pass — the row needs nothing.
+func TestRepoClonesPassNoUnits(t *testing.T) {
+	ws := t.TempDir()
+	// no .repo dir in ws; the config maps it.
+	srv := reposAihubDefault(t)
+	doc := reposDoctor(t, srv, "", ws)
+	_, detail := reposRow(t, doc, "pass")
+	if !strings.Contains(detail, "0") {
+		t.Fatalf("non-units .repo pass detail does not say the count: %q", detail)
+	}
+}
+
+// A terminal-WI 404 answer (in these fixtures, any delivery face not
+// pinned to a status) is a definitive uncovered fact — a warning names it.
+func TestRepoClonesDelivery404Warns(t *testing.T) {
+	srv := reposAihubDefault(t)
+	ws := t.TempDir()
+	reposDirty(t, reposClone(t, ws, "cl-404", "polyforge/e2e-9"))
+	doc := reposDoctor(t, srv, "", ws)
+	_, detail := reposRow(t, doc, "warn")
+	if !strings.Contains(detail, "cl-404") || !strings.Contains(detail, "404") {
+		t.Fatalf("the 404 delivery face's warning does not name the clone and the answer: %q", detail)
+	}
+}
+
+// The WI face is one transport failure short: delivery face dirty clone
+// → skip note; the sibling locally decidable shape still warns.
+func TestRepoClonesWiReadFailSkip(t *testing.T) {
+	f := &reposAihub{
+		known:   map[string][]api.ProjectRepo{"e2e": {{Name: "pi-web", URL: "file:///n/pi-web.git"}}},
+		items:   map[string]string{"e2e#9": api.StatusQueued},
+		slugged: map[string]bool{"e2e#9": true},
+	}
+	srv := f.server(t)
+	ws := t.TempDir()
+	reposDirty(t, reposClone(t, ws, "cl-dial", "polyforge/e2e-9"))
+	doc := reposDoctor(t, srv, "", ws)
+	_, detail := reposRow(t, doc, "skip")
+	if !strings.Contains(detail, "cl-dial") {
+		t.Fatalf("the WI-read failure's skip note does not name the clone: %q", detail)
 	}
 }
