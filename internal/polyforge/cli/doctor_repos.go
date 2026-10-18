@@ -233,7 +233,7 @@ func cloneUnitVerdict(u repoUnit, aihub *aihubclient.Client, reg *repoRegistry) 
 	}
 	var facts []string
 	if u.Dirty {
-		facts = append(facts, "uncommitted tracked change(s)")
+		facts = append(facts, "uncommitted change(s) (modified, staged or untracked)")
 	}
 	if u.Unpushed {
 		facts = append(facts, "local commit(s) on no remote-tracking ref")
@@ -395,7 +395,7 @@ func repoClonesCheck(r *doctorRun) (string, string) {
 		}
 		return "warn", strings.Join(parts, "; ")
 	case len(skipNotes) > 0:
-		return "skip", fmt.Sprintf("WI state not decidable, %d unit(s) reported without a faked green: %s", len(skipNotes), strings.Join(capRows(skipNotes), "; "))
+		return "skip", fmt.Sprintf("workspace-clone state not decidable, %d unit(s) reported without a faked green (reason per unit): %s", len(skipNotes), strings.Join(capRows(skipNotes), "; "))
 	default:
 		return "pass", fmt.Sprintf("%d .repo clone unit(s) scanned, all clean or covered (no uncovered change)", scanned)
 	}

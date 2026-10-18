@@ -266,7 +266,8 @@ Six standing rules, binding on every polyforge session:
    an existing branch, or gitignored build/test output) — name an attributable,
    not-yet-closed work item to the user (any existing WI whose goal the write serves,
    named before the write; this covers integrator manual delivery and ship-PR
-   merge-conflict resolution, owner ruling 2026-10-16 standing). With none, propose
+   merge-conflict resolution, the 2026-10-10 standing ruling — ruling 2,
+   mem_IbqTum3Y50sf). With none, propose
    filing one first (`pf file create`) and never proceed silently — carry on only on
    the user's EXPLICIT override ("just edit it, no ticket"). `pf doctor`'s
    "workspace repo clones" warning surfaces uncovered changes in clones and their
