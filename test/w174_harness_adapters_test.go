@@ -124,11 +124,11 @@ if (!stepAgent) {
   verdict.at1500 = snap();
   if (process.env.W174_SCENARIO === "ensure-fails") {
     // the failed ensure hands over to the RESTART_MS (5s) retry loop: wait
-    // (at most 9s more, the window this scenario always had) until its
-    // second retry — the third init — has run to its end with nothing left
-    // in flight, so a retry that re-ran ensure, on the first retry or a
-    // later one, has spawned it by then
-    const by = Date.now() + 9000;
+    // (at most 12s more; the third init lands about 10s in, so the cap
+    // leaves room under load) until its second retry — the third init —
+    // has run to its end with nothing left in flight, so a retry that
+    // re-ran ensure, on the first retry or a later one, has spawned it
+    const by = Date.now() + 12000;
     while (Date.now() < by && !(snap().inits >= 3 && inflight === 0)) await sleep(100);
   } else {
     await sleep(2500);
