@@ -2,10 +2,11 @@ package memory
 
 // Repro test for polyforge#210 (memory type taxonomy drift).
 //
-// Observed in production aihub: entries stored with invented top-level
-// types "polyforge-learnings" (2 entries) and "code-learnings" (1 entry),
-// written by fix/code step agents despite memory.md's steps-write-nothing
-// rule. aihub Create accepted them because it validates only that the
+// Observed in production aihub (2026-10-18): entries stored with invented
+// top-level types `polyforge-learnings` and `code-learnings`, written by a
+// credentialed caller outside step mode (the operator's chat agent via
+// `pf remember`); steps are already confined to experience.wrap by
+// stepmem.Check. aihub Create accepted them because it validates only that the
 // type is non-empty (store.go Create: `if req.Type == ""`); there is no
 // single type authority.
 //
