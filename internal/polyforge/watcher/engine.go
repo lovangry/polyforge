@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"slices"
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -87,7 +86,7 @@ var ErrParentGone = errors.New("parent process gone")
 // fixed-template lines on Out — those of the work items the first
 // cycle subscribed fold into one "N WIs need you" line; progress goes to the
 // status file. A Passive subscription (another chat is woken for its WI)
-// gets its progress line and none of its decisions. With WaitDecision
+// gets its progress line, none of its decisions and no ack. With WaitDecision
 // the first non-empty batch is printed, acked and Run returns nil.
 //
 // Delivery is fetch-then-ack: nothing the daemon hands out counts as
@@ -287,14 +286,14 @@ func cycle(d API, o *Options, fresh map[string]bool) ([]string, batch, error) {
 			continue
 		}
 		lines = append(lines, ProgressLine(snap, now))
-		res := Evaluate(sub, snap)
 		if sub.Passive {
 			// another chat is woken for this WI (polyforge#199): progress
-			// only. Nothing counts as delivered here, so a still-true
-			// decision fires should this chat become the wake target.
-			res.Decisions = nil
-			res.Notified = keep(res.Notified, sub.Notified)
+			// only. No ack either — the record is that chat's, so what it
+			// has not delivered stays undelivered for whichever chat
+			// becomes the wake target.
+			continue
 		}
+		res := Evaluate(sub, snap)
 		if fresh[sub.WI] {
 			if len(res.Decisions) > 0 {
 				needYou = append(needYou, api.DisplayName(snap.Slug, sub.WI))
@@ -315,17 +314,6 @@ func cycle(d API, o *Options, fresh map[string]bool) ([]string, batch, error) {
 		b.out = append([]outLine{{key: "attention " + l, text: l}}, b.out...)
 	}
 	return lines, b, nil
-}
-
-// keep answers the keys of a also in b, in a's order.
-func keep(a, b []string) []string {
-	var out []string
-	for _, k := range a {
-		if slices.Contains(b, k) {
-			out = append(out, k)
-		}
-	}
-	return out
 }
 
 func sameKeys(a, b []string) bool {

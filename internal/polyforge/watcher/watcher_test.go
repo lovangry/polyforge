@@ -1035,14 +1035,15 @@ func TestFailedReminderAckIsRetriedWithoutReprint(t *testing.T) {
 }
 
 // polyforge#199: a Passive subscription (another chat is woken for its
-// WI) shows progress and prints none of its decisions; nothing it saw
-// counts as delivered, so once it becomes the wake target (the origin
-// chat is gone) the still-pending question fires there.
+// WI) shows progress, prints none of its decisions and acks nothing — the
+// record is the wake target's, so an event decision it saw stays
+// undelivered: once this chat is the wake target (the origin chat is
+// gone) both the event and the still-pending question fire there.
 func TestPassiveSubscriptionShowsProgressOnly(t *testing.T) {
 	snap := running("wi_1", "plan")
 	snap.Execution.PendingQuestion = &protocol.WatchPendingQuestion{ID: "q-1", Step: "plan"}
 	snap.Events = []protocol.EventEntry{ev(3, "step_dead")}
-	passive := sub("wi_1", 0, "needs_input:q-0") // q-0: answered since
+	passive := sub("wi_1", 0)
 	passive.Passive = true
 	api := &fakeAPI{
 		subs:  protocol.ChatSubscriptions{Subscriptions: []protocol.ChatSub{passive}},
@@ -1067,22 +1068,19 @@ func TestPassiveSubscriptionShowsProgressOnly(t *testing.T) {
 	if len(status) != 1 || !strings.Contains(status[0], "wi_1") {
 		t.Fatalf("a passive subscription keeps its progress line: %q", status)
 	}
-	if len(api.acks) == 0 {
-		t.Fatal("the passive cycle must still ack (cursor, dropped keys)")
-	}
-	if a := api.acks[0]; a.Cursor != 3 || len(a.Notified) != 0 {
-		t.Fatalf("passive ack = %+v, want cursor 3 and no key counted as delivered", a)
+	if len(api.acks) != 0 {
+		t.Fatalf("a passive subscription must ack nothing (no cursor past an undelivered event): %+v", api.acks)
 	}
 
-	// the same chat becomes the wake target: the pending question fires
+	// the same chat becomes the wake target: what nobody delivered fires
 	api.mu.Lock()
-	api.subs.Subscriptions = []protocol.ChatSub{sub("wi_1", 3)}
+	api.subs.Subscriptions = []protocol.ChatSub{sub("wi_1", 0)}
 	api.mu.Unlock()
 	out.Reset()
 	if err := Run(context.Background(), api, Options{WaitDecision: true, Out: &out, Sleep: func(context.Context, time.Duration) {}}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "wi_1 needs_input q-1") {
-		t.Fatalf("the wake target must get the still-pending question: %q", out.String())
+	if !strings.Contains(out.String(), "wi_1 needs_input q-1") || !strings.Contains(out.String(), "wi_1 step_dead") {
+		t.Fatalf("the wake target must get the undelivered event and the pending question: %q", out.String())
 	}
 }

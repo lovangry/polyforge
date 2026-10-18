@@ -264,3 +264,49 @@ func TestNeedsInputFallsBackWhenTheOriginChatIsGone(t *testing.T) {
 		t.Fatalf("origin chat gone: the other chat is the fallback: %q", out)
 	}
 }
+
+// polyforge#199 review B1/B2: the origin chat got the question (a Claude
+// Code --wait-decision watcher printed, acked and exited) and then stays
+// silent for longer than chatLiveFor while the human decides: the other
+// chat must NOT get q-1. A decision raised meanwhile, which nobody has
+// delivered, goes to the fallback; the origin chat's returning watcher
+// does not print it again (one record for both).
+func TestOriginAckedDecisionNeverGoesToFallback(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.client.Origin = &cli.SubmitOrigin{ChatID: "chat_origin", Owner: "alice"}
+	td.submitClaim(t, "wi_ack")
+	td.waitMonitored(t, "wi_ack")
+	td.seedPendingQuestion(t, "wi_ack", "q-1", "plan", "?")
+	waitNeedsInput(t, td, "wi_ack")
+
+	run := func(chat string, d time.Duration) string {
+		ctx, cancel := context.WithTimeout(context.Background(), d)
+		defer cancel()
+		var out bytes.Buffer
+		if err := watcher.Run(ctx, clientAPI{d: td.client, chat: chat}, watcher.Options{Owner: "alice", WaitDecision: true, Out: &out, Poll: 20 * time.Millisecond}); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	if out := run("chat_origin", 5*time.Second); !strings.Contains(out, "wi_ack needs_input q-1") {
+		t.Fatalf("the origin chat is woken: %q", out)
+	}
+	// the origin chat's watcher has not polled for a chatLiveFor
+	td.subs.mu.Lock()
+	later := time.Now().Add(chatLiveFor)
+	td.subs.now = func() time.Time { return later }
+	td.subs.mu.Unlock()
+	if out := run("chat_other", 500*time.Millisecond); out != "" {
+		t.Fatalf("a decision the origin chat got must never wake another chat: %q", out)
+	}
+	// raised while the origin chat is silent: nobody delivered it
+	if err := td.obs.Events().Append("wi_ack", "step_dead", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if out := run("chat_other", 5*time.Second); !strings.Contains(out, "wi_ack step_dead") || strings.Contains(out, "q-1") {
+		t.Fatalf("the fallback gets the undelivered decision, and only it: %q", out)
+	}
+	if out := run("chat_origin", 500*time.Millisecond); out != "" {
+		t.Fatalf("the returning origin chat must not repeat what the fallback delivered: %q", out)
+	}
+}
