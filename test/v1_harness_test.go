@@ -607,6 +607,7 @@ type v1Daemon struct {
 	t          *testing.T
 	inst       *v1Install
 	cmd        *exec.Cmd
+	launchedAt time.Time // just before cmd.Start: this process's events come after it
 	logPath    string
 	sock       string
 	dataDir    string
@@ -788,6 +789,7 @@ func (d *v1Daemon) launch() {
 	cmd.Dir = d.dataDir
 	cmd.Stdout, cmd.Stderr = logf, logf
 	ownGroup(cmd)
+	d.launchedAt = time.Now()
 	if err := cmd.Start(); err != nil {
 		d.t.Fatal(err)
 	}
@@ -1142,21 +1144,20 @@ func (d *v1Daemon) settleClose(wi string) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	// a monitor that started must also have stopped (job_stopped is its
-	// last act; the final published push precedes it). daemon_restarted is
-	// written only by a booting daemon, into each work item it recovered,
-	// once it holds the data dir: every monitor before it died with the
-	// previous daemon process and never writes its job_stopped, so the
-	// tracking starts over there.
+	// last act; the final published push precedes it). Only this daemon
+	// process's monitors count: one that started before its launch died
+	// with a previous process and never writes its job_stopped.
 	stopped := func() bool {
 		started, stopped := false, false
 		for _, e := range d.eventsOf(d.t, wi) {
+			if at, err := time.Parse(time.RFC3339Nano, e.At); err == nil && at.Before(d.launchedAt) {
+				continue
+			}
 			switch e.Kind {
 			case "job_started":
 				started, stopped = true, false
 			case "job_stopped":
 				stopped = true
-			case "daemon_restarted":
-				started, stopped = false, false
 			}
 		}
 		return !started || stopped
