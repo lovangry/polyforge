@@ -28,9 +28,14 @@ func TestV1S18PushBackoffBackpressure(t *testing.T) {
 	// The driver keeps producing versions through the (short) outage
 	// window, then completes — degradation never kills the engine and
 	// the scenario closes the WI itself. Each envelope action holds its
-	// step open (ms) so the outage window sits INSIDE the run.
+	// step open (ms) so the outage window sits INSIDE the run. grill
+	// holds only 2s: the pre-outage published event lands within ~150ms,
+	// and grill's completion is then the outage's first boundary (the
+	// first failed push) without idling; fix and verification hold 8s
+	// each, so the ladder reaches its cap inside fix and the whole
+	// episode, recovery included, ends before the run does.
 	actions := []map[string]any{
-		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true, "ms": 8000},
+		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true, "ms": 2000},
 		{"do": "envelope", "id": "fix", "outcome": "completed", "handoff": true, "ms": 8000},
 		{"do": "envelope", "id": "verification", "outcome": "completed", "handoff": true, "ms": 8000},
 	}

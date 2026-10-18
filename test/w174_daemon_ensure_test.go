@@ -160,6 +160,33 @@ func (e *w174Env) daemons() []int {
 	return pids
 }
 
+// loops answers the pids of this machine's restart-loop shells: every
+// live process whose argv carries the loop body for this data dir (the
+// tmux server, whose argv still holds the launching command, excepted).
+func (e *w174Env) loops() []int {
+	var pids []int
+	ents, _ := os.ReadDir("/proc")
+	for _, ent := range ents {
+		pid, err := strconv.Atoi(ent.Name())
+		if err != nil {
+			continue
+		}
+		argv := w174Argv(pid)
+		if len(argv) == 0 || filepath.Base(argv[0]) == "tmux" {
+			continue
+		}
+		joined := strings.Join(argv, " ")
+		if !strings.Contains(joined, "pf daemon ensure loop") || !strings.Contains(joined, e.data) {
+			continue
+		}
+		if st, err := os.ReadFile(filepath.Join("/proc", ent.Name(), "stat")); err == nil && w174Zombie(string(st)) {
+			continue
+		}
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
 func w174Argv(pid int) []string {
 	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
 	if err != nil {
@@ -447,7 +474,10 @@ func TestW174LoopRestartsKilledDaemon(t *testing.T) {
 
 // TestW174GracefulStopEndsTheLoop: `pf ops shutdown` (and SIGTERM) under
 // the loop exits 0, which ends the loop: no daemon, no session, nothing
-// revived after the restart pause.
+// revived after the restart pause. The loop is the daemon's only
+// reviver, so "nothing revived" is proven by the loop itself: it logged
+// its clean-exit branch (written right before its break) and its shell
+// is gone, so it never reaches the restart pause or a next start.
 func TestW174GracefulStopEndsTheLoop(t *testing.T) {
 	e := w174NewEnv(t, true)
 	for _, how := range []string{"pf ops shutdown", "SIGTERM"} {
@@ -455,6 +485,9 @@ func TestW174GracefulStopEndsTheLoop(t *testing.T) {
 			t.Fatalf("ensure: exit %d %s %s", code, out, errOut)
 		}
 		pid := e.oneDaemon(t, 5*time.Second)
+		if len(e.loops()) == 0 {
+			t.Fatalf("%s: no restart-loop shell found while the loop runs (the exit check below would prove nothing)", how)
+		}
 		if how == "SIGTERM" {
 			if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
 				t.Fatal(err)
@@ -469,13 +502,15 @@ func TestW174GracefulStopEndsTheLoop(t *testing.T) {
 		waitUntil(t, 30*time.Second, how+": the daemon and its loop did not end", func() bool {
 			return len(e.daemons()) == 0 && len(e.sessions()) == 0
 		})
-		time.Sleep(7 * time.Second) // longer than the restart pause
-		if pids, s := e.daemons(), e.sessions(); len(pids) != 0 || len(s) != 0 {
-			t.Fatalf("%s: revived after a clean exit (daemons %v, sessions %v)", how, pids, s)
-		}
 		log, _ := os.ReadFile(filepath.Join(e.data, "daemon.log"))
 		if !strings.Contains(string(log), "exited cleanly; the loop ends") {
 			t.Fatalf("%s: the loop did not log its clean end:\n%s", how, log)
+		}
+		waitUntil(t, 10*time.Second, how+": the loop logged its end but its shell is still alive", func() bool {
+			return len(e.loops()) == 0
+		})
+		if pids, s := e.daemons(), e.sessions(); len(pids) != 0 || len(s) != 0 {
+			t.Fatalf("%s: revived after a clean exit (daemons %v, sessions %v)", how, pids, s)
 		}
 		_ = os.Remove(filepath.Join(e.data, "daemon.log"))
 	}

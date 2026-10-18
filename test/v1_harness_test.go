@@ -1142,7 +1142,11 @@ func (d *v1Daemon) settleClose(wi string) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	// a monitor that started must also have stopped (job_stopped is its
-	// last act; the final published push precedes it)
+	// last act; the final published push precedes it). daemon_restarted is
+	// written only by a booting daemon, into each work item it recovered,
+	// once it holds the data dir: every monitor before it died with the
+	// previous daemon process and never writes its job_stopped, so the
+	// tracking starts over there.
 	stopped := func() bool {
 		started, stopped := false, false
 		for _, e := range d.eventsOf(d.t, wi) {
@@ -1151,6 +1155,8 @@ func (d *v1Daemon) settleClose(wi string) {
 				started, stopped = true, false
 			case "job_stopped":
 				stopped = true
+			case "daemon_restarted":
+				started, stopped = false, false
 			}
 		}
 		return !started || stopped
@@ -1484,6 +1490,9 @@ type execStepView struct {
 	// Supervision is the driver-owned failure ledger and relaxed bounds
 	// (v2-converge 2.3/2.4).
 	Supervision map[string]any `json:"supervision"`
+	// Dispatch is the ordinal of the dispatch the step awaits (set by
+	// its step_start, cleared once settled).
+	Dispatch int64 `json:"dispatch"`
 }
 
 // executionView is the loose read shape of runtime-state/execution.json.
