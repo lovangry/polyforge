@@ -86,6 +86,7 @@ EXTENDED_GLOB and starts a comment after whitespace.
 | init / install / upgrade / machine setup / 装机 / 升级 | `verbs/init.md` (machine pointer) | CLI |
 | init this workspace / initialize the workspace / write the workspace yaml / 初始化工作区 / 生成工作区配置 | `verbs/init.md` (workspace init) | CLI |
 | help / what skills / usage / 速查 / 怎么用 | `verbs/help.md` | CLI |
+| what version / which build / what's this binary / 什么版本 / 查版本 | `verbs/version.md` | CLI |
 
 Disambiguation: "continue / go on" **mid-run** routes to `watch` (`pf watch <wi> --once`), not
 `resume` — `resume` is "continue": it reactivates a **paused** WI (a hub
