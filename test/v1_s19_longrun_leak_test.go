@@ -33,6 +33,7 @@ package test
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -60,14 +61,31 @@ const (
 	s19FDGap         = 200 * time.Millisecond
 )
 
-// s19FDCountOf returns the number of entries in /proc/<pid>/fd — the
-// process's open file descriptors (sockets, pipes and files alike).
-func s19FDCountOf(pid int) (int, error) {
+// s19FDCountsOf splits the entries of /proc/<pid>/fd — the process's open
+// file descriptors (sockets, pipes and files alike) — into the daemon's TCP
+// connections to the aihub at 127.0.0.1:hubPort and everything else. The
+// hub client's transport keeps up to http.DefaultMaxIdleConnsPerHost idle
+// keep-alive connections, and how many it holds depends on whether two hub
+// calls ever overlapped (a loaded machine makes that likelier), so those
+// are bounded separately instead of pinned to the baseline.
+func s19FDCountsOf(pid, hubPort int) (hub, other int, err error) {
 	ents, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	return len(ents), nil
+	peer := fmt.Sprintf("0100007F:%04X", hubPort)
+	for _, e := range ents {
+		tgt, _ := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", pid, e.Name()))
+		if strings.HasPrefix(tgt, "socket:[") {
+			// "tcp <local> <remote> ..." (s19SocketPeer)
+			if f := strings.Fields(s19SocketPeer(tgt)); len(f) > 2 && f[0] == "tcp" && f[2] == peer {
+				hub++
+				continue
+			}
+		}
+		other++
+	}
+	return hub, other, nil
 }
 
 // s19FDList returns the symlink targets of the process's open fds
@@ -131,22 +149,25 @@ func s19LineHasField(line, field string) bool {
 
 // s19MinFDCount samples the daemon's fd count n times, gap apart, and
 // returns the minimum (see the constants block for why the minimum).
-func s19MinFDCount(t *testing.T, pid int, n int, gap time.Duration) int {
+func s19MinFDCount(t *testing.T, pid, hubPort int, n int, gap time.Duration) (hub, other int) {
 	t.Helper()
-	min := -1
+	hub, other = -1, -1
 	for i := 0; i < n; i++ {
-		c, err := s19FDCountOf(pid)
+		h, o, err := s19FDCountsOf(pid, hubPort)
 		if err != nil {
 			t.Fatalf("fd count of daemon pid %d: %v", pid, err)
 		}
-		if min < 0 || c < min {
-			min = c
+		if hub < 0 || h < hub {
+			hub = h
+		}
+		if other < 0 || o < other {
+			other = o
 		}
 		if i < n-1 {
 			time.Sleep(gap)
 		}
 	}
-	return min
+	return hub, other
 }
 
 // s19AssertEventsLogClean reads the daemon's whole durable events log
@@ -262,9 +283,9 @@ func TestV1S19LongRunLeakProbe(t *testing.T) {
 
 	// Baseline: after start-up idle-settle, before job 1.
 	time.Sleep(s19StartupSettle)
-	baseline := s19MinFDCount(t, pid, s19FDSamples, s19FDGap)
+	baseHub, baseline := s19MinFDCount(t, pid, inst.port, s19FDSamples, s19FDGap)
 	baselineList := s19FDList(pid) // captured at baseline time for failure diagnosis
-	t.Logf("s19: daemon fd baseline after start-up settle: %d", baseline)
+	t.Logf("s19: daemon fd baseline after start-up settle: %d (+%d hub connections)", baseline, baseHub)
 
 	// 20 strictly consecutive driver work items: each is an autopilot
 	// workflow that completes and seals itself, and the next one starts
@@ -298,16 +319,19 @@ func TestV1S19LongRunLeakProbe(t *testing.T) {
 	})
 
 	// Final measurement: post-run settle, then the same min-of-samples
-	// read. The bar is "does not grow": final must not exceed baseline.
+	// read. The bar is "does not grow": final must not exceed baseline,
+	// and the hub keep-alive connections stay within the transport's idle
+	// bound (a connection leaked per job is never returned to the pool, so
+	// 20 jobs of it pass that bound; a single leaked one may hide inside it).
 	time.Sleep(s19FinalSettle)
-	final := s19MinFDCount(t, pid, s19FDSamples, s19FDGap)
-	if final > baseline {
+	finalHub, final := s19MinFDCount(t, pid, inst.port, s19FDSamples, s19FDGap)
+	if final > baseline || finalHub > http.DefaultMaxIdleConnsPerHost {
 		t.Logf("s19: baseline fd table:\n  %s", strings.Join(baselineList, "\n  "))
 		t.Logf("s19: final fd table:\n  %s", strings.Join(s19FDList(pid), "\n  "))
-		t.Fatalf("daemon fd count grew across %d consecutive jobs: baseline %d, final %d",
-			s19Jobs, baseline, final)
+		t.Fatalf("daemon fd count grew across %d consecutive jobs: baseline %d, final %d; hub connections %d (keep-alive bound %d)",
+			s19Jobs, baseline, final, finalHub, http.DefaultMaxIdleConnsPerHost)
 	}
-	t.Logf("s19: daemon fd final after settle: %d (baseline %d)", final, baseline)
+	t.Logf("s19: daemon fd final after settle: %d (baseline %d), hub connections %d (baseline %d)", final, baseline, finalHub, baseHub)
 
 	// The durable events log tells the whole run with no duplicates.
 	s19AssertEventsLogClean(t, d.dataDir, append([]string{warm}, wis...))
