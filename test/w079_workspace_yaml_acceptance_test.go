@@ -273,7 +273,9 @@ const w079RefusalWindow = 3 * time.Second
 // window of w079RefusalWindow starting now (every item was refused
 // before the call, so each is watched at least that long after its own
 // refusal): no item ever leaves queued at aihub and no capsule appears.
-// The last sweep starts after the window closes.
+// The last sweep starts after the window closes and also reads aihub's
+// durable event history, where any claim — however briefly held — left a
+// session_claimed event.
 func w079StayQueued(t *testing.T, d *w113Daemon, inst *v1Install, refused []w079RefusedWI) {
 	t.Helper()
 	deadline := time.Now().Add(w079RefusalWindow)
@@ -289,6 +291,9 @@ func w079StayQueued(t *testing.T, d *w113Daemon, inst *v1Install, refused []w079
 			}
 			if _, err := os.Stat(r.capDir); err == nil {
 				t.Fatalf("refused claim of %s materialized a capsule at %s", label, r.capDir)
+			}
+			if closed && strings.Contains(wiRawWithEvents(t, inst, r.wi), `"session_claimed"`) {
+				t.Fatalf("refused work item %s was claimed at some point: aihub recorded session_claimed", label)
 			}
 		}
 		if closed {

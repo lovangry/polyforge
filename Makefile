@@ -19,8 +19,9 @@ test:
 	# that evidence matters. Opt-in tests (skipped unless their env var is set):
 	#   POLYFORGE_TEST_SYSTEM_INSTALL=1    installer scenarios: write /usr/local/bin/pf
 	# The ./test acceptance package runs through test/e2e-parallel.sh: one
-	# process per test, E2E_JOBS at a time (`go test ./test/` still runs it
-	# serially, in about 15 minutes).
+	# process per test, E2E_JOBS at a time. `go test ./test/ -timeout 20m`
+	# still runs it serially; it takes longer than go's default 10m
+	# per-package timeout.
 	go test $$(go list ./... | grep -v '/test$$') -count=1
 	sh test/e2e-parallel.sh
 

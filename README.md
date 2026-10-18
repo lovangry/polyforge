@@ -376,7 +376,7 @@ service host with seconds of downtime (no startup auto-migration, see
     make test      # unit packages, then the e2e suite in parallel
     make xrefs     # design-doc cross-references only
     go build ./...
-    go test ./...  # the same, with the e2e suite serial (~15 min)
+    go test ./... -timeout 20m  # the same, e2e suite serial (over go's 10m default)
 
 `make test` runs the `./test` e2e package through `test/e2e-parallel.sh`:
 one process per test, `E2E_JOBS` at a time (default: the CPU count, at most

@@ -124,11 +124,12 @@ if (!stepAgent) {
   verdict.at1500 = snap();
   if (process.env.W174_SCENARIO === "ensure-fails") {
     // the failed ensure hands over to the RESTART_MS (5s) retry loop: wait
-    // (at most 9s more, as before) until its first retry — the second
-    // init — has run to its end with nothing left in flight, so a retry
-    // that re-ran ensure has spawned it by then
+    // (at most 9s more, the window this scenario always had) until its
+    // second retry — the third init — has run to its end with nothing left
+    // in flight, so a retry that re-ran ensure, on the first retry or a
+    // later one, has spawned it by then
     const by = Date.now() + 9000;
-    while (Date.now() < by && !(snap().inits >= 2 && inflight === 0)) await sleep(100);
+    while (Date.now() < by && !(snap().inits >= 3 && inflight === 0)) await sleep(100);
   } else {
     await sleep(2500);
   }
@@ -371,7 +372,7 @@ func TestW174ClaudeHookSilentWhenEnsureFails(t *testing.T) {
 // `timeout 20`, and a hanging ensure killed by it leaves the hook silent
 // with exit 0, still asking for the chat id afterwards. A `timeout` shim
 // first on the hook's PATH journals the argv the hook passed, then runs
-// the REAL timeout(1) with a 1s bound in place of the 20 — the kill and
+// the REAL timeout(1) with a 3s bound in place of the 20 — the kill and
 // the hook's handling of it stay real; the 20 is pinned by the argv.
 func TestW174ClaudeHookBoundedWhenEnsureHangs(t *testing.T) {
 	realTimeout, err := exec.LookPath("timeout")
@@ -379,7 +380,7 @@ func TestW174ClaudeHookBoundedWhenEnsureHangs(t *testing.T) {
 		t.Skip("no timeout(1) on this machine")
 	}
 	shim := func(bin string) {
-		body := "#!/bin/sh\necho \"timeout $*\" >> \"$PF_JOURNAL\"\nshift\nexec '" + realTimeout + "' 1 \"$@\"\n"
+		body := "#!/bin/sh\necho \"timeout $*\" >> \"$PF_JOURNAL\"\nshift\nexec '" + realTimeout + "' 3 \"$@\"\n"
 		if err := os.WriteFile(filepath.Join(bin, "timeout"), []byte(body), 0o755); err != nil {
 			t.Fatal(err)
 		}
