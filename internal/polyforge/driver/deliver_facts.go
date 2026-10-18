@@ -180,19 +180,29 @@ type testBarCmd struct {
 
 // evEvent is one simple command of the dispatch's evidence, in recorded
 // order: the repo it ran in (from the entry's cwd, `cd` and `git -C`),
-// its words, and its entry's exit code.
+// its words, its comparison key and its entry's exit code.
 type evEvent struct {
 	repo    string
-	words   []string
+	words   []string // commandWords: finds cd / git / gh
+	key     string   // barKey: compared with the test bar
 	exit    int
 	merge   bool // git merge / git pull
 	prMerge bool // gh pr merge
 }
 
-// commandWords is a simple command as the test-bar comparison sees it,
-// on both sides alike: redirections dropped, and the leading NAME=value
-// assignments, shell keywords and wrapper words (env, timeout, …)
-// skipped. nil = no command word.
+// barKey is a simple command as the test-bar comparison sees it, on
+// both sides alike: redirections dropped, quotes and whitespace
+// normalised (by shellSegments), nothing else removed. Leading
+// NAME=value assignments and wrapper words stay, so `GOWORK=off go build`
+// or `E2E_RUN=a sh e2e.sh` is matched only by that exact command.
+func barKey(seg []string) string {
+	return strings.Join(dropRedirections(seg), " ")
+}
+
+// commandWords is a simple command's command word onward: redirections
+// dropped, and the leading NAME=value assignments, shell keywords and
+// wrapper words (env, timeout, …) skipped. It identifies cd / git / gh;
+// it is never the test-bar comparison key (barKey). nil = no command word.
 func commandWords(seg []string) []string {
 	seg = dropRedirections(seg)
 	i := 0
@@ -230,7 +240,7 @@ func evidenceEvents(ev []CommandEvidence, capsuleRoot string) []evEvent {
 				}
 				continue
 			}
-			ev := evEvent{repo: repoOfRel(dir), words: words, exit: e.ExitCode}
+			ev := evEvent{repo: repoOfRel(dir), words: words, key: barKey(seg), exit: e.ExitCode}
 			if filepath.Base(words[0]) == "git" {
 				j, opts := gitSubcommand(words[1:])
 				for _, o := range opts {
@@ -286,8 +296,9 @@ func repoOfRel(dir string) string {
 // this dispatch: anywhere in it) and BEFORE the first `gh pr merge` of
 // that repo's PR after that merge — run in the repo or naming prURL —
 // since the PR merge is what the re-run must cover (polyforge#203).
-// Both sides compare as commandWords (quotes stripped, whitespace
-// collapsed; a leading `cd` sets the repo). No test bar for the repo
+// Both sides compare exactly, as barKey (quotes stripped, whitespace
+// collapsed, redirections dropped, leading assignments and wrappers
+// kept; a leading `cd` sets the repo). No test bar for the repo
 // means nothing to prove it with.
 func testBarRerun(repo, prURL string, bar []testBarCmd, events []evEvent) bool {
 	start := 0
@@ -313,12 +324,13 @@ func testBarRerun(repo, prURL string, bar []testBarCmd, events []evEvent) bool {
 			if words == nil || words[0] == "cd" {
 				continue
 			}
+			key := barKey(seg)
 			need++
 			found := false
 			for start < end {
 				e := events[start]
 				start++
-				if e.repo == repo && e.exit == 0 && strings.Join(e.words, " ") == strings.Join(words, " ") {
+				if e.repo == repo && e.exit == 0 && e.key == key {
 					found = true
 					break
 				}

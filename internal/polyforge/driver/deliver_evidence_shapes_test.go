@@ -3,8 +3,8 @@ package driver
 // deliver_evidence_shapes_test.go: polyforge#203's incident shapes.
 // Four deliveries re-ran the test bar after merging origin/main and
 // before `gh pr merge`, yet the driver could not read that evidence:
-// the test-bar side of the comparison kept the leading NAME=value
-// assignments and wrapper words the evidence side strips, so a bar such
+// the evidence side of the comparison stripped the leading NAME=value
+// assignments and wrapper words the test-bar side kept, so a bar such
 // as `GOWORK=off go build ./...` could never match (cause 2), and the
 // evidence carried no repo context because the prompt's example showed
 // no `cwd` (cause 1).
@@ -44,6 +44,38 @@ func TestTestBarRerunAssignmentPrefixedBar(t *testing.T) {
 	// the same command before the merge still does not count
 	if testBarRerun("demo", "", bar[:1], evidenceEvents(rec("GOWORK=off go build ./...", "git merge --no-edit origin/main"), root)) {
 		t.Fatal("a test bar run before the last merge counted")
+	}
+	// a shell-string re-run with the bar's quoting is the same command
+	quoted := []testBarCmd{{Repo: "demo", Command: "E2E_RUN='^(TestA|TestB)$' E2E_JOBS=8 sh test/e2e-parallel.sh"}}
+	if !testBarRerun("demo", "", quoted, evidenceEvents([]CommandEvidence{{Argv: []string{"cd repos/demo && E2E_RUN='^(TestA|TestB)$' E2E_JOBS=8 sh test/e2e-parallel.sh > /tmp/e2e.log 2>&1"}, DurationMs: 5}}, root)) {
+		t.Fatal("a verbatim quoted E2E_RUN re-run, redirected to a log, was not recognised")
+	}
+}
+
+// The comparison is exact: the leading assignments and wrapper words
+// are part of the command. A re-run that drops or changes them is a
+// different run and must not license the merge (polyforge#203 review B1;
+// the E2E_RUN-subset pitfall of polyforge#202).
+func TestTestBarRerunAssignmentMismatchRefused(t *testing.T) {
+	root := t.TempDir()
+	cases := []struct {
+		name, bar, rerun string
+	}{
+		{"different E2E_RUN subset", "E2E_RUN='^(TestA|TestB)$' E2E_JOBS=8 sh test/e2e-parallel.sh", "E2E_RUN='^(TestA)$' E2E_JOBS=8 sh test/e2e-parallel.sh"},
+		{"E2E_RUN dropped", "E2E_RUN=all sh test/e2e-parallel.sh", "sh test/e2e-parallel.sh"},
+		{"GOWORK=off missing", "GOWORK=off go build ./...", "go build ./..."},
+		{"GOWORK added", "go build ./...", "GOWORK=off go build ./..."},
+		{"env -u dropped", "env -u NODE_ENV npm test", "npm test"},
+	}
+	for _, c := range cases {
+		bar := []testBarCmd{{Repo: "demo", Command: c.bar}}
+		evidence := []CommandEvidence{
+			{Argv: []string{"git merge --no-edit origin/main"}, Cwd: "repos/demo", DurationMs: 5},
+			{Argv: []string{c.rerun}, Cwd: "repos/demo", DurationMs: 5},
+		}
+		if testBarRerun("demo", "", bar, evidenceEvents(evidence, root)) {
+			t.Errorf("%s: re-run %q satisfied test bar %q", c.name, c.rerun, c.bar)
+		}
 	}
 }
 
