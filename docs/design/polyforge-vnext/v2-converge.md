@@ -235,7 +235,7 @@ pi 适配层的具体机制：**专用 step agent 目录**。daemon 维护 `<har
 | 性质 | `PF_CHAT_ID` 是"通知谁"的**标签，不是凭证**，不得用于权限判断；不得写入任何共享或 agent 可写的文件 |
 | **负责人** | 该 WI 的 **reporter**（创建它的认证用户；交互提交、自动领取与在途 WI 一律如此——aihub 没有比 reporter 更可信的身份来源，D5 裁定）。门范围：负责人可 continue（resume-blocked）与 abandon（cancel）；ForceEnd 等恢复门仍限 admin/maintainer |
 | **任务来源 origin** | 每个 WI 的 daemon 侧记录：`chat`（含 chat id、负责人）或 `auto`（仅负责人） |
-| 通知路由 | 有订阅 chat → 通知 chat；否则 → 通知负责人（其下次任一会话启动时提示，可选择订阅；将来经 #84 推外部渠道） |
+| 通知路由 | 有订阅 chat → 通知 chat；否则 → 通知负责人（其下次任一会话启动时提示，可选择订阅；将来经 #84 推外部渠道）。负责人路由（subscribe-owned）给负责人的其他 chat 加的订阅记下 origin chat，并与 origin chat 的订阅共用同一份送达记录（游标、已送达决策键、done）：决策只唤醒 origin chat（它的 watcher 在线时），其他 chat 只显示进度；origin chat 的 watcher 一分钟没轮询时，由共用记录、id 最小的在线 chat 兜底，且只补送记录里谁都没送达过的决策——origin chat 已拿到的决策绝不再交给兜底 chat。显式 `pf watch subscribe` 让该 chat 成为独立的唤醒对象（polyforge#199） |
 
 "会话绑定 + adoption（接管 watcher）"整套规则被"负责人（必有）+ 订阅（可选）"取代。
 
@@ -617,7 +617,7 @@ carrier ref 只记录 HEAD，重新认领会丢掉任务仓库里未提交的改
 | 路径 | 写者 | 内容 |
 |---|---|---|
 | `<data-dir>/chats.json` | daemon `identity.go` | (harness, harness-session) → chat id，让恢复的会话沿用同一 chat；chat id 只是通知标签，不是凭据 |
-| `<data-dir>/chat-subs.json` | daemon `chatsubs.go` | 每个 chat 订阅的 WI、事件游标与已送达的决策键；原子写 |
+| `<data-dir>/chat-subs.json` | daemon `chatsubs.go` | 每个 chat 订阅的 WI、事件游标与已送达的决策键；负责人路由加的订阅另存 `origin_chat`（与 origin chat 的订阅共用送达记录）；原子写 |
 | `$XDG_RUNTIME_DIR/polyforge/chat-<chat>.{lock,pid,status}`（无 `XDG_RUNTIME_DIR` 时为临时目录下按 uid 区分的 0700 目录） | 常驻 watcher `watcher/files.go` | 单实例锁、pid 文件、该 chat 的进度文件；临时目录不是本人所有或可被他人写入时拒绝使用 |
 
 ### E.3 `attrs.blocked_seal` 与 `sealed_head` / `sealed_machine`

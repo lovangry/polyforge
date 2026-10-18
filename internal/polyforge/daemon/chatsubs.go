@@ -13,6 +13,22 @@ package daemon
 // every watcher cycle subscribes its chat to every held WI the chat
 // submitted or its owner owns (subscribe-owned). Decisions stay un-acked
 // (cursor not advanced) until a watcher of a subscribed chat prints them.
+//
+// Wake target (polyforge#199): a WI's decisions wake ONE chat — its
+// origin chat (the one that submitted it) — not every chat of the owner.
+// A subscription owner routing added to another chat records that origin
+// chat and shares the origin chat's delivery record (cursor, delivered
+// keys, done): it is answered with that record, and its acks land there.
+// So a decision is delivered once for the origin chat and its
+// owner-routed chats together — whichever of them printed it, none
+// prints it again. While the origin chat's watcher is live the others
+// are Passive (progress only, no decision, no ack); when it is not, the
+// lowest-id live one of them is the fallback and prints only what the
+// record says nobody has delivered yet. A WI without an origin chat, or
+// whose origin chat holds no subscription to it (unsubscribed there),
+// wakes every subscribed chat from its own record, as does an explicit
+// subscribe. "Live" is the in-memory last subscribe-owned call of the
+// chat's watcher (every poll makes one), within chatLiveFor.
 
 import (
 	"encoding/json"
@@ -25,6 +41,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/silgrid/polyforge/internal/common/atomicfile"
 
@@ -53,16 +70,33 @@ type chatDoc struct {
 	Muted map[string]bool `json:"muted,omitempty"`
 }
 
+// chatLiveFor is how long a chat counts as live after its watcher's last
+// subscribe-owned call (a resident watcher makes one every poll, 2s by
+// default). Silence does not prove the chat is gone: a Claude Code chat
+// has no watcher while it handles a --wait-decision wake, and a --poll
+// above chatLiveFor looks silent too. That only decides who prints a
+// decision NOBODY has delivered yet — what the origin chat already got
+// is in the shared record and never goes to a fallback.
+const chatLiveFor = time.Minute
+
 // subStore persists subscriptions and cursors.
 type subStore struct {
 	mu   sync.Mutex
 	path string
 	doc  subsDoc
+	// seen: when each chat's watcher last called subscribe-owned. In
+	// memory only: after a daemon start a chat not seen yet counts as
+	// live for chatLiveFor from born (see liveLocked).
+	seen map[string]time.Time
+	born time.Time
+	now  func() time.Time
 }
 
 // newSubStore loads (or starts) the store at path.
 func newSubStore(path string) (*subStore, error) {
-	s := &subStore{path: path, doc: subsDoc{Version: 1, Chats: map[string]*chatDoc{}}}
+	s := &subStore{path: path, doc: subsDoc{Version: 1, Chats: map[string]*chatDoc{}},
+		seen: map[string]time.Time{}, now: time.Now}
+	s.born = s.now()
 	raw, err := os.ReadFile(path)
 	switch {
 	case err == nil:
@@ -113,6 +147,13 @@ func (s *subStore) Subscribe(chat, wi, slug string, cursor int64) (bool, error) 
 		if fill {
 			sub.Slug = slug // a subscription recorded before its slug was known
 		}
+		if sub.OriginChat != "" {
+			// an explicit subscribe makes an owner-routed subscription
+			// a wake target of its own, with a record of its own that
+			// starts like a new subscription
+			sub.OriginChat, sub.Cursor, sub.Notified, sub.Done = "", cursor, nil, false
+			return true, s.persistLocked()
+		}
 		if !sub.Done {
 			if fill || unmuted {
 				return false, s.persistLocked()
@@ -127,17 +168,26 @@ func (s *subStore) Subscribe(chat, wi, slug string, cursor int64) (bool, error) 
 }
 
 // SubscribeNew adds a subscription only when the chat has none for wi
-// and has not muted it (a finished one is left finished). Reports
-// whether it added one.
-func (s *subStore) SubscribeNew(chat, wi, slug string, cursor int64) (bool, error) {
+// and has not muted it (a finished one is left finished); originChat is
+// the WI's origin chat when it is not this chat ("" otherwise): while
+// that chat holds a subscription to wi, this one shares its record and
+// cursor is not used. Reports whether it added one.
+func (s *subStore) SubscribeNew(chat, wi, slug, originChat string, cursor int64) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c := s.chatLocked(chat, true)
 	if c.Subs[wi] != nil || c.Muted[wi] {
 		return false, nil
 	}
-	c.Subs[wi] = &protocol.ChatSub{WI: wi, Slug: slug, Cursor: cursor}
+	c.Subs[wi] = &protocol.ChatSub{WI: wi, Slug: slug, Cursor: cursor, OriginChat: originChat}
 	return true, s.persistLocked()
+}
+
+// Seen records that the chat's watcher is polling now.
+func (s *subStore) Seen(chat string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.seen[chat] = s.now()
 }
 
 // Settled reports whether SubscribeNew would leave wi alone for the
@@ -168,22 +218,71 @@ func (s *subStore) Unsubscribe(chat, wi string) (bool, error) {
 	return had, s.persistLocked()
 }
 
-// List answers the chat's subscriptions, sorted by WI.
+// List answers the chat's subscriptions, sorted by WI. An owner-routed
+// one whose origin chat holds a subscription is answered with that
+// record, Passive unless this chat is the WI's wake target now.
 func (s *subStore) List(chat string) []protocol.ChatSub {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := []protocol.ChatSub{}
 	if c := s.chatLocked(chat, false); c != nil {
 		for _, sub := range c.Subs {
-			out = append(out, *sub)
+			cp := *sub
+			if o := s.recordLocked(sub); o != sub {
+				cp.Cursor, cp.Notified, cp.Done = o.Cursor, o.Notified, o.Done
+				cp.Passive = !s.fallbackLocked(chat, sub)
+			}
+			out = append(out, cp)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].WI < out[j].WI })
 	return out
 }
 
-// Ack records a watcher's progress; unknown WIs are ignored (the
-// subscription may have been removed meanwhile).
+// recordLocked answers the delivery record a subscription reads and
+// acks: the origin chat's subscription to the WI for an owner-routed
+// one, while the origin chat holds it; the subscription itself
+// otherwise.
+func (s *subStore) recordLocked(sub *protocol.ChatSub) *protocol.ChatSub {
+	if sub.OriginChat == "" {
+		return sub
+	}
+	if c := s.doc.Chats[sub.OriginChat]; c != nil && c.Subs[sub.WI] != nil {
+		return c.Subs[sub.WI]
+	}
+	return sub
+}
+
+// fallbackLocked: the chat is the wake target of its owner-routed
+// subscription — the origin chat's watcher is not live and no live chat
+// with a lower id shares the same record.
+func (s *subStore) fallbackLocked(chat string, sub *protocol.ChatSub) bool {
+	if s.liveLocked(sub.OriginChat) {
+		return false
+	}
+	for id, c := range s.doc.Chats {
+		if o := c.Subs[sub.WI]; id < chat && o != nil && o.OriginChat == sub.OriginChat && s.liveLocked(id) {
+			return false
+		}
+	}
+	return true
+}
+
+// liveLocked: the chat's watcher called subscribe-owned within
+// chatLiveFor; a chat not seen since the daemon started counts as live
+// for the daemon's first chatLiveFor (its watcher reconnects within its
+// backoff, ≤30s, so a restart hands nothing to a fallback).
+func (s *subStore) liveLocked(chat string) bool {
+	now := s.now()
+	if t, ok := s.seen[chat]; ok {
+		return now.Sub(t) < chatLiveFor
+	}
+	return now.Sub(s.born) < chatLiveFor
+}
+
+// Ack records a watcher's progress in the subscription's record (the
+// origin chat's for an owner-routed one, see recordLocked); unknown WIs
+// are ignored (the subscription may have been removed meanwhile).
 func (s *subStore) Ack(chat string, a protocol.ChatAck) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -191,7 +290,7 @@ func (s *subStore) Ack(chat string, a protocol.ChatAck) error {
 	if c == nil || c.Subs[a.WI] == nil {
 		return nil
 	}
-	sub := c.Subs[a.WI]
+	sub := s.recordLocked(c.Subs[a.WI])
 	sub.Cursor, sub.Notified, sub.Done = a.Cursor, a.Notified, a.Done
 	return s.persistLocked()
 }
@@ -295,6 +394,7 @@ func (d *Daemon) subscribeOwnedRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner := strings.TrimSpace(body.Owner)
+	d.subs.Seen(id) // every watcher poll calls this route: the chat is live
 	added := []protocol.ChatSub{}
 	jobs, _ := d.statusJobs()
 	for _, j := range jobs {
@@ -309,13 +409,17 @@ func (d *Daemon) subscribeOwnedRoute(w http.ResponseWriter, r *http.Request) {
 		if e, ok := d.obs.Events().Newest(j.WorkItemID, watcher.IsEventDecision); ok {
 			cursor = e.Seq - 1
 		}
-		fresh, err := d.subs.SubscribeNew(id, j.WorkItemID, j.Slug, cursor)
+		originChat := ""
+		if !mine && j.Origin != nil {
+			originChat = j.Origin.ChatID
+		}
+		fresh, err := d.subs.SubscribeNew(id, j.WorkItemID, j.Slug, originChat, cursor)
 		if err != nil {
 			writeErr(w, api.ErrDaemonInternal, err.Error())
 			return
 		}
 		if fresh {
-			added = append(added, protocol.ChatSub{WI: j.WorkItemID, Slug: j.Slug, Cursor: cursor})
+			added = append(added, protocol.ChatSub{WI: j.WorkItemID, Slug: j.Slug, Cursor: cursor, OriginChat: originChat})
 		}
 	}
 	writeJSON(w, http.StatusOK, protocol.ChatSubscriptions{ChatID: id, Subscriptions: added})
