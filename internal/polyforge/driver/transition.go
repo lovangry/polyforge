@@ -48,11 +48,15 @@ const (
 	StatusBlocked = capsule.WorkflowStatusBlocked
 )
 
-// Attempt causes (01 §6.3b): the closed two-value set of archived
-// attempts. Q&A history never lands in attempts[].
+// Attempt causes (01 §6.3b) of archived non-accepted attempts. A gate
+// FAIL rewind archives its target as gate_fail_rewind and every step
+// strictly between the target and the gate as superseded_by_rewind (it
+// failed nothing; a later gate discarded its output). Both carry
+// rewind_gate. Q&A history never lands in attempts[].
 const (
-	CauseGateFailRewind = "gate_fail_rewind"
-	CauseInfraFailure   = "infra_failure"
+	CauseGateFailRewind     = "gate_fail_rewind"
+	CauseSupersededByRewind = "superseded_by_rewind"
+	CauseInfraFailure       = "infra_failure"
 )
 
 // ErrStaleFence marks a transition refused by the spawn fence: the
@@ -498,7 +502,8 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest, info *appliedInfo)
 // on_fail: rewind first checks BOTH bounds — a hit ends
 // failed_rewind_exhausted (WF-101) before any mutation — then archives
 // every step in
-// [target, gate) as a gate_fail_rewind attempt, resets each to pending
+// [target, gate) (the target as gate_fail_rewind, the steps after it as
+// superseded_by_rewind), resets each to pending
 // with output cleared, moves the position back to target and persists
 // the FAIL verdict (the full verdict text, unconditionally) as the
 // target's pending_rewind_input. The gate itself is neither archived
@@ -565,9 +570,10 @@ func (d *Driver) checkRewindTarget(gate, target string) error {
 	return nil
 }
 
-// applyRewindRangeLocked archives every step in [from, to) as a
-// gate_fail_rewind attempt and resets it to pending with output
-// cleared, then moves the position to the target. rewindGate names the
+// applyRewindRangeLocked archives every step in [from, to) and resets it
+// to pending with output cleared, then moves the position to the target.
+// The target (index from) is archived as gate_fail_rewind; every later
+// step in the range as superseded_by_rewind. rewindGate names the
 // triggering gate.
 func (d *Driver) applyRewindRangeLocked(from, to int, target, rewindGate string, info *appliedInfo) {
 	for i := from; i < to; i++ {
@@ -579,8 +585,12 @@ func (d *Driver) applyRewindRangeLocked(from, to int, target, rewindGate string,
 		}
 		raw, _ := json.Marshal(st.Output)
 		consumed := st.BudgetConsumed
+		cause := CauseSupersededByRewind
+		if i == from {
+			cause = CauseGateFailRewind
+		}
 		st.Attempts = append(st.Attempts, capsule.Attempt{
-			Cause:          CauseGateFailRewind,
+			Cause:          cause,
 			AttemptSeq:     nextAttemptSeq(st),
 			StartedAt:      st.StepStartedAt,
 			ArchivedAt:     d.stamp(),

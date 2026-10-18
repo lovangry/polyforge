@@ -421,18 +421,21 @@ func TestRunGateFailRewindRecovers(t *testing.T) {
 	if exec.WorkflowStatus != StatusCompleted {
 		t.Fatalf("the flow must complete after the rewind: %q", exec.WorkflowStatus)
 	}
-	for _, id := range []string{"build", "polish"} {
-		// Each successful completion adds an "accepted" attempt (R14),
-		// plus the rewind archive: build=accepted+rewind+accepted(2nd run)=3,
-		// polish=accepted+rewind=2. Verify at least one rewind exists.
+	// Each successful completion adds an "accepted" attempt (R14), plus
+	// the rewind archive: the target build is archived gate_fail_rewind,
+	// polish (strictly between target and gate) superseded_by_rewind
+	// (owner ruling grill-201-r1, polyforge#201).
+	for _, tc := range []struct{ id, cause string }{
+		{"build", CauseGateFailRewind}, {"polish", CauseSupersededByRewind},
+	} {
 		var hasRewind bool
-		for _, att := range exec.Steps[id].Attempts {
-			if att.Cause == CauseGateFailRewind && att.RewindGate == "check" {
+		for _, att := range exec.Steps[tc.id].Attempts {
+			if att.Cause == tc.cause && att.RewindGate == "check" {
 				hasRewind = true
 			}
 		}
 		if !hasRewind {
-			t.Fatalf("%s missing rewind archive: %+v", id, exec.Steps[id].Attempts)
+			t.Fatalf("%s missing %s archive: %+v", tc.id, tc.cause, exec.Steps[tc.id].Attempts)
 		}
 	}
 	if exec.RewindStats.Count != 1 || exec.ReviewRounds["check"] != 1 {
