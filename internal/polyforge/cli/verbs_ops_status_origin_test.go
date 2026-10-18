@@ -33,8 +33,8 @@ workspaces: /srv/pf-ws
 
 WORK ITEM    STATUS   SESSION  SPAWN  AGENT PID  QUESTION  STEP-AGE  LAST-WORK  ORIGIN
 -----------  -------  -------  -----  ---------  --------  --------  ---------  -----------
-wi_chatless  running  -        -      -          -         -        -          chat:none
-wi_auto      running  -        -      -          -         -        -          auto
-wi_chat      running  -        -      -          -         -        -          chat:chat_z
+wi_chatless  running  -        -      -          -         -         -          chat:none
+wi_auto      running  -        -      -          -         -         -          auto
+wi_chat      running  -        -      -          -         -         -          chat:chat_z
 `)
 }
