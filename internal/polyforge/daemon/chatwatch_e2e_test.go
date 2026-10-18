@@ -141,19 +141,24 @@ type deadStdout struct{}
 
 func (deadStdout) Write([]byte) (int, error) { return 0, errors.New("write: broken pipe") }
 
-// repo review 2026-10-16 B-25 (WA-4): the owner's other chat starts a real
+// repo review 2026-10-16 B-25 (WA-4): a chat of the owner starts a real
 // watcher, which subscribes it to the owner's WI and dies before printing
 // the reminder — the next start prints the decision (fetch-then-ack), and
-// once printed and acked it never repeats.
+// once printed and acked it never repeats. The WI has no origin chat (an
+// auto-pull claim; alice is the reporter), so the owner-routed chat is
+// its wake target — a WI submitted from another chat would wake only that
+// chat (polyforge#199, TestNeedsInputWakesOnlyTheOriginChat).
 func TestWatcherCrashBeforePrintingOwnedReminderRedelivers(t *testing.T) {
 	td := newTestDaemon(t, nil)
-	td.client.Origin = &cli.SubmitOrigin{ChatID: "chat_origin", Owner: "alice"}
+	td.hub.mu.Lock()
+	td.hub.reporters = map[string]string{"wi_crash": "alice"}
+	td.hub.mu.Unlock()
 	td.submitClaim(t, "wi_crash")
 	td.waitMonitored(t, "wi_crash")
 	td.seedPendingQuestion(t, "wi_crash", "q-1", "plan", "?")
 	waitNeedsInput(t, td, "wi_crash")
 
-	// alice's other chat: subscribed through owner routing
+	// alice's chat: subscribed through owner routing
 	api := clientAPI{d: td.client, chat: "chat_other"}
 	run := func(out io.Writer, d time.Duration) error {
 		ctx, cancel := context.WithTimeout(context.Background(), d)
@@ -224,5 +229,84 @@ func TestWatcherPicksUpWIOwnedAfterStart(t *testing.T) {
 	_ = watcher.Run(ctx2, api, watcher.Options{Owner: "bob", Out: &out2, Poll: 20 * time.Millisecond})
 	if out2.Len() != 0 {
 		t.Fatalf("the delivered decision must not repeat: %q", out2.String())
+	}
+}
+
+// polyforge#199 fallback: when the WI's origin chat is gone (its watcher
+// stopped polling chatLiveFor ago), the owner's other chat is woken with
+// the still-pending question instead.
+func TestNeedsInputFallsBackWhenTheOriginChatIsGone(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.client.Origin = &cli.SubmitOrigin{ChatID: "chat_origin", Owner: "alice"}
+	td.submitClaim(t, "wi_gone")
+	td.waitMonitored(t, "wi_gone")
+	td.seedPendingQuestion(t, "wi_gone", "q-1", "plan", "?")
+	waitNeedsInput(t, td, "wi_gone")
+
+	run := func(chat string, d time.Duration) string {
+		ctx, cancel := context.WithTimeout(context.Background(), d)
+		defer cancel()
+		var out bytes.Buffer
+		if err := watcher.Run(ctx, clientAPI{d: td.client, chat: chat}, watcher.Options{Owner: "alice", WaitDecision: true, Out: &out, Poll: 20 * time.Millisecond}); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	if out := run("chat_other", 300*time.Millisecond); out != "" {
+		t.Fatalf("origin chat live: the other chat must stay passive: %q", out)
+	}
+	// the origin chat's watcher has not polled for a chatLiveFor
+	td.subs.mu.Lock()
+	later := time.Now().Add(chatLiveFor)
+	td.subs.now = func() time.Time { return later }
+	td.subs.mu.Unlock()
+	if out := run("chat_other", 5*time.Second); !strings.Contains(out, "wi_gone needs_input q-1") {
+		t.Fatalf("origin chat gone: the other chat is the fallback: %q", out)
+	}
+}
+
+// polyforge#199 review B1/B2: the origin chat got the question (a Claude
+// Code --wait-decision watcher printed, acked and exited) and then stays
+// silent for longer than chatLiveFor while the human decides: the other
+// chat must NOT get q-1. A decision raised meanwhile, which nobody has
+// delivered, goes to the fallback; the origin chat's returning watcher
+// does not print it again (one record for both).
+func TestOriginAckedDecisionNeverGoesToFallback(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.client.Origin = &cli.SubmitOrigin{ChatID: "chat_origin", Owner: "alice"}
+	td.submitClaim(t, "wi_ack")
+	td.waitMonitored(t, "wi_ack")
+	td.seedPendingQuestion(t, "wi_ack", "q-1", "plan", "?")
+	waitNeedsInput(t, td, "wi_ack")
+
+	run := func(chat string, d time.Duration) string {
+		ctx, cancel := context.WithTimeout(context.Background(), d)
+		defer cancel()
+		var out bytes.Buffer
+		if err := watcher.Run(ctx, clientAPI{d: td.client, chat: chat}, watcher.Options{Owner: "alice", WaitDecision: true, Out: &out, Poll: 20 * time.Millisecond}); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	if out := run("chat_origin", 5*time.Second); !strings.Contains(out, "wi_ack needs_input q-1") {
+		t.Fatalf("the origin chat is woken: %q", out)
+	}
+	// the origin chat's watcher has not polled for a chatLiveFor
+	td.subs.mu.Lock()
+	later := time.Now().Add(chatLiveFor)
+	td.subs.now = func() time.Time { return later }
+	td.subs.mu.Unlock()
+	if out := run("chat_other", 500*time.Millisecond); out != "" {
+		t.Fatalf("a decision the origin chat got must never wake another chat: %q", out)
+	}
+	// raised while the origin chat is silent: nobody delivered it
+	if err := td.obs.Events().Append("wi_ack", "step_dead", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if out := run("chat_other", 5*time.Second); !strings.Contains(out, "wi_ack step_dead") || strings.Contains(out, "q-1") {
+		t.Fatalf("the fallback gets the undelivered decision, and only it: %q", out)
+	}
+	if out := run("chat_origin", 500*time.Millisecond); out != "" {
+		t.Fatalf("the returning origin chat must not repeat what the fallback delivered: %q", out)
 	}
 }

@@ -138,10 +138,18 @@ per-chat read cursors live in the daemon, not in any file you can write. There
 is no arming, no script copying and no adoption prompt: a new session simply
 subscribes to the work items it wants. A running watcher also subscribes its
 chat, every poll, to every work item the daemon holds that the chat submitted
-or its owner (`PF_USER_ID`; the reporter when the job has no owner) owns;
-decisions the work items found at its start already hold surface as
-`[polyforge] N WIs need you: ...`, those of a work item that becomes the
-owner's later as their own lines.
+or its owner (`PF_USER_ID`; the reporter when the job has no owner) owns.
+A work item's decisions wake ONE chat: the chat that submitted it. Your
+other chats (another tab, another session) show its progress only; if the
+submitting chat's watcher has been silent for a minute, one of them is woken
+instead, but only for decisions the submitting chat has not received — a
+decision is delivered once, in whichever chat printed it. A work item with no
+submitting chat (auto-pulled, a CLI submit without a chat, or one the
+submitting chat unsubscribed) wakes every chat of its owner. An explicit
+`pf watch subscribe <wi>` makes this chat a wake target of its own, so a
+second chat subscribed that way is woken too. Decisions the work items found
+at the watcher's start already hold surface as
+`[polyforge] N WIs need you: ...`, later ones as their own lines.
 
 ### Rules for you (every harness)
 

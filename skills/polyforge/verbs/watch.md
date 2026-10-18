@@ -36,7 +36,11 @@ from the capsule's `execution.json` (the authority), so it also answers for a
 work item that finished while nobody was watching.
 
 The resident watcher, the Claude Code status line / wake loop and the pi
-extension are described in the `pf watch` section of `SKILL.md`. A decision
+extension are described in the `pf watch` section of `SKILL.md`. `--poll D`
+sets the resident watcher's poll interval (default 2s); above one minute the
+daemon counts the chat as silent between polls, so a decision of a work item
+this chat submitted that it has not received yet may wake another chat of the
+owner instead (once — never both). A decision
 wake-up line is a fixed template and carries no question or error text:
 present it to the human, never answer it yourself, and read the question text
 here (`--once`) only when asked. A `carrier_push_failed <repo>` line means the

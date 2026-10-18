@@ -32,6 +32,7 @@ func TestD8TransientTextsClassifyUpstreamTransient(t *testing.T) {
 		"stream closed: unexpected EOF",
 		"the model returned an invalid tool call (incomplete JSON arguments)",
 		"provider returned an empty response (0 output tokens)",
+		"Upstream response stream ended before completion",
 	} {
 		for _, turnErr := range []bool{false, true} {
 			got, _, _ := classifyWaitFailure(&ExitedError{ExitCode: 1, LastError: text, TurnError: turnErr})
@@ -53,6 +54,10 @@ func TestD8TransientTextsClassifyUpstreamTransient(t *testing.T) {
 	}
 	if got, _, _ := classifyWaitFailure(&ExitedError{ExitCode: 1, LastError: `model "x/y" not found`}); got != FailExitModel {
 		t.Errorf("a model-name problem must stay model-class: %q", got)
+	}
+	// a bare model "ended" has no upstream/stream subject: never transient.
+	if got, _, _ := classifyWaitFailure(&ExitedError{ExitCode: 1, LastError: "the model ended the turn", TurnError: true}); got == FailUpstreamTransient {
+		t.Errorf("a model ending its own turn must not be an upstream transient: %q", got)
 	}
 	if IsModelClass(FailUpstreamTransient) {
 		t.Fatalf("an upstream transient must never advance the candidate pointer")
