@@ -76,16 +76,23 @@ else { delete env.PF_WI_ID; delete process.env.PF_WI_ID; }
 
 const handlers = {};
 const ui = { widget: undefined, setWidget(_k, c) { this.widget = c; } };
+// inflight counts pi.exec children not yet exited: the extension's code
+// after an awaited exec runs in the microtasks of that exit, so a
+// macrotask that sees 0 sees every follow-up exec already spawned.
+let inflight = 0;
 const pi = {
   on: (ev, fn) => { handlers[ev] = fn; },
   exec: (cmd, args, opts) => new Promise((resolve) => {
+    inflight++;
+    let done = false;
+    const settle = (r) => { if (!done) { done = true; inflight--; resolve(r); } };
     const child = spawn(cmd, args, { env, stdio: ["ignore", "pipe", "pipe"] });
     let out = "", err = "", timer;
     if (opts && opts.timeout) timer = setTimeout(() => child.kill("SIGKILL"), opts.timeout);
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (err += d));
-    child.on("exit", (code) => { clearTimeout(timer); resolve({ code: code ?? -1, stdout: out, stderr: err }); });
-    child.on("error", (e) => resolve({ code: -1, stdout: "", stderr: String(e) }));
+    child.on("exit", (code) => { clearTimeout(timer); settle({ code: code ?? -1, stdout: out, stderr: err }); });
+    child.on("error", (e) => settle({ code: -1, stdout: "", stderr: String(e) }));
   }),
   sendMessage: () => {},
 };
@@ -115,7 +122,17 @@ if (!stepAgent) {
   verdict.sessionStartMs = Date.now() - t0;
   await sleep(1500);
   verdict.at1500 = snap();
-  await sleep(process.env.W174_SCENARIO === "ensure-fails" ? 9000 : 2500);
+  if (process.env.W174_SCENARIO === "ensure-fails") {
+    // the failed ensure hands over to the RESTART_MS (5s) retry loop: wait
+    // (at most 12s more; the third init lands about 10s in, so the cap
+    // leaves room under load) until its second retry — the third init —
+    // has run to its end with nothing left in flight, so a retry that
+    // re-ran ensure, on the first retry or a later one, has spawned it
+    const by = Date.now() + 12000;
+    while (Date.now() < by && !(snap().inits >= 3 && inflight === 0)) await sleep(100);
+  } else {
+    await sleep(2500);
+  }
   const ev = { toolName: "bash", input: { command: "echo hi" } };
   await handlers["tool_call"](ev, {});
   verdict.bash = ev.input.command;
@@ -246,9 +263,19 @@ type w174HookRun struct {
 
 func w174RunHook(t *testing.T, ensureMode string, extraEnv ...string) w174HookRun {
 	t.Helper()
+	return w174RunHookWith(t, nil, ensureMode, extraEnv...)
+}
+
+// w174RunHookWith is w174RunHook with prep run on the hook's bin dir (the
+// head of its PATH) before the hook starts.
+func w174RunHookWith(t *testing.T, prep func(bin string), ensureMode string, extraEnv ...string) w174HookRun {
+	t.Helper()
 	work := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(work, "bin"), 0o755); err != nil {
 		t.Fatal(err)
+	}
+	if prep != nil {
+		prep(filepath.Join(work, "bin"))
 	}
 	if err := os.WriteFile(filepath.Join(work, "bin", "pf"), []byte(w174FakePf), 0o755); err != nil {
 		t.Fatal(err)
@@ -341,16 +368,33 @@ func TestW174ClaudeHookSilentWhenEnsureFails(t *testing.T) {
 	}
 }
 
+// TestW174ClaudeHookBoundedWhenEnsureHangs: the hook wraps ensure in
+// `timeout 20`, and a hanging ensure killed by it leaves the hook silent
+// with exit 0, still asking for the chat id afterwards. A `timeout` shim
+// first on the hook's PATH journals the argv the hook passed, then runs
+// the REAL timeout(1) with a 3s bound in place of the 20 — the kill and
+// the hook's handling of it stay real; the 20 is pinned by the argv.
 func TestW174ClaudeHookBoundedWhenEnsureHangs(t *testing.T) {
-	if _, err := exec.LookPath("timeout"); err != nil {
+	realTimeout, err := exec.LookPath("timeout")
+	if err != nil {
 		t.Skip("no timeout(1) on this machine")
 	}
-	r := w174RunHook(t, "hang")
+	shim := func(bin string) {
+		body := "#!/bin/sh\necho \"timeout $*\" >> \"$PF_JOURNAL\"\nshift\nexec '" + realTimeout + "' 3 \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(bin, "timeout"), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := w174RunHookWith(t, shim, "hang")
 	if r.code != 0 || r.out != "" {
 		t.Fatalf("a hanging ensure must leave the hook silent with exit 0: exit %d stdout %q", r.code, r.out)
 	}
 	if r.took > 25*time.Second {
 		t.Fatalf("the hook waited %s on a hanging ensure: the bound is 20s", r.took)
+	}
+	if len(r.journal) < 3 || r.journal[0] != "timeout 20 pf daemon ensure --timeout 15s" ||
+		r.journal[1] != "daemon ensure --timeout 15s" || !strings.HasPrefix(r.journal[2], "chat init --harness claude") {
+		t.Fatalf("the hook must run ensure under `timeout 20`, then (ensure killed) still ask for the chat id: journal %q", r.journal)
 	}
 }
 

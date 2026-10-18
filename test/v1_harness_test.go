@@ -64,12 +64,26 @@ func v1Root(t *testing.T) string {
 // <dir>/covdata so every spawned aihub/daemon/CLI/agent process emits
 // its coverage there — the manual instrumented round for the e2e
 // coverage report (merge with `go tool covdata textfmt`).
+//
+// PFV1_PREBUILT_BINS=<dir> (test/e2e-parallel.sh) skips the build: the
+// three binaries are hard-linked (copied across filesystems) into this
+// run's own dir, so the bin sweep's exe-path match still sees only the
+// processes this test binary started.
 func v1Bins(t *testing.T) string {
 	t.Helper()
 	v1BinOnce.Do(func() {
 		dir, err := os.MkdirTemp("", "pfv1-bins")
 		if err != nil {
 			v1BinErr = err
+			return
+		}
+		if pre := os.Getenv("PFV1_PREBUILT_BINS"); pre != "" && os.Getenv("PFV1_COVER_BINS") == "" {
+			for _, name := range []string{"aihub", "pf", "fakepi"} {
+				if v1BinErr = linkOrCopy(filepath.Join(pre, name), filepath.Join(dir, name)); v1BinErr != nil {
+					return
+				}
+			}
+			v1BinDir = dir
 			return
 		}
 		build := exec.Command("go", "build", "-o", dir+"/",
@@ -97,6 +111,32 @@ func v1Bins(t *testing.T) string {
 	}
 	registerBinSweep(t, v1BinDir)
 	return v1BinDir
+}
+
+// linkOrCopy hard-links src to dst, copying (mode kept) when a link is
+// impossible.
+func linkOrCopy(src, dst string) error {
+	if os.Link(src, dst) == nil {
+		return nil
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	fi, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fi.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // ---------------------------------------------------------------------------
@@ -212,23 +252,39 @@ func newV1InstallRepos(t *testing.T, repos []api.ProjectRepo) *v1Install {
 	// stop, the inproc rig's terminate) and thus over the final process
 	// state, whatever teardown path was taken.
 	t.Cleanup(func() { inst.sweepOrphans() })
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	inst.port = ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
-	inst.url = "http://127.0.0.1:" + strconv.Itoa(inst.port)
 
 	logf, err := os.Create(inst.aihubLog)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(filepath.Join(bins, "aihub"),
-		"--data-dir", inst.dataDir, "--listen", "127.0.0.1:"+strconv.Itoa(inst.port))
-	cmd.Stdout, cmd.Stderr = logf, logf
-	inst.startAihubProc(t, cmd, logf)
-	inst.waitHTTP(t)
+	// The port is probed free and then bound by the aihub, so another test
+	// process can take it in between (e2e-parallel.sh): a lost port is
+	// retried on a fresh port with a fresh data dir.
+	for attempt := 1; ; attempt++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		inst.port = ln.Addr().(*net.TCPAddr).Port
+		ln.Close()
+		inst.url = "http://127.0.0.1:" + strconv.Itoa(inst.port)
+		cmd := exec.Command(filepath.Join(bins, "aihub"),
+			"--data-dir", inst.dataDir, "--listen", "127.0.0.1:"+strconv.Itoa(inst.port))
+		cmd.Stdout, cmd.Stderr = logf, logf
+		inst.startAihubProc(t, cmd, logf)
+		if inst.waitHTTP(t) {
+			break
+		}
+		if attempt == 5 {
+			t.Fatalf("aihub lost its port %d times in a row:\n%s", attempt, v1ReadString(inst.aihubLog))
+		}
+		if err := os.RemoveAll(inst.dataDir); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(inst.dataDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	inst.adminKey = v1HarvestBootstrapKey(t, inst.dataDir, inst.aihubLog)
 	inst.client = aihubclient.New(inst.url, inst.adminKey)
 	if _, err := inst.client.CreateProject(aihubclient.ProjectCreateRequest{
@@ -261,21 +317,58 @@ func (u *v1Install) startAihubProc(t *testing.T, cmd *exec.Cmd, logf *os.File) {
 	})
 }
 
-// waitHTTP polls the aihub TCP face until it answers.
-func (u *v1Install) waitHTTP(t *testing.T) {
+// waitHTTP waits until THIS install's aihub process listens on u.port —
+// not merely until something answers there: another test process's
+// aihub may hold a port this one probed free. It reports false when the
+// process exited first (the port was taken).
+func (u *v1Install) waitHTTP(t *testing.T) bool {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		conn, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(u.port))
-		if err == nil {
-			conn.Close()
-			return
+		if v1ListensOn(u.aihubCmd.Process.Pid, u.port) {
+			return true
+		}
+		select {
+		case <-u.aihubExited:
+			return false
+		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("aihub never came up on %d: %v", u.port, err)
+			t.Fatalf("aihub never came up on %d:\n%s", u.port, v1ReadString(u.aihubLog))
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// v1ListensOn reports whether process pid holds the LISTEN socket on
+// 127.0.0.1:port: /proc/<pid>/net/tcp names the socket's inode and one
+// of the process's fds must be that socket.
+func v1ListensOn(pid, port int) bool {
+	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/net/tcp", pid))
+	if err != nil {
+		return false
+	}
+	local, inode := fmt.Sprintf("0100007F:%04X", port), ""
+	for _, line := range strings.Split(string(raw), "\n") {
+		// sl local_address rem_address st ... inode (field 9); st 0A = LISTEN
+		if f := strings.Fields(line); len(f) > 9 && f[1] == local && f[3] == "0A" {
+			inode = f[9]
+			break
+		}
+	}
+	if inode == "" {
+		return false
+	}
+	ents, err := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
+	if err != nil {
+		return false
+	}
+	for _, e := range ents {
+		if tgt, _ := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", pid, e.Name())); tgt == "socket:["+inode+"]" {
+			return true
+		}
+	}
+	return false
 }
 
 // v1HarvestBootstrapKey reads the bootstrap admin key the aihub writes
@@ -345,7 +438,9 @@ func (u *v1Install) restartAihub() {
 		"--data-dir", u.dataDir, "--listen", "127.0.0.1:"+strconv.Itoa(u.port))
 	cmd.Stdout, cmd.Stderr = logf, logf
 	u.startAihubProc(u.t, cmd, logf)
-	u.waitHTTP(u.t)
+	if !u.waitHTTP(u.t) {
+		u.t.Fatalf("the restarted aihub could not bind its port %d again (another process took it during the outage):\n%s", u.port, v1ReadString(u.aihubLog))
+	}
 }
 
 // hermeticConfigPath writes an EMPTY scratch cli.toml and returns its
@@ -567,6 +662,7 @@ type v1Daemon struct {
 	t          *testing.T
 	inst       *v1Install
 	cmd        *exec.Cmd
+	launchedAt time.Time // just before cmd.Start: this process's events come after it
 	logPath    string
 	sock       string
 	dataDir    string
@@ -748,6 +844,7 @@ func (d *v1Daemon) launch() {
 	cmd.Dir = d.dataDir
 	cmd.Stdout, cmd.Stderr = logf, logf
 	ownGroup(cmd)
+	d.launchedAt = time.Now()
 	if err := cmd.Start(); err != nil {
 		d.t.Fatal(err)
 	}
@@ -1102,10 +1199,15 @@ func (d *v1Daemon) settleClose(wi string) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	// a monitor that started must also have stopped (job_stopped is its
-	// last act; the final published push precedes it)
+	// last act; the final published push precedes it). Only this daemon
+	// process's monitors count: one that started before its launch died
+	// with a previous process and never writes its job_stopped.
 	stopped := func() bool {
 		started, stopped := false, false
 		for _, e := range d.eventsOf(d.t, wi) {
+			if at, err := time.Parse(time.RFC3339Nano, e.At); err == nil && at.Before(d.launchedAt) {
+				continue
+			}
 			switch e.Kind {
 			case "job_started":
 				started, stopped = true, false
@@ -1444,6 +1546,9 @@ type execStepView struct {
 	// Supervision is the driver-owned failure ledger and relaxed bounds
 	// (v2-converge 2.3/2.4).
 	Supervision map[string]any `json:"supervision"`
+	// Dispatch is the ordinal of the dispatch the step awaits (set by
+	// its step_start, cleared once settled).
+	Dispatch int64 `json:"dispatch"`
 }
 
 // executionView is the loose read shape of runtime-state/execution.json.

@@ -73,9 +73,12 @@ func TestV2RestartCapsuleMissingBlocksThenResumeFromCheckpoint(t *testing.T) {
 		return perr == nil && strings.Contains(string(packed), "refs/pf-task/demo-src")
 	})
 	// ...and the hub chain's execution.json must already record the fix
-	// step done (work published after the last push is the only thing a
-	// capsule loss may cost)
-	waitUntil(t, 60*time.Second, "the hub chain never recorded the fix step done", func() bool {
+	// step done and verification's step_start (work published after the
+	// last push is the only thing a capsule loss may cost; the step_start
+	// reaches the hub by its own async push, so crashing on "fix done"
+	// alone sometimes re-derives the dead ordinal and replays its 120s
+	// action into the 60s model-error grace)
+	waitUntil(t, 60*time.Second, "the hub chain never recorded the fix step done and verification running", func() bool {
 		if !inst.bareHasPath(t, wi, "runtime-state/execution.json") {
 			return false
 		}
@@ -83,8 +86,8 @@ func TestV2RestartCapsuleMissingBlocksThenResumeFromCheckpoint(t *testing.T) {
 		if json.Unmarshal([]byte(inst.bareFileAtMain(t, wi, "runtime-state/execution.json")), &x) != nil {
 			return false
 		}
-		fix := x.Steps["fix"]
-		return fix != nil && fix.Status == "done"
+		fix, ver := x.Steps["fix"], x.Steps["verification"]
+		return fix != nil && fix.Status == "done" && ver != nil && ver.Status == "in_progress"
 	})
 	preMax := 0.0 // the highest ordinal dispatched before the loss
 	for _, s := range spawnJournal(t, capA) {
@@ -142,7 +145,8 @@ func TestV2RestartCapsuleMissingBlocksThenResumeFromCheckpoint(t *testing.T) {
 	}
 	// completed steps were NOT re-run: every dispatch after the loss —
 	// an ordinal past the dead session's (the chain may lack the dead
-	// dispatch's journal line, never its step_start) — is verification
+	// dispatch's journal line, not its step_start: waited for above) — is
+	// verification
 	spawns := spawnJournal(t, d2.capsuleDir(wi))
 	resumed := 0
 	for _, s := range spawns {

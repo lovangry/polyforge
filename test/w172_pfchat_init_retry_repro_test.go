@@ -142,9 +142,18 @@ await handlers["session_start"]({}, ctx);
 await sleep(1500);
 verdict.phase1 = snapshot();
 
-// ---- phase 2: operator revives the daemon; wait 2.6x RESTART_MS (5s) ----
+// ---- phase 2: operator revives the daemon; allow 2.6x RESTART_MS (5s) ----
+// Polls for the recovery the verdict demands (chat init retried, resident
+// watcher spawned, widget set) and stops at the first moment it holds,
+// never later than 13s after the revival.
 writeFileSync(stateFile, "up");
-await sleep(13000);
+const revivedBy = Date.now() + 13000;
+for (;;) {
+  const s = snapshot();
+  if (s.chatInitAttempts >= 2 && s.watchSpawns >= 1 && s.widgetSet) break;
+  if (Date.now() >= revivedBy) break;
+  await sleep(100);
+}
 const bashEvent = { toolName: "bash", input: { command: "echo hi" } };
 await handlers["tool_call"](bashEvent, {});
 verdict.phase2 = snapshot();
@@ -275,7 +284,7 @@ func TestW172PfChatInitRetryAfterDaemonRevival(t *testing.T) {
 	// Phase 2 is the report: after the daemon is revived, the extension
 	// must recover within a few RESTART_MS beats.
 	if v.Phase2.ChatInitAttempts < 2 {
-		t.Errorf("phase2: daemon revived 13s (>2x RESTART_MS=5s) ago, but `pf chat init` was attempted only %d time(s) total — the extension gave up permanently after the first failure (init has no retry loop)", v.Phase2.ChatInitAttempts)
+		t.Errorf("phase2: within 13s (>2x RESTART_MS=5s) of the daemon's revival `pf chat init` was attempted only %d time(s) total — the extension gave up permanently after the first failure (init has no retry loop)", v.Phase2.ChatInitAttempts)
 	}
 	if v.Phase2.WatchSpawns < 1 {
 		t.Errorf("phase2: no resident `pf watch --chat <id>` spawned after daemon revival")

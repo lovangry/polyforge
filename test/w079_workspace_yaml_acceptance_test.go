@@ -23,6 +23,7 @@ package test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -237,6 +238,16 @@ func w079AttemptStats(t *testing.T, capDir, step string) (providerInfra, gateRew
 // capsule exists for it, and the daemon keeps serving.
 func w079Refused(t *testing.T, d *w113Daemon, inst *v1Install, ws, wi, submitOut string, submitCode int, needles ...string) {
 	t.Helper()
+	w079RefusalOutput(t, wi, submitOut, submitCode, needles...)
+	w079StayQueued(t, d, inst, []w079RefusedWI{{wi: wi, capDir: w079Capsule(t, inst, ws, wi)}})
+	d.pfWant(inst, -1, "ops", "status")
+}
+
+// w079RefusalOutput asserts the synchronous half of a pre-claim
+// refusal: the `pf submit` of wi failed with DAEMON-414 and every
+// needle in its output.
+func w079RefusalOutput(t *testing.T, wi, submitOut string, submitCode int, needles ...string) {
+	t.Helper()
 	if submitCode == 0 {
 		t.Fatalf("pf submit of %s succeeded; want a DAEMON-414 refusal (output %q)", wi, submitOut)
 	}
@@ -245,17 +256,51 @@ func w079Refused(t *testing.T, d *w113Daemon, inst *v1Install, ws, wi, submitOut
 			t.Fatalf("submit refusal of %s misses %q (output %q)", wi, n, submitOut)
 		}
 	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if status := inst.wiStatus(t, wi); status != "queued" {
-			t.Fatalf("refused work item %s left the queued state: status %q — a pre-claim refusal must never claim it (log tail %s)", wi, status, d.logTail())
+}
+
+// w079RefusedWI is one refused work item the stability window watches:
+// its id, the capsule dir a claim would materialize, and a case name
+// for the failure message ("" outside a table).
+type w079RefusedWI struct {
+	name, wi, capDir string
+}
+
+// w079RefusalWindow is how long a refused work item is watched for a
+// (wrong) claim after its refusal.
+const w079RefusalWindow = 3 * time.Second
+
+// w079StayQueued asserts the stable half of a pre-claim refusal over ONE
+// window of w079RefusalWindow starting now (every item was refused
+// before the call, so each is watched at least that long after its own
+// refusal): no item ever leaves queued at aihub and no capsule appears.
+// The last sweep starts after the window closes and also reads aihub's
+// durable event history, where any claim — however briefly held — left a
+// session_claimed event.
+func w079StayQueued(t *testing.T, d *w113Daemon, inst *v1Install, refused []w079RefusedWI) {
+	t.Helper()
+	deadline := time.Now().Add(w079RefusalWindow)
+	for {
+		closed := time.Now().After(deadline)
+		for _, r := range refused {
+			label := r.wi
+			if r.name != "" {
+				label = fmt.Sprintf("%s (case %q)", r.wi, r.name)
+			}
+			if status := inst.wiStatus(t, r.wi); status != "queued" {
+				t.Fatalf("refused work item %s left the queued state: status %q — a pre-claim refusal must never claim it (log tail %s)", label, status, d.logTail())
+			}
+			if _, err := os.Stat(r.capDir); err == nil {
+				t.Fatalf("refused claim of %s materialized a capsule at %s", label, r.capDir)
+			}
+			if closed && strings.Contains(wiRawWithEvents(t, inst, r.wi), `"session_claimed"`) {
+				t.Fatalf("refused work item %s was claimed at some point: aihub recorded session_claimed", label)
+			}
 		}
-		if _, err := os.Stat(w079Capsule(t, inst, ws, wi)); err == nil {
-			t.Fatalf("refused claim of %s materialized a capsule at %s", wi, w079Capsule(t, inst, ws, wi))
+		if closed {
+			return
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	d.pfWant(inst, -1, "ops", "status")
 }
 
 // w079Run submits wi and waits for the completed, wrapped run; answers
@@ -521,14 +566,25 @@ func TestW079InvalidYamlRefusesWithoutClaim(t *testing.T) {
 		{"duplicate project key", "steps:\n  e2e:\n    default: { models: [pi:a] }\n  w079dup:\n    default: { models: [pi:a] }\n  w079dup:\n    default: { models: [pi:b] }\n", []string{"w079dup"}},
 		{"duplicate list key", "steps:\n  e2e:\n    default: { models: [pi:a] }\n    default: { models: [pi:b] }\n", []string{"default"}},
 	}
+	// Each case's submit is refused synchronously (checked per case);
+	// the stability half — every refused WI stays queued with no capsule
+	// — then runs over ONE shared window that opens after the last
+	// refusal, so every case is watched at least w079RefusalWindow. The
+	// daemon runs without --auto and a refused submit is never enqueued,
+	// so nothing but a new submit could claim a refused WI later.
+	var refused []w079RefusedWI
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			w079Yaml(t, ws, c.yaml)
 			wi := w113NewWI(t, inst, "e2e", "w079 invalid yaml: "+c.name, envelopeAutopilot())
 			out, code := d.pf(inst, "submit", wi)
-			w079Refused(t, d, inst, ws, wi, out, code, append([]string{".polyforge.yaml"}, c.needles...)...)
+			w079RefusalOutput(t, wi, out, code, append([]string{".polyforge.yaml"}, c.needles...)...)
+			refused = append(refused, w079RefusedWI{name: c.name, wi: wi, capDir: w079Capsule(t, inst, ws, wi)})
+			d.pfWant(inst, -1, "ops", "status")
 		})
 	}
+	w079StayQueued(t, d, inst, refused)
+	d.pfWant(inst, -1, "ops", "status")
 }
 
 // TestW079FixYamlAndResubmitIsClean: a refusal leaves the WI queued with
