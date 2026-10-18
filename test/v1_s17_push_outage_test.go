@@ -21,11 +21,17 @@ import (
 // event is pinned in v1_s18 with a shrunk ladder.)
 func TestV1S17PushOutageKeepsDriverAndCatchesUp(t *testing.T) {
 	inst := newV1Install(t)
-	// The plan: a long parked question/answer ladder (the version stream),
+	// The plan: a parked question/answer ladder (the version stream),
 	// then the completion tail. Each answer consumes exactly one ordinal:
 	// answer k re-dispatches grill under ordinal k+1, whose envelope parks
 	// on question k+1.
-	const outageRounds = 30
+	//
+	// outageRounds: the outage needs >= 5 push_failed below. Measured, the
+	// first outage round (plus its push_failed wait) yields ~4 and every
+	// further round 2-3 more, so 5 is reached by round 2; 4 rounds land
+	// ~10-11 (2x the 5 the assertions need) without leaning on the
+	// time-driven retries.
+	const outageRounds = 4
 	actions := []map[string]any{
 		{"do": "envelope", "id": "grill", "outcome": "needs_input", "question_id": "q_s17bp_0",
 			"question": "s17: the version-stream ladder parks here."},
