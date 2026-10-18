@@ -386,7 +386,8 @@ it: a harness adapter sets it.
   `pi.extensions` manifest; it runs `pf chat init` on session start (pi-web
   replays session start when it resumes its sessions) — when that fails it
   runs `pf daemon ensure` once in the background and retries — and
-  prefixes every bash tool call with `PF_CHAT_ID=<id>`.
+  prefixes every bash tool call with `PF_CHAT_ID=<id> export PF_CHAT_ID; `,
+  so every command of a compound string (`cmd1; pf submit`) sees the id.
 - **Step agents never run either adapter**: pi steps run against the
   daemon's own agent dir (no user packages, no pf-chat), claude steps run
   with `--bare` (no hooks); both carry `PF_WI_ID`, on which the adapters

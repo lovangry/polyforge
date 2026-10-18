@@ -3,9 +3,10 @@
 //
 // On session_start it asks the local daemon, via `pf chat init`, for the
 // chat id of this pi session (a resumed session gets the same id). Every
-// bash tool call is then prefixed with `PF_CHAT_ID=<id> ` so pf commands
-// the model runs know which chat they belong to. The id is a notification
-// label, not a credential.
+// bash tool call is then prefixed with `PF_CHAT_ID=<id> export PF_CHAT_ID; `
+// so pf commands the model runs know which chat they belong to — every
+// command in the string, not just the first (polyforge#206). The id is a
+// notification label, not a credential.
 //
 // Watching (v2-converge §3): the extension spawns the resident
 // `pf watch --chat <id>`; its stdout carries ONLY fixed-template decision
@@ -161,7 +162,14 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_call", async (event) => {
     if (chatId && isToolCallEventType("bash", event)) {
-      event.input.command = `PF_CHAT_ID=${chatId} ${event.input.command}`;
+      // pi runs the string as one `bash -c` (fallback `sh -c`). A bare
+      // `PF_CHAT_ID=<id> cmd` assignment reaches only the first simple
+      // command, so in `cmd1; pf submit` pf ran chat-less (polyforge#206).
+      // An assignment before the special builtin `export` persists in the
+      // shell (POSIX; bash and dash alike) and `export` marks it, so every
+      // command in the string inherits the id; an explicit per-command
+      // `PF_CHAT_ID=… pf` still wins.
+      event.input.command = `PF_CHAT_ID=${chatId} export PF_CHAT_ID; ${event.input.command}`;
     }
   });
 }
