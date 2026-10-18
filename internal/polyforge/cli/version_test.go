@@ -3,6 +3,9 @@ package cli
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -71,14 +74,35 @@ func TestRunVersionVerb(t *testing.T) {
 		t.Fatalf("pf --json version printed %q, want the flag path's JSON shape", got)
 	}
 
-	// `pf help` lists the verb (the WI's acceptance: reachable without
-	// knowing the flag), under a Diagnostics group line.
+	// NoConfigLoad: the verb answers even with a malformed --config —
+	// LoadConfig refuses loudly on a malformed file (normal verbs exit
+	// 1), version must not: the same reachability the pre-dispatch
+	// --version flag has.
+	broken := filepath.Join(t.TempDir(), "broken.toml")
+	if err := os.WriteFile(broken, []byte("not valid toml at all"), 0o600); err != nil {
+		t.Fatalf("cannot create the malformed --config fixture: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"--config", broken, "version"}, nil, &stdout, &stderr); code != 0 {
+		t.Fatalf("pf --config <malformed> version exited %d, want 0 (NoConfigLoad:\nthe verb must answer where the config is unloadable, like the --version flag); stderr:\n%s", code, stderr.String())
+	}
+
+	// `pf help` lists the verb as a registry row under `Diagnostics:`
+	// (the WI's acceptance: reachable without knowing the flag). A plain
+	// substring/counter check is vacuous here: the pre-existing global
+	// `--version` flag line already contains "version" twice, so only
+	// the positional row pins the listing. Registry rows are indented
+	// two spaces and group headers sit at column 0, so the pattern also
+	// keeps the row inside the Diagnostics group (no other header
+	// between `Diagnostics:` and the row).
+	helpRow := regexp.MustCompile(`Diagnostics:\n(?:  [^\n]*\n)*  version\s+Print the build version`)
 	help := new(bytes.Buffer)
 	if code := Run([]string{"help"}, nil, help, &stderr); code != 0 {
 		t.Fatalf("pf help exited %d, want 0; stderr:\n%s", code, stderr.String())
 	}
-	if count := strings.Count(help.String(), "version"); count < 2 {
-		t.Fatalf("pf help output lists `version` %d time(s), want at least\n2 (the verb row and the --version global flag):\n%s", count, help.String())
+	if !helpRow.MatchString(help.String()) {
+		t.Fatalf("pf help does not list the version verb as a Diagnostics\nrow (want `  version        Print the build version of this pf binary` after `Diagnostics:`):\n%s", help.String())
 	}
 
 	// Arity: extra positionals are a local validation error, exit 1 (not
