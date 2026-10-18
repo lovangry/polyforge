@@ -91,7 +91,11 @@ end), `CORE-410` (terminal).
   jobs table (WORK
   ITEM — the slug, e.g. `polyforge#140`, or the id for a job claimed before
   slugs were recorded —, STATUS, SESSION, SPAWN, AGENT PID, QUESTION, STEP-AGE, LAST-WORK;
-  plus ORIGIN when some job has one). This is
+  plus ORIGIN when some job has one — the ORIGIN cell is `chat:<full id>`
+  for a chat submit (the full chat id, never truncated or compacted, so it
+  stays pasteable into `pf watch --chat <id>`), `chat:none` for a chat-kind
+  submit with no chat id, `auto` for an auto-claim, and `-` when the job has
+  no origin). This is
   bookkeeping about what this machine manages — not workflow execution
   progress (`pf watch` is the progress verb) — with two deliberately
   progress-shaped exceptions: STEP-AGE is mm:ss since the current dispatch
