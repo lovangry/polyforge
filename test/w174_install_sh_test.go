@@ -73,9 +73,18 @@ func w174NewInstall(t *testing.T) *w174Install {
 case "$1 $2" in
 "release list") cat "$W174_TAG_FILE"; echo ;;  # what --jq '.[0].tagName' prints
 "release download")
-  dir=; prev=
-  for a in "$@"; do [ "$prev" = "--dir" ] && dir=$a; prev=$a; done
-  cp "$W174_REL/pf-linux-amd64" "$W174_REL/SHA256SUMS" "$dir/" ;;
+  dir=; pat=; prev=
+  for a in "$@"; do
+    case "$prev" in
+      --dir) dir=$a ;;
+      --pattern) pat=$a ;;
+    esac
+    prev=$a
+  done
+  cp "$W174_REL/SHA256SUMS" "$dir/"
+  [ -z "$pat" ] || [ -f "$W174_REL/$pat" ] || exit 1
+  [ -z "$pat" ] || cp "$W174_REL/$pat" "$dir/$pat"
+  ;;
 "repo clone")
   [ "${W174_CLONE_FAIL:-}" = 1 ] && exit 1
   mkdir -p "$4" && cp -R "$W174_SRC"/. "$4"/ ;;
@@ -906,5 +915,227 @@ func TestW174InstallShutdownFailureStopsAtOnce(t *testing.T) {
 	}
 	if lines := in.journalLines(); journalIndex(lines, "pf daemon ensure") >= 0 {
 		t.Fatalf("ran ensure after a failed shutdown:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// ---------------------------------------------------------------------
+// polyforge#218: darwin as a supported work-machine platform. The
+// installer's ONLY per-OS branch is the asset pick (`uname -s`/`uname -m`
+// → pf-darwin-arm64 / pf-darwin-amd64 / pf-linux-amd64) and the checksum
+// verifier gains the macOS shasum fallback; prerequisites are checked and
+// reported up front, never installed.
+
+// w174FilteredPath builds a PATH prelude: shim plus a symlink farm of the
+// system dirs minus the named tools — the hermetic "not on PATH". The shim
+// too is copied over (minus the missing tool), so a stub named like the
+// missing tool does not satisfy the check.
+func w174FilteredPath(t *testing.T, shim string, missing ...string) string {
+	t.Helper()
+	farm := t.TempDir()
+	gone := map[string]bool{}
+	for _, m := range missing {
+		gone[m] = true
+	}
+	shim2 := filepath.Join(t.TempDir(), "shim")
+	if err := os.MkdirAll(shim2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(shim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if gone[e.Name()] {
+			continue
+		}
+		raw, rerr := os.ReadFile(filepath.Join(shim, e.Name()))
+		_ = rerr
+		if err := os.WriteFile(filepath.Join(shim2, e.Name()), raw, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, d := range []string{"/usr/bin", "/bin"} {
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || gone[e.Name()] {
+				continue
+			}
+			// regular files AND named links (python3 → python3.11 etc.)
+			_ = os.Symlink(filepath.Join(d, e.Name()), filepath.Join(farm, e.Name()))
+		}
+	}
+	return shim2 + string(os.PathListSeparator) + farm
+}
+
+// w174DarwinRelease publishes a release whose pf asset is the darwin one
+// (named asset) covered by SHA256SUMS, carrying the same pf shim wrapper
+// as release(t, tag). Returns the wrapper content: the installed binary
+// must equal it, proving the darwin asset — not the linux one — was
+// installed.
+func (in *w174Install) w174DarwinRelease(t *testing.T, tag, asset string) string {
+	t.Helper()
+	wrapper := fmt.Sprintf(`#!/bin/sh
+echo "pf $*" >> "$W174_JOURNAL"
+[ "$1" = --version ] && { echo %s; exit 0; }
+exec %s "$@"
+`, tag, in.pf)
+	if err := os.WriteFile(filepath.Join(in.rel, asset), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(wrapper))
+	if err := os.WriteFile(filepath.Join(in.rel, "SHA256SUMS"), []byte(hex.EncodeToString(sum[:])+"  "+asset+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(in.tagFile, []byte(tag), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return wrapper
+}
+
+// w174UnameShim answers `uname -s`/`uname -m` from a fixed pair (the
+// installer's asset pick is keyed on exactly that).
+func w174UnameShim(t *testing.T, dir, kernel, arch string) {
+	t.Helper()
+	body := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in -s) echo %s ;; -m) echo %s ;; *) echo %s ;; esac\n", kernel, arch, arch)
+	if err := os.WriteFile(filepath.Join(dir, "uname"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestW174InstallDarwinAssetPickAndShasumFallback: on a Mac (uname shim;
+// NO sha256sum on PATH) the installer downloads the pf-darwin-arm64 /
+// pf-darwin-amd64 asset — the installed pf IS the darwin asset
+// byte-for-byte, not the linux one — and verifies it through
+// `shasum -a 256` (macOS has no sha256sum): the fallback is what made the
+// install succeed.
+func TestW174InstallDarwinAssetPickAndShasumFallback(t *testing.T) {
+	for name, arch := range map[string]string{"arm64": "arm64", "amd64 (x86_64)": "x86_64"} {
+		t.Run(name, func(t *testing.T) {
+			in := w174NewInstall(t)
+			asset := map[string]string{"arm64": "pf-darwin-arm64", "x86_64": "pf-darwin-amd64"}[arch]
+			wrapper := in.w174DarwinRelease(t, "v0.0.3-w218", asset)
+			w174UnameShim(t, in.shim, "Darwin", arch)
+			// shasum shim delegating to the real verifier, in macOS's output
+			// format (`<hex>  <file>`): with no sha256sum on PATH this is the
+			// only checksum tool, so success proves the fallback ran.
+			shasumReal, err := exec.LookPath("sha256sum")
+			if err != nil {
+				t.Skip("no real sha256sum to back the shasum shim")
+			}
+			if err := os.WriteFile(filepath.Join(in.shim, "shasum"),
+				[]byte("#!/bin/sh\n[ \"$1 $2\" = \"-a 256\" ] && { shift 2; exec "+shasumReal+" \"$@\"; }\nexit 1\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			in.path = w174FilteredPath(t, in.shim, "sha256sum")
+			out, code := in.run(t)
+			if code != 0 {
+				t.Fatalf("install.sh on a Mac (Darwin %s): exit %d\n%s", arch, code, out)
+			}
+			if got := w174ReadFile(t, in.bin); got != wrapper {
+				t.Fatalf("installed pf is NOT the %s asset (want the wrapper byte-for-byte):\n%.200s", asset, got)
+			}
+			if !strings.Contains(out, "pf v0.0.3-w218 downloaded, SHA-verified, staged") {
+				t.Fatalf("no download/verify step in the output:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestW174InstallMissingPrerequisiteRefuses (polyforge#218): a machine
+// missing one of gh/curl/python3/git is reported with what to obtain and
+// the installer refuses BEFORE anything is touched (step 1's promise:
+// nothing on this machine was changed).
+func TestW174InstallMissingPrerequisiteRefuses(t *testing.T) {
+	for _, tool := range []string{"gh", "python3"} {
+		t.Run(tool, func(t *testing.T) {
+			in := w174NewInstall(t)
+			in.path = w174FilteredPath(t, in.shim, tool)
+			out, code := in.run(t)
+			if code == 0 {
+				t.Fatalf("install.sh on a PATH without %s must fail:\n%s", tool, out)
+			}
+			for _, want := range []string{"missing required tools", tool, "nothing on this machine was changed"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("refusal lacks %q:\n%s", want, out)
+				}
+			}
+			if _, err := os.Stat(in.bin); !os.IsNotExist(err) {
+				t.Fatalf("a pf binary landed in %s despite the refusal", in.bin)
+			}
+			if _, err := os.Stat(filepath.Join(in.data, "release", "v0.0.1-w174")); !os.IsNotExist(err) {
+				t.Fatalf("a release checkout was staged despite the refusal: %v", err)
+			}
+			if left, _ := filepath.Glob(in.bin + ".new.*"); len(left) != 0 {
+				t.Fatalf("staged binary left behind: %v", left)
+			}
+			for _, l := range in.journalLines() {
+				if l != "" {
+					t.Fatalf("the refusal still ran shim tools: %q", l)
+				}
+			}
+		})
+	}
+}
+
+// TestW174InstallReleaseSwitchWithoutGnuMvT (polyforge#218 review B5):
+// the release/current swap must not depend on GNU-only `mv -T` — BSD/macOS
+// mv(1) (synopsis `mv [-f | -i | -n] [-hv] source target`) has no -T and
+// exits 64 with "illegal option -- T". An mv shim that rejects -T exactly
+// like BSD mv is put on PATH; the upgrade must still complete, swap the
+// binary and switch release/current. The switch itself goes through
+// python3's os.replace (rename(2)), a checked prerequisite.
+func TestW174InstallReleaseSwitchWithoutGnuMvT(t *testing.T) {
+	in := w174NewInstall(t)
+	in.release(t, "v0.0.1-w174")
+	if out, code := in.run(t); code != 0 {
+		t.Fatalf("install v0.0.1: exit %d\n%s", code, out)
+	}
+	in.oneDaemon(t, 10*time.Second)
+
+	// BSD mv: `-T` is an illegal option; every other invocation still
+	// performs a real move (delegated to the host's mv).
+	mvReal, err := exec.LookPath("mv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(in.shim, "mv"), []byte(
+		"#!/bin/sh\n"+
+			"for a in \"$@\"; do\n"+
+			"  if [ \"$a\" = -T ]; then\n"+
+			"    echo \"mv: illegal option -- T\" >&2\n"+
+			"    echo \"usage: mv [-f | -i | -n] [-hv] source target\" >&2\n"+
+			"    echo \"       mv [-f | -i | -n] [-hv] source ... directory\" >&2\n"+
+			"    exit 64\n"+
+			"  fi\n"+
+			"done\n"+
+			"src=; last=\n"+
+			"for a in \"$@\"; do src=$last; last=$a; done\n"+
+			"x=0; [ -x \"$src\" ] && x=1\n"+
+			"echo \"mv x=$x $*\" >> \"$W174_JOURNAL\"\n"+
+			"exec "+mvReal+" \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	in.release(t, "v0.0.2-w174")
+	in.resetJournal(t)
+	out, code := in.run(t)
+	if code != 0 {
+		t.Fatalf("upgrade with BSD-style mv (no -T support) must still succeed: exit %d\n%s", code, out)
+	}
+	if cur, _ := os.Readlink(filepath.Join(in.data, "release", "current")); cur != "v0.0.2-w174" {
+		t.Fatalf("release/current -> %q, want v0.0.2-w174", cur)
+	}
+	if got := w174ReadFile(t, in.bin); !strings.Contains(got, "v0.0.2-w174") {
+		t.Fatal("the binary was not swapped")
+	}
+	if left, _ := filepath.Glob(filepath.Join(in.data, "release", ".current.tmp.*")); len(left) != 0 {
+		t.Fatalf("leftover: %v", left)
+	}
+	in.oneDaemon(t, 10*time.Second)
+	if in.loops() != 1 {
+		t.Fatalf("restart loops = %d (sessions %v), want 1", in.loops(), in.sessions())
 	}
 }

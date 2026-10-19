@@ -216,7 +216,7 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 | `GIT-412` | Local staged gitlink refused by `pf` before commit (the hook rejects gitlinks with text only) |
 | `GIT-500` | CGI failure; push failure in `pf` |
 | `DAEMON-400` | Bad UDS request |
-| `DAEMON-403` | Mutating UDS request from a step process tree (SO_PEERCRED; fail closed) |
+| `DAEMON-403` | Mutating UDS request from a step process tree (UDS peer credential — SO_PEERCRED on Linux, LOCAL_PEERCRED + LOCAL_PEERPID on darwin; fail closed) |
 | `DAEMON-404` | No local job for the WI |
 | `DAEMON-409` | Job-state conflict (e.g. wrap/fail of a parked WI, pause/wrap while recovering, resume-paused refused) |
 | `DAEMON-410` | Daemon is shutting down; start deferred |
@@ -237,7 +237,11 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 `internal/polyforge/daemon/routes.go` `routes()` — 19 routes, all wrapped by `refuseStepOrigin`: every
 non-read request whose peer (or its ancestors / process-group leader) carries this daemon's
 `PF_WI_ID`+`PF_DAEMON_ID` markers — or whose peer credential cannot be read — is refused `DAEMON-403`
-(SO_PEERCRED capture `daemon/peercred.go`, check `runtime/stepproc.go` `StepProcessOrigin`). The guard
+(credential capture per OS: `daemon/peercred_linux.go` reads SO_PEERCRED on Linux;
+`daemon/peercred_darwin.go` reads LOCAL_PEERCRED + LOCAL_PEERPID on darwin — ok only when both
+succeed and the pid is positive, else refused. Ancestry and markers are read through the runtime
+proc seam `runtime/procinfo_linux.go` / `runtime/procinfo_darwin.go`; the check itself is
+`runtime/stepproc.go` `StepProcessOrigin`). The guard
 lets exactly two step writes through, and both are reachable ONLY from a step process of this daemon
 (resolved from the peer's process tree, every other caller refused `DAEMON-403`): `POST /step/memories`
 (`pf remember` inside a step, §7.4) and `POST /step/result` (`pf result submit`, §7.3); with

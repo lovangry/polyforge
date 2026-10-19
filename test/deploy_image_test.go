@@ -452,7 +452,11 @@ func TestReleaseScriptDigestFileFeedsDeployPreflight(t *testing.T) {
 	}
 	d := newDeployWorld(t, "v1.2.0")
 	d.release("v1.2.0", true, digOld, digOld)
-	for _, f := range []string{"aihub-linux-amd64", "pf-linux-amd64", "aihub-image.digest", "SHA256SUMS"} {
+	for _, f := range []string{
+		"aihub-linux-amd64", "pf-linux-amd64",
+		"aihub-darwin-arm64", "pf-darwin-arm64", "aihub-darwin-amd64", "pf-darwin-amd64",
+		"aihub-image.digest", "SHA256SUMS",
+	} {
 		b, err := os.ReadFile(filepath.Join(produced, f))
 		if err != nil {
 			t.Fatal(err)

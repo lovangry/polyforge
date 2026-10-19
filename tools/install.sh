@@ -1,7 +1,9 @@
 #!/bin/sh
 # polyforge bootstrap — complete machine setup in one command; idempotent
 # (a second run changes nothing). Steps:
-#   1. prepare — download + SHA-verify the latest pf and stage it next to
+#   1. prepare — check and report the prerequisites (gh, curl, python3, git;
+#      never install them), pick this machine's pf asset from uname (the one
+#      per-OS branch), download + SHA-verify the latest pf and stage it next to
 #      the installed one ($BIN.new.<pid>); clone the release tag into
 #      ~/.local/share/polyforge/release/<VER>. A failure here leaves pf,
 #      release/current and the running daemon untouched.
@@ -28,7 +30,10 @@
 # agent trees are terminated and recover at the next daemon start):
 #   curl ... | PF_INSTALL_FORCE=1 bash -s -- <api-key> [server-host]
 #
-# Requires: gh authenticated (repo is private).
+# Requires: gh authenticated (repo is private); gh, curl, python3 and git
+# on PATH (checked and reported, never installed); macOS ships shasum for
+# the checksum (the installer uses sha256sum when it is there), and no
+# flock — that absence already degrades with a WARN.
 set -e
 KEY="${1:?usage: install.sh <api-key> [server-host]}"
 HOST="${2:-${PF_HOST:-10.146.0.34}}"
@@ -93,6 +98,7 @@ else:
 # replaced. A failure in this phase leaves pf, release/current and the
 # running daemon exactly as they were.
 echo "== 1/5 prepare (pf binary + release checkout; nothing is changed yet)"
+
 STAGED=""   # the new binary, staged next to $BIN (same filesystem)
 TMP=""
 CLONE=""
@@ -123,7 +129,40 @@ refuse() {
   echo "   $3"; exit 1
 }
 
-command -v gh >/dev/null 2>&1 || prep_fail "gh not found"
+# Check-and-report the prerequisites (polyforge#218): the installer NEVER
+# installs anything. Each missing tool is named with what to obtain, and the
+# refusal happens HERE, before one byte on this machine changes. tmux is
+# deliberately NOT refused here: without it the daemon's `pf daemon ensure`
+# falls back to unsupervised-with-WARNING (reported in this installer's step
+# 4 output and by pf doctor's "daemon supervision" row).
+MISSING=""
+for t in gh curl python3 git; do
+  command -v "$t" >/dev/null 2>&1 || MISSING="$MISSING $t"
+done
+if [ -n "$MISSING" ]; then
+  echo "ERROR: missing required tools:$MISSING; this installer checks and reports — it never installs anything."
+  for t in $MISSING; do
+    case "$t" in
+      gh)      echo "   gh      - macOS: brew install gh   |  Linux: apt install gh   (then: gh auth login)" ;;
+      curl)    echo "   curl    - macOS: xcode-select --install  |  Linux: apt install curl" ;;
+      python3) echo "   python3 - macOS: xcode-select --install  |  Linux: apt install python3" ;;
+      git)     echo "   git     - macOS: xcode-select --install  |  Linux: apt install git" ;;
+    esac
+  done
+  prep_fail "install the missing tool(s) above, then re-run this installer"
+fi
+
+# The one per-OS branch: which pf asset this machine runs. The release
+# publishes aihub/pf for linux-amd64, darwin-arm64 and darwin-amd64
+# (polyforge#218); native Windows and other platforms are out of scope
+# (WSL2 is treated as Linux, and uname reports exactly that).
+case "$(uname -s):$(uname -m)" in
+  "Linux:x86_64")  PF_ASSET="pf-linux-amd64" ;;
+  "Darwin:arm64")  PF_ASSET="pf-darwin-arm64" ;;
+  "Darwin:x86_64") PF_ASSET="pf-darwin-amd64" ;;
+  *) prep_fail "no pf asset for this machine ($(uname -s):$(uname -m)); the release carries pf for linux-amd64, darwin-arm64 and darwin-amd64 only (native Windows is out of scope; WSL2 is treated as Linux)" ;;
+esac
+
 VER=$(gh release list --repo "$REPO" --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null) || true
 [ -n "$VER" ] || prep_fail "no release found"
 
@@ -134,20 +173,26 @@ if [ "$RUNNING" = "$VER" ]; then
   echo "   pf $VER already current, skipping"
 else
   TMP=$(mktemp -d)
-  gh release download "$VER" --repo "$REPO" --pattern "pf-linux-amd64" --dir "$TMP" 2>/dev/null \
-    || prep_fail "binary not on release $VER"
+  gh release download "$VER" --repo "$REPO" --pattern "$PF_ASSET" --dir "$TMP" 2>/dev/null \
+    || prep_fail "$PF_ASSET not on release $VER"
   gh release download "$VER" --repo "$REPO" --pattern "SHA256SUMS" --dir "$TMP" 2>/dev/null \
     || prep_fail "SHA256SUMS not on release $VER"
-  EXP=$(grep "pf-linux-amd64" "$TMP/SHA256SUMS" | awk '{print $1}')
-  GOT=$(sha256sum "$TMP/pf-linux-amd64" | awk '{print $1}')
-  [ "$GOT" = "$EXP" ] || prep_fail "SHA mismatch on pf-linux-amd64 of $VER"
+  EXP=$(grep "$PF_ASSET" "$TMP/SHA256SUMS" | awk '{print $1}')
+  # sha256sum on Linux; macOS ships shasum (same `<hex>  <file>` print)
+  if command -v sha256sum >/dev/null 2>&1; then
+    GOT=$(sha256sum "$TMP/$PF_ASSET" | awk '{print $1}')
+  else
+    GOT=$(shasum -a 256 "$TMP/$PF_ASSET" 2>/dev/null | awk '{print $1}')
+  fi
+  [ -n "$GOT" ] || prep_fail "no sha256sum and no shasum to verify $PF_ASSET with"
+  [ "$GOT" = "$EXP" ] || prep_fail "SHA mismatch on $PF_ASSET of $VER"
   # Stage the new binary in $BIN's own directory, already executable: the
   # swap in step 2 is then one rename(2) — `pf` is at every instant
   # either the complete old or the complete new binary, never a partial
   # or non-executable file (a harness hook or pf-chat may run it then).
   mkdir -p "$(dirname "$BIN")" || prep_fail "cannot create $(dirname "$BIN")"
   STAGED="$BIN.new.$$"
-  { cp "$TMP/pf-linux-amd64" "$STAGED" && chmod 755 "$STAGED"; } \
+  { cp "$TMP/$PF_ASSET" "$STAGED" && chmod 755 "$STAGED"; } \
     || prep_fail "cannot stage the new binary at $STAGED (write access to $(dirname "$BIN")?)"
   rm -rf "$TMP"; TMP=""
   echo "   pf $VER downloaded, SHA-verified, staged"
@@ -254,7 +299,11 @@ if [ "$PREV" = "$VER" ]; then
   echo "   release/current -> $VER already"
 else
   CUR_TMP="$RELEASE_DIR/.current.tmp.$$"
-  { ln -sfn "$VER" "$CUR_TMP" && mv -T "$CUR_TMP" "$RELEASE_DIR/current"; } \
+  # os.replace is rename(2) — atomic on Linux and macOS. GNU `mv -T` is not
+  # portable (BSD/macOS mv has no -T), and BSD mv without -T would follow a
+  # symlink-to-directory destination instead of replacing the link itself.
+  # python3 is a checked prerequisite, so it is always available here.
+  { ln -sfn "$VER" "$CUR_TMP" && python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$CUR_TMP" "$RELEASE_DIR/current"; } \
     || { rm -f "$CUR_TMP"; echo "ERROR: cannot switch $RELEASE_DIR/current to $VER"; exit 1; }
   echo "   release/current -> $VER (was ${PREV:-none})"
   # keep the new and the previous version, prune the rest

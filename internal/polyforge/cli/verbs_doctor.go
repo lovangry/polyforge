@@ -8,6 +8,7 @@ import (
 	"maps"
 	"net/http"
 	"os"
+	"os/exec"
 	"slices"
 	"sort"
 	"strings"
@@ -61,6 +62,7 @@ const (
 	docChConfig    = "config"
 	docChMapping   = "workspace mapping"
 	docChDirs      = "workspace dirs"
+	docChPrereqs   = "prerequisites"
 	docChYaml      = "workspace yaml"
 	docChProjects  = "aihub projects"
 	docChServer    = "server reach"
@@ -110,6 +112,7 @@ var doctorChecks = []struct {
 	{docChScratch, needMapping, func(r *doctorRun) (string, string) { return scratchCheck(r.present, time.Now(), r.prune).row() }},
 	{docChRepoClones, needMapping, func(r *doctorRun) (string, string) { return repoClonesCheck(r) }},
 	{docChMemPolicy, needMapping, func(r *doctorRun) (string, string) { return memoryPolicyCheck(r.present).row() }},
+	{docChPrereqs, needConfig, func(r *doctorRun) (string, string) { return prerequisitesCheck(exec.LookPath).row() }},
 	{docChServer, needConfig, func(r *doctorRun) (string, string) { return passOrFail(r.reachOK), r.reachMsg }},
 	{docChSocket, needConfig, func(r *doctorRun) (string, string) { return passOrFail(r.sockOK), r.sockMsg }},
 	{docChSupervision, needConfig, func(r *doctorRun) (string, string) { return supervisionCheck(r.sockOK).row() }},

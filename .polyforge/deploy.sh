@@ -18,8 +18,11 @@
 #
 # What it does: promote an already-released version onto the aihub docker
 # service. The release (release.sh) publishes the aihub image to the PRIVATE
-# GHCR repo ghcr.io/silgrid/aihub:<tag> plus the release assets
-# aihub-linux-amd64, pf-linux-amd64, aihub-image.digest, SHA256SUMS. This
+# GHCR repo ghcr.io/silgrid/aihub:<tag> plus the 8-asset release matrix
+# (polyforge#218: aihub/pf × linux-amd64, darwin-arm64, darwin-amd64,
+# aihub-image.digest, SHA256SUMS covering them all). The deployer consumes the
+# linux pair and the digest file; its checksum check verifies exactly those
+# (the darwin assets belong to work machines, tools/install.sh). This
 # script runs on the DEPLOYER machine (which holds the GitHub / GHCR
 # credentials), pulls that image, verifies it, and ships it to the server with
 # `docker save | ssh docker load`: the server never holds GitHub credentials
@@ -781,7 +784,11 @@ fetch_release() {
   if [ "$need" = 1 ] && [ ! -s "$fd/$ASSET_DIGEST" ]; then
     die "release $ft has no asset $ASSET_DIGEST - it was not published with a GHCR image; nothing to deploy"
   fi
-  (cd "$fd" && sha256sum -c SHA256SUMS) >"$WORK/sha.log" 2>&1 || die "sha256sum -c of release $ft failed: $(cat "$WORK/sha.log")"
+  # SHA256SUMS covers the full 8-asset matrix (the darwin binaries the
+  # deployer does not consume); verify exactly the downloaded set.
+  grep -E "[[:space:]]($ASSET_AIHUB|$ASSET_PF|$ASSET_DIGEST)\$" "$fd/SHA256SUMS" >"$fd/SHA256SUMS.deploy" \
+    || die "release $ft: SHA256SUMS does not cover $ASSET_AIHUB/$ASSET_PF/$ASSET_DIGEST"
+  (cd "$fd" && sha256sum -c SHA256SUMS.deploy) >"$WORK/sha.log" 2>&1 || die "sha256sum -c of release $ft failed: $(cat "$WORK/sha.log")"
   if [ -s "$fd/$ASSET_DIGEST" ]; then
     grep -q "[[:space:]]$ASSET_DIGEST\$" "$fd/SHA256SUMS" || die "release $ft: $ASSET_DIGEST is not covered by SHA256SUMS"
   fi

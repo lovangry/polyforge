@@ -661,8 +661,9 @@ func (d *Daemon) opsConfigRoute(w http.ResponseWriter, r *http.Request) {
 
 func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 	// Attribute the shutdown to the dialing process (polyforge#110):
-	// the UDS peer credential — the kernel's SO_PEERCRED record of who
-	// is on the other end, never anything from the request body
+	// the UDS peer credential — the kernel's peer-credential record
+	// (SO_PEERCRED on Linux, LOCAL_PEERCRED + LOCAL_PEERPID on darwin)
+	// of who is on the other end, never anything from the request body
 	// (caller-supplied; the CLI sends an empty object).
 	cause := "route: POST /shutdown uds peer credential unavailable"
 	if cred, ok := requestPeerCred(r.Context()); ok {
@@ -678,8 +679,9 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 // (v2-converge.md Appendix C(b)): the agent executing a work item
 // must never drive the daemon. Every request that is not a read (GET/HEAD —
 // status, watch snapshot, subscriptions stay open) is refused
-// DAEMON-403 when its UDS peer — the kernel's SO_PEERCRED record, never
-// anything from the request body — belongs to a step process tree of this
+// DAEMON-403 when its UDS peer — the kernel's peer-credential record
+// (peercred_linux.go / peercred_darwin.go), never anything from the
+// request body — belongs to a step process tree of this
 // daemon (runtime.StepProcessOrigin: the PF_WI_ID/PF_DAEMON_ID markers on
 // the peer, an ancestor or its process-group leader). A request whose peer
 // credential is unavailable is refused too: the guard fails closed. An

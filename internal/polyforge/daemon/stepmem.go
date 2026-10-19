@@ -19,8 +19,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
-	"strconv"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/api"
@@ -74,7 +72,7 @@ func (d *Daemon) peerStepOrigin(r *http.Request) (stepJob, string) {
 	if !ok {
 		return stepJob{}, notStep
 	}
-	chain := ancestry(cred.pid)
+	chain := runtime.AncestryOf(cred.pid)
 	var matches []stepJob
 	for _, ji := range d.rt.List() {
 		entries, _ := capsule.ReadSpawnJournal(ji.CapsuleDir)
@@ -98,29 +96,6 @@ func (d *Daemon) peerStepOrigin(r *http.Request) (stepJob, string) {
 		return stepJob{}, fmt.Sprintf("refused: the caller descends from the step process of %s but claims PF_WI_ID=%s", matches[0].wi, claimed)
 	}
 	return matches[0], ""
-}
-
-// ancestry answers pid, its ancestors and their process groups (procfs).
-func ancestry(pid int) map[int]bool {
-	out := map[int]bool{}
-	for i := 0; pid > 1 && i < 64; i++ {
-		out[pid] = true
-		raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
-		s := string(raw)
-		k := strings.LastIndex(s, ")")
-		if err != nil || k < 0 {
-			break
-		}
-		f := strings.Fields(s[k+1:]) // state ppid pgrp ...
-		if len(f) < 3 {
-			break
-		}
-		if pg, _ := strconv.Atoi(f[2]); pg > 1 {
-			out[pg] = true
-		}
-		pid, _ = strconv.Atoi(f[1])
-	}
-	return out
 }
 
 // stepSearchRoute forwards one search scoped to the caller's project.

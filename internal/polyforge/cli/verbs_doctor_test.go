@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -414,5 +415,70 @@ func TestDaemonEnvCheckPiModelsRefs(t *testing.T) {
 	c := daemonEnvCheck(true, []string{"HOME", "PATH"}, []string{"GOPATH", "OPENROUTER_API_KEY", "ZAI_KEY"})
 	if c.Status != "warn" || !strings.Contains(c.Detail, "$OPENROUTER_API_KEY, $ZAI_KEY") || strings.Contains(c.Detail, "$GOPATH") || !strings.Contains(c.Detail, "auth.json") {
 		t.Fatalf("pi models refs: %+v", c)
+	}
+}
+
+// ---- prerequisites (polyforge#218): the one warn-only row covering
+// gh, curl, python3, tmux and git. Warn-only: a gap makes the setup
+// path fail later with its own message; the doctor reports, never
+// installs, and never turns a healthy setup red.
+
+func TestPrerequisitesCheck(t *testing.T) {
+	everyone := func(string) (string, error) { return "/usr/bin/found", nil }
+	if c := prerequisitesCheck(everyone); c.Status != "pass" || !strings.Contains(c.Detail, "gh, curl, python3, tmux, git") {
+		t.Fatalf("complete PATH: %+v", c)
+	}
+	c := prerequisitesCheck(func(tool string) (string, error) {
+		if tool == "tmux" || tool == "python3" {
+			return "", exec.ErrNotFound
+		}
+		return "/usr/bin/" + tool, nil
+	})
+	if c.Status != "warn" {
+		t.Fatalf("missing tools must warn, never fail: %+v", c)
+	}
+	for _, frag := range []string{"tmux", "brew install tmux", "python3", "xcode-select --install", "the doctor never installs anything"} {
+		if !strings.Contains(c.Detail, frag) {
+			t.Fatalf("warn detail lacks %q: %+v", frag, c)
+		}
+	}
+	if strings.Contains(c.Detail, "gh") && !strings.Contains(c.Detail, "gh —") {
+		t.Fatalf("present tools must not be named: %+v", c)
+	}
+}
+
+// the full doctor: the "prerequisites" row passes on a PATH-complete
+// profile and warns (never fails) when a tool is off PATH.
+func TestDoctorPrerequisitesRow(t *testing.T) {
+	env := doctorServerConfig(t, "http://aihub.invalid:1", "k", "")
+	dir := t.TempDir()
+	for _, tool := range []string{"gh", "curl", "python3", "tmux", "git"} {
+		if err := os.WriteFile(filepath.Join(dir, tool), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	full := map[string]string{}
+	for k, v := range env {
+		full[k] = v
+	}
+	full["PATH"] = dir
+	code, _, doc := doctorStatus(t, full, "--json", "doctor")
+	st, detail := doctorFind(t, doc, "prerequisites")
+	if st != "pass" {
+		t.Fatalf("prerequisites on a PATH-complete profile: %q (code %d, doc %+v)", st, code, doc)
+	}
+	missingPath := t.TempDir() // none of the five anywhere on this PATH
+	bare := map[string]string{}
+	for k, v := range env {
+		bare[k] = v
+	}
+	bare["PATH"] = missingPath
+	_, _, doc = doctorStatus(t, bare, "--json", "doctor")
+	st, detail = doctorFind(t, doc, "prerequisites")
+	if st != "warn" {
+		t.Fatalf("prerequisites without any setup tool: %q (%q)", st, detail)
+	}
+	if !strings.Contains(detail, "gh — macOS: brew install gh") {
+		t.Fatalf("warn detail must say what to obtain: %q", detail)
 	}
 }

@@ -15,7 +15,7 @@ import (
 )
 
 // doctor_layout.go: the install-layout half of the harness family plus
-// the daemon supervision check.
+// the daemon supervision and prerequisites checks.
 //
 //   - pi / claude install layout: pi references the local release
 //     checkout (<data-dir>/release/current) as a package, and
@@ -29,6 +29,11 @@ import (
 //   - daemon supervision: a live daemon under the tmux restart loop (or
 //     an active systemd unit) passes, an unsupervised one warns with the
 //     fix; a dead daemon is the "daemon socket" fail.
+//   - prerequisites: the five tools the setup path needs (gh, curl,
+//     python3, tmux, git) reported by LookPath — MISSING ones are named
+//     with what to obtain; the check is warn-only (never fails, installs
+//     nothing), so a host with every daemon check green is not made
+//     "failing" by an absent developer tool.
 //
 // Like the display checks these never fail: pass, warn or skip.
 
@@ -38,6 +43,38 @@ const (
 	docChV1Leftovers  = "v1 harness leftovers"
 	docChSupervision  = "daemon supervision"
 )
+
+// prerequisiteHints is the one place stating what a missing setup tool
+// is obtained from, per OS (macOS line first — the darwin hosts are new
+// territory).
+var prerequisiteHints = map[string]string{
+	"gh":      "macOS: brew install gh   |  Linux: apt install gh   (then: gh auth login)",
+	"curl":    "macOS: xcode-select --install  |  Linux: apt install curl",
+	"python3": "macOS: xcode-select --install  |  Linux: apt install python3",
+	"tmux":    "macOS: brew install tmux  |  Linux: apt install tmux",
+	"git":     "macOS: xcode-select --install  |  Linux: apt install git",
+}
+
+// prerequisiteOrder keeps the report's tool list stable.
+var prerequisiteOrder = []string{"gh", "curl", "python3", "tmux", "git"}
+
+// prerequisitesCheck reports the five setup tools' presence on PATH —
+// warn-only: every missing one is named with what to obtain, never a
+// fail, and the doctor never installs anything.
+func prerequisitesCheck(lookPath func(string) (string, error)) doctorCheck {
+	var missing []string
+	for _, tool := range prerequisiteOrder {
+		if _, err := lookPath(tool); err != nil {
+			missing = append(missing, tool+" — "+prerequisiteHints[tool])
+		}
+	}
+	if len(missing) == 0 {
+		return doctorCheck{Name: docChPrereqs, Status: "pass",
+			Detail: "all five setup tools on PATH: " + strings.Join(prerequisiteOrder, ", ")}
+	}
+	return doctorCheck{Name: docChPrereqs, Status: "warn",
+		Detail: "missing (checked and reported; the doctor never installs anything): " + strings.Join(missing, "; ")}
+}
 
 // v1ClaudeSkills are the v1 Claude Code skills (archive/00-architecture.md §11.1).
 var v1ClaudeSkills = []string{

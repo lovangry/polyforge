@@ -5,8 +5,9 @@ package runtime
 // Step agents are untrusted, and they can reach the daemon's UDS face:
 // in #122 a grill-review agent answered its own human question through
 // `pf answer` and the workflow moved on. The daemon therefore refuses an
-// answer whose UDS peer (SO_PEERCRED pid) belongs to a step process
-// tree. Membership is read from procfs with the markers every step
+// answer whose UDS peer (the peer credential's pid) belongs to a step
+// process tree. Membership is read through the runtime proc seam
+// (procfs on Linux, sysctls on darwin) with the markers every step
 // process is spawned with (PF_WI_ID + PF_DAEMON_ID, the same markers the
 // layer-4 cleanup sweep keys on): a process carries them itself, or one
 // of its ancestors does (an `env -u` exec still has a marked parent), or
@@ -16,19 +17,16 @@ package runtime
 // (setsid) AND cleared its environment is outside this check.
 
 import (
-	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 )
 
-// maxAncestry bounds the parent walk (a cycle cannot occur in procfs,
-// but a racing reparent must not loop forever).
+// maxAncestry bounds the parent walk (a cycle cannot occur in the
+// process table, but a racing reparent must not loop forever).
 const maxAncestry = 64
 
 // StepProcessOrigin reports whether pid belongs to a step process tree of
 // the daemon whose machine id is daemonID, and the PF_WI_ID of the step
-// it belongs to. Unreadable procfs entries (another uid, an exit race)
+// it belongs to. Unreadable process entries (another uid, an exit race)
 // are skipped: the walk answers from what it can read.
 func StepProcessOrigin(pid int, daemonID string) (wi string, ok bool) {
 	seenGroups := map[int64]bool{}
@@ -52,16 +50,17 @@ func StepProcessOrigin(pid int, daemonID string) (wi string, ok bool) {
 	return "", false
 }
 
-// stepMarkers reads /proc/<pid>/environ: a step process of this daemon
-// carries PF_DAEMON_ID=<daemonID> and a non-empty PF_WI_ID.
+// stepMarkers reads the process's environment via the proc seam: a step
+// process of this daemon carries PF_DAEMON_ID=<daemonID> and a non-empty
+// PF_WI_ID.
 func stepMarkers(pid int, daemonID string) (string, bool) {
-	raw, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "environ"))
+	envs, err := procEnviron(pid)
 	if err != nil {
 		return "", false
 	}
 	var wi string
 	var ours bool
-	for _, kv := range strings.Split(string(raw), "\x00") {
+	for _, kv := range envs {
 		switch {
 		case strings.HasPrefix(kv, "PF_WI_ID="):
 			wi = strings.TrimPrefix(kv, "PF_WI_ID=")
