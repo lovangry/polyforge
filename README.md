@@ -4,6 +4,24 @@ Work-item orchestration platform: an aihub server (WI store, memory, git
 revision chain) and a pf work-machine binary (CLI + daemon with the Go
 execution driver).
 
+## Platform support (polyforge#218)
+
+- **Linux x86_64 is the reference platform** — the aihub docker image stays
+  linux/amd64-only and production deploys through `deploy.sh` on Linux hosts.
+- **macOS (Darwin) arm64 and amd64 are supported as work machines and as a
+  single machine — cross-built; hardware verification pending**: releases
+  ship `pf` and `aihub` darwin binaries, the daemon is supervised by tmux on
+  the same single code path as on Linux, and `pf doctor`'s check set runs
+  unchanged, plus one additive warn-only `prerequisites` row that reports
+  missing tools. The qualifier is the docs claiming no more than the
+  evidence shows: the darwin binaries are cross-built (the darwin
+  cross-build gate runs everywhere) and every darwin-runtime proof on real
+  Mac hardware is deferred to a follow-up — this lane's evidence is code
+  reading, the cross-build gate and the Linux test bar; the follow-up's
+  hardware run removes the qualifier. macOS is not a CI platform.
+- WSL2 is treated as Linux.
+- Native Windows is out of scope (not supported).
+
 ## Install (team machines — read this first)
 
 One line, any machine, any harness (or none). Ask the admin for a personal
@@ -17,6 +35,23 @@ curl -s -H "Authorization: token $(gh auth token)" \
 
 (requires `gh` authenticated — the repo is private. Override the
 server host with `PF_HOST=<host>` if it ever moves.)
+
+**macOS notes.** The installer picks this machine's own pf asset from
+`uname` (darwin-arm64 or darwin-amd64; no `uname`-detectable cross-pick —
+the same one line works on either Mac). It CHECKS and REPORTS its
+prerequisites — `gh`, `curl`, `python3`, `git` — and never installs them:
+point each missing tool at `brew install` / `xcode-select --install` (the
+refusal is printed before anything on the machine is touched). The
+downloaded binary is SHA-verified with `shasum -a 256` when `sha256sum` is
+absent (macOS ships `shasum`). The binary default install path is
+`/usr/local/bin` — override with `PF_BIN=…` on a macOS without sudo — and
+`PF_HOST` decides what the config points at; for a machine running its own
+aihub use `PF_HOST=127.0.0.1` (the step's second argument too). tmux is the
+daemon's supervision: without it `pf daemon ensure` still starts the daemon,
+unsupervised with a WARNING (`pf doctor`'s "daemon supervision" row says so).
+A Mac that only ever talks to the central Linux aihub stays exactly where the
+bare one-liner above lands it; the single-machine form is the Quickstart
+below.
 
 It installs the `pf` binary (downloaded from the GitHub Release with `gh release download` and checked against its `SHA256SUMS`), writes
 `~/.config/polyforge/cli.toml` (never rewritten), and keeps its own checkout
@@ -206,6 +241,102 @@ bin/pf --config /tmp/pf-quickstart/cli.toml ops shutdown
 kill <AIHUB_PID>
 ```
 
+## Quickstart (macOS — one Mac as one machine: local aihub + pf + daemon + lane)
+
+Everything below uses existing commands only — the macOS-native aihub
+asset from the release, the same CLI verbs, and `tools/install.sh` (a
+port conflict beware: aihub here keeps the standard port 8080 so the
+installer's config matches; use another port only if 8080 is taken —
+both sides, consistently).
+
+**1. Download both native darwin assets from the current release** —
+`aihub-darwin-arm64` (or `-amd64` on an Intel Mac) and `pf-darwin-*`:
+
+```
+VER=$(gh release view --repo silgrid/polyforge --json tagName -q .tagName)
+gh release download "$VER" --repo silgrid/polyforge --pattern 'aihub-darwin-*' --pattern 'pf-darwin-*' \
+  --dir /tmp/pf-quickstart/bin
+chmod +x /tmp/pf-quickstart/bin/*
+mkdir -p /tmp/pf-quickstart/aihub-data
+```
+
+**2. Start the local aihub and keep it alive.** The keep-alive is a HAND-RUN
+tmux restart loop — you start it, and after a reboot you start it again
+by hand; nothing in pf starts, restarts or supervises aihub:
+
+```
+tmux new-session -d -s aihub 'while :; do \
+  /tmp/pf-quickstart/bin/aihub-darwin-arm64 --data-dir /tmp/pf-quickstart/aihub-data \
+  --listen 127.0.0.1:8080 >> /tmp/pf-quickstart/aihub.log 2>&1; sleep 5; done'
+```
+
+On first start over an empty data dir, aihub seeds a bootstrap admin
+(`usr_root`) and writes `<data-dir>/bootstrap-admin.key` (mode 0600; the
+log names the file, never the key). Copy the key, then DELETE the file —
+the key is not stored anywhere else:
+
+```
+cat /tmp/pf-quickstart/aihub-data/bootstrap-admin.key   # copy it, then delete the file
+rm /tmp/pf-quickstart/aihub-data/bootstrap-admin.key
+```
+
+**3. Create the project and a machine identity** with the downloaded pf,
+pointed at the local aihub with the bootstrap key (every connection entry
+is also a per-command flag). The machine user's API key is the daemon's
+credential; its plaintext is shown exactly once. The last command grants
+the machine user the maintainer role on demo — aihub's first-heartbeat
+machine registration admits only an admin or a project maintainer, so
+without the grant the daemon's heartbeat can never register this machine:
+
+```
+PF=/tmp/pf-quickstart/bin/pf-darwin-arm64
+$PF --server http://127.0.0.1:8080 --api-key "<BOOTSTRAP_KEY>" projects create --name demo
+$PF --server http://127.0.0.1:8080 --api-key "<BOOTSTRAP_KEY>" users create --display-name smoke-machine --user-type machine
+$PF --server http://127.0.0.1:8080 --api-key "<BOOTSTRAP_KEY>" api-keys create --user <MACHINE_USER_ID>
+$PF --server http://127.0.0.1:8080 --api-key "<BOOTSTRAP_KEY>" projects members add demo --user <MACHINE_USER_ID> --role maintainer
+```
+
+**4. Install pf the ordinary way, against your own local aihub** — the
+key argument is the MACHINE key just created, the host argument
+`127.0.0.1` makes the config point at this Mac's aihub (single-machine
+form):
+
+```
+curl -s -H "Authorization: token $(gh auth token)" \
+  https://raw.githubusercontent.com/silgrid/polyforge/main/tools/install.sh \
+  | bash -s -- <MACHINE_KEY> 127.0.0.1
+```
+
+**5. Add the `[workspace]` mapping to your config** — the daemon refuses
+to start without one (polyforge#113): the installer creates the config
+at `~/.config/polyforge/cli.toml` but the mapping below is what makes
+`pf daemon ensure` startable; the mapped directory must pre-exist:
+
+```
+mkdir -p "$HOME/polyforge-workspace"
+cat >> ~/.config/polyforge/cli.toml <<EOF
+
+[workspace."$HOME/polyforge-workspace"]
+projects = ["demo"]
+EOF
+```
+
+**6. Start the daemon** — the tmux session `polyforge-daemon` supervises
+it (the same single supervision path as on Linux):
+
+```
+pf daemon ensure      # starts the daemon; tmux session polyforge-daemon supervises it
+```
+
+The daemon's first heartbeat registers this machine — because its key's
+user is a maintainer of demo (the grant of step 3): machine registration
+requires an admin or a project maintainer, and a registration failure
+shows in `~/.local/share/polyforge/daemon.log`. Then continue with the
+from-zero smoke run above from step **5. File a minimal smoke work item** —
+drop the `bin/` prefix (pf is installed) and the `--config` flags (your
+config lives at `~/.config/polyforge/cli.toml`; same verbs). File →
+submit → watch → wrap; `pf doctor` at any point.
+
 ## Architecture
 
 Current-system reference: `docs/design/polyforge-vnext/reference.md` (one
@@ -345,9 +476,12 @@ deploy lock, backups, the upgrade-SQL switch window, automatic rollback and the
 machine preconditions: read the header comments of
 [.polyforge/release.sh](.polyforge/release.sh) and
 [.polyforge/deploy.sh](.polyforge/deploy.sh). In short:
-`release.sh` (vX.Y.Z, default bump `minor`) publishes `aihub-linux-amd64`,
-`pf-linux-amd64`, `aihub-image.digest`, `SHA256SUMS` and
-`ghcr.io/silgrid/aihub:<tag>`; `deploy.sh` promotes that image onto the aihub
+`release.sh` (vX.Y.Z, default bump `minor`) publishes the 8-asset matrix —
+`aihub-linux-amd64`, `pf-linux-amd64`, `aihub-darwin-arm64`,
+`pf-darwin-arm64`, `aihub-darwin-amd64`, `pf-darwin-amd64`,
+`aihub-image.digest`, `SHA256SUMS` (covering all seven files) — and
+`ghcr.io/silgrid/aihub:<tag>` (the image stays linux/amd64-only);
+`deploy.sh` promotes that image onto the aihub
 service host with seconds of downtime (no startup auto-migration, see
 [docs/upgrade.md](docs/upgrade.md)). Deploying a work machine is re-running
 `tools/install.sh`.
@@ -363,9 +497,9 @@ service host with seconds of downtime (no startup auto-migration, see
                mono-repo git tag (single semver per tag)
                               |
                               v
-        GitHub release: aihub-linux-amd64, pf-linux-amd64,
-        aihub-image.digest, SHA256SUMS  +  ghcr.io image <tag>
-                              |
+     GitHub release: aihub/pf linux-amd64 + darwin-arm64 +
+     darwin-amd64, aihub-image.digest, SHA256SUMS
+                              |  +  ghcr.io image <tag> (linux/amd64)
                               v
  DEPLOYMENT: `deploy.sh` for the aihub host; re-run `tools/install.sh` on work machines
  +-----------------------------------------------------------+
