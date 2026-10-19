@@ -61,6 +61,17 @@ func TestCandidatePointer(t *testing.T) {
 		{"rewind archive still resets",
 			[]capsule.Attempt{prov(), capsule.Attempt{Cause: CauseGateFailRewind, FailureCause: FailExitModel}, prov()},
 			[]string{"m1", "m2"}, 1},
+		// polyforge#222: the light rewind archive resets like every rewind
+		// archive — a light rewind never burns a candidate (INV-1g).
+		{"light rewind resets the count",
+			[]capsule.Attempt{prov(), prov(), {Cause: CauseGateFailRewindTextOnly, RewindGate: "review"}, prov()},
+			[]string{"m1", "m2", "m3"}, 1},
+		{"light rewind to head with no later failures",
+			[]capsule.Attempt{prov(), prov(), {Cause: CauseGateFailRewindTextOnly}},
+			[]string{"m1", "m2"}, 0},
+		{"light rewind archive still resets",
+			[]capsule.Attempt{prov(), capsule.Attempt{Cause: CauseGateFailRewindTextOnly, FailureCause: FailExitModel}, prov()},
+			[]string{"m1", "m2"}, 1},
 	}
 	for _, tc := range cases {
 		got := CandidatePointer(tc.attempts, tc.candidates)
