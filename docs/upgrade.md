@@ -785,7 +785,7 @@ examples below keep today's behaviour and show that alternative as a
 comment). Keep each file's header comment but drop any `harness`
 wording.
 
-osp-ws (`/root/code/aicoding/osp-ws/.polyforge.yaml`):
+osp-ws (`<osp-workspace>/.polyforge.yaml`):
 
 ```yaml
 steps:
@@ -820,7 +820,7 @@ bare `claude-opus-5-5` was being skipped there — write the list that
 bundle step should really walk. The bundle itself must also be
 rewritten: no `harness` key, prefixed `model_candidates`.)
 
-gmi-ws (`/root/code/aicoding/gmi-ws/.polyforge.yaml`):
+gmi-ws (`<gmi-workspace>/.polyforge.yaml`):
 
 ```yaml
 steps:
@@ -839,7 +839,7 @@ steps:
       models: [pi:sub2api-glm/glm-5.3]
 ```
 
-yf-ws (`/root/code/aicoding/yf-ws/.polyforge.yaml`):
+yf-ws (`<yf-workspace>/.polyforge.yaml`):
 
 ```yaml
 steps:

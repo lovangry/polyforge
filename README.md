@@ -30,11 +30,15 @@ API key (`pf_k1_…`), then:
 ```
 curl -s -H "Authorization: token $(gh auth token)" \
   https://raw.githubusercontent.com/silgrid/polyforge/main/tools/install.sh \
-  | bash -s -- <your-api-key>
+  | bash -s -- <your-api-key> <server-host>
 ```
 
-(requires `gh` authenticated — the repo is private. Override the
-server host with `PF_HOST=<host>` if it ever moves.)
+(requires `gh` authenticated — the repo is private. `<server-host>` is the
+aihub host the admin gives you, as the second argument or `PF_HOST=<host>`;
+there is no built-in default. It is required for a first install — the run
+that writes `~/.config/polyforge/cli.toml`, refused before anything changes
+without it — and optional on an upgrade: a machine whose config already
+carries an `api_key` re-runs the line with `<your-api-key>` alone.)
 
 **macOS notes.** The installer picks this machine's own pf asset from
 `uname` (darwin-arm64 or darwin-amd64; no `uname`-detectable cross-pick —
@@ -45,8 +49,8 @@ refusal is printed before anything on the machine is touched). The
 downloaded binary is SHA-verified with `shasum -a 256` when `sha256sum` is
 absent (macOS ships `shasum`). The binary default install path is
 `/usr/local/bin` — override with `PF_BIN=…` on a macOS without sudo — and
-`PF_HOST` decides what the config points at; for a machine running its own
-aihub use `PF_HOST=127.0.0.1` (the step's second argument too). tmux is the
+the host (second argument or `PF_HOST`) decides what a new config points at;
+for a machine running its own aihub use `127.0.0.1`. tmux is the
 daemon's supervision: without it `pf daemon ensure` still starts the daemon,
 unsupervised with a WARNING (`pf doctor`'s "daemon supervision" row says so).
 A Mac that only ever talks to the central Linux aihub stays exactly where the

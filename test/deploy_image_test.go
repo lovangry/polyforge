@@ -275,6 +275,7 @@ c.commit()`
 		"HOME="+filepath.Join(w, "home"), "DOCKER_CONFIG="+filepath.Join(w, "home", ".docker"),
 		"AIHUB_HOST=fakehost", "AIHUB_DATA="+data,
 		"BACKUP_ROOT="+filepath.Join(w, "backups"), "DEPLOY_LOCK_FILE="+filepath.Join(w, "srv", "deploy.lock"), "COMPOSE_FILE="+compose,
+		"COMPOSE_PROJECT=aihub-app",
 		"WAIT_SECS=4", "POLL_SECS=1", "UP_WAIT_SECS=5")
 	return d
 }

@@ -656,3 +656,110 @@ func TestDeployConsistencyDBOnlyMemories(t *testing.T) {
 		t.Errorf("the service was stopped although step 4 refused:\n%s", d.logOf("log-docker"))
 	}
 }
+
+// deployRequiredVars are the five variables deploy.sh has no default for
+// (polyforge#212: the deployment's topology is operator-owned, not in the repo).
+var deployRequiredVars = []string{"AIHUB_HOST", "AIHUB_DATA", "COMPOSE_FILE", "COMPOSE_PROJECT", "DEPLOY_LOCK_FILE"}
+
+// withoutEnv answers env minus every entry setting one of names.
+func withoutEnv(env []string, names ...string) []string {
+	var keep []string
+	for _, kv := range env {
+		drop := false
+		for _, n := range names {
+			if strings.HasPrefix(kv, n+"=") {
+				drop = true
+			}
+		}
+		if !drop {
+			keep = append(keep, kv)
+		}
+	}
+	return keep
+}
+
+// envValue answers the value env sets for name ("" if none).
+func envValue(env []string, name string) string {
+	v := ""
+	for _, kv := range env {
+		if strings.HasPrefix(kv, name+"=") {
+			v = strings.TrimPrefix(kv, name+"=")
+		}
+	}
+	return v
+}
+
+// TestDeployRefusesMissingRequiredVars (polyforge#212): with any of the five
+// required variables unset (no env, no deploy.env), a real run AND a dry-run
+// are a usage error (exit 2) naming exactly the missing variables - never a
+// value - before any ssh / gh / docker work. Before #212 they had built-in
+// defaults (the private production topology) and the run went ahead.
+func TestDeployRefusesMissingRequiredVars(t *testing.T) {
+	cases := map[string]struct {
+		args    []string
+		missing []string
+	}{
+		"real-all":        {[]string{"v2.3.0", "--confirm", "v2.3.0"}, deployRequiredVars},
+		"dry-all":         {[]string{"v2.3.0", "--dry-run"}, deployRequiredVars},
+		"dry-one-missing": {[]string{"v2.3.0", "--dry-run"}, []string{"COMPOSE_PROJECT"}},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			d := newReadyWorld(t)
+			full := d.env
+			d.env = withoutEnv(d.env, c.missing...)
+			out, err := d.run("", c.args...)
+			if exitCode(err) != 2 {
+				t.Fatalf("want exit 2 (usage error) for missing %v, got %v\n%s", c.missing, err, out)
+			}
+			for _, v := range deployRequiredVars {
+				missing := false
+				for _, m := range c.missing {
+					missing = missing || m == v
+				}
+				if missing != strings.Contains(out, v) {
+					t.Errorf("the refusal must name exactly the missing variables %v (%s named=%v)\n%s", c.missing, v, !missing, out)
+				}
+				if val := envValue(full, v); !missing && strings.Contains(out, val) {
+					t.Errorf("the refusal must not print values (%s=%s)\n%s", v, val, out)
+				}
+			}
+			if !strings.Contains(out, ".config/polyforge/deploy.env") {
+				t.Errorf("the refusal must point at the env file\n%s", out)
+			}
+			if got := d.logOf("log-ssh") + d.logOf("log-gh") + d.logOf("log-docker"); got != "" {
+				t.Errorf("network/tool work happened before the refusal:\n%s", got)
+			}
+			d.assertNothingMutated("v2.2.1")
+		})
+	}
+}
+
+// TestDeployEnvFileReadEnvWins (polyforge#212): deploy.sh reads
+// $HOME/.config/polyforge/deploy.env when it exists, and a variable the
+// environment already set wins over the file. The file supplies four of the
+// five required values and a WRONG COMPOSE_FILE; the environment supplies
+// only the right COMPOSE_FILE: the dry-run passes its read-only preflight
+// (which checks the compose file on the server) only if both hold.
+func TestDeployEnvFileReadEnvWins(t *testing.T) {
+	d := newReadyWorld(t)
+	var file strings.Builder
+	file.WriteString("# operator-owned deploy topology\n")
+	for _, v := range deployRequiredVars {
+		if v == "COMPOSE_FILE" {
+			file.WriteString("COMPOSE_FILE=" + filepath.Join(d.w, "no-such", "docker-compose.yml") + "\n")
+			continue
+		}
+		file.WriteString(v + "=" + envValue(d.env, v) + "\n")
+	}
+	wf(t, filepath.Join(envValue(d.env, "HOME"), ".config", "polyforge", "deploy.env"), file.String(), 0o600)
+	d.env = withoutEnv(d.env, "AIHUB_HOST", "AIHUB_DATA", "COMPOSE_PROJECT", "DEPLOY_LOCK_FILE")
+	out, err := d.run("", "v2.3.0", "--dry-run")
+	if err != nil || !strings.Contains(out, "dry-run: steps 0-1 ran read-only") {
+		t.Fatalf("the dry-run must take the four values from deploy.env and COMPOSE_FILE from the environment: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "no-such") {
+		t.Errorf("the file's COMPOSE_FILE was used although the environment set it\n%s", out)
+	}
+	d.assertNothingMutated("v2.2.1")
+}
