@@ -140,8 +140,14 @@ func TestClaudeConfigFacts(t *testing.T) {
 	// torn JSON: no facts, a decode warning (never a value)
 	write("{not json")
 	facts, _, warn = factsProbe(root)
-	if len(facts) != 0 || warn == "" || !strings.Contains(warn, "does not parse") {
+	if len(facts) != 0 || warn == "" || !strings.Contains(warn, "does not parse") || !strings.Contains(warn, "refused") {
 		t.Fatalf("torn facts %v %q", facts, warn)
+	}
+	// no `env` key: the same refusal the claude spawner gives (polyforge#223)
+	write(`{"model":"x"}`)
+	facts, _, warn = factsProbe(root)
+	if len(facts) != 0 || !strings.Contains(warn, "no `env` key") || !strings.Contains(warn, "refused") {
+		t.Fatalf("env-less facts %v %q", facts, warn)
 	}
 
 	// a set credential still never lands in any rendered fact
