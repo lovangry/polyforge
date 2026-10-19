@@ -440,18 +440,9 @@ func scanEnvMarker(wi, daemonID string) []int {
 }
 
 // cwdScan reports (never kills) live processes whose cwd sits inside the
-// capsule — an operator shell must survive the cleanup. The probe on
-// our own pid guards against a platform with no cwd primitive: if even
-// our own cwd cannot be read, the layer reports one visible warning
-// naming it unavailable (never silently skipped) and stays
-// warnings-only.
+// capsule — an operator shell must survive the cleanup.
 func cwdScan(t CleanupTarget, rep *CleanupReport) {
 	if t.CapsuleDir == "" {
-		return
-	}
-	if _, err := procCwd(os.Getpid()); err != nil {
-		rep.Warnings = append(rep.Warnings,
-			fmt.Sprintf("layer 5: process cwd cannot be read on this OS (%v); the capsule-cwd scan is unavailable — reported, not silently skipped", err))
 		return
 	}
 	self := os.Getpid()

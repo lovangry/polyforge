@@ -1,6 +1,8 @@
 package daemon
 
-// peercred.go: SO_PEERCRED plumbing for the daemon's UDS face
+// peercred.go: the shared half of the daemon's UDS peer-credential read
+// (the per-OS getsockopt halves live in peercred_linux.go /
+// peercred_darwin.go)
 // (polyforge#110). The v1 daemon lost the v0 capability
 // (v0/internal/daemon/api.go in git history, reference.md §6.1): with a bare net.Listen served
 // by &http.Server{Handler: ...} there is no ConnContext hook and no
@@ -17,8 +19,8 @@ import (
 	"net"
 )
 
-// peerCred is the SO_PEERCRED credential of the process on the other
-// end of an accepted UDS conn.
+// peerCred is the peer credential (pid + effective uid) of the process
+// on the other end of an accepted UDS conn.
 type peerCred struct {
 	pid int
 	uid int
@@ -37,7 +39,8 @@ type credConn struct {
 
 // credListener wraps the UDS listener and reads each accepted conn's
 // peer credential at accept time. The credential is read with
-// SyscallConn().Control + GetsockoptUcred — NEVER uc.File()/Fd(): a
+// SyscallConn().Control + the per-OS getsockopt (peercred_linux.go /
+// peercred_darwin.go) — NEVER uc.File()/Fd(): a
 // dup'd fd shares the open file description, and File/Fd deliberately
 // return a BLOCKING descriptor, so that dance cleared O_NONBLOCK on
 // the SHARED description — flipping the accepted conn into
