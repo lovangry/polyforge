@@ -191,6 +191,8 @@ bundle 引用只有 `bundle_name` 一个 scalar（polyforge#149 B9 删除了整�
 6. 触发 FAIL 的 gate 自身不归档、保持 `in_progress`，以 fresh 形态重入，累计 T 归零（`v2-converge.md#§2.4`）。
 7. 从 target 继续 §6.1。
 
+**轻量回退（polyforge#222，上述序列的一个子形态）**：`review` gate 的 FAIL 且其记录的 blocking findings（至少一条）全部带 `text_only: true` 时，同一次原子写入走轻量路径——上界先查、槽位照耗（第 2、3 条不变），target 归档为 `cause: gate_fail_rewind_text_only`，判定全文随轻量重入说明（`pending_rewind_input` 的 `Note`）送达 target，并写入 `supervision.next_dispatch: resume`：target 的再派发恢复其上一次会话（同 harness、同会话身份）而非全量重推导；恢复不可能（异 harness、原生会话/transcript 已不存在）时降级为今天的 fresh+只读参考回退，同一槽位内、spawn journal 记录 `resume: false`。轻量重入的 completed 结果可带 `needs_code_change: true`（结构性修复的自报；无轻量上下文或非布尔值即拒收）：同一次写入把 target 按 `gate_fail_rewind` 归档、重置 pending、把同一份 FAIL 判定作为 fresh 重入的输入送达，不再计槽位（分类错误不重复计费）。gate 自身仍以 fresh 重入（第 6 条不变）。
+
 **候选指针在 rewind 中重置**（INV-1g）：被重置的 step 重跑从候选列表第 1 项开始；gate FAIL 的任何路径都不切换候选。上界可在 frontmatter 配置（≤0 的值回落为缺省 4 / 2，无法用 0 关闭 rewind），达到即终止，没有"人工授权后继续"的第三条路径——后续只能是 WI 层面的决定（`pf cancel` 后另开 WI）。
 
 ### 6.3 基础设施失败 → 当前 step 原地重试（按死因有界切换候选） <!-- §6.3 -->
