@@ -30,11 +30,15 @@ API key (`pf_k1_…`), then:
 ```
 curl -s -H "Authorization: token $(gh auth token)" \
   https://raw.githubusercontent.com/silgrid/polyforge/main/tools/install.sh \
-  | bash -s -- <your-api-key>
+  | bash -s -- <your-api-key> <server-host>
 ```
 
-(requires `gh` authenticated — the repo is private. Override the
-server host with `PF_HOST=<host>` if it ever moves.)
+(requires `gh` authenticated — the repo is private. `<server-host>` is the
+aihub host the admin gives you, as the second argument or `PF_HOST=<host>`;
+there is no built-in default. It is required for a first install — the run
+that writes `~/.config/polyforge/cli.toml`, refused before anything changes
+without it — and optional on an upgrade: a machine whose config already
+carries an `api_key` re-runs the line with `<your-api-key>` alone.)
 
 **macOS notes.** The installer picks this machine's own pf asset from
 `uname` (darwin-arm64 or darwin-amd64; no `uname`-detectable cross-pick —
@@ -45,8 +49,8 @@ refusal is printed before anything on the machine is touched). The
 downloaded binary is SHA-verified with `shasum -a 256` when `sha256sum` is
 absent (macOS ships `shasum`). The binary default install path is
 `/usr/local/bin` — override with `PF_BIN=…` on a macOS without sudo — and
-`PF_HOST` decides what the config points at; for a machine running its own
-aihub use `PF_HOST=127.0.0.1` (the step's second argument too). tmux is the
+the host (second argument or `PF_HOST`) decides what a new config points at;
+for a machine running its own aihub use `127.0.0.1`. tmux is the
 daemon's supervision: without it `pf daemon ensure` still starts the daemon,
 unsupervised with a WARNING (`pf doctor`'s "daemon supervision" row says so).
 A Mac that only ever talks to the central Linux aihub stays exactly where the
@@ -676,7 +680,7 @@ resolved (stderr, a `retired_env_ignored` event, `env_warnings` in
 | `--machine-id ID` | ensure (recorded id, else `m-<short hostname>`) | `m-<short hostname>` | Machine identity claims and leases are recorded under; recorded in `<data-dir>/daemon-id` on first start, after which that file wins (a differing value refuses to start). |
 | `--data-dir DIR` | ensure (`POLYFORGE_DATA_DIR`) | `~/.local/share/polyforge` | Daemon state, the per-work-item events files and the capsules' external git dirs. |
 | `--workflows-dir DIR` | ensure | `./workflows` | Workflow-bundle checkout the in-process Go driver loads step definitions from (`pf daemon ensure` passes `<data-dir>/release/current/workflows`). |
-| `--claude-bin PATH` | `claude_bin` | `claude` | Claude Code binary for steps whose harness is `claude` (run as `claude -p --bare`). The daemon never manages its credentials: the `<harness-root>/claude-config/settings.json` env block is the authority layer. |
+| `--claude-bin PATH` | `claude_bin` | `claude` | Claude Code binary for steps whose harness is `claude` (run as `claude -p --bare` when the claude-config settings.json env block carries a non-empty `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY`, else `claude -p --safe-mode` for an OAuth login). The daemon never manages its credentials: the `<harness-root>/claude-config/settings.json` env block is the authority layer. |
 | `--operator-agent-dir DIR` | `[daemon] operator_agent_dir` | `~/.pi/agent` | SOURCE of the dedicated step agent dir — a credential surface: the daemon copies the minimal set (`auth.json`, `models.json`, `agents/`, `extensions/subagent/`) from here into `<harness-root>/step-agent`, and every pi step runs against that copy — the operator's own packages and settings never reach a step. A configured source without a readable `auth.json` refuses the start. |
 | `--harness-root DIR` | `[daemon] harness_root` | `<data-dir>` | Parent root of the step harness dirs: `<DIR>/step-agent` (dedicated agent dir), `/step-agent-sessions` (pi sessions) and `/claude-config` (claude config dir; its settings.json env block is the credential authority layer). The former `--harness-sessions-root` was renamed — old deployments fail loudly at startup. |
 | `--max-concurrent-jobs N` | `[daemon] max_concurrent_jobs` | `4` | Configured cap on concurrently running jobs; `pf ops max N` overrides it until the daemon restarts (see above). |

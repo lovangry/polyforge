@@ -19,7 +19,7 @@
 # Claude Code fires SessionStart on startup, resume, clear and compact.
 #
 # Step agents never get here: the daemon runs claude steps with --bare
-# (no hooks), and a process carrying the step marker PF_WI_ID exits at
+# or --safe-mode (either skips hooks), and a process carrying the step marker PF_WI_ID exits at
 # once as a second fence.
 
 [ -n "${PF_WI_ID:-}" ] && exit 0

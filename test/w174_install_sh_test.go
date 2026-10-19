@@ -175,9 +175,15 @@ exec %[2]s "$@"
 // run executes tools/install.sh once; answers (output, exit code).
 func (in *w174Install) run(t *testing.T) (string, int) {
 	t.Helper()
+	return in.runArgs(t, "w174key", "127.0.0.1")
+}
+
+// runArgs executes tools/install.sh once with the given arguments.
+func (in *w174Install) runArgs(t *testing.T, args ...string) (string, int) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", filepath.Join(v1Root(t), "tools", "install.sh"), "w174key", "127.0.0.1")
+	cmd := exec.CommandContext(ctx, "sh", append([]string{filepath.Join(v1Root(t), "tools", "install.sh")}, args...)...)
 	cmd.Env = append(in.env(), "PF_BIN="+in.bin, "W174_REL="+in.rel, "W174_SRC="+in.src,
 		"W174_JOURNAL="+in.journal, "W174_TAG_FILE="+in.tagFile, "W174_SOCK="+in.sock, "W174_CFG="+in.cfg)
 	cmd.Env = append(cmd.Env, in.extraEnv...)

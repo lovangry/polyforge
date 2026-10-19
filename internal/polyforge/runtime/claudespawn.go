@@ -3,13 +3,13 @@ package runtime
 // claudespawn.go: the step spawner for the Claude Code harness
 // (polyforge#159). One step = one headless `claude -p` process:
 //
-//	<claude_bin> -p --bare
+//	<claude_bin> -p --bare | --safe-mode
 //	  --output-format stream-json --verbose --include-partial-messages
 //	  --session-id <uuid> | --resume <uuid>
 //	  [--model <claude id>]
 //	  --tools <ClaudeStepTools> --allowedTools <ClaudeStepTools>
 //	  --permission-mode dontAsk --permission-prompts none
-//	  --strict-mcp-config --disable-slash-commands --safe-mode
+//	  --strict-mcp-config --disable-slash-commands
 //
 // cwd = the capsule root, own process group (as pi); stdin = the
 // assembled step prompt (the SAME text pi gets), closed once written.
@@ -22,22 +22,35 @@ package runtime
 // The daemon never injects a credential: none ride the environment or
 // argv — the harness's own settings.json provides them.
 //
-// Clean step context (a functional requirement, not isolation): --bare
-// skips hooks, plugins, LSP, auto-memory, CLAUDE.md discovery and the
-// keychain; --strict-mcp-config with no --mcp-config loads no MCP
-// server; --disable-slash-commands keeps the human's skills out;
-// --safe-mode is the umbrella over every customization surface the
-// enumerated flags do not list (output styles, workflows, themes,
-// keybindings and whatever a later release adds). The
+// Context flag by auth mode (polyforge#223), decided at every spawn
+// (fresh and --resume) from that settings.json env block:
+//   - token mode — a non-empty ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY:
+//     --bare only. --bare skips hooks, plugins, LSP, auto-memory,
+//     CLAUDE.md discovery and the keychain.
+//   - OAuth mode — no non-empty token key, a missing settings.json or no
+//     harness root: --safe-mode only. --bare would skip the keychain the
+//     OAuth login lives in; --safe-mode starts with every customization
+//     off (CLAUDE.md, skills, plugins, hooks, MCP servers, custom
+//     commands and agents, output styles, workflows, …).
+// A settings.json that exists but is unreadable, is not JSON or has no
+// `env` string map refuses the spawn. Either flag skips hooks.
+//
+// Clean step context (a functional requirement, not isolation): the
+// mode's flag above; --strict-mcp-config with no --mcp-config loads no
+// MCP server; --disable-slash-commands keeps the human's skills out. The
 // --tools allowlist is the whole tool surface: no background, scheduling
 // or messaging tool exists in the step (background tasks are also off
-// through CLAUDE_CODE_DISABLE_BACKGROUND_TASKS and --bare). No
-// --fallback-model: switching models is D7's alone.
+// through CLAUDE_CODE_DISABLE_BACKGROUND_TASKS). No --fallback-model:
+// switching models is D7's alone.
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/silgrid/polyforge/internal/common/harness"
@@ -55,6 +68,46 @@ var ClaudeBackgroundTools = []string{
 	"Monitor", "TaskOutput", "TaskStop", "KillShell", "BashOutput",
 	"CronCreate", "CronDelete", "CronList", "ScheduleWakeup",
 	"RemoteTrigger", "PushNotification", "SendMessage",
+}
+
+// ReadClaudeSettingsEnv reads the env block of <ccDir>/settings.json —
+// the one read shared by the claude spawner (auth mode) and the daemon's
+// doctor facts. ccDir "" (no harness root) or an absent file: nil, nil.
+// A file that exists but is unreadable, is not JSON or does not decode
+// into an `env` string map is an error naming the file; the error never
+// carries a value from the file.
+func ReadClaudeSettingsEnv(ccDir string) (map[string]string, error) {
+	if ccDir == "" {
+		return nil, nil
+	}
+	path := filepath.Join(ccDir, "settings.json")
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("the claude-config settings.json is unreadable (%v)", err)
+	}
+	var doc struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		var syn *json.SyntaxError
+		if errors.As(err, &syn) {
+			return nil, fmt.Errorf("the claude-config settings.json %s does not parse as JSON (offset %d)", path, syn.Offset)
+		}
+		return nil, fmt.Errorf("the claude-config settings.json %s does not parse into an `env` string map", path)
+	}
+	if doc.Env == nil {
+		return nil, fmt.Errorf("the claude-config settings.json %s does not parse into an `env` block (no `env` key; `\"env\": {}` makes it tokenless)", path)
+	}
+	return doc.Env, nil
+}
+
+// ClaudeTokenMode reports whether a settings.json env block carries a
+// credential: a non-empty ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY.
+func ClaudeTokenMode(env map[string]string) bool {
+	return env["ANTHROPIC_AUTH_TOKEN"] != "" || env["ANTHROPIC_API_KEY"] != ""
 }
 
 // claudeSpawner derives Claude Code step processes. Like piSpawner it
@@ -75,7 +128,15 @@ func (s *claudeSpawner) buildCmd(p SpawnParams) (*exec.Cmd, error) {
 	if !harness.ValidSessionID(p.HarnessSession) {
 		return nil, fmt.Errorf("runtime: claude spawn without a valid session id (%q)", p.HarnessSession)
 	}
-	args := []string{"-p", "--bare",
+	settings, err := ReadClaudeSettingsEnv(s.cfg.ClaudeConfigDir())
+	if err != nil {
+		return nil, fmt.Errorf("runtime: claude spawn refused: %w", err)
+	}
+	contextFlag := "--safe-mode"
+	if ClaudeTokenMode(settings) {
+		contextFlag = "--bare"
+	}
+	args := []string{"-p", contextFlag,
 		"--output-format", "stream-json", "--verbose", "--include-partial-messages"}
 	if p.Resume {
 		args = append(args, "--resume", p.HarnessSession)
@@ -94,7 +155,6 @@ func (s *claudeSpawner) buildCmd(p SpawnParams) (*exec.Cmd, error) {
 		"--permission-prompts", "none",
 		"--strict-mcp-config",
 		"--disable-slash-commands",
-		"--safe-mode",
 	)
 	cmd := exec.Command(s.bin(), args...)
 	cmd.Dir = p.CapsuleDir

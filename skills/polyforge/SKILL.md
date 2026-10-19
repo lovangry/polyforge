@@ -267,7 +267,7 @@ Six standing rules, binding on every polyforge session:
    registry; the cli.toml `[workspace]` mapping is the only placement source.
 6. **No unticketed writes into `.repo/` clones (polyforge#198).** This rule binds
    interactive chat sessions only — step agents never load this skill (pi steps run
-   against the daemon's own agent dir, claude steps run `--bare` — and they work
+   against the daemon's own agent dir, claude steps run `--bare` or `--safe-mode` — and they work
    inside a capsule whose work item is the ticket). Before your FIRST write into a
    mapped workspace's `.repo/<repo>` clone — any change to a tracked or untracked
    non-ignored file, or creating a commit (NOT read-only ops, fetch/pull, checkout of
@@ -390,7 +390,7 @@ it: a harness adapter sets it.
   so every command of a compound string (`cmd1; pf submit`) sees the id.
 - **Step agents never run either adapter**: pi steps run against the
   daemon's own agent dir (no user packages, no pf-chat), claude steps run
-  with `--bare` (no hooks); both carry `PF_WI_ID`, on which the adapters
+  with `--bare` or `--safe-mode` (either skips hooks); both carry `PF_WI_ID`, on which the adapters
   exit as a second fence. Only a human's session starts the daemon.
 
 ## Routing boundaries this skill never crosses

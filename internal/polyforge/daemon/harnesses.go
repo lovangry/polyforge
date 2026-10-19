@@ -13,7 +13,6 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +25,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
+	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 )
 
 // minClaudeVersion is the oldest Claude Code version the adapter's
@@ -103,7 +103,7 @@ func (d *Daemon) harnessStatuses() map[string]harnessStatus {
 		AuthTokenEnv:    setOrUnset(os.Getenv("ANTHROPIC_AUTH_TOKEN")),
 		APIKeyEnv:       setOrUnset(os.Getenv("ANTHROPIC_API_KEY")),
 		BaseURLEnv:      setOrUnset(os.Getenv("ANTHROPIC_BASE_URL")),
-		BackgroundTasks: "disabled by the adapter (--bare, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1, --tools allowlist)",
+		BackgroundTasks: "disabled by the adapter (CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1, --tools allowlist)",
 	}
 	cl.SettingsEnv, cl.HarnessDirs, cl.SettingsWarning = d.claudeConfigFacts()
 	if p, err := exec.LookPath(cl.Bin); err == nil {
@@ -115,10 +115,13 @@ func (d *Daemon) harnessStatuses() map[string]harnessStatus {
 	return map[string]harnessStatus{"pi": pi, "claude": cl}
 }
 
-// claudeConfigFacts reads the claude-config settings.json in-memory. It
-// never carries a value. Absent: all-unset facts, no warning (nothing
-// configured is exactly the doctor's "carries nothing" verdict, and the
-// in-repo fake-cfg tests below pin the un-configured default shape).
+// claudeConfigFacts reads the claude-config settings.json in-memory
+// through runtime.ReadClaudeSettingsEnv, the claude spawner's own read
+// (polyforge#223). It never carries a value. Absent: all-unset facts, no
+// warning (nothing configured is exactly the doctor's "carries nothing"
+// verdict, and the in-repo fake-cfg tests below pin the un-configured
+// default shape). Unusable: no facts, the spawner's refusal as the
+// warning.
 func (d *Daemon) claudeConfigFacts() (map[string]string, map[string]harnessDirStatus, string) {
 	root := d.cfg.HarnessRoot
 	ccDir := filepath.Join(root, "claude-config")
@@ -131,29 +134,23 @@ func (d *Daemon) claudeConfigFacts() (map[string]string, map[string]harnessDirSt
 		st, err := os.Stat(s.Path)
 		dirs[k] = harnessDirStatus{Path: s.Path, Exists: err == nil && st.IsDir()}
 	}
-	raw, err := os.ReadFile(filepath.Join(ccDir, "settings.json"))
+	env, err := runtime.ReadClaudeSettingsEnv(ccDir)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, dirs, ""
-		}
-		return nil, dirs, "the claude-config settings.json is unreadable (" + err.Error() + ")"
+		return nil, dirs, err.Error() + " — claude steps are refused until it is fixed"
 	}
-	var doc struct {
-		Env map[string]string `json:"env"`
-	}
-	if err := json.Unmarshal(raw, &doc); err != nil || doc.Env == nil {
-		return nil, dirs, "the claude-config settings.json does not parse into an `env` block — whether the steps would run on credentials is unknowable from here"
+	if env == nil {
+		return nil, dirs, ""
 	}
 	facts := map[string]string{}
 	for _, k := range settingsEnvKeys {
-		facts[k] = setOrUnset(doc.Env[k])
+		facts[k] = setOrUnset(env[k])
 	}
 	var warns []string
-	token, baseUrl := doc.Env["ANTHROPIC_AUTH_TOKEN"], doc.Env["ANTHROPIC_BASE_URL"]
+	token, baseUrl := env["ANTHROPIC_AUTH_TOKEN"], env["ANTHROPIC_BASE_URL"]
 	if strings.HasPrefix(token, settingsTokenPrefix) && baseUrl != "" {
 		warns = append(warns, "OAuth token (sk-ant-oat01-, a `claude setup-token` mint) paired with a gateway BASE_URL — that combination is rejected by Claude Code: use either the official API with no BASE_URL, or a gateway token; this is the doctor's pairing clause")
 	}
-	if doc.Env["CLAUDE_CONFIG_DIR"] != "" {
+	if env["CLAUDE_CONFIG_DIR"] != "" {
 		warns = append(warns, "the claude-config settings.json env block sets CLAUDE_CONFIG_DIR: remove it — the adapter hard-sets the step's config dir and the settings value overrides the adapter's")
 	}
 	return facts, dirs, strings.Join(warns, "; ")
