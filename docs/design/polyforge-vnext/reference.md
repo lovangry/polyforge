@@ -250,7 +250,7 @@ non-read request whose peer (or its ancestors / process-group leader) carries th
 | POST | `/ops/config` | auto-pull switch, max concurrent jobs | `pf ops auto on|off`, `pf ops max N` |
 | POST | `/shutdown` | async shutdown (§6.2) | `pf ops shutdown` |
 | POST | `/chat/init` | harness session → chat id | `pf chat init` |
-| GET | `/jobs/{wi}/watch?after=N` | per-WI snapshot + events | `pf watch <wi> --once` |
+| GET | `/jobs/{wi}/watch?after=N` | per-WI snapshot + events; `execution.declared_steps` lists the steps of the capsule's pinned workflow in frontmatter order as `{"id", "on_fail"}` (`on_fail` the gate's rewind target, else `null`), omitted when that workflow.md is missing or unparseable | `pf watch <wi> --once` |
 | GET | `/chats/{id}/subscriptions` | list; a subscription owner routing added to a chat that did not submit the WI carries `origin_chat` and, while that origin chat holds a subscription to the WI, shares its delivery record (answered with its `cursor`/`notified`/`done`; acks land there — a decision is delivered once for both chats). It is answered `passive` (progress only, no decision line, no ack) while the origin chat's watcher is live; otherwise the lowest-id live chat sharing the record is the fallback and prints only what nobody delivered. A WI with no origin chat, or one the origin chat unsubscribed, wakes every subscribed chat from its own record (polyforge#199) | `pf watch` |
 | POST | `/chats/{id}/subscribe`, `/unsubscribe` | manage subscriptions; an unsubscribe also mutes the WI for the chat (subscribe-owned skips it until a subscribe) | `pf watch subscribe|unsubscribe` |
 | POST | `/chats/{id}/ack` | cursor advance | resident `pf watch --chat` |
