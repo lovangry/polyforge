@@ -36,5 +36,10 @@ The argument is the work item id (`wi_` + random chars) or its slug.
 | `AUTH-403` | The caller is not the reporter, a project maintainer or an admin | Ask the task owner or a maintainer. |
 | `AUTH-401` | api key missing or invalid | Credential rejected — check `--api-key` / `PF_API_KEY` / config. |
 
+Canceling a **paused** work item needs nothing from the machine that paused
+it: its daemon notices the cancel at its next session check (within ~30s) and
+drops its local paused record by itself — no restart, no `pf ops
+end-session`.
+
 A canceled work item is terminal; only a brand-new work item can carry the
 work forward.

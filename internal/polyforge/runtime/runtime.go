@@ -102,6 +102,12 @@ type Config struct {
 	// after Base, doubling up to Max (defaults 2s / 60s).
 	EndRetryBase time.Duration
 	EndRetryMax  time.Duration
+	// SessionRevalidateEvery is the M4 cadence for the retained PAUSED
+	// records (revalidatePaused) — the records observe's monitor no
+	// longer revalidates. The daemon passes the same resolved cadence
+	// observe uses for running jobs; <= 0 (the unit-test default)
+	// disables it.
+	SessionRevalidateEvery time.Duration
 	// EventTap, when non-nil, receives runtime-sourced diagnostic events
 	// (kind "push_failed" on a seal push that failed after its retries)
 	// so they land in the daemon's durable events log next to the
@@ -365,9 +371,17 @@ func DefaultSpawner(cfg *Config) Spawner {
 }
 
 // Run is the OB-message loop: it hands every Observe message to its work
-// item's actor until ctx ends, and then cancels the actors' context.
+// item's actor until ctx ends, and then cancels the actors' context. It
+// also drives the retained paused records' session revalidation
+// (revalidatePaused) at cfg.SessionRevalidateEvery.
 func (r *Runtime) Run(ctx context.Context) error {
 	defer r.cancel()
+	var tick <-chan time.Time
+	if every := r.cfg.SessionRevalidateEvery; every > 0 {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		tick = t.C
+	}
 	for {
 		for {
 			msg, ok := r.fromOB.Pop()
@@ -380,6 +394,8 @@ func (r *Runtime) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-r.fromOB.Notify():
+		case <-tick:
+			r.revalidatePaused()
 		}
 	}
 }

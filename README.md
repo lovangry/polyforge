@@ -702,7 +702,7 @@ and an old bundle that still carries them has them silently ignored.
 | `--step-timeout D` | `[daemon] step_timeout` | `90m` | T: cumulative step runtime across all its dispatches (`step_timeout_long_task` / `step_timeout_slow_model`). |
 | `--stall-window D` | `[daemon] stall_window` | `10m` | N: the driver between steps (not waiting on a human) for longer than this is `driver_stalled`; a negative value disables it. |
 | `--model-error-grace D` | test/dev-only | `1m` | Grace after a turn ENDS with no result file: ended on a model error is `model_error` (switch candidate); ended normally is `ended_without_result` (same-model retry). |
-| `--revalidate-every D` | test/dev-only | `30s` | M4 periodic session-revalidation cadence for RUNNING jobs; `0`/omitted keeps the 30s default, a negative value disables revalidation. |
+| `--revalidate-every D` | test/dev-only | `30s` | M4 periodic session-revalidation cadence for held records — running jobs and retained paused records (a hub-side cancel of a paused WI releases the local record at the next tick); `0`/omitted keeps the 30s default. A negative value disables both, leaving a hub-side cancel of a paused WI stale until a daemon restart. |
 
 Before starting ANY implementation or review lane: recall the v0 lessons
 ledger (`docs/design/polyforge-vnext/v0-lessons-ledger.md`, now including

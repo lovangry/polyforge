@@ -52,8 +52,10 @@ type SessionVerifier interface {
 
 // Revalidation tunables.
 const (
-	// defaultRevalidateEvery is the M4 cadence (per RUNNING job).
-	defaultRevalidateEvery = 30 * time.Second
+	// DefaultRevalidateEvery is the M4 cadence (per RUNNING job here;
+	// the daemon hands the same cadence to the runtime for the retained
+	// paused records).
+	DefaultRevalidateEvery = 30 * time.Second
 	// verifyErrorBackoff bounds the retry cadence after a TRANSPORT-class
 	// verify failure: the next attempt waits this long (never the full
 	// interval — the task's "retry next tick" — but never the raw poll
