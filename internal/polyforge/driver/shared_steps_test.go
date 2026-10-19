@@ -305,7 +305,16 @@ func TestSharedStepPromptsKeepLaneFacts(t *testing.T) {
 			"code, tests and assertions", "`workflows/**` `.md` files", "prompts drive step agents",
 			"`text_only: true` only when its fix touches nothing but the",
 			"non-blocking findings never enter the rule", "cause: gate_fail_rewind_text_only",
-			"output.commits` names", "BLOCKING mis-marking", "record it WITHOUT `text_only`"},
+			// review B1: the trigger keys on the latest REWIND-ARCHIVE attempt
+			// (a normal light completion appends an accepted attempt after the
+			// light archive, so "the latest archived attempt" never fires at
+			// re-run time), and the light round is anchored to the archived
+			// record — the diff after the pre-light commits — never to
+			// output.commits, which a resumed session may re-list in full.
+			"the latest attempt whose cause is neither `accepted` nor `infra_failure`",
+			"archived `result` holds the pre-light output",
+			"what changed after the last sha that list names", "`git diff <that sha>..HEAD`",
+			"BLOCKING mis-marking", "record it WITHOUT `text_only`"},
 	}
 	for stepID, byBundle := range lanes {
 		for bundle, f := range byBundle {

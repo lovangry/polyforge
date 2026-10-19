@@ -84,14 +84,21 @@ Then, on every lane:
   keeps the rewind fresh, and non-blocking findings never enter the rule.
 - **Judge a light round for mis-marking.** Read `execution.json`'s attempts ledger
   (`runtime-state/execution.json`). When `steps.{{build_step}}.attempts`'s latest
-  archived attempt carries `cause: gate_fail_rewind_text_only`, this re-run follows a
-  light rewind: judge the light round's changes — the commits
-  `steps.{{build_step}}.output.commits` names — against the text-only boundary above,
-  on top of your normal full-change judgment (which is unchanged and stays the
-  adjacent-issue catcher). Any structural change among them is a BLOCKING mis-marking
-  finding: record it WITHOUT `text_only` (it is structural), so the resulting FAIL
-  rewinds fresh with its own rewind slot. A light round that stayed text-only records
-  no mis-marking finding — a pass is possible if nothing else is wrong.
+  rewind-archive attempt — namely
+  the latest attempt whose cause is neither `accepted` nor `infra_failure` —
+  carries `cause: gate_fail_rewind_text_only`, this re-run follows a light rewind:
+  judge the light round's changes against the text-only boundary above, on top of
+  your normal full-change judgment (which is unchanged and stays the
+  adjacent-issue catcher). Anchor the light round to that record, not to
+  `steps.{{build_step}}.output.commits` (a resumed session may list its earlier
+  commits again): the `gate_fail_rewind_text_only` attempt's
+  archived `result` holds the pre-light output and its `commits`, and the light
+  round is what changed after the last sha that list names, per task repo
+  (`git diff <that sha>..HEAD`). Any structural change in the light round is a
+  BLOCKING mis-marking finding: record it WITHOUT `text_only` (it is structural),
+  so the resulting FAIL rewinds fresh with its own rewind slot. A light round
+  that stayed text-only records no mis-marking finding — a pass is possible if
+  nothing else is wrong.
 
 **Do not run tests or builds.** This step reads and judges; it never runs the build, the
 test suite (`go test ./...`, `make test`, the full `./test`, `npm test`) or an e2e suite.
