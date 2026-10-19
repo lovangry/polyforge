@@ -814,9 +814,10 @@ func TestSpawnStepResumeWithoutJournalLineDegradesToFresh(t *testing.T) {
 }
 
 // lightStepSpawn is the light re-entry shape the driver's prepareDispatch
-// hands the adapter: a pending rewound target under its durable
-// next_dispatch resume order, carrying the verdict and the light
-// re-entry instruction as its rewind input (polyforge#222).
+// hands the adapter: a resume of the previous dispatch's conversation on a
+// pending light-rewind target (the ledger's light cause derives the
+// resume), carrying the verdict and the light re-entry instruction as
+// its rewind input (polyforge#222).
 func lightStepSpawn(harnessID string) StepSpawn {
 	return StepSpawn{StepID: "verification", SpawnN: 3, Resume: true, Harness: harnessID,
 		RewindInput: &capsule.RewindInput{ToStep: "verification", Reason: "the verdict in full", Note: LightRewindNote}}

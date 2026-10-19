@@ -161,24 +161,13 @@ type StepSupervision struct {
 	RelaxedWallMs int64 `json:"relaxed_wall_ms,omitempty"`
 	// NextDispatch shapes the next dispatch after a failure: "" resumes
 	// the transcript, "fresh" starts a new conversation with the previous
-	// transcript as read-only reference. On a PENDING step (the light
-	// rewind's target) "resume" orders a resume of the previous dispatch's
-	// conversation (polyforge#222). Cleared by the next step_start.
+	// transcript as read-only reference. Cleared by the next step_start.
 	NextDispatch string `json:"next_dispatch,omitempty"`
 }
 
 // NextDispatchFresh is the StepSupervision.NextDispatch value that
 // orders a fresh conversation.
 const NextDispatchFresh = "fresh"
-
-// NextDispatchResume is the StepSupervision.NextDispatch value that
-// orders a resume of the previous dispatch's conversation on a PENDING
-// step (polyforge#222): the light rewind's durable re-entry order, set
-// by the same single gate-FAIL transition write that archives the range
-// and routes the verdict, consumed by the target's next step_start like
-// every next_dispatch value (a crash between the write and the
-// re-dispatch loses nothing — the restart reads the order from disk).
-const NextDispatchResume = "resume"
 
 type Attempt struct {
 	Cause          string          `json:"cause"`

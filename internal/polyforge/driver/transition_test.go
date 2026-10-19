@@ -618,12 +618,11 @@ func TestTransitionGateFailLightRewindEligibility(t *testing.T) {
 		} else if want := LightRewindNote; tc.light && pri.Note != want || !tc.light && pri.Note != "" {
 			t.Errorf("%s: rewind input Note = %q, want the light instruction on the light path and empty on the fresh one", tc.name, pri.Note)
 		}
-		marker := ""
-		if build.Supervision != nil {
-			marker = build.Supervision.NextDispatch
-		}
-		if want := capsule.NextDispatchResume; tc.light && marker != want || !tc.light && marker != "" {
-			t.Errorf("%s: build next_dispatch = %q, want %q on the light path and no order on the fresh one", tc.name, marker, want)
+		// the resume order is the ledger cause (one fact, one place — review
+		// B2): the light context the re-dispatch derives its resume from is
+		// exactly the archived cause above; no second order exists anywhere
+		if got := lightRewindContext(build.Attempts); got != tc.light {
+			t.Errorf("%s: the ledger light context = %v, want %v (the resume order is the ledger cause)", tc.name, got, tc.light)
 		}
 		// the gate itself: in_progress holding its verdict, its own
 		// re-entry ordered fresh, its window reset (D6) — on both paths.
@@ -696,21 +695,27 @@ func TestTransitionGateFailLightBoundsHold(t *testing.T) {
 	if build.PendingRewindInput != nil {
 		t.Errorf("the exhausted rewind must not route a verdict: %+v", build.PendingRewindInput)
 	}
-	if marker := build.Supervision; marker != nil && marker.NextDispatch != "" {
-		t.Errorf("round 2's start consumed the order; the bound must leave no new one: %+v", marker)
-	}
+	// the ledger (the resume order's one home) is untouched by the bound
+	// too: no new rewind archive may land — the scans above pin exactly
+	// the one light archive and no fresh one, so round 2's re-entry keeps
+	// the resume it derived and nothing new is ordered
 }
 
 // TestTransitionLightRewindOrderIsDurable: the resume order and the
-// rewind input land in the SAME single gate-FAIL write — the persisted
-// file (the restart's only authority) already carries both, so a crash
-// anywhere around a light rewind recovers through the ordinary restart
-// path with no downgrade to fresh.
+// rewind input land in the SAME single gate-FAIL write — the order is
+// the ledger fact (the light cause archived on the pending target), so
+// the persisted file (the restart's only authority) already carries
+// both, and a crash anywhere around a light rewind recovers through the
+// ordinary restart path with no downgrade to fresh.
 func TestTransitionLightRewindOrderIsDurable(t *testing.T) {
 	exec := lightGateFail(t, "review", lightReviewOutput(`[{"severity":"blocking","detail":"d","text_only":true}]`))
 	build := exec.Steps["build"]
-	if build.Supervision == nil || build.Supervision.NextDispatch != capsule.NextDispatchResume {
-		t.Fatalf("the persisted file must carry the resume order: %+v", build.Supervision)
+	if build.Status != capsule.StepPending || !lightRewindContext(build.Attempts) {
+		t.Fatalf("the persisted file must carry the resume order (the pending target + the light ledger cause): %q %+v", build.Status, build.Attempts)
+	}
+	att := build.Attempts[len(build.Attempts)-1]
+	if att.Cause != CauseGateFailRewindTextOnly || att.RewindGate != "review" {
+		t.Fatalf("the light archive must name the gate: %+v", att)
 	}
 	if pri := build.PendingRewindInput; pri == nil || pri.Note != LightRewindNote || pri.Reason != "comment wording only" {
 		t.Fatalf("the persisted file must carry the verdict + light instruction: %+v", pri)

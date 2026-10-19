@@ -634,13 +634,14 @@ func (d *Driver) plan(ctx context.Context) (stop bool, stepID string, err error)
 
 // prepareDispatch snapshots everything the spawn needs from under the
 // mutex: the resume flag (an in_progress step is a re-dispatch — answer
-// continuation, crash recovery, recovery-lane re-derivation), the
-// rewind verdict about to be consumed by the start write (it must reach
-// the dispatched process's prompt inputs), the step's archived answers
-// (a resumed step continues with its Q&A history), and the effective
-// model candidate. Parking on an open question is plan()'s decision —
-// a pending question can only exist on the current in_progress step,
-// which plan sees before dispatching here.
+// continuation, crash recovery, recovery-lane re-derivation; a pending
+// light-rewind target is the light re-entry, its resume derived from
+// the ledger), the rewind verdict about to be consumed by the start
+// write (it must reach the dispatched process's prompt inputs), the
+// step's archived answers (a resumed step continues with its Q&A
+// history), and the effective model candidate. Parking on an open
+// question is plan()'s decision — a pending question can only exist on
+// the current in_progress step, which plan sees before dispatching here.
 func (d *Driver) prepareDispatch(stepID string) (*StepSpawn, int64, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -659,15 +660,17 @@ func (d *Driver) prepareDispatch(stepID string) (*StepSpawn, int64, error) {
 			sp.Fresh = true
 			sp.Resume = false
 		}
-		// The durable light order (polyforge#222): a PENDING step — a gate
-		// FAIL's rewound target — whose supervision orders resume re-enters
-		// as a resume of its previous dispatch's conversation (the
-		// symmetric rule: in_progress defaults resume and "fresh" overrides;
-		// pending defaults fresh and "resume" overrides). The start write
-		// consumes the order; SpawnStep's existing same-harness journal
-		// lookup decides whether the resume is possible and degrades to
-		// fresh-with-reference when it is not.
-		if !sp.Resume && st.Status == capsule.StepPending && st.Supervision != nil && st.Supervision.NextDispatch == capsule.NextDispatchResume {
+		// The light re-entry (polyforge#222): a PENDING step — a gate
+		// FAIL's rewound target — whose ledger's latest non-infra_failure
+		// archived attempt is the light rewind re-enters as a resume of
+		// its previous dispatch's conversation. The order is that ledger
+		// fact — the same single gate-FAIL write that routed the verdict
+		// archived it, and the same derivation the needs_code_change
+		// self-report validation reads (one fact, one place): nothing to
+		// write, nothing to consume, equally durable. SpawnStep's existing
+		// same-harness journal lookup decides whether the resume is
+		// possible and degrades to fresh-with-reference when it is not.
+		if !sp.Resume && st.Status == capsule.StepPending && lightRewindContext(st.Attempts) {
 			sp.Resume = true
 		}
 	}
@@ -858,9 +861,9 @@ type StepSpawn struct {
 	Harness string
 	// Resume marks a re-dispatch of an in_progress step (answer
 	// continuation, crash recovery, recovery-lane re-derivation) or of a
-	// pending rewound target under its durable next_dispatch resume order
-	// (the light rewind, polyforge#222) — a resume of the previous
-	// dispatch's conversation.
+	// pending light-rewind target (polyforge#222: the ledger's light
+	// cause derives the resume) — a resume of the previous dispatch's
+	// conversation.
 	Resume bool
 	// Answers is the step's archived Q&A history — a resumed step
 	// continues from it, never from a blank slate.

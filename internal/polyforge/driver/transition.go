@@ -57,8 +57,9 @@ const (
 // polyforge#222: a review-gate FAIL whose blocking findings (at least
 // one) are all marked text_only archives its target as
 // gate_fail_rewind_text_only instead — the light rewind, which re-enters
-// the target as a resume of its previous conversation (the durable
-// next_dispatch order) rather than a fresh re-derivation. The rewind
+// the target as a resume of its previous conversation rather than a
+// fresh re-derivation (the order is that ledger cause itself, derived
+// by prepareDispatch/applyStepStartLocked — no second carrier). The rewind
 // accounting is identical (one slot, bounds before mutation); the
 // candidate pointer resets on it like on every rewind archive.
 const (
@@ -314,11 +315,14 @@ func (d *Driver) applyInitLocked() error {
 // may resume: that is the owner's §6.4 unblock action, which also
 // rewrites the status back to running.
 //
-// A pending entry under the light rewind's durable next_dispatch resume
-// order (polyforge#222) is the light re-entry — a resume of the previous
-// dispatch's conversation: the started event's resume flag is set for
-// this shape too (the event does not lie about the dispatch), and this
-// very write consumes the order like every next_dispatch value.
+// A pending entry whose ledger's latest non-infra_failure archived
+// attempt is the light rewind (polyforge#222) is the light re-entry — a
+// resume of the previous dispatch's conversation: the started event's
+// resume flag is set for this shape too (the event does not lie about
+// the dispatch). The resume order IS that ledger fact — recorded by the
+// same gate-FAIL write that archives the range, read here and by
+// prepareDispatch — so this write consumes no separate order; after the
+// start the step is in_progress and resumes by default.
 func (d *Driver) applyStepStartLocked(req TransitionRequest, info *appliedInfo) error {
 	if _, ok := d.workflow.indexOf(req.StepID); !ok {
 		return fmt.Errorf("driver: step %q is not in the workflow", req.StepID)
@@ -334,21 +338,14 @@ func (d *Driver) applyStepStartLocked(req TransitionRequest, info *appliedInfo) 
 		st = &capsule.Step{}
 		d.exec.Steps[req.StepID] = st
 	}
-	// the durable next-dispatch order this start consumes (captured before
-	// the clearing below): the light rewind's resume order on a pending
-	// target names the shape this dispatch actually takes.
-	ordered := ""
-	if st.Supervision != nil {
-		ordered = st.Supervision.NextDispatch
-	}
 	switch {
 	case st.Status == capsule.StepPending || st.Status == "":
 		st.PendingRewindInput = nil          // consumed by this dispatch (D8)
 		st.Output = nil                      // stale products never feed a re-run (01 §6.2 step 4)
 		st.BudgetConsumed = capsule.Budget{} // the rewind archived the prior window
 		st.Status = capsule.StepInProgress
-		if ordered == capsule.NextDispatchResume {
-			info.resume = true // the light re-entry: a resume of the previous conversation
+		if lightRewindContext(st.Attempts) {
+			info.resume = true // the light re-entry: a resume of the previous conversation (the ledger cause is the order)
 		}
 	case st.Status == capsule.StepInProgress:
 		info.resume = true
@@ -578,13 +575,15 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest, info *appliedInfo)
 // The LIGHT variant (polyforge#222): the same single write over a
 // REVIEW-gate FAIL whose recorded blocking findings (at least one) all
 // carry text_only archives the target with the
-// gate_fail_rewind_text_only cause, routes the verdict with the light
-// re-entry instruction as the rewind input's Note, and sets the target's
-// durable next_dispatch to "resume" — the re-dispatch resumes the
-// target's previous conversation instead of re-deriving fresh.
-// Everything else (bounds, slot accounting, the superseded range, the
-// gate-side fresh-re-entry windows) is exactly the fresh rewind's: the
-// light path saves the re-derivation, never a rewind slot.
+// gate_fail_rewind_text_only cause and routes the verdict with the
+// light re-entry instruction as the rewind input's Note — the
+// re-dispatch then resumes the target's previous conversation instead
+// of re-deriving fresh, an order derived from the ledger that same write
+// already recorded (the light cause on the pending target), not a
+// second carrier. Everything else (bounds, slot accounting, the
+// superseded range, the gate-side fresh-re-entry windows) is exactly the
+// fresh rewind's: the light path saves the re-derivation, never a
+// rewind slot.
 //
 // It runs inside the gate's step_result write, after that write checked
 // the gate is the running current step and the target (checkRewindTarget).
@@ -638,19 +637,13 @@ func (d *Driver) applyGateFailLocked(gate string, v *GateVerdict, out map[string
 	}
 	if light {
 		// The light re-entry instruction rides beside the verdict (the
-		// prompt renders it as its own section), and the durable resume
-		// order — set here because the range reset just cleared the
-		// target's supervision — is consumed by the target's next
-		// step_start write: a crash between this write and the
-		// re-dispatch recovers through the ordinary restart path.
+		// prompt renders it as its own section). The re-dispatch's resume
+		// order is NOT a second write: the same single write above already
+		// archived the light cause on the target, and the re-dispatch
+		// (prepareDispatch / applyStepStartLocked) derives the resume from
+		// that ledger fact — the same derivation the needs_code_change
+		// self-report validation reads (one fact, one place).
 		pri.Note = LightRewindNote
-		tst := d.exec.Steps[target]
-		if tst != nil {
-			if tst.Supervision == nil {
-				tst.Supervision = &capsule.StepSupervision{}
-			}
-			tst.Supervision.NextDispatch = capsule.NextDispatchResume
-		}
 	}
 	d.exec.Steps[target].PendingRewindInput = pri
 }

@@ -217,12 +217,13 @@ func (l *snapshotLog) Append(_, kind string, _ any) error {
 }
 
 // TestCrashAroundLightRewindStillResumes (polyforge#222): the light
-// order is DURABLE — the same single gate-FAIL write that archives the
-// range and routes the verdict also sets the resume order, so a kill -9
-// between that write and the re-dispatch resumes on restart (the marker
-// and the rewind input are on disk), and a kill after the re-entry's
-// step_start resumes through the in_progress continuation. No window
-// degrades the light re-entry to fresh.
+// order is DURABLE — the resume order is the ledger cause itself, which
+// the same single gate-FAIL write that archives the range and routes the
+// verdict also records, so a kill -9 between that write and the
+// re-dispatch resumes on restart (the ledger and the rewind input are on
+// disk), and a kill after the re-entry's step_start resumes through the
+// in_progress continuation. No window degrades the light re-entry to
+// fresh.
 func TestCrashAroundLightRewindStillResumes(t *testing.T) {
 	lightOut := `{"verdict":"fail","fail_reason":"comment wording only","findings":[{"severity":"blocking","detail":"d","text_only":true}]}`
 
@@ -248,10 +249,13 @@ func TestCrashAroundLightRewindStillResumes(t *testing.T) {
 		if atCrash == nil {
 			t.Fatal("the crash-instant execution.json is unreadable")
 		}
+		// the ledger IS the resume order: the pending target, its light
+		// cause (the fact the restart's prepareDispatch derives the resume
+		// from) and the rewind input must all be on disk at the crash instant
 		if b := atCrash.Steps["build"]; b == nil || b.Status != capsule.StepPending ||
-			b.Supervision == nil || b.Supervision.NextDispatch != capsule.NextDispatchResume ||
+			!lightRewindContext(b.Attempts) ||
 			b.PendingRewindInput == nil || b.PendingRewindInput.Note != LightRewindNote {
-			t.Fatalf("the crash instant must hold the durable light order: %+v", b)
+			t.Fatalf("the crash instant must hold the durable light order (the pending target, the light ledger cause, the rewind input): %+v", b)
 		}
 		raw, _ := os.ReadFile(crashed)
 		if err := os.WriteFile(e.execPath, raw, 0o644); err != nil {
@@ -273,7 +277,7 @@ func TestCrashAroundLightRewindStillResumes(t *testing.T) {
 	})
 
 	// Window 2: the crash lands after the re-entry's step_start — the
-	// marker is consumed, the dispatch is in flight — and the restart
+	// dispatch is in flight, the step in_progress — and the restart
 	// resumes through the in_progress continuation.
 	t.Run("crash after the re-entry's step_start", func(t *testing.T) {
 		e := newCrashEnv(t, spec("build"), gateSpec("review", "build"))

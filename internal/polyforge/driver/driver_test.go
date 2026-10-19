@@ -457,10 +457,11 @@ func TestRunGateFailRewindRecovers(t *testing.T) {
 
 // TestRunLightRewindResumesBuildSession (polyforge#222): a review FAIL
 // whose blocking findings are all text_only rewinds the build step LIGHT —
-// the re-dispatch is a RESUME of its previous conversation (the durable
-// next_dispatch order, consumed by the start write, whose event records
-// the shape), carrying the verdict and the light re-entry instruction as
-// its rewind input; the review gate's own re-entry stays fresh; one slot.
+// the re-dispatch is a RESUME of its previous conversation (the resume
+// order is the ledger cause the same write archived, and the started
+// event records the shape), carrying the verdict and the light
+// re-entry instruction as its rewind input; the review gate's own
+// re-entry stays fresh; one slot.
 func TestRunLightRewindResumesBuildSession(t *testing.T) {
 	d, sp, execPath := runEnv(t, spec("build"), gateSpec("review", "build"))
 	sp.script = []fakeEntry{
@@ -500,9 +501,6 @@ func TestRunLightRewindResumesBuildSession(t *testing.T) {
 	}
 	if !light {
 		t.Fatalf("build must carry the light archive: %+v", exec.Steps["build"].Attempts)
-	}
-	if sup := exec.Steps["build"].Supervision; sup != nil && sup.NextDispatch != "" {
-		t.Fatalf("the start write must consume the resume order: %+v", sup)
 	}
 	// the started event does not lie about the light re-entry's shape
 	var resumed bool
