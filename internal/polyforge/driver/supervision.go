@@ -248,15 +248,21 @@ var textClasses = []struct {
 	// upstream stream — malformed/incomplete/truncated tool-call arguments
 	// or JSON, an empty (0-token) reply, a reset/refused/closed/EOF upstream
 	// connection or an upstream stream that ended before completion
-	// (polyforge#202). The stream-drop verbs need an upstream/provider/
-	// stream/connection subject: a bare "the model ended the turn" stays
-	// model-class. A bare "invalid ..." (tool name, request, argument), a
+	// (polyforge#202), or a gateway reply naming an upstream error AND
+	// inviting a retry ("400: {"message":"The model request failed due to
+	// an upstream error. Please retry.",...}", polyforge#227 — keyed on the
+	// conjunction, never on the 4xx status or invalid_request_error). The
+	// stream-drop verbs need an upstream/provider/stream/connection
+	// subject: a bare "the model ended the turn" stays model-class. A bare
+	// "invalid ..." (tool name, request, argument), a plain 4xx, an
+	// upstream error without a retry invitation (or the reverse), a
 	// context-length error or a local I/O error is NOT here.
 	{regexp.MustCompile(`(?i)(` +
 		`tool\W{0,3}calls?\W.{0,60}\b(incomplete|truncated|malformed|unterminated)\b|` +
 		`\b(incomplete|truncated|malformed|unterminated)\W{1,3}(json|arguments|tool\W{0,3}calls?)\b|` +
 		`\bempty\W(response|reply|completion)\b|\b(0|zero)\W?(output\W)?tokens?\b|` +
-		`\b(upstream|provider|stream|connection)\W.{0,30}\b(reset|refused|dropped|closed|aborted|ended|eof)\b)`),
+		`\b(upstream|provider|stream|connection)\W.{0,30}\b(reset|refused|dropped|closed|aborted|ended|eof)\b|` +
+		`\bupstream\W.{0,40}\bplease\W+retry\b)`),
 		FailUpstreamTransient, true},
 	// model name (model-class, F4): a pinned model that cannot resolve must
 	// advance the candidate chain. After the throttle and transient rows:
