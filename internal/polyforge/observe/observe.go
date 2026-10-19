@@ -95,7 +95,7 @@ func (c *Config) fill() {
 		c.PushBound = protocol.PushTimeout
 	}
 	if c.SessionRevalidateEvery == 0 {
-		c.SessionRevalidateEvery = defaultRevalidateEvery
+		c.SessionRevalidateEvery = DefaultRevalidateEvery
 	}
 	if c.PushFunc == nil {
 		// ctx (PushBound) bounds the chain push; on its end the push's

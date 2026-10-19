@@ -718,6 +718,48 @@ func (r *Runtime) ResumePaused(ctx context.Context, wi string) (string, error) {
 	return out, err
 }
 
+// revalidatePaused is the M4 revalidation of the retained PAUSED records
+// (polyforge#217): a paused record has no observe monitor, and a hub-side
+// change of its session — `pf cancel` (direct to aihub, from any
+// machine), a hub-side session end — reaches the holder no other way, so
+// without it the record stays paused until a restart. Each tick posts one
+// check per paused record to its actor; a work item whose actor is busy
+// is checked at a later tick (no backlog builds on a hung hub). Only the
+// job-table lock is taken here; the verify runs on the actor.
+func (r *Runtime) revalidatePaused() {
+	r.mu.Lock()
+	var ids []string
+	for id, j := range r.jobs {
+		if st, _ := j.snapshot(); st == StatePaused && r.boxes[id] == nil {
+			ids = append(ids, id)
+		}
+	}
+	r.mu.Unlock()
+	for _, id := range ids {
+		r.post(id, func() { r.revalidatePausedRecord(id) })
+	}
+}
+
+// revalidatePausedRecord verifies one retained paused record's session
+// (wi's actor). A session the hub no longer holds settles exactly as
+// reconcileRecord settles a paused record on a mismatch (notOurs: a
+// canceled, wrapped, failed, blocked or queued work item drops the
+// record; another holder supersedes it). A match changes nothing: the
+// operator pause stands, and a cleared clean_pause still waits for the
+// operator's `pf resume` on this machine or the next start (no remote
+// resume). A verify error is not a verdict: the next tick asks again.
+func (r *Runtime) revalidatePausedRecord(wi string) {
+	j := r.jobOf(wi)
+	if j == nil || stateOf(j) != StatePaused || r.ctx.Err() != nil {
+		return
+	}
+	v, err := r.hub.SessionVerify(wi, j.record().SessionID)
+	if err != nil || v.Matches {
+		return
+	}
+	r.notOurs(j, v)
+}
+
 // blockUnrecoverable blocks ONE mid-flight record whose capsule is
 // missing, whose project is unmapped, or whose session verify the hub
 // refused: the ordinary bounded-fail path (SessionEnd(blocked) with a

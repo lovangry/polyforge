@@ -166,7 +166,9 @@ type SupervisionConfig struct {
 	// (default 1m).
 	ModelErrorGrace time.Duration
 	// SessionRevalidateEvery is the M4 periodic session-revalidation
-	// cadence (0 = observe's default 30s; negative = disabled).
+	// cadence of the held records — observe's running jobs and the
+	// runtime's retained paused records (0 = the default 30s; negative =
+	// disabled).
 	SessionRevalidateEvery time.Duration
 }
 
@@ -399,6 +401,14 @@ func New(cfg Config) (*Daemon, error) {
 	// rides the runtime config (RecallTopK; 0 keeps the default 10).
 	rtCfg.RecallTopK = cfg.RecallTopK
 	rtCfg.MemoryRecall = recallSnapshot(cfg.Hub)
+	// M4 cadence, resolved once: observe revalidates the running jobs,
+	// the runtime the retained paused records (polyforge#217) — 0 = the
+	// 30s default, negative = disabled for both.
+	revalidateEvery := cfg.Supervision.SessionRevalidateEvery
+	if revalidateEvery == 0 {
+		revalidateEvery = observe.DefaultRevalidateEvery
+	}
+	rtCfg.SessionRevalidateEvery = revalidateEvery
 	rtMsgs := supervise.NewQueue[protocol.RTMsg]()
 	obMsgs := supervise.NewQueue[protocol.OBMsg]()
 	rt := runtime.New(rtCfg, cfg.Hub, sp, rtMsgs, obMsgs)
@@ -424,9 +434,8 @@ func New(cfg Config) (*Daemon, error) {
 		Registry:        d.sup,
 		ModelErrorGrace: cfg.Supervision.ModelErrorGrace,
 		DriverStall:     cfg.Supervision.StallWindow,
-		// M4 cadence rides the same pass-through (0 = the 30s default,
-		// negative = disabled).
-		SessionRevalidateEvery: cfg.Supervision.SessionRevalidateEvery,
+		// M4 cadence: the one resolved above.
+		SessionRevalidateEvery: revalidateEvery,
 	})
 	if err != nil {
 		return nil, err
