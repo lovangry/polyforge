@@ -96,4 +96,4 @@ archival request. pf-execute §8 completely rewritten.
 
 ### Version naming correction
 This spec is **v1**, not v2. The current pilot code is **v0**. The old
-aihub system (10.146.0.34) is not versioned in this scheme.
+aihub system (the existing aihub host) is not versioned in this scheme.
