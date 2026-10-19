@@ -1,29 +1,36 @@
 package runtime
 
 // pitranscript.go: the pi-harness live-transcript face (pilot F3).
-// The real harness ignores the PI_SESSION_DIR env the v0 supervisor
-// trusted (the variable the harness actually honors is its
-// own <APP>_CODING_AGENT_SESSION_DIR; v0's port blind-carried the dead
-// name), so a fresh derivation's transcript lands at the harness's
-// DEFAULT session store —
+// polyforge hands every pi step its capsule's own session directory,
 //
-//	~/.pi/agent/sessions/<dashified-capsule-dir>--/<ts>-<uuid>.jsonl
+//	<harness-root>/step-agent-sessions/<dashified-capsule-dir>/
 //
-// — and nothing ever reaches the capsule's declared session/ path. The
-// fix: the observe monitor owns the sync (locate after spawn, copy into
-// the capsule at every commit boundary of the dispatch, before the
-// commit so the transcript rides git history — v1 ruling C1 (archive/v1-architecture-spec.md)), per dispatch
-// onto the path its step_started fact names. This file only holds the
-// locator the monitor calls.
+// (piSessionDir), as PI_CODING_AGENT_SESSION_DIR. pi uses that value
+// verbatim and writes its <ts>-<uuid>.jsonl sessions flat into it; pi's
+// own per-cwd dashify rule applies only in its default store
+// (~/.pi/agent/sessions/), which polyforge never uses. The observe
+// monitor owns the sync (locate after spawn, copy into the capsule at
+// every commit boundary of the dispatch, before the commit so the
+// transcript rides git history — v1 ruling C1
+// (archive/v1-architecture-spec.md)), per dispatch onto the path its
+// step_started fact names. This file only holds the locator the monitor
+// calls and the one definition of the directory both sides share.
 //
-// The session-directory naming rule is the harness's own, mirrored here
-// verbatim from its source: the resolved cwd is stripped of its one
-// leading slash, every "/ \ :" becomes "-", and the result is wrapped in
-// "--" ... "--". A capsule at /root/ws/capsules/polyforge-140 therefore
-// writes under "--root-ws-capsules-polyforge-140--". Path characters the
-// rule does NOT fold (e.g. "#") survive into the directory name — one
-// more reason the capsule directory never carries a raw slug: it is
-// named by api.PathName ("<project>-<seq>", F2 / polyforge#144).
+// History: the v0 supervisor set PI_SESSION_DIR, a name the harness
+// ignores (it honors <APP>_CODING_AGENT_SESSION_DIR), so transcripts
+// landed in the default store; 9e8546a2 then passed the shared flat
+// step-agent-sessions root while the locator scanned a per-capsule
+// subdirectory, so nothing was found (polyforge#211).
+//
+// The per-capsule directory name is polyforge's own, reusing pi's
+// dashify rule mirrored from its source: the resolved capsule dir is
+// stripped of its one leading slash, every "/ \ :" becomes "-", and the
+// result is wrapped in "--" ... "--". A capsule at
+// /root/ws/capsules/polyforge-140 therefore gets
+// "--root-ws-capsules-polyforge-140--". Path characters the rule does
+// NOT fold (e.g. "#") survive into the directory name — one more reason
+// the capsule directory never carries a raw slug: it is named by
+// api.PathName ("<project>-<seq>", F2 / polyforge#144).
 
 import (
 	"fmt"
@@ -58,9 +65,11 @@ const locateSlack = 2 * time.Second
 // naming stays frozen even though the spawn-journal line's display-key
 // fossil (instance → spawn_token) is cleaned up.
 
-// piSessionDirName derives the harness's per-cwd session directory name
-// (the dashify rule above). capsuleDir is resolved through symlinks
-// first: the harness derives the name from the process's real cwd.
+// piSessionDirName derives polyforge's per-capsule pi session directory
+// name (the dashify rule above). capsuleDir is resolved through symlinks
+// first so the spawn side (SpawnParams.CapsuleDir) and the locator side
+// (the daemon's capsuleDir) compute the same name even when one of them
+// reaches the capsule through a symlink.
 func piSessionDirName(capsuleDir string) string {
 	real := capsuleDir
 	if resolved, err := filepath.EvalSymlinks(capsuleDir); err == nil {
