@@ -210,7 +210,9 @@ func (w *relWorld) env(extra ...string) []string {
 		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@e", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@e",
 		"RELEASE_XREFS_CMD=echo xrefs >> \"$CALLLOG\"",
 		"RELEASE_TEST_CMD=echo tests >> \"$CALLLOG\"",
-		"RELEASE_BUILD_CMD=echo build >> \"$CALLLOG\"; mkdir -p artifacts/release-$TAG; echo aihub-bin > artifacts/release-$TAG/aihub; echo pf-bin > artifacts/release-$TAG/pf",
+		"RELEASE_BUILD_CMD=echo build >> \"$CALLLOG\"; mkdir -p artifacts/release-$TAG; echo aihub-bin > artifacts/release-$TAG/aihub; echo pf-bin > artifacts/release-$TAG/pf; "+
+			"echo aihub-arm64-bin > artifacts/release-$TAG/aihub-darwin-arm64; echo pf-arm64-bin > artifacts/release-$TAG/pf-darwin-arm64; "+
+			"echo aihub-amd64-bin > artifacts/release-$TAG/aihub-darwin-amd64; echo pf-amd64-bin > artifacts/release-$TAG/pf-darwin-amd64",
 	)
 	return append(env, extra...)
 }
@@ -275,9 +277,14 @@ func TestReleaseScriptHappyPathOrderAndAssets(t *testing.T) {
 		t.Fatalf("v1.3.0 not on origin: %q", got)
 	}
 	rel := filepath.Join(w.fakeRel, "v1.3.0")
-	for _, f := range []string{"aihub-linux-amd64", "pf-linux-amd64", "aihub-image.digest", "SHA256SUMS", ".body"} {
+	for _, f := range []string{"aihub-linux-amd64", "pf-linux-amd64", "aihub-darwin-arm64", "pf-darwin-arm64", "aihub-darwin-amd64", "pf-darwin-amd64", "aihub-image.digest", "SHA256SUMS", ".body"} {
 		if _, err := os.Stat(filepath.Join(rel, f)); err != nil {
 			t.Fatalf("release missing %s: %v", f, err)
+		}
+	}
+	for n, want := range map[string]string{"aihub-darwin-arm64": "aihub-arm64-bin", "pf-darwin-arm64": "pf-arm64-bin", "aihub-darwin-amd64": "aihub-amd64-bin", "pf-darwin-amd64": "pf-amd64-bin"} {
+		if got, _ := os.ReadFile(filepath.Join(rel, n)); strings.TrimSpace(string(got)) != want {
+			t.Fatalf("%s content = %q, want %q (the staged darwin binary, copied under its asset name)", n, got, want)
 		}
 	}
 	dg, _ := os.ReadFile(filepath.Join(rel, "aihub-image.digest"))
@@ -285,8 +292,13 @@ func TestReleaseScriptHappyPathOrderAndAssets(t *testing.T) {
 		t.Fatalf("digest file = %q", dg)
 	}
 	sums, _ := os.ReadFile(filepath.Join(rel, "SHA256SUMS"))
-	if n := strings.Count(string(sums), "\n"); n != 3 || strings.Contains(string(sums), "SHA256SUMS") {
-		t.Fatalf("SHA256SUMS should cover exactly 3 files: %q", sums)
+	if n := strings.Count(string(sums), "\n"); n != 7 || strings.Contains(string(sums), "SHA256SUMS") {
+		t.Fatalf("SHA256SUMS should cover exactly 7 files: %q", sums)
+	}
+	for _, n := range []string{"aihub-linux-amd64", "pf-linux-amd64", "aihub-darwin-arm64", "pf-darwin-arm64", "aihub-darwin-amd64", "pf-darwin-amd64", "aihub-image.digest"} {
+		if !strings.Contains(string(sums), "  "+n+"\n") {
+			t.Fatalf("SHA256SUMS lacks %s: %q", n, sums)
+		}
 	}
 	head := relGit(t, w.work, "rev-parse", "HEAD")
 	tail := strings.Split(strings.TrimSpace(out), "\n")
@@ -379,7 +391,7 @@ func TestReleaseScriptVersionFloorAndBump(t *testing.T) {
 func TestReleaseScriptTagTakenOnOriginStopsBeforePublish(t *testing.T) {
 	w := newRelWorld(t, []string{"v1.2.0"}, nil)
 	// a parallel release claims the computed version while we build
-	build := "echo build >> \"$CALLLOG\"; mkdir -p artifacts/release-$TAG; echo a > artifacts/release-$TAG/aihub; echo p > artifacts/release-$TAG/pf; " +
+	build := "echo build >> \"$CALLLOG\"; mkdir -p artifacts/release-$TAG; for n in aihub pf aihub-darwin-arm64 pf-darwin-arm64 aihub-darwin-amd64 pf-darwin-amd64; do echo bin > artifacts/release-$TAG/$n; done; " +
 		"git tag -a -m other \"$TAG\" HEAD~1 && git push -q origin \"$TAG\" && git tag -d \"$TAG\" >/dev/null"
 	out, err := w.run([]string{"RELEASE_BUILD_CMD=" + build})
 	if err == nil {
@@ -532,9 +544,14 @@ func (w *relWorld) publishFake(tag string, files map[string]string) {
 }
 
 func goodRelease() map[string]string {
-	f := map[string]string{"aihub-linux-amd64": "A", "pf-linux-amd64": "P", "aihub-image.digest": relFakeDigest + "\n"}
+	f := map[string]string{
+		"aihub-linux-amd64": "A", "pf-linux-amd64": "P",
+		"aihub-darwin-arm64": "Aa", "pf-darwin-arm64": "Pa",
+		"aihub-darwin-amd64": "Ax", "pf-darwin-amd64": "Px",
+		"aihub-image.digest": relFakeDigest + "\n",
+	}
 	var sums strings.Builder
-	for _, n := range []string{"aihub-linux-amd64", "pf-linux-amd64", "aihub-image.digest"} {
+	for _, n := range []string{"aihub-linux-amd64", "pf-linux-amd64", "aihub-darwin-arm64", "pf-darwin-arm64", "aihub-darwin-amd64", "pf-darwin-amd64", "aihub-image.digest"} {
 		fmt.Fprintf(&sums, "%x  %s\n", sha256.Sum256([]byte(f[n])), n)
 	}
 	f["SHA256SUMS"] = sums.String()
@@ -552,8 +569,10 @@ func TestReleaseScriptVerify(t *testing.T) {
 	}{
 		{name: "pass", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"}},
 		{name: "pass first release", tag: "v1.0.0", origin: []string{"v1.0.0"}},
-		{name: "checksum mismatch", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"},
+		{name: "checksum mismatch (linux)", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"},
 			mut: func(f map[string]string) { f["pf-linux-amd64"] = "tampered" }, fail: "sha256sum"},
+		{name: "checksum mismatch (darwin)", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"},
+			mut: func(f map[string]string) { f["pf-darwin-arm64"] = "tampered" }, fail: "sha256sum"},
 		{name: "wrong asset set", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"},
 			mut: func(f map[string]string) { f["extra.txt"] = "x" }, fail: "asset set"},
 		{name: "missing asset", tag: "v1.3.0", origin: []string{"v1.2.0", "v1.3.0"},

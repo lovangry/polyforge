@@ -54,8 +54,11 @@ xrefs:
 
 check: build vet fmt xrefs crossbuild test
 
-# release builds the two shipped binaries with the git tag injected into
-# internal/version.Version via -ldflags -X, into artifacts/release-<tag>/.
+# release builds the six shipped binaries with the git tag injected into
+# internal/version.Version via -ldflags -X, into artifacts/release-<tag>/
+# (polyforge#218: the matrix is aihub/pf × linux-amd64, darwin-arm64,
+# darwin-amd64; release.sh consumes the linux pair under the un-suffixed
+# names and the darwin ones under their asset names).
 # Pass VERSION=<tag> (the release procedure builds before tagging) or run
 # it on the tagged commit itself. Refuses to stamp the un-injected "dev".
 release:
@@ -64,4 +67,8 @@ release:
 		exit 1; \
 	fi
 	GOWORK=off go build -ldflags "$(GO_LDFLAGS)" -o artifacts/release-$(VERSION)/ ./cmd/aihub ./cmd/pf
-	@echo "release: injected internal/version.Version=$(VERSION) (ldflags -X) into aihub and pf"
+	GOWORK=off GOOS=darwin GOARCH=arm64 go build -ldflags "$(GO_LDFLAGS)" -o artifacts/release-$(VERSION)/aihub-darwin-arm64 ./cmd/aihub
+	GOWORK=off GOOS=darwin GOARCH=arm64 go build -ldflags "$(GO_LDFLAGS)" -o artifacts/release-$(VERSION)/pf-darwin-arm64 ./cmd/pf
+	GOWORK=off GOOS=darwin GOARCH=amd64 go build -ldflags "$(GO_LDFLAGS)" -o artifacts/release-$(VERSION)/aihub-darwin-amd64 ./cmd/aihub
+	GOWORK=off GOOS=darwin GOARCH=amd64 go build -ldflags "$(GO_LDFLAGS)" -o artifacts/release-$(VERSION)/pf-darwin-amd64 ./cmd/pf
+	@echo "release: injected internal/version.Version=$(VERSION) (ldflags -X) into the 6 binaries: aihub/pf linux-amd64 + darwin-arm64 + darwin-amd64"
