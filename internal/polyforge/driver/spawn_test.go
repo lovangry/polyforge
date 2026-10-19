@@ -556,6 +556,29 @@ func TestStepRunWaitStaleFenceRejected(t *testing.T) {
 	}
 }
 
+// polyforge#214: an envelope naming another work item is the same
+// identity-mismatch class as a foreign step_id — refused at collection,
+// never silently accepted (an empty wi_id is still filled, see
+// TestStepRunWaitFillsOmittedIdentity).
+func TestStepRunWaitForeignWorkItemRejected(t *testing.T) {
+	ad, sp, capDir := spawnEnv(t)
+	writeCapsuleFile(t, capDir, "artifacts/fix-summary.md", "s")
+	run, err := ad.SpawnStep(context.Background(), StepSpawn{StepID: "verification", SpawnN: 3})
+	if err != nil {
+		t.Fatalf("SpawnStep: %v", err)
+	}
+	writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/pending-results/3.json", string(validEnvelope("wi_other", "verification", 3)))
+	_, h := sp.last()
+	h.setDone()
+	_, err = run.Wait(context.Background())
+	if err == nil || !strings.Contains(err.Error(), ErrIdentityMismatch.Error()) || !strings.Contains(err.Error(), `"wi_other"`) {
+		t.Fatalf("a foreign wi_id must fail as an identity mismatch, got %v", err)
+	}
+	if _, serr := os.Stat(filepath.Join(capDir, "artifacts", "steps", "verification", "s3", "result.json")); serr == nil {
+		t.Fatal("a rejected envelope must not be archived")
+	}
+}
+
 func TestStepRunWaitTornWriteHeals(t *testing.T) {
 	ad, _, capDir := spawnEnv(t)
 	writeCapsuleFile(t, capDir, "artifacts/fix-summary.md", "s")

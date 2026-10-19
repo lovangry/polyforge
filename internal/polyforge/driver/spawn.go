@@ -1033,6 +1033,10 @@ func (r *stepRun) collect() (*StepResult, error) {
 	if res.WIID == "" {
 		res.WIID = r.wiID
 	}
+	if res.WIID != r.wiID {
+		return nil, fmt.Errorf("%w: envelope names work item %q, dispatch is %q",
+			ErrIdentityMismatch, clipAgentText(res.WIID), r.wiID)
+	}
 	if res.SpawnN == 0 {
 		res.SpawnN = r.sp.SpawnN
 	}
