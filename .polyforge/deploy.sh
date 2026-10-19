@@ -112,12 +112,12 @@
 #   11  deploy failed AND the rollback failed: production state is uncertain;
 #       loud manual instructions are printed.  deployed=UNKNOWN previous=<old> attempted=<version>
 #
-# Deploy lock: `flock -n` on the server (DEPLOY_LOCK_FILE, default
-# /data/aihub-app/.deploy.lock) taken through a long-lived background ssh
-# session that runs `flock -n <file> sh -c 'echo LOCKED; exec cat'`. The lock
-# lives exactly as long as that remote `cat` has an open stdin. If this script
-# is killed or the ssh client dies, sshd closes the pipe, cat exits and the
-# kernel drops the flock: no pid file to clean up. On a network PARTITION the
+# Deploy lock: `flock -n` on the server (DEPLOY_LOCK_FILE, required) taken
+# through a long-lived background ssh session that runs
+# `flock -n <file> sh -c 'echo LOCKED; exec cat'`. The lock lives exactly as
+# long as that remote `cat` has an open stdin. If this script is killed or
+# the ssh client dies, sshd closes the pipe, cat exits and the kernel drops
+# the flock: no pid file to clean up. On a network PARTITION the
 # server only notices when its TCP keepalive / sshd timeout fires, so the lock
 # can outlive this script for a while (fail-safe: it blocks other deploys, it
 # never lets two run). The reverse case - the lock session dying while this
@@ -127,14 +127,24 @@
 # the deploy dies ("deploy lock session died") instead of running unlocked. If
 # it is noticed after the swap, the rollback still runs and reports it.
 #
+# Environment, required (no defaults - the deployment's topology is not in
+# this repo). Set them in the environment or in the operator-owned, untracked
+# ~/.config/polyforge/deploy.env (shell assignments, read when the file exists;
+# a variable the environment already set wins over the file). Any one missing
+# is a usage error (exit 2, the missing NAMES listed) before any network work,
+# --dry-run included. Placeholder example:
+#   AIHUB_HOST=root@<aihub-host>                      (ssh target of the server)
+#   AIHUB_DATA=/<path>/aihub                          (aihub data dir on the server)
+#   COMPOSE_FILE=/<path>/aihub-app/docker-compose.yml (on the server)
+#   COMPOSE_PROJECT=<compose-project>
+#   DEPLOY_LOCK_FILE=/<path>/aihub-app/.deploy.lock   (on the server)
 # Environment (defaults):
-#   AIHUB_HOST=root@10.146.0.34   AIHUB_CONTAINER=aihub   AIHUB_DATA=/data/aihub
-#   BACKUP_ROOT=/data/polyforge-backups (local)
+#   AIHUB_CONTAINER=aihub   BACKUP_ROOT=/data/polyforge-backups (local)
 #   GH_REPO=silgrid/polyforge   GHCR_IMAGE=ghcr.io/silgrid/aihub   AIHUB_PORT=8080   WAIT_SECS=60
-#   COMPOSE_FILE=/data/aihub-app/docker-compose.yml  COMPOSE_PROJECT=aihub-app  AIHUB_SERVICE=aihub
+#   AIHUB_SERVICE=aihub
 #   DRAIN_SECS=15 (stop_grace_period; > aihub's own 10s drain)   MAX_DOWNTIME_SECS=20 (warn; > DRAIN_SECS)   UP_WAIT_SECS=120 (fail;
 #   covers aihub's one-time memory content migration at its first start)
-#   DEPLOY_LOCK_FILE=/data/aihub-app/.deploy.lock (on the server)   LOCK_WAIT_SECS=20
+#   LOCK_WAIT_SECS=20
 set -eu
 
 USAGE="usage: .polyforge/deploy.sh <version> --confirm <version> [--dry-run] [--force]"
@@ -183,9 +193,27 @@ if [ -z "$DRY" ] && [ -z "$CONFIRM_SET" ]; then
   exit 1
 fi
 
-AIHUB_HOST="${AIHUB_HOST:-root@10.146.0.34}"
+# The deployment's topology is operator-owned, never in this repo: the five
+# required variables come from the environment or from DEPLOY_ENV (shell
+# assignments, read when the file exists); a variable the environment already
+# set wins over the file. Checked before ANY network work, --dry-run included.
+DEPLOY_ENV="${HOME:-}/.config/polyforge/deploy.env"
+if [ -n "${HOME:-}" ] && [ -f "$DEPLOY_ENV" ]; then
+  ENV_SNAPSHOT="$(export -p)"
+  set -a
+  . "$DEPLOY_ENV"
+  set +a
+  eval "$ENV_SNAPSHOT"   # the environment wins over the file
+fi
+MISSING=""
+for v in AIHUB_HOST AIHUB_DATA COMPOSE_FILE COMPOSE_PROJECT DEPLOY_LOCK_FILE; do
+  eval "[ -n \"\${$v:-}\" ]" || MISSING="$MISSING $v"
+done
+if [ -n "$MISSING" ]; then
+  echo "deploy: missing required variable(s):$MISSING - set them in the environment or in $DEPLOY_ENV (see this script's header). Nothing was touched." >&2
+  exit 2
+fi
 AIHUB_CONTAINER="${AIHUB_CONTAINER:-aihub}"
-AIHUB_DATA="${AIHUB_DATA:-/data/aihub}"
 BACKUP_ROOT="${BACKUP_ROOT:-/data/polyforge-backups}"
 GH_REPO="${GH_REPO:-silgrid/polyforge}"
 AIHUB_PORT="${AIHUB_PORT:-8080}"
@@ -194,10 +222,7 @@ POLL_SECS="${POLL_SECS:-2}"
 DRAIN_SECS="${DRAIN_SECS:-15}"
 MAX_DOWNTIME_SECS="${MAX_DOWNTIME_SECS:-20}"
 UP_WAIT_SECS="${UP_WAIT_SECS:-120}"
-DEPLOY_LOCK_FILE="${DEPLOY_LOCK_FILE:-/data/aihub-app/.deploy.lock}"
 LOCK_WAIT_SECS="${LOCK_WAIT_SECS:-20}"
-COMPOSE_FILE="${COMPOSE_FILE:-/data/aihub-app/docker-compose.yml}"
-COMPOSE_PROJECT="${COMPOSE_PROJECT:-aihub-app}"
 AIHUB_SERVICE="${AIHUB_SERVICE:-aihub}"
 IMAGE_REPO="${IMAGE_REPO:-polyforge/aihub}"
 GHCR_IMAGE="${GHCR_IMAGE:-ghcr.io/silgrid/aihub}"
