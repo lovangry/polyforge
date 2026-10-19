@@ -15,8 +15,6 @@ package daemon
 import (
 	"context"
 	"net"
-
-	"golang.org/x/sys/unix"
 )
 
 // peerCred is the SO_PEERCRED credential of the process on the other
@@ -59,9 +57,7 @@ func (l *credListener) Accept() (net.Conn, error) {
 	if uc, ok := c.(*net.UnixConn); ok {
 		if rc, rerr := uc.SyscallConn(); rerr == nil {
 			_ = rc.Control(func(fd uintptr) {
-				if ucred, gerr := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED); gerr == nil {
-					cc.cred = peerCred{pid: int(ucred.Pid), uid: int(ucred.Uid), ok: true}
-				}
+				cc.cred = acceptPeerCred(int(fd))
 			})
 		}
 	}
