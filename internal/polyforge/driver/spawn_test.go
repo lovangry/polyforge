@@ -195,9 +195,9 @@ func TestSpawnStepInheritPromptAssembly(t *testing.T) {
 		"handoff from grill",            // handoff content
 		"FAIL: tests red",               // rewind verdict
 		"q_1", "yes, vendored",          // Q&A history
-		"runtime-state/pending-results/2.json", // delivery path
-		"artifacts/handoff-fix.md",             // fix declares handoff: the convention path
-		"INHERIT",                              // context note
+		"pf result submit",         // the one delivery path (#214)
+		"artifacts/handoff-fix.md", // fix declares handoff: the convention path
+		"INHERIT",                  // context note
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q\n--- prompt ---\n%s", want, prompt)
