@@ -150,7 +150,7 @@ func TestW211FinalGateFailAfterStepDoneLandsFinalStateOnChain(t *testing.T) {
 					"version":             "2.211.0",
 					"commit":              "0000000000000000000000000000000000000001",
 					"artifacts_published": []string{"v2.211.0"},
-			}},
+				}},
 			// The FINAL dispatch: one long quiet gate (no mid-step state
 			// change — the envelope lands after the delay) whose FAIL
 			// verdict goes straight to terminal (verify has no on_fail).

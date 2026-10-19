@@ -136,9 +136,9 @@ func TestGateFailStraightToTerminalRidesPushAndTranscriptSync(t *testing.T) {
 	}
 	h := newFakeHandle("att_1")
 	m := &Monitor{
-		wi: WIInfo{WorkItem: "wi_test", CapsuleDir: capsuleDir, Git: git},
+		wi:  WIInfo{WorkItem: "wi_test", CapsuleDir: capsuleDir, Git: git},
 		cfg: cfg, log: log, ob: ob, link: supervise.NewLink("wi_test"),
-		rtQ:       supervise.NewQueue[Attach](),
+		rtQ:        supervise.NewQueue[Attach](),
 		stopCh:     make(chan struct{}),
 		gate:       make(chan struct{}, 1),
 		pushDone:   make(chan pushResult, 1),
