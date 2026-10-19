@@ -152,6 +152,10 @@ exist and sit strictly earlier than the failing step. This section explains the 
   with the blocking findings attached; `root-cause` is NOT a rewind target — if the
   review verdict says the diagnosis itself was wrong, `fix`'s re-run is expected to say
   so in its output and stop honestly rather than re-litigate the cause mid-flow.
+  An all-text-only review FAIL (every blocking finding marked `text_only: true`) takes
+  the light path: `fix`'s previous session resumes with the verdict, applies only
+  text-only fixes, and the gate tail (`verification`, then a fresh `review`) re-runs
+  unchanged.
 - **`deliver` FAILs ("back to code") -> rewind to `fix`.** The human sent the delivery
   back; `fix` re-runs and the re-run delivery reuses the same branch and PR.
 

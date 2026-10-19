@@ -5,8 +5,8 @@
 //
 // The one advancement rule: the pointer is the number of archived
 // infra_failure attempts whose FailureCause is model-class (IsModelClass)
-// recorded after the most recent rewind archive (gate_fail_rewind or
-// superseded_by_rewind), capped at the last
+// recorded after the most recent rewind archive (gate_fail_rewind,
+// gate_fail_rewind_text_only or superseded_by_rewind), capped at the last
 // candidate. Host-class deaths (FailExitHost) block the step instead and
 // never advance; every other cause is a same-model retry. The rule reads
 // the death cause the driver itself assigned — never free text.
@@ -27,8 +27,10 @@ func IsModelClass(cause string) bool {
 // CandidatePointer answers the 0-based index into candidates of the
 // step's current effective model, recomputed purely from the archived
 // attempts: the count of model-class infra failures after the most
-// recent rewind archive — gate_fail_rewind or superseded_by_rewind —
-// (from the start when there is none), capped at
+// recent rewind archive — gate_fail_rewind, gate_fail_rewind_text_only
+// (the light rewind, polyforge#222: a light rewind never burns a
+// candidate either) or superseded_by_rewind — (from the start when there
+// is none), capped at
 // len(candidates)-1. Advancing is bounded, never wrapping: exhausting the
 // list is not a terminal condition (the failure counter owns
 // terminality).
@@ -42,7 +44,7 @@ func CandidatePointer(attempts []capsule.Attempt, candidates []string) int {
 	count := 0
 	for _, a := range attempts {
 		switch a.Cause {
-		case CauseGateFailRewind, CauseSupersededByRewind:
+		case CauseGateFailRewind, CauseGateFailRewindTextOnly, CauseSupersededByRewind:
 			count = 0 // counting restarts after the last rewind archive
 		case CauseInfraFailure:
 			if IsModelClass(a.FailureCause) {

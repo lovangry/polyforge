@@ -157,6 +157,10 @@ gates, two distinct targets (`spec`, `code`). This section only explains
   does not need a third rewind target for this). A blocking finding against an
   authored test sends `code` through `needs_input`: it may not change those tests
   without a human answer (the driver's authored-tests gate).
+  An all-text-only review FAIL (every blocking finding marked `text_only: true`) takes
+  the light path: `code`'s previous session resumes with the verdict, applies only
+  text-only fixes, and the gate tail (`verification`, then a fresh `review`) re-runs
+  unchanged.
 - **`deliver` "back to code" -> rewind to `code`.** A human chose to send the change
   back instead of merging it.
 

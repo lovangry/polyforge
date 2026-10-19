@@ -444,6 +444,15 @@ func assembleStepPrompt(p promptParts) string {
 		b.WriteString(p.Rewind.Reason)
 		b.WriteString("\n")
 	}
+	// The light re-entry instruction (polyforge#222): a rewind input whose
+	// Note is set rides beside the verdict as its own section — the resumed
+	// session sees the text-only boundary duty and the needs_code_change
+	// self-report channel without re-deriving them from the verdict.
+	if p.Rewind != nil && strings.TrimSpace(p.Rewind.Note) != "" {
+		b.WriteString("\n# Light rewind re-entry (this verdict is all text-only)\n\n")
+		b.WriteString(p.Rewind.Note)
+		b.WriteString("\n")
+	}
 	if p.PriorRejection != "" {
 		b.WriteString("\n# Previous result envelope REJECTED — fix and rewrite\n\n")
 		b.WriteString("Your previous envelope for this step was rejected by the driver's validation:\n\n")

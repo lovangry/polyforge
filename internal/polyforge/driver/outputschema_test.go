@@ -320,6 +320,45 @@ func TestShippedStepSchemasAcceptKnownGoodOutputs(t *testing.T) {
 			t.Fatalf("%s: known-good output rejected: %v", key, err)
 		}
 	}
+	// polyforge#222: the review schema accepts the optional text_only marker
+	// on both verdict branches — a marked non-blocking finding under pass,
+	// marked blocking findings under fail (the light rewind's eligibility
+	// shape) and unmarked findings beside them alike, for every bundle whose
+	// review resolves to the shared definition.
+	for _, bundle := range []string{"bug-fix", "chore", "feature-full"} {
+		bundleDir := filepath.Join(shippedWorkflowsDir, bundle)
+		s, err := loadStepOutputSchema(bundleDir, "review", shippedVars(t, bundleDir, "review"))
+		if err != nil || s == nil {
+			t.Fatalf("%s/review: %v", bundle, err)
+		}
+		for name, sample := range map[string]string{
+			"pass with marked non-blocking findings":  `{"verdict":"pass","findings":[{"severity":"non-blocking","detail":"nit: a log line could be shorter","text_only":true}]}`,
+			"fail with every blocking finding marked": `{"verdict":"fail","fail_reason":"comment wording only","findings":[{"severity":"blocking","detail":"the doc comment names the old flag","text_only":true},{"severity":"non-blocking","detail":"nit"}]}`,
+			"fail with an unmarked blocking finding":  `{"verdict":"fail","fail_reason":"an assertion is wrong","findings":[{"severity":"blocking","detail":"light round changed an assertion"}]}`,
+		} {
+			if err := checkOutputSchema(s.Schema, json.RawMessage(sample)); err != nil {
+				t.Errorf("%s/review: %s rejected: %v", bundle, name, err)
+			}
+		}
+	}
+	// polyforge#222: the build steps' schemas accept the optional
+	// needs_code_change self-report beside the normal completion (which
+	// the main loop above proves with the field absent).
+	for _, bs := range [][2]string{{"bug-fix", "fix"}, {"chore", "code"}, {"feature-full", "code"}} {
+		bundleDir := filepath.Join(shippedWorkflowsDir, bs[0])
+		s, err := loadStepOutputSchema(bundleDir, bs[1], shippedVars(t, bundleDir, bs[1]))
+		if err != nil || s == nil {
+			t.Fatalf("%s/%s: %v", bs[0], bs[1], err)
+		}
+		with := map[string]string{
+			"bug-fix/fix":       `{"commits":[{"sha":"abc1234","message":"fix: init map"}],"build_status":"green","root_cause_addressed":true,"regression_test":"internal/x/x_test.go","needs_code_change":true,"summary":"structural fix self-reported"}`,
+			"chore/code":        `{"commits":[{"sha":"abc1234","message":"chore: drop dead code"}],"build_status":"green","needs_code_change":true}`,
+			"feature-full/code": `{"commits":[{"step_id":"s1","sha":"abc1234","message":"feat: s1"}],"build_status":"green","needs_code_change":true,"summary":"structural fix self-reported"}`,
+		}[bs[0]+"/"+bs[1]]
+		if err := checkOutputSchema(s.Schema, json.RawMessage(with)); err != nil {
+			t.Errorf("%s/%s: the needs_code_change self-report must validate: %v", bs[0], bs[1], err)
+		}
+	}
 }
 
 // TestFeatureFullMergedStepSchemasRejectContradictions (polyforge#165):

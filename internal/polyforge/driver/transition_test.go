@@ -522,6 +522,322 @@ func TestTransitionNeedsInputAndAnswer(t *testing.T) {
 // ---------------------------------------------------------------------------
 // gate_fail / rewind
 
+// lightReviewOutput builds one review-gate FAIL output over the given
+// findings JSON (the light path's eligibility input; "" = no findings key).
+func lightReviewOutput(findings string) json.RawMessage {
+	out := `{"verdict":"fail","fail_reason":"comment wording only"`
+	if findings != "" {
+		out += `,"findings":` + findings
+	}
+	return json.RawMessage(out + `}`)
+}
+
+// lightGateFail drives build -> polish -> one gate FAILing over the given
+// output and answers the persisted execution state (the restart's
+// authority, not the driver's memory).
+func lightGateFail(t *testing.T, gateID string, output json.RawMessage) *capsule.Execution {
+	t.Helper()
+	d, _, _, execPath := testEnv(t, spec("build"), spec("polish"), gateSpec(gateID, "build"))
+	mustInit(t, d)
+	for _, s := range []struct {
+		id string
+		n  int64
+	}{
+		{"build", 1}, {"polish", 2},
+	} {
+		mustStart(t, d, s.id, s.n)
+		if err := d.transition(TransitionRequest{
+			Kind: TransStepResult, StepID: s.id, SpawnN: s.n,
+			Result: completedResult(s.id, s.n, `{"ok":true}`),
+		}); err != nil {
+			t.Fatalf("result %s: %v", s.id, err)
+		}
+	}
+	mustStart(t, d, gateID, 3)
+	if err := d.transition(TransitionRequest{
+		Kind: TransStepResult, StepID: gateID, SpawnN: 3,
+		Result: &StepResult{StepID: gateID, SpawnN: 3, Outcome: OutcomeGateFailed, Output: output},
+		Gate:   &GateVerdict{GateStepID: gateID, TargetStep: "build", VerdictText: "comment wording only"},
+	}); err != nil {
+		t.Fatalf("gate_fail: %v", err)
+	}
+	return readExec(t, execPath)
+}
+
+// TestTransitionGateFailLightRewindEligibility (polyforge#222): only a
+// REVIEW-gate FAIL whose recorded blocking findings (at least one) are
+// all marked text_only takes the light path — the light cause on the
+// target, the verdict + light instruction as the rewind input, the durable
+// resume order. Every other shape (an unmarked blocking finding, no
+// blocking findings at all, a malformed findings record, another gate)
+// rewinds fresh exactly as before; non-blocking findings never enter the
+// rule. The rewind accounting (one slot, superseded range, gate-side
+// fresh re-entry window) is identical on both paths.
+func TestTransitionGateFailLightRewindEligibility(t *testing.T) {
+	cases := []struct {
+		name     string
+		gate     string
+		findings string
+		light    bool
+	}{
+		{"all blocking findings text-only", "review", `[{"severity":"blocking","detail":"d","text_only":true}]`, true},
+		{"one unmarked blocking finding", "review", `[{"severity":"blocking","detail":"d","text_only":true},{"severity":"blocking","detail":"d2"}]`, false},
+		{"no blocking findings", "review", `[{"severity":"non-blocking","detail":"d","text_only":true}]`, false},
+		{"non-blocking markers ignored", "review", `[{"severity":"blocking","detail":"d","text_only":true},{"severity":"non-blocking","detail":"n"}]`, true},
+		{"no findings recorded", "review", "", false},
+		{"findings not a list", "review", `{"severity":"blocking","text_only":true}`, false},
+		{"finding not an object", "review", `["blocking"]`, false},
+		{"text_only not a boolean", "review", `[{"severity":"blocking","detail":"d","text_only":"true"}]`, false},
+		{"non-review gate never light (verification FAIL)", "verification", `[{"severity":"blocking","detail":"d","text_only":true}]`, false},
+		{"non-review gate never light (deliver back to code)", "deliver", `[{"severity":"blocking","detail":"d","text_only":true}]`, false},
+	}
+	for _, tc := range cases {
+		exec := lightGateFail(t, tc.gate, lightReviewOutput(tc.findings))
+		build, polish := exec.Steps["build"], exec.Steps["polish"]
+		wantCause := CauseGateFailRewind
+		if tc.light {
+			wantCause = CauseGateFailRewindTextOnly
+		}
+		att := build.Attempts[len(build.Attempts)-1]
+		if att.Cause != wantCause || att.RewindGate != tc.gate {
+			t.Errorf("%s: build archived as (%s, %s), want (%s, %s)", tc.name, att.Cause, att.RewindGate, wantCause, tc.gate)
+		}
+		if sup := polish.Attempts[len(polish.Attempts)-1]; sup.Cause != CauseSupersededByRewind || sup.RewindGate != tc.gate {
+			t.Errorf("%s: superseded range must keep its cause: %+v", tc.name, polish.Attempts)
+		}
+		for _, st := range []*capsule.Step{build, polish} {
+			if st.Status != capsule.StepPending || st.Output != nil {
+				t.Errorf("%s: the range must reset pending with output cleared: %+v", tc.name, st)
+			}
+		}
+		if exec.RewindStats.Count != 1 || len(exec.RewindStats.ToStep) != 1 || exec.RewindStats.ToStep[0] != "build" {
+			t.Errorf("%s: exactly one slot, logged to build: %+v", tc.name, exec.RewindStats)
+		}
+		if pri := build.PendingRewindInput; pri == nil || pri.ToStep != "build" || pri.Reason != "comment wording only" {
+			t.Errorf("%s: the verdict must route to build: %+v", tc.name, pri)
+		} else if want := LightRewindNote; tc.light && pri.Note != want || !tc.light && pri.Note != "" {
+			t.Errorf("%s: rewind input Note = %q, want the light instruction on the light path and empty on the fresh one", tc.name, pri.Note)
+		}
+		// the resume order is the ledger cause (one fact, one place — review
+		// B2): the light context the re-dispatch derives its resume from is
+		// exactly the archived cause above; no second order exists anywhere
+		if got := lightRewindContext(build.Attempts); got != tc.light {
+			t.Errorf("%s: the ledger light context = %v, want %v (the resume order is the ledger cause)", tc.name, got, tc.light)
+		}
+		// the gate itself: in_progress holding its verdict, its own
+		// re-entry ordered fresh, its window reset (D6) — on both paths.
+		gate := exec.Steps[tc.gate]
+		if gate.Status != capsule.StepInProgress || gate.Output["verdict"] != "fail" {
+			t.Errorf("%s: the gate is never done and holds its verdict: %+v", tc.name, gate)
+		}
+		if gate.Supervision == nil || gate.Supervision.NextDispatch != capsule.NextDispatchFresh {
+			t.Errorf("%s: the gate's own re-entry must stay fresh: %+v", tc.name, gate.Supervision)
+		}
+		if gate.BudgetConsumed != (capsule.Budget{}) {
+			t.Errorf("%s: D6 window reset missing: %+v", tc.name, gate.BudgetConsumed)
+		}
+		if exec.CurrentStep != "build" {
+			t.Errorf("%s: the position must move back to build: %q", tc.name, exec.CurrentStep)
+		}
+	}
+}
+
+// TestTransitionGateFailLightBoundsHold: a light rewind is no budget
+// bypass — an over-bound light FAIL ends failed_rewind_exhausted BEFORE
+// any mutation (no second archive, no second slot, no marker or verdict
+// left behind), exactly like the fresh rewind.
+func TestTransitionGateFailLightBoundsHold(t *testing.T) {
+	d, _, _, execPath := testEnv(t, spec("build"), gateSpec("review", "build"))
+	d.workflow.MaxPerStep = 1
+	mustInit(t, d)
+	failLight := func(n int64) {
+		t.Helper()
+		mustStart(t, d, "review", n)
+		if err := d.transition(TransitionRequest{
+			Kind: TransStepResult, StepID: "review", SpawnN: n,
+			Result: &StepResult{StepID: "review", SpawnN: n, Outcome: OutcomeGateFailed,
+				Output: lightReviewOutput(`[{"severity":"blocking","detail":"d","text_only":true}]`)},
+			Gate: &GateVerdict{GateStepID: "review", TargetStep: "build", VerdictText: "comment wording only"},
+		}); err != nil {
+			t.Fatalf("gate_fail %d: %v", n, err)
+		}
+	}
+	// round 1: the light rewind lands (one slot, the resume order set).
+	mustStart(t, d, "build", 1)
+	if err := d.transition(TransitionRequest{Kind: TransStepResult, StepID: "build", SpawnN: 1, Result: completedResult("build", 1, `{}`)}); err != nil {
+		t.Fatalf("result build: %v", err)
+	}
+	failLight(2)
+	// round 2: build re-enters (consuming the order) and completes; the
+	// second light FAIL hits max_per_step.
+	mustStart(t, d, "build", 3)
+	if err := d.transition(TransitionRequest{Kind: TransStepResult, StepID: "build", SpawnN: 3, Result: completedResult("build", 3, `{}`)}); err != nil {
+		t.Fatalf("result build: %v", err)
+	}
+	failLight(4)
+	exec := readExec(t, execPath)
+	if exec.WorkflowStatus != StatusFailedRewindExhausted {
+		t.Fatalf("the second light rewind must hit max_per_step, got %q", exec.WorkflowStatus)
+	}
+	build := exec.Steps["build"]
+	var light int
+	for _, a := range build.Attempts {
+		if a.Cause == CauseGateFailRewindTextOnly {
+			light++
+		}
+		if a.Cause == CauseGateFailRewind {
+			t.Errorf("the exhausted rewind must not archive: %+v", a)
+		}
+	}
+	if light != 1 || exec.RewindStats.Count != 1 {
+		t.Fatalf("the bound fired before any mutation: light archives %d, count %d", light, exec.RewindStats.Count)
+	}
+	if build.PendingRewindInput != nil {
+		t.Errorf("the exhausted rewind must not route a verdict: %+v", build.PendingRewindInput)
+	}
+	// the ledger (the resume order's one home) is untouched by the bound
+	// too: no new rewind archive may land — the scans above pin exactly
+	// the one light archive and no fresh one, so round 2's re-entry keeps
+	// the resume it derived and nothing new is ordered
+}
+
+// TestTransitionLightRewindOrderIsDurable: the resume order and the
+// rewind input land in the SAME single gate-FAIL write — the order is
+// the ledger fact (the light cause archived on the pending target), so
+// the persisted file (the restart's only authority) already carries
+// both, and a crash anywhere around a light rewind recovers through the
+// ordinary restart path with no downgrade to fresh.
+func TestTransitionLightRewindOrderIsDurable(t *testing.T) {
+	exec := lightGateFail(t, "review", lightReviewOutput(`[{"severity":"blocking","detail":"d","text_only":true}]`))
+	build := exec.Steps["build"]
+	if build.Status != capsule.StepPending || !lightRewindContext(build.Attempts) {
+		t.Fatalf("the persisted file must carry the resume order (the pending target + the light ledger cause): %q %+v", build.Status, build.Attempts)
+	}
+	att := build.Attempts[len(build.Attempts)-1]
+	if att.Cause != CauseGateFailRewindTextOnly || att.RewindGate != "review" {
+		t.Fatalf("the light archive must name the gate: %+v", att)
+	}
+	if pri := build.PendingRewindInput; pri == nil || pri.Note != LightRewindNote || pri.Reason != "comment wording only" {
+		t.Fatalf("the persisted file must carry the verdict + light instruction: %+v", pri)
+	}
+}
+
+// TestTransitionSelfReportRewindRewindsFreshSameSlot (polyforge#222): a
+// completed result of a light re-entry carrying needs_code_change: true is
+// NOT archived done — the same write archives the resumed attempt as
+// gate_fail_rewind (rewind_gate = the light gate, the delivered result and
+// consumed budget archived), resets the step pending with output cleared,
+// routes the SAME FAIL verdict (re-derived from the gate's recorded
+// output) as the fresh re-entry's rewind input (no Note), charges NO new
+// slot, leaves the position on the step, and emits the rewind event —
+// never step_done for a step that is not done.
+func TestTransitionSelfReportRewindRewindsFreshSameSlot(t *testing.T) {
+	d, log, _, execPath := testEnv(t, spec("build"), gateSpec("review", "build"))
+	mustInit(t, d)
+	failLight := func(n int64) {
+		t.Helper()
+		mustStart(t, d, "review", n)
+		if err := d.transition(TransitionRequest{
+			Kind: TransStepResult, StepID: "review", SpawnN: n,
+			Result: &StepResult{StepID: "review", SpawnN: n, Outcome: OutcomeGateFailed,
+				Output: lightReviewOutput(`[{"severity":"blocking","detail":"d","text_only":true}]`)},
+			Gate: &GateVerdict{GateStepID: "review", TargetStep: "build", VerdictText: "comment wording only"},
+		}); err != nil {
+			t.Fatalf("gate_fail %d: %v", n, err)
+		}
+	}
+	// round 1: build completes, review FAILs all-text-only (the light rewind).
+	mustStart(t, d, "build", 1)
+	if err := d.transition(TransitionRequest{Kind: TransStepResult, StepID: "build", SpawnN: 1,
+		Result: completedResult("build", 1, `{"ok":1}`)}); err != nil {
+		t.Fatalf("result build: %v", err)
+	}
+	failLight(2)
+	// round 2: the light re-entry starts (consuming the order) and
+	// self-reports a structural fix.
+	mustStart(t, d, "build", 3)
+	if err := d.transition(TransitionRequest{Kind: TransStepResult, StepID: "build", SpawnN: 3,
+		Result: completedResult("build", 3, `{"ok":2,"needs_code_change":true}`)}); err != nil {
+		t.Fatalf("self-report result: %v", err)
+	}
+	exec := readExec(t, execPath)
+	st := exec.Steps["build"]
+	if st.Status != capsule.StepPending || st.Output != nil {
+		t.Fatalf("the self-report must rewind the step, never archive it done: %+v", st)
+	}
+	att := st.Attempts[len(st.Attempts)-1]
+	if att.Cause != CauseGateFailRewind || att.RewindGate != "review" || att.ArchivedAt == "" || att.ConsumedBudget == nil {
+		t.Fatalf("the self-report archive must mirror the range rewind's shape: %+v", att)
+	}
+	var delivered map[string]any
+	if json.Unmarshal(att.Result, &delivered) != nil || delivered["needs_code_change"] != true || delivered["ok"] != float64(2) {
+		t.Fatalf("the delivered result must ride the archived attempt: %s", att.Result)
+	}
+	if exec.RewindStats.Count != 1 {
+		t.Fatalf("the self-report reuses the light rewind's slot (no charge): %+v", exec.RewindStats)
+	}
+	if pri := st.PendingRewindInput; pri == nil || pri.ToStep != "build" || pri.Note != "" ||
+		!strings.Contains(pri.Reason, "comment wording only") || !strings.Contains(pri.Reason, `"verdict":"fail"`) {
+		t.Fatalf("the same FAIL verdict must ride the fresh re-entry (no Note): %+v", pri)
+	}
+	if exec.CurrentStep != "build" {
+		t.Fatalf("the position stays on the rewound step: %q", exec.CurrentStep)
+	}
+	if got := log.kinds(); got[len(got)-1] != "rewind" {
+		t.Fatalf("the self-report emits the rewind event, never step_done: %v", got)
+	}
+	var rewound bool
+	for _, e := range log.entries {
+		if e.kind == "rewind" && e.body["gate"] == "review" && e.body["target"] == "build" {
+			rewound = true
+		}
+		if e.kind == "step_done" && e.body["step"] == "build" && e.body["spawn_n"] == int64(3) {
+			t.Fatalf("a self-reporting dispatch is never done: %+v", e.body)
+		}
+	}
+	if !rewound {
+		t.Fatal("the self-report rewind event must name the light gate and the target")
+	}
+}
+
+// TestTransitionLightCompletionWithoutSelfReportIsDone: a light re-entry
+// that completes WITHOUT the field is handled exactly as today — done,
+// the accepted attempt archived, no rewind.
+func TestTransitionLightCompletionWithoutSelfReportIsDone(t *testing.T) {
+	d, _, _, _ := testEnv(t, spec("build"), gateSpec("review", "build"))
+	mustInit(t, d)
+	mustStart(t, d, "build", 1)
+	if err := d.transition(TransitionRequest{Kind: TransStepResult, StepID: "build", SpawnN: 1,
+		Result: completedResult("build", 1, `{"ok":1}`)}); err != nil {
+		t.Fatalf("result build: %v", err)
+	}
+	mustStart(t, d, "review", 2)
+	if err := d.transition(TransitionRequest{
+		Kind: TransStepResult, StepID: "review", SpawnN: 2,
+		Result: &StepResult{StepID: "review", SpawnN: 2, Outcome: OutcomeGateFailed,
+			Output: lightReviewOutput(`[{"severity":"blocking","detail":"d","text_only":true}]`)},
+		Gate: &GateVerdict{GateStepID: "review", TargetStep: "build", VerdictText: "comment wording only"},
+	}); err != nil {
+		t.Fatalf("gate_fail: %v", err)
+	}
+	mustStart(t, d, "build", 3) // the light re-entry
+	if err := d.transition(TransitionRequest{Kind: TransStepResult, StepID: "build", SpawnN: 3,
+		Result: completedResult("build", 3, `{"ok":2}`)}); err != nil {
+		t.Fatalf("light completion: %v", err)
+	}
+	snap := d.Snapshot()
+	st := snap.Steps["build"]
+	if st.Status != capsule.StepDone || st.Output["ok"] != float64(2) {
+		t.Fatalf("a normal light completion is done exactly as today: %+v", st)
+	}
+	if att := st.Attempts[len(st.Attempts)-1]; att.Cause != "accepted" {
+		t.Fatalf("the accepted attempt archives as today: %+v", att)
+	}
+	if snap.RewindStats.Count != 1 {
+		t.Fatalf("no second rewind may land: %+v", snap.RewindStats)
+	}
+}
+
 func TestTransitionGateFailRewind(t *testing.T) {
 	d, _, _, _ := testEnv(t, spec("build"), spec("polish"), gateSpec("check", "build"))
 	mustInit(t, d)

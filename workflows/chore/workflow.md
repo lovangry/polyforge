@@ -135,6 +135,10 @@ exist and sit strictly earlier than the failing step. This section explains the 
   half-finished deletion, a rule hit); `code` is the only step that can change the
   tree, so every gate on this lane shares it as its rewind target (`deliver`'s "back to
   code" included). The re-run passes through `verification` again before `review`.
+  An all-text-only review FAIL (every blocking finding marked `text_only: true`) takes
+  the light path: `code`'s previous session resumes with the verdict, applies only
+  text-only fixes, and the gate tail (`verification`, then a fresh `review`) re-runs
+  unchanged.
 
 Workflow-level rewind bounds are the tightest of the reference bundles:
 `max_total: 2`, `max_per_step: 2`. A chore that needs more than two bounded attempts to

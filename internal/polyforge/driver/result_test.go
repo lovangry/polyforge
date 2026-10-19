@@ -11,6 +11,7 @@ package driver
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -44,6 +45,53 @@ func TestValidateStepResultCompleted(t *testing.T) {
 	f := newFixture(t, true)
 	if err := ValidateStepResult(f.res, f.spec); err != nil {
 		t.Fatalf("completed minimal-contract result must validate: %v", err)
+	}
+}
+
+// TestValidateStepResultNeedsCodeChangeEdges (polyforge#222): the
+// needs_code_change self-report is legal only on a completed result under
+// a light rewind — the field without that context (or a non-boolean
+// value) is an envelope rejection, the in-process rewrite lane; under the
+// context both true (the self-report) and false (an explicit no) pass —
+// the transition alone keys on true.
+func TestValidateStepResultNeedsCodeChangeEdges(t *testing.T) {
+	light := func() *fixture {
+		f := newFixture(t, false)
+		f.spec.LightRewind = true
+		return f
+	}
+	for _, tc := range []struct {
+		name   string
+		light  bool
+		output json.RawMessage
+		wantOK bool
+	}{
+		{"self-report under a light rewind", true, json.RawMessage(`{"summary":"s","needs_code_change":true}`), true},
+		{"explicit no under a light rewind", true, json.RawMessage(`{"summary":"s","needs_code_change":false}`), true},
+		{"field without the light context", false, json.RawMessage(`{"summary":"s","needs_code_change":true}`), false},
+		{"explicit no without the light context", false, json.RawMessage(`{"summary":"s","needs_code_change":false}`), false},
+		{"non-boolean value", true, json.RawMessage(`{"summary":"s","needs_code_change":"true"}`), false},
+	} {
+		f := newFixture(t, false)
+		f.spec.LightRewind = tc.light
+		f.res.Output = tc.output
+		err := ValidateStepResult(f.res, f.spec)
+		if tc.wantOK && err != nil {
+			t.Errorf("%s: rejected: %v", tc.name, err)
+		}
+		if !tc.wantOK {
+			if err == nil || !strings.Contains(err.Error(), "needs_code_change") {
+				t.Errorf("%s: want the needs_code_change rejection, got %v", tc.name, err)
+			}
+		}
+	}
+	// a non-completed outcome never reads the field (its output is the
+	// verdict/question context, not a schema-shaped completion)
+	f := light()
+	f.res.Outcome = OutcomeGateFailed
+	f.res.Output = json.RawMessage(`{"verdict":"fail","needs_code_change":"why"}`)
+	if err := ValidateStepResult(f.res, f.spec); err != nil {
+		t.Errorf("a gate_failed envelope is not judged on the completion field: %v", err)
 	}
 }
 

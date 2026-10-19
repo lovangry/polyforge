@@ -191,6 +191,8 @@ bundle 引用只有 `bundle_name` 一个 scalar（polyforge#149 B9 删除了整�
 6. 触发 FAIL 的 gate 自身不归档、保持 `in_progress`，以 fresh 形态重入，累计 T 归零（`v2-converge.md#§2.4`）。
 7. 从 target 继续 §6.1。
 
+**轻量回退（polyforge#222，上述序列的一个子形态）**：`review` gate 的 FAIL 且其记录的 blocking findings（至少一条）全部带 `text_only: true` 时，同一次原子写入走轻量路径——上界先查、槽位照耗（第 2、3 条不变），target 归档为 `cause: gate_fail_rewind_text_only`，判定全文随轻量重入说明（`pending_rewind_input` 的 `Note`）送达 target；target 的再派发恢复其上一次会话（同 harness、同会话身份）而非全量重推导——恢复指令不另写一份，由同一次写入已落盘的台账推导（target 为 pending，且其最后一条非 `infra_failure` 归档 attempt 即轻量原因；与 `needs_code_change` 自报校验读的是同一事实）；恢复不可能（异 harness、原生会话/transcript 已不存在）时降级为今天的 fresh+只读参考回退，同一槽位内、spawn journal 记录 `resume: false`。轻量重入的 completed 结果可带 `needs_code_change: true`（结构性修复的自报；无轻量上下文或非布尔值即拒收）：同一次写入把 target 按 `gate_fail_rewind` 归档、重置 pending、把同一份 FAIL 判定作为 fresh 重入的输入送达，不再计槽位（分类错误不重复计费）。gate 自身仍以 fresh 重入（第 6 条不变）。
+
 **候选指针在 rewind 中重置**（INV-1g）：被重置的 step 重跑从候选列表第 1 项开始；gate FAIL 的任何路径都不切换候选。上界可在 frontmatter 配置（≤0 的值回落为缺省 4 / 2，无法用 0 关闭 rewind），达到即终止，没有"人工授权后继续"的第三条路径——后续只能是 WI 层面的决定（`pf cancel` 后另开 WI）。
 
 ### 6.3 基础设施失败 → 当前 step 原地重试（按死因有界切换候选） <!-- §6.3 -->
@@ -198,17 +200,17 @@ bundle 引用只有 `bundle_name` 一个 scalar（polyforge#149 B9 删除了整�
 1. 判定：一切未产出业务判定的失败（进程死亡、退出未交结果、超时、harness 静默、限流、上游瞬时错误、宿主机错误），由 supervisor 判死或 driver 在等结果时发现，死因分类与处理表见 `v2-converge.md#§2.3`。
 2. 处理（一次原子写入，`TransStepFailed`）：step 保持 `in_progress`，向 `steps.<id>.attempts[]` 追加一条 `cause: infra_failure` 的记录（带 `failure_cause`）、更新失败计数与放宽后的阈值、写入下一次派发形态。
 3. 原地重新派发同一 step，不跳过、不回退；已 done 的 step 绝不重跑。
-4. **候选切换**（`driver/candidates.go`）：生效列表按 `reference.md#§7.5` 的优先级取得；指针 = 最后一条 rewind 归档（`gate_fail_rewind` 或 `superseded_by_rewind`）之后、模型类死因（`model_error`、`model_hung`、`step_timeout_slow_model`、`exit_model_class`）的 `infra_failure` 条目数，取到末位为止——只依赖 `execution.json`，崩溃恢复后复算一致。宿主机类死因使 step blocked、不推进；其余死因（含 `rate_limited`、界内的 `upstream_transient`）原模型重试。候选用尽后保持末位。
+4. **候选切换**（`driver/candidates.go`）：生效列表按 `reference.md#§7.5` 的优先级取得；指针 = 最后一条 rewind 归档（`gate_fail_rewind`、`gate_fail_rewind_text_only` 或 `superseded_by_rewind`）之后、模型类死因（`model_error`、`model_hung`、`step_timeout_slow_model`、`exit_model_class`）的 `infra_failure` 条目数，取到末位为止——只依赖 `execution.json`，崩溃恢复后复算一致。宿主机类死因使 step blocked、不推进；其余死因（含 `rate_limited`、界内的 `upstream_transient`）原模型重试。候选用尽后保持末位。
 5. 计入的失败达上限（`DefaultMaxStepFailures` = 3）→ step blocked；该计数**按候选**：换到新候选时清零；`rate_limited` 与界内的 `upstream_transient` 不计（后者连续 2 次后第 3 次归为 `exit_model_class` 换候选）；daemon 重启造成的中断不计失败、不推进指针（`driver/supervision.go`）。
 
 ### 6.3b 归档 attempts 的两分法（cause 语义） <!-- §6.3b -->
 
 `steps.<id>.attempts[]` 的非接受记录分两类车道，以 `cause` 区分、互斥（另有一类非失败记录：每个被接受的 completed 结果追加一条 `cause: accepted`，`driver/transition.go`，供恢复引擎的进度账本与候选指针复算使用）：
 
-1. **rewind 归档**：§6.2 第 4 步追加——业务车道的归档，随后该 step 重置为 `pending`。rewind 的 target 记为 **`gate_fail_rewind`**；target 与 gate 之间被连带作废的 step 记为 **`superseded_by_rewind`**（它本身没有失败）。两者都带 `rewind_gate`，都重置候选指针。
+1. **rewind 归档**：§6.2 第 4 步追加——业务车道的归档，随后该 step 重置为 `pending`。rewind 的 target 记为 **`gate_fail_rewind`**，轻量回退（§6.2）的 target 记为 **`gate_fail_rewind_text_only`**；轻量重入以 `needs_code_change: true` 自报结构性修复时，completed 分支的同一写入同样把该次重入按 **`gate_fail_rewind`** 归档（复用同一判定与槽位，见 §6.2 轻量回退）；target 与 gate 之间被连带作废的 step 记为 **`superseded_by_rewind`**（它本身没有失败）。三种 cause 都带 `rewind_gate`，都重置候选指针。
 2. **`infra_failure`**：§6.3 第 2 步追加——可审计的中断记录，不改变 step 状态（保持 `in_progress`），同时是候选指针复算的输入。
 
-只有产出业务 FAIL 判定的回退才产生 `gate_fail_rewind` / `superseded_by_rewind`；一切未产出判定的中断都是 `infra_failure`。两类记录按时间序共存。
+只有回退归档才产生 `gate_fail_rewind` / `gate_fail_rewind_text_only` / `superseded_by_rewind`——gate FAIL 判定的回退（§6.2），或轻量重入的结构性自报（同样按 `gate_fail_rewind` 归档，复用同一判定与槽位）；一切未产出判定的中断都是 `infra_failure`。两类记录按时间序共存。
 
 ### 6.4 incomplete 结果 <!-- §6.4 -->
 

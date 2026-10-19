@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/common/harness"
 	"github.com/silgrid/polyforge/internal/common/spawn"
 	"github.com/silgrid/polyforge/internal/common/workflow"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
@@ -810,6 +811,164 @@ func TestSpawnStepResumeWithoutJournalLineDegradesToFresh(t *testing.T) {
 			}
 		})
 	}
+}
+
+// lightStepSpawn is the light re-entry shape the driver's prepareDispatch
+// hands the adapter: a resume of the previous dispatch's conversation on a
+// pending light-rewind target (the ledger's light cause derives the
+// resume), carrying the verdict and the light re-entry instruction as
+// its rewind input (polyforge#222).
+func lightStepSpawn(harnessID string) StepSpawn {
+	return StepSpawn{StepID: "verification", SpawnN: 3, Resume: true, Harness: harnessID,
+		RewindInput: &capsule.RewindInput{ToStep: "verification", Reason: "the verdict in full", Note: LightRewindNote}}
+}
+
+// lastJournal answers the capsule spawn journal's last entry (the shape
+// the journal callback wrote for the dispatch under test).
+func lastJournal(t *testing.T, capDir string) capsule.SpawnJournalEntry {
+	t.Helper()
+	entries, err := capsule.ReadSpawnJournal(capDir)
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("spawn journal: %v %+v", err, entries)
+	}
+	return entries[len(entries)-1]
+}
+
+// TestSpawnStepLightReentryResumesAndDegrades (polyforge#222): the light
+// re-entry is a Resume spawn at the adapter too — the same
+// latestJournalEntry path every resume uses — and it resumes the previous
+// dispatch's journal identity on BOTH harnesses: pi continues the previous
+// transcript, claude continues its native session id; the spawn journal
+// records resume: true on both (#211: writes = looks). A resume that is
+// impossible — the previous dispatch ran on another harness, or the
+// native session/transcript is gone — degrades to fresh (the previous
+// transcript as read-only reference when one is readable), the journal
+// recording resume: false: the same single rewind slot, never a
+// mis-marking and never an error.
+func TestSpawnStepLightReentryResumesAndDegrades(t *testing.T) {
+	t.Run("pi transcript continues", func(t *testing.T) {
+		ad, sp, capDir := spawnEnv(t)
+		prev := filepath.Join(capDir, "session", "prev-light.jsonl")
+		writeCapsuleFile(t, capDir, "session/prev-light.jsonl", `{"t":"turn"}`+"\n")
+		writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
+			`{"spawn_n":2,"step_id":"verification","transcript":"`+prev+`","harness":"pi","work_item":"wi_sp"}`+"\n")
+		if _, err := ad.SpawnStep(context.Background(), lightStepSpawn("")); err != nil {
+			t.Fatalf("SpawnStep: %v", err)
+		}
+		p, _ := sp.last()
+		if !p.Resume || p.TranscriptPath != prev {
+			t.Fatalf("the light re-entry must resume the previous pi transcript: resume=%v transcript=%q", p.Resume, p.TranscriptPath)
+		}
+		if !strings.Contains(p.InitialPrompt, "# Light rewind re-entry") || !strings.Contains(p.InitialPrompt, LightRewindNote) {
+			t.Fatalf("the light instruction must render as its own section:\n%s", p.InitialPrompt)
+		}
+		if err := p.Journal(99, nowStampX()); err != nil {
+			t.Fatalf("journal: %v", err)
+		}
+		if e := lastJournal(t, capDir); !e.Resume || e.Transcript != prev {
+			t.Fatalf("the journal must record the resume: %+v", e)
+		}
+	})
+	t.Run("claude native session continues", func(t *testing.T) {
+		ad, sp, capDir := spawnEnv(t)
+		ad.ClaudeConfigDir = filepath.Join(capDir, "claude-config")
+		id := "01234567-89ab-cdef-0123-456789abcdef"
+		native := filepath.Join("claude-config", "projects", harness.ClaudeProjectDirName(capDir), id+".jsonl")
+		writeCapsuleFile(t, capDir, native, `{"t":"turn"}`+"\n")
+		writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
+			`{"spawn_n":2,"step_id":"verification","transcript":"`+filepath.Join(capDir, "session", "prev-claude.jsonl")+`","harness":"claude","harness_session":"`+id+`","work_item":"wi_sp"}`+"\n")
+		if _, err := ad.SpawnStep(context.Background(), lightStepSpawn("claude")); err != nil {
+			t.Fatalf("SpawnStep: %v", err)
+		}
+		p, _ := sp.last()
+		if !p.Resume || p.HarnessSession != id {
+			t.Fatalf("the light re-entry must resume the previous claude session: resume=%v session=%q", p.Resume, p.HarnessSession)
+		}
+		if !strings.Contains(p.InitialPrompt, "# Light rewind re-entry") || !strings.Contains(p.InitialPrompt, LightRewindNote) {
+			t.Fatalf("the light instruction must render as its own section:\n%s", p.InitialPrompt)
+		}
+		if err := p.Journal(99, nowStampX()); err != nil {
+			t.Fatalf("journal: %v", err)
+		}
+		if e := lastJournal(t, capDir); !e.Resume || e.HarnessSession != id {
+			t.Fatalf("the journal must record the resumed native session: %+v", e)
+		}
+	})
+	t.Run("other harness degrades fresh with reference", func(t *testing.T) {
+		ad, sp, capDir := spawnEnv(t)
+		ad.ClaudeConfigDir = filepath.Join(capDir, "claude-config")
+		id := "01234567-89ab-cdef-0123-456789abcdef"
+		native := filepath.Join("claude-config", "projects", harness.ClaudeProjectDirName(capDir), id+".jsonl")
+		writeCapsuleFile(t, capDir, native, `{"t":"turn"}`+"\n")
+		prev := filepath.Join(capDir, "session", "prev-claude.jsonl")
+		writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
+			`{"spawn_n":2,"step_id":"verification","transcript":"`+prev+`","harness":"claude","harness_session":"`+id+`","work_item":"wi_sp"}`+"\n")
+		// the light re-entry runs on pi: a claude session cannot be resumed there
+		if _, err := ad.SpawnStep(context.Background(), lightStepSpawn("")); err != nil {
+			t.Fatalf("SpawnStep: %v", err)
+		}
+		p, _ := sp.last()
+		if p.Resume {
+			t.Fatalf("another harness's session cannot be resumed: %+v", p)
+		}
+		if !strings.Contains(p.InitialPrompt, "Previous attempt (read-only reference)") || !strings.Contains(p.InitialPrompt, prev) {
+			t.Fatalf("the fallback must carry the previous transcript as reference:\n%s", p.InitialPrompt)
+		}
+		if err := p.Journal(99, nowStampX()); err != nil {
+			t.Fatalf("journal: %v", err)
+		}
+		if e := lastJournal(t, capDir); e.Resume {
+			t.Fatalf("the fallback must be recorded fresh: %+v", e)
+		}
+	})
+	t.Run("claude session gone degrades fresh with reference", func(t *testing.T) {
+		ad, sp, capDir := spawnEnv(t)
+		ad.ClaudeConfigDir = filepath.Join(capDir, "claude-config")
+		id := "01234567-89ab-cdef-0123-456789abcdef"
+		// the native session dir is gone; the capsule-side copy (synced at
+		// the dispatch's commit boundary) is the readable reference
+		prev := filepath.Join(capDir, "session", "prev-claude.jsonl")
+		writeCapsuleFile(t, capDir, "session/prev-claude.jsonl", `{"t":"turn"}`+"\n")
+		writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
+			`{"spawn_n":2,"step_id":"verification","transcript":"`+prev+`","harness":"claude","harness_session":"`+id+`","work_item":"wi_sp"}`+"\n")
+		if _, err := ad.SpawnStep(context.Background(), lightStepSpawn("claude")); err != nil {
+			t.Fatalf("SpawnStep: %v", err)
+		}
+		p, _ := sp.last()
+		if p.Resume || p.HarnessSession == id {
+			t.Fatalf("a gone native session cannot be resumed: %+v", p)
+		}
+		if !strings.Contains(p.InitialPrompt, "Previous attempt (read-only reference)") || !strings.Contains(p.InitialPrompt, prev) {
+			t.Fatalf("the fallback must carry the capsule copy as reference:\n%s", p.InitialPrompt)
+		}
+		if err := p.Journal(99, nowStampX()); err != nil {
+			t.Fatalf("journal: %v", err)
+		}
+		if e := lastJournal(t, capDir); e.Resume {
+			t.Fatalf("the fallback must be recorded fresh: %+v", e)
+		}
+	})
+	t.Run("pi transcript gone degrades fresh", func(t *testing.T) {
+		ad, sp, capDir := spawnEnv(t)
+		writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/spawn-journal.jsonl",
+			`{"spawn_n":2,"step_id":"fix","transcript":"/does/not/exist.jsonl","harness":"pi","work_item":"wi_sp"}`+"\n")
+		if _, err := ad.SpawnStep(context.Background(), lightStepSpawn("")); err != nil {
+			t.Fatalf("SpawnStep: %v", err)
+		}
+		p, _ := sp.last()
+		if p.Resume || strings.Contains(p.TranscriptPath, "/does/not/") {
+			t.Fatalf("an unreadable transcript cannot be resumed: %+v", p)
+		}
+		if strings.Contains(p.InitialPrompt, "read-only reference") {
+			t.Fatalf("no reference may be named when no transcript is readable:\n%s", p.InitialPrompt)
+		}
+		if err := p.Journal(99, nowStampX()); err != nil {
+			t.Fatalf("journal: %v", err)
+		}
+		if e := lastJournal(t, capDir); e.Resume {
+			t.Fatalf("the fallback must be recorded fresh: %+v", e)
+		}
+	})
 }
 
 // TestSpawnStepWiresHarnessTranslatorOntoTheLink: the step process's

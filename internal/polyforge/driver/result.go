@@ -229,6 +229,13 @@ type ResultSpec struct {
 	// it named) — deliver_facts.go.
 	VerifiedHeads   map[string]string
 	VerifiedTestBar []testBarCmd
+	// LightRewind (polyforge#222): the step's latest non-infra_failure
+	// archived attempt is a light rewind (gate_fail_rewind_text_only) —
+	// this dispatch is that rewind's re-entry, so the completed result
+	// may carry the needs_code_change structural self-report. Assembled
+	// under the driver's lock from the same ledger the transition's
+	// self-report rewind reads (lightRewindContext).
+	LightRewind bool
 }
 
 // ValidateStepResult runs the staging gates over one envelope:
@@ -263,6 +270,11 @@ type ResultSpec struct {
 //     completed result is recorded (res.schemaViolation), not rejected.
 //     A rejection is the in-process retry lane, never a silent
 //     reclassification;
+//     3d. the needs_code_change self-report (polyforge#222), judged on
+//     the DELIVERED completed outcome: a non-boolean value, or the
+//     field without a light rewind preceding it in the step's ledger
+//     (spec.LightRewind), is an envelope rejection — the field belongs
+//     only to a light re-entry's structural self-report;
 //  4. the command-evidence gate: every command_evidence item, on any
 //     step and outcome, must be an object that decodes as a
 //     CommandEvidence (decodeCommandEvidence); on a RequireCommandEvidence
@@ -364,6 +376,22 @@ func ValidateStepResult(res *StepResult, spec ResultSpec) error {
 				if res.Outcome == OutcomeCompleted {
 					res.schemaViolation = err.Error()
 				}
+			}
+		}
+		// 3d. the needs_code_change self-report (polyforge#222): legal only
+		// on a completed result under a light rewind — the field belongs
+		// to the light re-entry's structural self-report, whose fresh
+		// rewind reuses the light rewind's slot. A non-boolean value, or
+		// the field without the light context, is an envelope rejection
+		// (the in-process rewrite lane): never a silent ignore, and never
+		// an uncharged rewind (that would be a budget hole).
+		if out, perr := parseOutput(res.Output); perr == nil {
+			present, _, malformed := needsCodeChangeOf(out)
+			if malformed {
+				return fmt.Errorf("driver: step %q completed with a non-boolean needs_code_change (the field is the light re-entry's structural self-report; it is a boolean or absent)", spec.StepID)
+			}
+			if present && !spec.LightRewind {
+				return fmt.Errorf("driver: step %q completed carrying needs_code_change but no light rewind precedes it in its ledger — the field belongs only to a light re-entry's structural self-report; omit it on a normal completion (apply the fix and complete, or ask a human)", spec.StepID)
 			}
 		}
 	}
