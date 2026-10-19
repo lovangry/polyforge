@@ -210,13 +210,14 @@ func (s *piSpawner) buildCmd(p SpawnParams) *exec.Cmd {
 	}
 	// addendum 2 (owner ruling A): the step process's harness identity is
 	// the DEDICATED agent directory — not the operator's — plus its own
-	// session store. Only a real runtime (DataDir set) redirects: a bare
-	// Config (unit tests of the argv shape) has no data dir to own.
+	// session store — the capsule's own directory in it (piSessionDir,
+	// the same dir the live-transcript locator scans; polyforge#211).
+	// Only a real runtime (DataDir set) redirects: a bare Config (unit
+	// tests of the argv shape) has no data dir to own.
 	if s.cfg.DataDir != "" {
-		sessions := s.cfg.StepAgentSessionsDir()
 		additions = append(additions,
 			"PI_CODING_AGENT_DIR="+s.cfg.StepAgentDir(),
-			"PI_CODING_AGENT_SESSION_DIR="+sessions,
+			"PI_CODING_AGENT_SESSION_DIR="+piSessionDir(s.cfg.StepAgentSessionsDir(), p.CapsuleDir),
 		)
 	}
 	cmd.Env = newEnvSanitizer(s.cfg.EnvSecrets...).childEnv(additions...)

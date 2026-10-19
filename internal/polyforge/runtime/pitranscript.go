@@ -81,17 +81,34 @@ func piSessionDirName(capsuleDir string) string {
 	return "--" + dashed + "--"
 }
 
+// piSessionDir is the capsule's own pi session directory under the step
+// session store — the ONE fact both sides read (polyforge#211): the
+// spawn hands it to the step process as PI_CODING_AGENT_SESSION_DIR and
+// LocateLiveTranscript scans it. pi uses that env value verbatim as the
+// session directory and writes its sessions flat into it (the per-cwd
+// dashified subdirectory exists only in its default store), so the
+// per-capsule level must be part of the value the spawn passes; a
+// shared flat root would mix every workspace's WIs and leave the
+// locator nothing capsule-specific to scan. "" when no store is
+// configured.
+func piSessionDir(sessionsRoot, capsuleDir string) string {
+	if sessionsRoot == "" {
+		return ""
+	}
+	return filepath.Join(sessionsRoot, piSessionDirName(capsuleDir))
+}
+
 // LocateLiveTranscript scans the harness session store for the live
 // transcript of a derivation whose process was born at notBefore: the
-// newest .jsonl under the capsule's dashified session directory whose
+// newest .jsonl under the capsule's own session directory (piSessionDir) whose
 // mtime is at/after the spawn moment (minus the locate slack). "" when
 // the directory, or any qualifying file, does not exist — the callers
 // treat that as the typed transcript_missing condition, never an error.
 func LocateLiveTranscript(sessionsRoot, capsuleDir string, notBefore time.Time) string {
-	if sessionsRoot == "" {
+	dir := piSessionDir(sessionsRoot, capsuleDir)
+	if dir == "" {
 		return "" // no step session store configured: never the operator's ~/.pi
 	}
-	dir := filepath.Join(sessionsRoot, piSessionDirName(capsuleDir))
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		return ""

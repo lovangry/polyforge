@@ -58,8 +58,8 @@ package runtime
 // Sessions live in a SIBLING directory (step-agent-sessions), not here,
 // so the agent dir itself stays exactly the enumerated minimal set: the
 // step process gets PI_CODING_AGENT_SESSION_DIR=<harness-root>/
-// step-agent-sessions and the runtime's transcript locator root points
-// at the same place.
+// step-agent-sessions/<dashified-capsule-dir> (piSessionDir) and the
+// runtime's transcript locator scans that same directory.
 //
 // polyforge#171 — the harness-root map: all three harness state dirs
 // derive from ONE root (Config.HarnessRoot, resolved as --harness-root
@@ -108,8 +108,9 @@ func (c *Config) StepAgentDir() string {
 	return filepath.Join(c.HarnessRoot, StepAgentDirName)
 }
 
-// StepAgentSessionsDir is the step processes' harness session store
-// (PI_CODING_AGENT_SESSION_DIR and the live-transcript locator root).
+// StepAgentSessionsDir is the step processes' harness session store:
+// the root of the per-capsule dirs (piSessionDir) each pi step gets as
+// PI_CODING_AGENT_SESSION_DIR and the live-transcript locator scans.
 func (c *Config) StepAgentSessionsDir() string {
 	return filepath.Join(c.HarnessRoot, StepAgentSessionsDirName)
 }

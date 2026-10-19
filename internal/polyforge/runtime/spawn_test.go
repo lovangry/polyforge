@@ -86,6 +86,55 @@ func TestSpawnStepAgentDirectoryEnv(t *testing.T) {
 	}
 }
 
+// polyforge#211: pi uses PI_CODING_AGENT_SESSION_DIR verbatim as its
+// session directory and writes sessions FLAT into it (the per-cwd
+// dashified subdirectory exists only in its default store). The dir the
+// spawn hands the child must therefore be exactly the dir the live-
+// transcript locator scans, or no pi transcript ever reaches the
+// capsule's session/ (every commit boundary emits transcript_missing).
+// The test writes a session file where pi would — flat into the env
+// value — and requires both locator entry points to find it.
+func TestSpawnPiSessionDirIsWhereTheLocatorLooks(t *testing.T) {
+	cfg := Config{PiBin: "/nonexistent-pi", DataDir: t.TempDir(), OperatorAgentDir: t.TempDir()}
+	cfg.FillDefaults()
+	capsuleDir := filepath.Join(t.TempDir(), "capsules", "polyforge-211")
+	if err := os.MkdirAll(capsuleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newPiSpawner(&cfg).buildCmd(SpawnParams{WorkItemID: "wi_loc", CapsuleDir: capsuleDir, SpawnN: 1})
+	var sessionDir string
+	for _, kv := range cmd.Env {
+		if v, ok := strings.CutPrefix(kv, "PI_CODING_AGENT_SESSION_DIR="); ok {
+			sessionDir = v
+		}
+	}
+	if sessionDir == "" {
+		t.Fatalf("the child env must carry PI_CODING_AGENT_SESSION_DIR, got:\n%s", strings.Join(cmd.Env, "\n"))
+	}
+	spawnAt := time.Now()
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	live := filepath.Join(sessionDir, "2026-10-18T12-33-17-007Z_01a14f00-86ce-75c6-872f-5c6fe65c675d.jsonl")
+	if err := os.WriteFile(live, []byte("{\"type\":\"session\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := LocateLiveTranscript(cfg.StepAgentSessionsDir(), capsuleDir, spawnAt); got != live {
+		t.Fatalf("LocateLiveTranscript = %q, want the session pi wrote into the spawn's session dir %q", got, live)
+	}
+	if got := LocateTranscript(cfg.StepAgentSessionsDir(), cfg.ClaudeConfigDir(), capsuleDir, spawnAt, "pi", ""); got != live {
+		t.Fatalf("LocateTranscript(pi) = %q, want %q", got, live)
+	}
+	// another capsule's spawn gets its own dir: the store is shared by
+	// every workspace, so a flat root would let one WI adopt another's
+	other := newPiSpawner(&cfg).buildCmd(SpawnParams{CapsuleDir: filepath.Join(t.TempDir(), "polyforge-212")})
+	for _, kv := range other.Env {
+		if v, ok := strings.CutPrefix(kv, "PI_CODING_AGENT_SESSION_DIR="); ok && v == sessionDir {
+			t.Fatalf("two capsules must not share one pi session dir %q", v)
+		}
+	}
+}
+
 func TestSpawnResumeAddsSessionArg(t *testing.T) {
 	sp := newPiSpawner(&Config{})
 	cmd := sp.buildCmd(SpawnParams{TranscriptPath: "/caps/session/t.jsonl", Resume: true, CapsuleDir: "/caps"})
