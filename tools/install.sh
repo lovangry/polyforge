@@ -25,6 +25,10 @@
 #   curl -s -H "Authorization: token $(gh auth token)" \
 #     https://raw.githubusercontent.com/silgrid/polyforge/main/tools/install.sh \
 #     | bash -s -- <api-key> [server-host]
+# The aihub server host (argument 2, else PF_HOST; no built-in default) is
+# REQUIRED for a first install — the run that writes cli.toml — and refused
+# before anything changes when absent; an upgrade (cli.toml with an api_key
+# already there, never rewritten) needs no host.
 # While the daemon runs jobs (`pf ops status`) an upgrade is refused and
 # nothing changes: wait, pause them (`pf pause <wi>`), or override (their
 # agent trees are terminated and recover at the next daemon start):
@@ -36,11 +40,18 @@
 # flock — that absence already degrades with a WARN.
 set -e
 KEY="${1:?usage: install.sh <api-key> [server-host]}"
-HOST="${2:-${PF_HOST:-10.146.0.34}}"
+HOST="${2:-${PF_HOST:-}}"
 API="http://$HOST:8080"
 REPO="silgrid/polyforge"
 BIN="${PF_BIN:-/usr/local/bin/pf}"
 CFG="$HOME/.config/polyforge/cli.toml"
+# has_config: this machine already has its config (kept, never rewritten)
+has_config() { [ -f "$CFG" ] && grep -q "api_key" "$CFG"; }
+if [ -z "$HOST" ] && ! has_config; then
+  echo "usage: install.sh <api-key> <server-host>  (or PF_HOST=<server-host>)"
+  echo "ERROR: a first install writes $CFG and needs the aihub <server-host> (argument 2 or PF_HOST); nothing on this machine was changed."
+  exit 2
+fi
 DAEMON_DATA="$HOME/.local/share/polyforge"
 DAEMON_SOCKET="$DAEMON_DATA/daemon.sock"
 RELEASE_DIR="$DAEMON_DATA/release"
@@ -318,7 +329,7 @@ fi
 echo "== 3/5 config + harnesses"
 # config: create or verify (NEVER rewritten)
 mkdir -p "$(dirname "$CFG")"
-if [ -f "$CFG" ] && grep -q "api_key" "$CFG"; then
+if has_config; then
   echo "   config exists ($CFG)"
   if grep -q '^[[:space:]]*\[workspace' "$CFG"; then
     echo "   workspace mapping present (the daemon routes capsules by it)"
