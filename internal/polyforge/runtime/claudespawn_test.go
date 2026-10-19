@@ -28,13 +28,14 @@ func TestClaudeBuildCmdArgvEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"/opt/claude", "-p", "--bare",
+	// a bare Config has no harness root: tokenless, so OAuth mode
+	want := []string{"/opt/claude", "-p", "--safe-mode",
 		"--output-format", "stream-json", "--verbose", "--include-partial-messages",
 		"--session-id", testSession,
 		"--model", "claude-opus-5-5",
 		"--tools", ClaudeStepTools, "--allowedTools", ClaudeStepTools,
 		"--permission-mode", "dontAsk", "--permission-prompts", "none",
-		"--strict-mcp-config", "--disable-slash-commands", "--safe-mode"}
+		"--strict-mcp-config", "--disable-slash-commands"}
 	if strings.Join(cmd.Args, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("argv\n got %q\nwant %q", cmd.Args, want)
 	}
@@ -91,6 +92,82 @@ func TestClaudeBuildCmdArgvEnv(t *testing.T) {
 	// an invalid session id is refused (the id may come from the journal)
 	if _, err := sp.buildCmd(SpawnParams{CapsuleDir: "/caps", HarnessSession: "../x"}); err == nil {
 		t.Fatal("invalid session id accepted")
+	}
+}
+
+// polyforge#223: the context flag follows the auth mode of the
+// claude-config settings.json env block, read at every spawn (fresh and
+// resume): token mode → --bare only; tokenless (empty value, missing
+// file, no harness root) → --safe-mode only; an unusable file refuses
+// the spawn. No value from the file reaches the argv, env or error.
+func TestClaudeContextFlagByAuthMode(t *testing.T) {
+	const secret = "tok-SENTINEL-223"
+	root := t.TempDir()
+	cfg := &Config{HarnessRoot: root}
+	ccDir := cfg.ClaudeConfigDir()
+	if err := os.MkdirAll(ccDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := filepath.Join(ccDir, "settings.json")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(settings, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sp := &claudeSpawner{cfg: cfg}
+	check := func(name, want, banned string) {
+		t.Helper()
+		for _, resume := range []bool{false, true} {
+			cmd, err := sp.buildCmd(SpawnParams{CapsuleDir: "/caps", Resume: resume, HarnessSession: testSession})
+			if err != nil {
+				t.Fatalf("%s (resume=%v): %v", name, resume, err)
+			}
+			if n := slices.Index(cmd.Args, want); n != 2 || strings.Count(strings.Join(cmd.Args, " "), want) != 1 {
+				t.Fatalf("%s (resume=%v): want %s exactly once right after -p: %q", name, resume, want, cmd.Args)
+			}
+			if slices.Contains(cmd.Args, banned) {
+				t.Fatalf("%s (resume=%v): argv carries %s: %q", name, resume, banned, cmd.Args)
+			}
+			if all := strings.Join(cmd.Args, " ") + strings.Join(cmd.Env, " "); strings.Contains(all, secret) {
+				t.Fatalf("%s: a settings value reached the argv/env", name)
+			}
+		}
+	}
+
+	check("missing settings.json", "--safe-mode", "--bare")
+	write(`{"env":{"ANTHROPIC_AUTH_TOKEN":"` + secret + `","ANTHROPIC_BASE_URL":"https://gw.example"}}`)
+	check("auth token", "--bare", "--safe-mode")
+	write(`{"env":{"ANTHROPIC_API_KEY":"` + secret + `"}}`)
+	check("api key", "--bare", "--safe-mode")
+	write(`{"env":{"ANTHROPIC_AUTH_TOKEN":"","ANTHROPIC_API_KEY":"","ANTHROPIC_BASE_URL":"https://x"}}`)
+	check("empty token values", "--safe-mode", "--bare")
+	write(`{"env":{}}`)
+	check("empty env block", "--safe-mode", "--bare")
+
+	for body, frag := range map[string]string{
+		`{"env":{"ANTHROPIC_AUTH_TOKEN":"` + secret + `"`: "does not parse as JSON",
+		`{"model":"x"}`:                      "no `env` key",
+		`{"env":{"ANTHROPIC_AUTH_TOKEN":7}}`: "`env` string map",
+		`[]`:                                 "`env` string map",
+	} {
+		write(body)
+		_, err := sp.buildCmd(SpawnParams{CapsuleDir: "/caps", HarnessSession: testSession})
+		if err == nil || !strings.Contains(err.Error(), frag) || !strings.Contains(err.Error(), settings) {
+			t.Fatalf("settings %q: err %v, want a refusal naming %s and %q", body, err, settings, frag)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("the refusal carries a settings value: %v", err)
+		}
+	}
+	if os.Geteuid() != 0 {
+		write(`{"env":{}}`)
+		if err := os.Chmod(settings, 0); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sp.buildCmd(SpawnParams{CapsuleDir: "/caps", HarnessSession: testSession}); err == nil || !strings.Contains(err.Error(), "unreadable") {
+			t.Fatalf("unreadable settings.json: err %v", err)
+		}
 	}
 }
 

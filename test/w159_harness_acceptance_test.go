@@ -163,7 +163,8 @@ func TestW159MixedHarnessWorkItem(t *testing.T) {
 			t.Fatalf("claude argv %q misses %q", argv, want)
 		}
 	}
-	for _, banned := range []string{w159Token, "--setting-sources", "--fallback-model", "claude:claude-opus-5-5"} {
+	// polyforge#223: the settings.json carries a token → --bare only
+	for _, banned := range []string{w159Token, "--safe-mode", "--setting-sources", "--fallback-model", "claude:claude-opus-5-5"} {
 		if strings.Contains(argv, banned) {
 			t.Fatalf("claude argv carries %q: %s", banned, argv)
 		}

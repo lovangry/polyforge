@@ -11,7 +11,8 @@ package runtime
 //     install.sh writes) and carries pf-chat / the v1 bridge in its
 //     auto-loaded extensions/, nothing of it reaches the step dir (no
 //     settings.json, no extension but subagent);
-//   - a claude step runs with --bare (no hooks, so no SessionStart);
+//   - a claude step runs with --bare or --safe-mode (no hooks, so no
+//     SessionStart);
 //   - both carry PF_WI_ID, the marker pf-chat and the hook check as their
 //     second fence.
 
@@ -84,14 +85,14 @@ func TestW174StepAgentsCannotReachTheEnsureAdapters(t *testing.T) {
 		}
 	}
 
-	// claude step: --bare (no hooks) and the step marker
+	// claude step: --bare or --safe-mode (either skips hooks) and the step marker
 	sp := &claudeSpawner{cfg: &cfg}
 	cmd, err := sp.buildCmd(SpawnParams{WorkItemID: "wi_c", CapsuleDir: "/caps", Model: "claude-opus-5-5", HarnessSession: testSession})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(cmd.Args, "--bare") {
-		t.Fatalf("claude step argv lacks --bare (its SessionStart hook would run pf daemon ensure): %q", cmd.Args)
+	if !slices.Contains(cmd.Args, "--bare") && !slices.Contains(cmd.Args, "--safe-mode") {
+		t.Fatalf("claude step argv lacks --bare/--safe-mode (its SessionStart hook would run pf daemon ensure): %q", cmd.Args)
 	}
 	if !slices.Contains(cmd.Env, "PF_WI_ID=wi_c") {
 		t.Fatal("claude step env lacks PF_WI_ID")

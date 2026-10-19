@@ -399,7 +399,7 @@ func TestW174ClaudeHookBoundedWhenEnsureHangs(t *testing.T) {
 }
 
 // TestW174ClaudeStepHookNeverEnsures: a claude step (PF_WI_ID set; and
-// --bare skips hooks altogether) never reaches pf.
+// --bare / --safe-mode skip hooks altogether) never reaches pf.
 func TestW174ClaudeStepHookNeverEnsures(t *testing.T) {
 	r := w174RunHook(t, "up", "PF_WI_ID=wi_step")
 	if r.code != 0 || r.out != "" || (len(r.journal) > 0 && r.journal[0] != "") {
