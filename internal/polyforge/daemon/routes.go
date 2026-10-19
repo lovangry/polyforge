@@ -736,7 +736,7 @@ func (d *Daemon) pendingQuestionIDs(wi string) []string {
 	if wid == "" {
 		wid = wi
 	}
-	ex := d.loadExecution(wid, nil)
+	ex, _ := d.loadExecution(wid, nil)
 	if ex == nil {
 		return nil
 	}

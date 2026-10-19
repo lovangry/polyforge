@@ -80,13 +80,26 @@ type Origin struct {
 }
 
 // WatchExecution is the subset of execution.json the watcher reads:
-// workflow status, current step, per-step status/start, pending question.
+// workflow status, current step, per-step status/start, pending question,
+// plus the declared step structure of the WI's workflow.
 type WatchExecution struct {
 	WorkflowStatus  string                `json:"workflow_status"`
 	CurrentStep     string                `json:"current_step"`
 	UpdatedAt       string                `json:"updated_at,omitempty"`
 	Steps           map[string]WatchStep  `json:"steps,omitempty"`
 	PendingQuestion *WatchPendingQuestion `json:"pending_question,omitempty"`
+	// DeclaredSteps is the step sequence of the workflow the WI runs (the
+	// capsule's pinned bundle), in frontmatter declaration order — Steps
+	// is a map and carries no order. Omitted when that workflow.md is
+	// missing or unparseable.
+	DeclaredSteps []WatchDeclaredStep `json:"declared_steps,omitempty"`
+}
+
+// WatchDeclaredStep is one declared workflow step: its id and its gate
+// FAIL rewind target (on_fail.target), an explicit null when it has none.
+type WatchDeclaredStep struct {
+	ID     string  `json:"id"`
+	OnFail *string `json:"on_fail"`
 }
 
 // WatchStep is one step's status and start moment.

@@ -1,11 +1,14 @@
 package daemon
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/silgrid/polyforge/internal/common/api"
+	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
@@ -518,5 +521,88 @@ func TestSubStoreWakesTheOriginChatElseOneFallback(t *testing.T) {
 	}
 	if get("chat_b", "wi_2").Passive {
 		t.Fatal("an origin-less WI must not be passive")
+	}
+}
+
+// The watch snapshot's execution carries the declared step structure of
+// the capsule's pinned workflow (polyforge#213): frontmatter order (not
+// the alphabetical order of the steps map), on_fail the gate's rewind
+// target or an explicit null, no other keys. A missing or unparseable
+// workflow.md omits the field and leaves the rest of the snapshot as is.
+func TestWatchSnapshotDeclaredSteps(t *testing.T) {
+	td := newTestDaemon(t, nil)
+	td.hub.mu.Lock()
+	td.hub.slugs = map[string]string{"wi_gone": "proj#9"}
+	td.hub.mu.Unlock()
+	td.seedPendingQuestion(t, "wi_gone", "q-9", "zeta", "x")
+	capDir := filepath.Join(td.cfg.Mapping.Workspaces()[0], "capsules", api.PathName("proj#9", "wi_gone"))
+	bundleDir := filepath.Join(capDir, capsule.DirWorkflows, "flow")
+	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	idn, _ := json.Marshal(capsule.Identity{WorkItemID: "wi_gone", BundleName: "flow"})
+	if err := os.WriteFile(filepath.Join(capDir, capsule.CapsuleJSON), idn, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wfPath := filepath.Join(bundleDir, "workflow.md")
+	snapshotJSON := func() map[string]any {
+		t.Helper()
+		raw, err := json.Marshal(td.watchSnapshot("wi_gone", nil, false, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatal(err)
+		}
+		ex, ok := m["execution"].(map[string]any)
+		if !ok {
+			t.Fatalf("no execution: %s", raw)
+		}
+		return ex
+	}
+
+	for name, body := range map[string]string{
+		"missing":     "",
+		"unparseable": "---\nsteps: [\n---\n",
+	} {
+		if body == "" {
+			_ = os.Remove(wfPath)
+		} else if err := os.WriteFile(wfPath, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ex := snapshotJSON()
+		if _, has := ex["declared_steps"]; has {
+			t.Fatalf("%s workflow.md: declared_steps must be omitted: %v", name, ex)
+		}
+		if ex["current_step"] != "zeta" || ex["pending_question"] == nil {
+			t.Fatalf("%s workflow.md: rest of the snapshot changed: %v", name, ex)
+		}
+	}
+
+	wf := "---\nname: flow\nsteps:\n" +
+		"  - { id: zeta }\n" +
+		"  - { id: alpha }\n" +
+		"  - { id: mid, context_policy: fresh, gate: true, on_fail: { target: alpha } }\n" +
+		"---\n\n# flow\n"
+	if err := os.WriteFile(wfPath, []byte(wf), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ex := snapshotJSON()
+	got, err := json.Marshal(ex["declared_steps"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `[{"id":"zeta","on_fail":null},{"id":"alpha","on_fail":null},{"id":"mid","on_fail":"alpha"}]`
+	if string(got) != want {
+		t.Fatalf("declared_steps = %s, want %s", got, want)
+	}
+	for _, e := range ex["declared_steps"].([]any) {
+		if len(e.(map[string]any)) != 2 {
+			t.Fatalf("an entry carries keys beyond id and on_fail: %v", e)
+		}
+	}
+	if ex["current_step"] != "zeta" || ex["pending_question"] == nil {
+		t.Fatalf("rest of the snapshot changed: %v", ex)
 	}
 }
