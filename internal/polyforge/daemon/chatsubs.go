@@ -48,6 +48,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/protocol"
+	"github.com/silgrid/polyforge/internal/polyforge/driver"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
 	"github.com/silgrid/polyforge/internal/polyforge/watcher"
@@ -581,25 +582,56 @@ func watchProgress(lp observe.LiveProgress) *protocol.WatchProgress {
 // capsule its hub record names: capsules/<project>-<seq> under the
 // project's mapped workspace (item nil = no record to fall back on). It
 // is the one execution.json reader of the daemon (the watch projection
-// and the no-id answer both use it).
-func (d *Daemon) loadExecution(wi string, item *api.WorkItem) *capsule.Execution {
+// and the no-id answer both use it), and answers the capsule dir it read
+// it from too ("" with a nil execution).
+func (d *Daemon) loadExecution(wi string, item *api.WorkItem) (*capsule.Execution, string) {
 	var candidates []string
 	if d.rt != nil {
 		if ji, ok := d.rt.Info(wi); ok && ji.CapsuleDir != "" {
-			candidates = append(candidates, filepath.Join(ji.CapsuleDir, capsule.ExecutionJSON))
+			candidates = append(candidates, ji.CapsuleDir)
 		}
 	}
 	if len(candidates) == 0 && item != nil && d.cfg.Mapping != nil {
 		if ws, err := d.cfg.Mapping.WorkspaceFor(item.ProjectName); err == nil {
-			candidates = append(candidates, filepath.Join(ws, "capsules", api.PathName(item.Slug, wi), capsule.ExecutionJSON))
+			candidates = append(candidates, filepath.Join(ws, "capsules", api.PathName(item.Slug, wi)))
 		}
 	}
-	for _, p := range candidates {
-		if ex := readExecutionFile(p); ex != nil {
-			return ex
+	for _, dir := range candidates {
+		if ex := readExecutionFile(filepath.Join(dir, capsule.ExecutionJSON)); ex != nil {
+			return ex, dir
 		}
 	}
-	return nil
+	return nil, ""
+}
+
+// declaredSteps answers the step sequence of the workflow the capsule's
+// driver executes — its pinned bundle (capsule.json bundle_name under
+// workflows/), parsed by the driver's own loader — in frontmatter order.
+// nil when capsule.json or the workflow.md is missing or unparseable: the
+// snapshot then omits the field and nothing else changes.
+func declaredSteps(capsuleDir string) []protocol.WatchDeclaredStep {
+	raw, err := os.ReadFile(filepath.Join(capsuleDir, capsule.CapsuleJSON))
+	if err != nil {
+		return nil
+	}
+	var idn capsule.Identity
+	if json.Unmarshal(raw, &idn) != nil || idn.BundleName == "" {
+		return nil
+	}
+	wf, err := driver.LoadWorkflow(filepath.Join(capsuleDir, capsule.DirWorkflows, idn.BundleName))
+	if err != nil {
+		return nil
+	}
+	out := make([]protocol.WatchDeclaredStep, 0, len(wf.Steps))
+	for _, s := range wf.Steps {
+		ds := protocol.WatchDeclaredStep{ID: s.ID}
+		if s.OnFail != nil {
+			target := s.OnFail.Target
+			ds.OnFail = &target
+		}
+		out = append(out, ds)
+	}
+	return out
 }
 
 // readExecutionFile parses one execution.json; nil when absent or torn.
@@ -641,13 +673,13 @@ func (d *Daemon) pendingQuestions() map[string]string {
 
 // readExecution projects loadExecution onto the watch wire shape.
 func (d *Daemon) readExecution(wi string, item *api.WorkItem) *protocol.WatchExecution {
-	ex := d.loadExecution(wi, item)
+	ex, dir := d.loadExecution(wi, item)
 	if ex == nil {
 		return nil
 	}
 	out := &protocol.WatchExecution{
 		WorkflowStatus: ex.WorkflowStatus, CurrentStep: ex.CurrentStep, UpdatedAt: ex.UpdatedAt,
-		Steps: map[string]protocol.WatchStep{},
+		Steps: map[string]protocol.WatchStep{}, DeclaredSteps: declaredSteps(dir),
 	}
 	ids := make([]string, 0, len(ex.Steps))
 	for id := range ex.Steps {
