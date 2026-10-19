@@ -1,7 +1,7 @@
 package supervise
 
 // claude.go: the translator of Claude Code's headless stream
-// (`claude -p --bare --output-format stream-json --verbose
+// (`claude -p --bare|--safe-mode --output-format stream-json --verbose
 // --include-partial-messages`, polyforge#159). One JSON record per line:
 //
 //	{"type":"system","subtype":"init",...}            session ready, first model call

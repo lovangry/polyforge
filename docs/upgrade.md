@@ -534,35 +534,50 @@ prefixes). The precedence line for a file header is in the README's
 ### What a claude step runs
 
 ```
-claude -p --bare --output-format stream-json --verbose --include-partial-messages
+claude -p --bare | --safe-mode
+  --output-format stream-json --verbose --include-partial-messages
   --session-id <uuid> | --resume <uuid>  [--model <claude id>]
   --tools Bash,Read,Edit,Write,Glob,Grep,TodoWrite,Agent --allowedTools <same>
   --permission-mode dontAsk --permission-prompts none
-  --strict-mcp-config --disable-slash-commands --safe-mode
+  --strict-mcp-config --disable-slash-commands
 ```
 
 with the capsule as cwd and the step prompt (the same text pi gets) on
-stdin. `--bare`, `--strict-mcp-config` and `--disable-slash-commands`
-give the step a clean context: no hooks, plugins, MCP servers, skills or
-CLAUDE.md of the human's. `--safe-mode` covers the customization
-surfaces those flags do not list (output styles, workflows, themes,
-keybindings and whatever later Claude Code releases add). Background tasks are off
-(`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, `--bare`, and no background
-tool in `--tools`). The native session stays at
+stdin. The context flag follows the auth mode of
+`<harness-root>/claude-config/settings.json`, read at every spawn (fresh
+and `--resume`, so an edit applies to the next step without a daemon
+restart):
+
+- **Token mode** — its `env` block carries a non-empty
+  `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY`: `--bare` only (no hooks,
+  plugins, LSP, auto-memory, CLAUDE.md discovery or keychain).
+- **OAuth mode** — no non-empty token key, no settings.json, or no
+  harness root: `--safe-mode` only (every customization off: CLAUDE.md,
+  skills, plugins, hooks, MCP servers, custom commands and agents, output
+  styles, workflows). `--bare` would skip the keychain the login lives in.
+- A settings.json that exists but is unreadable, is not JSON or has no
+  `env` block refuses the spawn with an error naming the file (`"env": {}`
+  makes it tokenless).
+
+Either way `--strict-mcp-config` and `--disable-slash-commands` keep the
+human's MCP servers and skills out. Background tasks are off
+(`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1` and no background tool in
+`--tools`). The native session stays at
 `~/.claude/projects/…/<uuid>.jsonl` and is copied into the capsule's
 `session/` at every commit boundary; an answered question resumes the
 same session (`--resume`).
 
-**Credentials are the human's.** Log Claude Code in on the work machine
-beforehand; the daemon never reads, writes or manages a credential — the
-step's credential authority layer is its own
-`<harness-root>/claude-config/settings.json` (polyforge#171; see the
-later section), and an explicit daemon-env `ANTHROPIC_AUTH_TOKEN` is
-what the step inherits when its settings carry none (the daemon
-injects none itself). `--bare` does not read the interactive login: the
-settings env block is applied on a bare step, and the adapter hard-sets
-`CLAUDE_CONFIG_DIR` to the claude-config dir, so the daemon CAN see that
-layer from the machine it runs on.
+**Credentials are the human's.** The daemon never writes or manages a
+credential and injects none itself — the step's credential authority
+layer is its own `<harness-root>/claude-config/settings.json`
+(polyforge#171; see the later section), and every inherited
+`ANTHROPIC_*` is stripped from the step's environment. The adapter
+hard-sets `CLAUDE_CONFIG_DIR` to the claude-config dir, so in token mode
+the settings env block is what a bare step applies, and in OAuth mode the
+step uses the Claude Code login of that config dir (log it in on the work
+machine beforehand). The daemon reads the env block only to pick the
+mode, never reporting a value, so it CAN see that layer from the machine
+it runs on.
 
 New cli.toml keys (flat, optional):
 
