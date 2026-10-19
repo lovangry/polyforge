@@ -150,6 +150,14 @@ func asks(qid, q string) fakeEntry {
 func gateFAIL() fakeEntry {
 	return fakeEntry{res: &StepResult{Outcome: OutcomeGateFailed, Output: json.RawMessage(`{"verdict":"FAIL: tests red"}`)}}
 }
+
+// lightReviewFAIL is a review-gate FAIL verdict whose every blocking
+// finding is marked text_only — polyforge#222's light-path trigger (the
+// unmarked twin is gateFAIL's shape plus an unmarked blocking finding).
+func lightReviewFAIL() fakeEntry {
+	return fakeEntry{res: &StepResult{Outcome: OutcomeGateFailed, Output: json.RawMessage(
+		`{"verdict":"fail","fail_reason":"comment wording only","findings":[{"severity":"blocking","detail":"the doc comment names the old flag","text_only":true}]}`)}}
+}
 func incomplete() fakeEntry {
 	return fakeEntry{res: &StepResult{Outcome: OutcomeIncomplete, Output: json.RawMessage(`{"partial":true}`)}}
 }
@@ -444,6 +452,67 @@ func TestRunGateFailRewindRecovers(t *testing.T) {
 	// The verdict was consumed: no pending_rewind_input remains.
 	if pri := exec.Steps["build"].PendingRewindInput; pri != nil {
 		t.Fatalf("the verdict is consumed at dispatch: %+v", pri)
+	}
+}
+
+// TestRunLightRewindResumesBuildSession (polyforge#222): a review FAIL
+// whose blocking findings are all text_only rewinds the build step LIGHT —
+// the re-dispatch is a RESUME of its previous conversation (the durable
+// next_dispatch order, consumed by the start write, whose event records
+// the shape), carrying the verdict and the light re-entry instruction as
+// its rewind input; the review gate's own re-entry stays fresh; one slot.
+func TestRunLightRewindResumesBuildSession(t *testing.T) {
+	d, sp, execPath := runEnv(t, spec("build"), gateSpec("review", "build"))
+	sp.script = []fakeEntry{
+		done(`{"b":1}`),
+		lightReviewFAIL(),
+		done(`{"b":2}`), // the light re-entry (a resume)
+		done(`{"verdict":"PASS"}`),
+	}
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got := sp.dispatched()
+	want := []string{"build@1(resume=false)", "review@2(resume=false)", "build@3(resume=true)", "review@4(resume=false)"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("dispatch ledger:\n got  %v\n want %v", got, want)
+	}
+	re := sp.spawnAt(2)
+	if !re.Resume || re.Fresh {
+		t.Fatalf("the light re-entry must resume the previous conversation: %+v", re)
+	}
+	if ri := re.RewindInput; ri == nil || ri.ToStep != "build" || ri.Note != LightRewindNote ||
+		!strings.Contains(ri.Reason, `"verdict":"fail"`) {
+		t.Fatalf("the light re-entry carries the verdict + the light instruction: %+v", ri)
+	}
+	if g := sp.spawnAt(3); g.Resume || !g.Fresh {
+		t.Fatalf("the review gate's own re-entry must stay fresh: %+v", g)
+	}
+	exec := readExec(t, execPath)
+	if exec.WorkflowStatus != StatusCompleted || exec.RewindStats.Count != 1 {
+		t.Fatalf("one light slot, completed: %q %+v", exec.WorkflowStatus, exec.RewindStats)
+	}
+	var light bool
+	for _, a := range exec.Steps["build"].Attempts {
+		if a.Cause == CauseGateFailRewindTextOnly && a.RewindGate == "review" {
+			light = true
+		}
+	}
+	if !light {
+		t.Fatalf("build must carry the light archive: %+v", exec.Steps["build"].Attempts)
+	}
+	if sup := exec.Steps["build"].Supervision; sup != nil && sup.NextDispatch != "" {
+		t.Fatalf("the start write must consume the resume order: %+v", sup)
+	}
+	// the started event does not lie about the light re-entry's shape
+	var resumed bool
+	for _, e := range d.log.(*eventLog).entries {
+		if e.kind == "step_started" && e.body["step"] == "build" && e.body["spawn_n"] == int64(3) {
+			resumed = e.body["resume"] == true
+		}
+	}
+	if !resumed {
+		t.Fatal("the light re-entry's step_started event must record resume: true")
 	}
 }
 

@@ -298,14 +298,20 @@ func (d *Driver) applyInitLocked() error {
 
 // applyStepStartLocked flips one step to in_progress (01 §6.5 dispatch)
 // and moves the execution position onto it. Two entry shapes share the
-// kind: a PENDING step is a fresh entry (first dispatch or rewind
-// re-entry — the pending rewind verdict is consumed by this very write,
+// kind: a PENDING step is a fresh entry (first dispatch or rewind re-entry
+// — the pending rewind verdict is consumed by this very write,
 // D8, and the budget window re-opens after the rewind archived it); an
 // IN_PROGRESS step is a resume re-dispatch (answer continuation, crash
 // recovery, recovery-lane re-derivation — a new measurement window, the
 // prior partial output kept). From StatusBlocked only the current step
 // may resume: that is the owner's §6.4 unblock action, which also
 // rewrites the status back to running.
+//
+// A pending entry under the light rewind's durable next_dispatch resume
+// order (polyforge#222) is the light re-entry — a resume of the previous
+// dispatch's conversation: the started event's resume flag is set for
+// this shape too (the event does not lie about the dispatch), and this
+// very write consumes the order like every next_dispatch value.
 func (d *Driver) applyStepStartLocked(req TransitionRequest, info *appliedInfo) error {
 	if _, ok := d.workflow.indexOf(req.StepID); !ok {
 		return fmt.Errorf("driver: step %q is not in the workflow", req.StepID)
@@ -321,12 +327,22 @@ func (d *Driver) applyStepStartLocked(req TransitionRequest, info *appliedInfo) 
 		st = &capsule.Step{}
 		d.exec.Steps[req.StepID] = st
 	}
+	// the durable next-dispatch order this start consumes (captured before
+	// the clearing below): the light rewind's resume order on a pending
+	// target names the shape this dispatch actually takes.
+	ordered := ""
+	if st.Supervision != nil {
+		ordered = st.Supervision.NextDispatch
+	}
 	switch {
 	case st.Status == capsule.StepPending || st.Status == "":
 		st.PendingRewindInput = nil          // consumed by this dispatch (D8)
 		st.Output = nil                      // stale products never feed a re-run (01 §6.2 step 4)
 		st.BudgetConsumed = capsule.Budget{} // the rewind archived the prior window
 		st.Status = capsule.StepInProgress
+		if ordered == capsule.NextDispatchResume {
+			info.resume = true // the light re-entry: a resume of the previous conversation
+		}
 	case st.Status == capsule.StepInProgress:
 		info.resume = true
 	default:

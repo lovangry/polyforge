@@ -659,6 +659,17 @@ func (d *Driver) prepareDispatch(stepID string) (*StepSpawn, int64, error) {
 			sp.Fresh = true
 			sp.Resume = false
 		}
+		// The durable light order (polyforge#222): a PENDING step — a gate
+		// FAIL's rewound target — whose supervision orders resume re-enters
+		// as a resume of its previous dispatch's conversation (the
+		// symmetric rule: in_progress defaults resume and "fresh" overrides;
+		// pending defaults fresh and "resume" overrides). The start write
+		// consumes the order; SpawnStep's existing same-harness journal
+		// lookup decides whether the resume is possible and degrades to
+		// fresh-with-reference when it is not.
+		if !sp.Resume && st.Status == capsule.StepPending && st.Supervision != nil && st.Supervision.NextDispatch == capsule.NextDispatchResume {
+			sp.Resume = true
+		}
 	}
 	// the in-process rejection retry lane: the prior dispatch's
 	// validation error rides the prompt as visible feedback
@@ -846,7 +857,10 @@ type StepSpawn struct {
 	// from the driver — pi when nothing chose otherwise).
 	Harness string
 	// Resume marks a re-dispatch of an in_progress step (answer
-	// continuation, crash recovery, recovery-lane re-derivation).
+	// continuation, crash recovery, recovery-lane re-derivation) or of a
+	// pending rewound target under its durable next_dispatch resume order
+	// (the light rewind, polyforge#222) — a resume of the previous
+	// dispatch's conversation.
 	Resume bool
 	// Answers is the step's archived Q&A history — a resumed step
 	// continues from it, never from a blank slate.

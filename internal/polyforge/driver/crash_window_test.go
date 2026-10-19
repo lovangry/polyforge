@@ -12,6 +12,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -213,6 +214,84 @@ func (l *snapshotLog) Append(_, kind string, _ any) error {
 	}
 	l.taken = true
 	return os.WriteFile(l.dst, raw, 0o644)
+}
+
+// TestCrashAroundLightRewindStillResumes (polyforge#222): the light
+// order is DURABLE — the same single gate-FAIL write that archives the
+// range and routes the verdict also sets the resume order, so a kill -9
+// between that write and the re-dispatch resumes on restart (the marker
+// and the rewind input are on disk), and a kill after the re-entry's
+// step_start resumes through the in_progress continuation. No window
+// degrades the light re-entry to fresh.
+func TestCrashAroundLightRewindStillResumes(t *testing.T) {
+	lightOut := `{"verdict":"fail","fail_reason":"comment wording only","findings":[{"severity":"blocking","detail":"d","text_only":true}]}`
+
+	// Window 1: the crash lands between the gate-FAIL transition write
+	// (the rewind event fires with the write) and the re-dispatch.
+	t.Run("crash between the gate write and the dispatch", func(t *testing.T) {
+		e := newCrashEnv(t, spec("build"), gateSpec("review", "build"))
+		crashed := filepath.Join(t.TempDir(), "execution.json")
+		log := &snapshotLog{kind: "rewind", src: e.execPath, dst: crashed}
+		sp := &fakeSpawner{script: []fakeEntry{
+			done(`{}`), // build (spawn 1)
+			{res: &StepResult{Outcome: OutcomeGateFailed, Output: json.RawMessage(lightOut)}}, // review (spawn 2): the light rewind
+			done(`{}`),                 // the light re-entry (spawn 3)
+			done(`{"verdict":"PASS"}`), // review re-run (spawn 4)
+		}}
+		if err := e.driver(sp, 0, log).Run(context.Background()); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if !log.taken {
+			t.Fatal("no rewind event fired")
+		}
+		atCrash := tryReadExec(crashed)
+		if atCrash == nil {
+			t.Fatal("the crash-instant execution.json is unreadable")
+		}
+		if b := atCrash.Steps["build"]; b == nil || b.Status != capsule.StepPending ||
+			b.Supervision == nil || b.Supervision.NextDispatch != capsule.NextDispatchResume ||
+			b.PendingRewindInput == nil || b.PendingRewindInput.Note != LightRewindNote {
+			t.Fatalf("the crash instant must hold the durable light order: %+v", b)
+		}
+		raw, _ := os.ReadFile(crashed)
+		if err := os.WriteFile(e.execPath, raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		sp2 := &fakeSpawner{script: []fakeEntry{done(`{}`), done(`{"verdict":"PASS"}`)}}
+		if err := e.driver(sp2, 2, nil).Run(context.Background()); err != nil {
+			t.Fatalf("restarted Run: %v", err)
+		}
+		if got := sp2.dispatched(); len(got) == 0 || !sp2.spawnAt(0).Resume || sp2.spawnAt(0).Fresh {
+			t.Fatalf("the restart must resume the light re-entry, never fresh: %v", got)
+		}
+		if ri := sp2.spawnAt(0).RewindInput; ri == nil || ri.Note != LightRewindNote || !strings.Contains(ri.Reason, "comment wording only") {
+			t.Fatalf("the restart must carry the light rewind input: %+v", ri)
+		}
+		if x := readExec(t, e.execPath); x.WorkflowStatus != StatusCompleted || x.RewindStats.Count != 1 {
+			t.Fatalf("the restarted lane must complete on the one light slot: %q %+v", x.WorkflowStatus, x.RewindStats)
+		}
+	})
+
+	// Window 2: the crash lands after the re-entry's step_start — the
+	// marker is consumed, the dispatch is in flight — and the restart
+	// resumes through the in_progress continuation.
+	t.Run("crash after the re-entry's step_start", func(t *testing.T) {
+		e := newCrashEnv(t, spec("build"), gateSpec("review", "build"))
+		e.crashHeld([]fakeEntry{
+			done(`{}`), // build (spawn 1)
+			{res: &StepResult{Outcome: OutcomeGateFailed, Output: json.RawMessage(lightOut)}}, // review (spawn 2): the light rewind
+		}, func() {}) // the held dispatch IS the light re-entry (spawn 3)
+		sp2 := &fakeSpawner{script: []fakeEntry{done(`{}`), done(`{"verdict":"PASS"}`)}}
+		if err := e.driver(sp2, 3, nil).Run(context.Background()); err != nil {
+			t.Fatalf("restarted Run: %v", err)
+		}
+		if got := sp2.dispatched(); len(got) == 0 || !sp2.spawnAt(0).Resume {
+			t.Fatalf("the restart must resume the in-flight light re-entry: %v", got)
+		}
+		if x := readExec(t, e.execPath); x.WorkflowStatus != StatusCompleted || x.RewindStats.Count != 1 {
+			t.Fatalf("the resumed lane must complete on the one light slot: %q %+v", x.WorkflowStatus, x.RewindStats)
+		}
+	})
 }
 
 // TestCrashAtGateVerdictKeepsTheVerdict (CR-2): a kill -9 the instant
