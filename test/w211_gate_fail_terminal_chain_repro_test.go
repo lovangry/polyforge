@@ -2,17 +2,20 @@ package test
 
 // w211_gate_fail_terminal_chain_repro_test.go — polyforge#211 (the #204
 // incident shape), root-cause lane, step "repro": a gate FAIL straight to
-// terminal must land the final execution state on the capsule git chain.
+// terminal must land the final execution state on the capsule git chain
+// (a regression bar; see below).
 //
-// The reported failure: terminal transitions never ride an
-// execution-state push — completed WIs are covered by the last
-// step_done's push, but a gate-FAIL straight to terminal WITHOUT
-// step_done ends with the final version unpersisted on the git chain
-// and the transcript never synced (#204's audit: last published = 2s
-// after step start, session/ empty, after a 13-min 23-toolcall
-// dispatch). The risk window is a single long final step with no
-// mid-step state change — exactly the failed-terminal jobs whose audit
-// matters most.
+// The reported failure theory was that terminal transitions never ride
+// an execution-state push. #211's root-cause REFUTED it: in #204 the
+// terminal version (failed_gate + verdict) was published and pushed.
+// The real cause was the pi session-dir/locator mismatch: pi wrote its
+// sessions flat into step-agent-sessions/ while LocateLiveTranscript
+// scanned a per-capsule subdir, so session/ stayed empty. That cause is
+// pinned by TestSpawnPiSessionDirIsWhereTheLocatorLooks in
+// internal/polyforge/runtime/spawn_test.go. fakepi writes straight into
+// session/, so this file does not exercise that locator. The tests in
+// this file pass on base 2a879f0d. They are kept (owner ruling, #211) as
+// regression bars that guard the working terminal-push path.
 //
 // The scenario below drives the REAL stack end to end (real aihub, real
 // pf daemon, the real Go driver, fakepi as the step harness): a
@@ -45,10 +48,9 @@ import (
 // TestW211GateFailStraightToTerminalLandsFinalStateOnChain is the
 // mechanical repro: the exact reported shape (a gate FAIL straight to
 // terminal, a single final dispatch with no mid-step state change),
-// asserted against the goal's contract. It fails today for the reported
-// reason (the chain's execution.json is the step_start version, the
-// final version and the verdict never persisted) and passes once the
-// terminal transition rides the push.
+// asserted against the goal's contract. It passes on base 2a879f0d. It
+// is a regression bar for the terminal-push path, not a repro of
+// #211's cause (see the file header).
 func TestW211GateFailStraightToTerminalLandsFinalStateOnChain(t *testing.T) {
 	inst := newV1Install(t)
 

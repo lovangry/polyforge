@@ -7,10 +7,16 @@ package observe
 // lands on the capsule git chain) and the commit-boundary transcript
 // sync (the dispatch's transcript lands in session/).
 //
-// The reported failure: the final version ends UNPERSISTED on the git
-// chain — the last published version is the step_start one (#204's audit
-// found it 2s after step start after a 13-min 23-toolcall dispatch) — and
-// the transcript is never synced (session/ empty).
+// The reported failure theory was that the final version ends
+// UNPERSISTED on the git chain and the transcript is never synced.
+// #211's root-cause REFUTED the terminal-push half: in #204 the terminal
+// version was published and pushed. The empty session/ came from the pi
+// session-dir/locator mismatch, which is pinned by
+// TestSpawnPiSessionDirIsWhereTheLocatorLooks in
+// internal/polyforge/runtime/spawn_test.go. This test stubs the live
+// locator, so it does not exercise that cause. It passes on base
+// 2a879f0d and is kept (owner ruling, #211) as a regression bar for the
+// terminal push and the boundary sync.
 //
 // The fact sequence below is the driver's real emission order for that
 // flow: the step_start transition's exec_committed (v1) precedes
