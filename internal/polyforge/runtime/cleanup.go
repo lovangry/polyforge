@@ -4,16 +4,17 @@
 // because a surviving orphan keeps writing the capsule next to the
 // re-derived agent (single-writer domain).
 //
-//	L1 PPID snapshot: walk /proc and snapshot the FULL descendant set
-//	   BEFORE any signal (100% precise while the tree is intact).
+//	L1 PPID snapshot: walk the process list (procfs on Linux, the
+//	   kern.proc.all sysctl on darwin) and snapshot the FULL descendant
+//	   set BEFORE any signal (100% precise while the tree is intact).
 //	L2 process group: kill(-pgid, TERM→KILL) — one signal collects the
 //	   group the agent was made leader of at spawn.
 //	L3 identity supplementary kill: the snapshot's (pid, starttime)
 //	   pairs re-kill survivors, refusing to signal a pid whose starttime
 //	   no longer matches (PID-reuse mis-kill protection).
-//	L4 env marker scan: /proc/*/environ processes carrying
-//	   PF_WI_ID=<wi> — catches double-forked escapees that left the
-//	   process group.
+//	L4 env marker scan: processes whose environment (procfs environ on
+//	   Linux, kern.procargs2 on darwin) carries PF_WI_ID=<wi> — catches
+//	   double-forked escapees that left the process group.
 //	L5 cwd scan: processes whose cwd sits inside the capsule are
 //	   reported as WARNINGS only, never killed (an operator's shell
 //	   cd'd into the capsule must survive).
@@ -24,7 +25,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,9 +32,6 @@ import (
 )
 
 var (
-	// procRoot is the procfs mount; a variable only so the fail-closed
-	// branches are testable.
-	procRoot = "/proc"
 	// killFn is the signal(2) face; a variable so EPERM seams are testable.
 	killFn = syscall.Kill
 	// sleepFn is the inter-poll pause of the bounded waits.
@@ -179,32 +176,8 @@ func Cleanup(t CleanupTarget, bound time.Duration) (*CleanupReport, error) {
 }
 
 // ---------------------------------------------------------------------------
-// procfs helpers
-
-// procStat parses one /proc/<pid>/stat read. The comm field may contain
-// spaces inside parentheses, so the split happens after the LAST ')'.
-func procStat(pid int) (state string, ppid, pgrp, start int64, ok bool) {
-	raw, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
-	if err != nil {
-		return "", 0, 0, 0, false
-	}
-	s := string(raw)
-	idx := strings.LastIndex(s, ")")
-	if idx < 0 || idx+2 > len(s) {
-		return "", 0, 0, 0, false
-	}
-	fields := strings.Fields(s[idx+2:])
-	if len(fields) < 20 {
-		return "", 0, 0, 0, false
-	}
-	ppid, err1 := strconv.ParseInt(fields[1], 10, 64)
-	pgrp, err2 := strconv.ParseInt(fields[2], 10, 64)
-	start, err3 := strconv.ParseInt(fields[19], 10, 64)
-	if err1 != nil || err2 != nil || err3 != nil {
-		return "", 0, 0, 0, false
-	}
-	return fields[0], ppid, pgrp, start, true
-}
+// proc helpers (the per-OS readers live in procinfo_linux.go /
+// procinfo_darwin.go — the proc seam)
 
 func procIdentOf(pid int) (procIdent, bool) {
 	if pid <= 0 || !procExists(pid) {
@@ -226,26 +199,10 @@ func procExists(pid int) bool {
 	return state != "Z"
 }
 
-// bootTime is the btime of /proc/stat, the wall-clock anchor for
-// starttime comparisons.
+// bootTime is the wall-clock anchor for starttime comparisons; the
+// per-OS reader (procinfo_linux.go/procinfo_darwin.go) reads it once —
+// it never changes while the machine is up.
 var bootOnce = sync.OnceValue(readBootTime)
-
-func readBootTime() int64 {
-	raw, err := os.ReadFile(filepath.Join(procRoot, "stat"))
-	if err != nil {
-		return 0
-	}
-	for _, line := range strings.Split(string(raw), "\n") {
-		if strings.HasPrefix(line, "btime ") {
-			v, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "btime ")), 10, 64)
-			if err == nil {
-				return v
-			}
-			return 0
-		}
-	}
-	return 0
-}
 
 // rootIdentityHolds reports whether the recorded pid is still OUR process:
 // alive, or its recorded creation time still matches an un-reaped corpse.
@@ -276,7 +233,7 @@ func rootIdentityHolds(t CleanupTarget) bool {
 	return startWall > recUnix-2 && startWall < recUnix+2
 }
 
-// snapshotDescendants walks /proc once and returns the full descendant set
+// snapshotDescendants walks the process list once and returns the full descendant set
 // of root (including root itself) with each member's starttime — L1's
 // pre-signal snapshot.
 func snapshotDescendants(root int) []procIdent {
@@ -284,19 +241,12 @@ func snapshotDescendants(root int) []procIdent {
 		return nil
 	}
 	children := map[int64][]int{}
-	entries, err := os.ReadDir(procRoot)
+	pids, err := procListAll()
 	if err != nil {
 		return nil
 	}
 	idents := map[int]procIdent{}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil || pid <= 1 {
-			continue
-		}
+	for _, pid := range pids {
 		state, ppid, _, start, ok := procStat(pid)
 		if !ok || state == "Z" {
 			continue
@@ -402,18 +352,11 @@ func groupProvableOurs(t CleanupTarget) bool {
 		return false // member birth times unverifiable: fail closed
 	}
 	floor := rec.Unix() - 2
-	entries, err := os.ReadDir(procRoot)
+	pids, err := procListAll()
 	if err != nil {
 		return false
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		pid, aerr := strconv.Atoi(e.Name())
-		if aerr != nil || pid <= 1 {
-			continue
-		}
+	for _, pid := range pids {
 		state, _, pgrp, start, ok := procStat(pid)
 		if !ok || state == "Z" || int(pgrp) != t.Pgid {
 			continue
@@ -426,26 +369,19 @@ func groupProvableOurs(t CleanupTarget) bool {
 }
 
 // groupEmpty reports whether NO live member remains in the group. Fails
-// closed: an unreadable procfs makes emptiness unprovable and answers
+// closed: an unreadable process list makes emptiness unprovable and answers
 // false.
 func groupEmpty(pgid int) bool {
-	entries, err := os.ReadDir(procRoot)
+	pids, err := procListAll()
 	if err != nil {
 		return false
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil || pid <= 1 {
-			continue
-		}
+	for _, pid := range pids {
 		state, _, pgrp, _, ok := procStat(pid)
 		if !ok {
 			// A still-present pid with an unreadable stat makes the whole
 			// answer unprovable — never fail open.
-			if _, derr := os.Stat(filepath.Join(procRoot, e.Name())); derr == nil {
+			if procStillListed(pid) {
 				return false
 			}
 			continue
@@ -473,33 +409,30 @@ func waitGroupEmpty(pgid int, bound time.Duration) bool {
 // ---------------------------------------------------------------------------
 // env marker scan (L4) and cwd scan (L5)
 
-// scanEnvMarker returns the live pids whose environ carries BOTH this
+// scanEnvMarker returns the live pids whose environment carries BOTH this
 // WI's PF_WI_ID marker and this daemon's PF_DAEMON_ID marker. Excludes
-// self and pid 1.
+// self (pid 1 and below are outside procListAll). Unreadable environments
+// (another uid, an exit race) are skipped: not provably ours.
 func scanEnvMarker(wi, daemonID string) []int {
 	self := os.Getpid()
-	entries, err := os.ReadDir(procRoot)
+	pids, err := procListAll()
 	if err != nil {
 		return nil
 	}
 	var out []int
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil || pid <= 1 || pid == self {
+	for _, pid := range pids {
+		if pid == self {
 			continue
 		}
 		state, _, _, _, ok := procStat(pid)
 		if !ok || state == "Z" {
 			continue
 		}
-		raw, err := os.ReadFile(filepath.Join(procRoot, e.Name(), "environ"))
+		envs, err := procEnviron(pid)
 		if err != nil {
 			continue // unreadable (permission/exit race): not provably ours
 		}
-		if envHasMarkers(string(raw), wi, daemonID) {
+		if envHasMarkers(envs, wi, daemonID) {
 			out = append(out, pid)
 		}
 	}
@@ -507,29 +440,34 @@ func scanEnvMarker(wi, daemonID string) []int {
 }
 
 // cwdScan reports (never kills) live processes whose cwd sits inside the
-// capsule — an operator shell must survive the cleanup.
+// capsule — an operator shell must survive the cleanup. The probe on
+// our own pid guards against a platform with no cwd primitive: if even
+// our own cwd cannot be read, the layer reports one visible warning
+// naming it unavailable (never silently skipped) and stays
+// warnings-only.
 func cwdScan(t CleanupTarget, rep *CleanupReport) {
 	if t.CapsuleDir == "" {
 		return
 	}
+	if _, err := procCwd(os.Getpid()); err != nil {
+		rep.Warnings = append(rep.Warnings,
+			fmt.Sprintf("layer 5: process cwd cannot be read on this OS (%v); the capsule-cwd scan is unavailable — reported, not silently skipped", err))
+		return
+	}
 	self := os.Getpid()
-	entries, err := os.ReadDir(procRoot)
+	pids, err := procListAll()
 	if err != nil {
 		return
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil || pid <= 1 || pid == self {
+	for _, pid := range pids {
+		if pid == self {
 			continue
 		}
 		state, _, _, _, ok := procStat(pid)
 		if !ok || state == "Z" {
 			continue
 		}
-		cwd, err := os.Readlink(filepath.Join(procRoot, e.Name(), "cwd"))
+		cwd, err := procCwd(pid)
 		if err != nil {
 			continue
 		}
@@ -540,12 +478,12 @@ func cwdScan(t CleanupTarget, rep *CleanupReport) {
 	}
 }
 
-// envHasMarkers reports whether a /proc/<pid>/environ blob carries both
-// PF_WI_ID=<wi> and PF_DAEMON_ID=<daemonID>.
-func envHasMarkers(environ, wi, daemonID string) bool {
+// envHasMarkers reports whether an environment (one KEY=VALUE token per
+// string) carries both PF_WI_ID=<wi> and PF_DAEMON_ID=<daemonID>.
+func envHasMarkers(envs []string, wi, daemonID string) bool {
 	wiMark, dMark := "PF_WI_ID="+wi, "PF_DAEMON_ID="+daemonID
 	var hasWI, hasD bool
-	for _, kv := range strings.Split(environ, "\x00") {
+	for _, kv := range envs {
 		switch kv {
 		case wiMark:
 			hasWI = true

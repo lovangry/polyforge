@@ -19,8 +19,6 @@ package runtime
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"strconv"
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/polyforge/gitops"
@@ -56,11 +54,11 @@ func journalPIDs(capsuleDir string) []journalPID {
 // pidHasWIMarker reports whether pid's environment carries both
 // PF_WI_ID=wi and PF_DAEMON_ID=daemonID.
 func pidHasWIMarker(pid int, wi, daemonID string) bool {
-	raw, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "environ"))
+	envs, err := procEnviron(pid)
 	if err != nil {
 		return false
 	}
-	return envHasMarkers(string(raw), wi, daemonID)
+	return envHasMarkers(envs, wi, daemonID)
 }
 
 // journalPIDIsOurs is the pid-reuse guard. A journal pid is signaled only

@@ -16,9 +16,6 @@ package runtime
 // (setsid) AND cleared its environment is outside this check.
 
 import (
-	"os"
-	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -52,16 +49,17 @@ func StepProcessOrigin(pid int, daemonID string) (wi string, ok bool) {
 	return "", false
 }
 
-// stepMarkers reads /proc/<pid>/environ: a step process of this daemon
-// carries PF_DAEMON_ID=<daemonID> and a non-empty PF_WI_ID.
+// stepMarkers reads the process's environment via the proc seam: a step
+// process of this daemon carries PF_DAEMON_ID=<daemonID> and a non-empty
+// PF_WI_ID.
 func stepMarkers(pid int, daemonID string) (string, bool) {
-	raw, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "environ"))
+	envs, err := procEnviron(pid)
 	if err != nil {
 		return "", false
 	}
 	var wi string
 	var ours bool
-	for _, kv := range strings.Split(string(raw), "\x00") {
+	for _, kv := range envs {
 		switch {
 		case strings.HasPrefix(kv, "PF_WI_ID="):
 			wi = strings.TrimPrefix(kv, "PF_WI_ID=")
