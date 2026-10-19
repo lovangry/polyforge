@@ -234,10 +234,14 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 
 ### 6.1 UDS routes <!-- §6.1 -->
 
-`internal/polyforge/daemon/routes.go` `routes()` — 18 routes, all wrapped by `refuseStepOrigin`: every
+`internal/polyforge/daemon/routes.go` `routes()` — 19 routes, all wrapped by `refuseStepOrigin`: every
 non-read request whose peer (or its ancestors / process-group leader) carries this daemon's
 `PF_WI_ID`+`PF_DAEMON_ID` markers — or whose peer credential cannot be read — is refused `DAEMON-403`
-(SO_PEERCRED capture `daemon/peercred.go`, check `runtime/stepproc.go` `StepProcessOrigin`).
+(SO_PEERCRED capture `daemon/peercred.go`, check `runtime/stepproc.go` `StepProcessOrigin`). The guard
+lets exactly two step writes through, and both are reachable ONLY from a step process of this daemon
+(resolved from the peer's process tree, every other caller refused `DAEMON-403`): `POST /step/memories`
+(`pf remember` inside a step, §7.4) and `POST /step/result` (`pf result submit`, §7.3); with
+`GET /step/memories/search|{id}` they are the step face, not listed below.
 
 | Method | Path | Does | Caller |
 |---|---|---|---|
@@ -328,7 +332,7 @@ verdict contract), record-only on every other step (event `output_schema_violati
 
 ### 7.3 Step dispatch and the result envelope <!-- §7.3 -->
 
-- One harness process per dispatch, cwd = capsule. The step writes **one** JSON envelope to `runtime-state/pending-results/<spawn_n>.json`: `{wi_id, step_id, spawn_n, outcome, output, question_id, question, command_evidence, submitted_at}`; outcomes `completed | gate_failed | needs_input | incomplete` (`driver/result.go`). The driver archives it to `artifacts/steps/<step>/s<spawn_n>/result.json`.
+- One harness process per dispatch, cwd = capsule. The step delivers **one** JSON envelope with `pf result submit <json|-|@file>` — the only delivery path the prompt names (polyforge#214; hand-writing the drop is not described, and a helper that cannot deliver ends the turn without a result, the exited-without-result recovery lane). The agent supplies `{outcome, output}` (needs_input: `question_id` + `question`; `command_evidence` when the step owes it); the daemon's `POST /step/result` (`daemon/stepresult.go`) resolves the calling step from its process tree like `/step/memories`, refuses a caller-supplied `wi_id`/`step_id`/`spawn_n` that disagrees and the light shape defects (`driver.CheckEnvelopeShape`: JSON, outcome closed set, `output` an object, the needs_input question pair) with `DAEMON-403`/`DAEMON-400` writing nothing, stamps `wi_id, step_id, spawn_n, submitted_at` itself and lands the envelope atomically at `runtime-state/pending-results/<spawn_n>.json` — the caller's cwd and any harness sandbox have no say. Outcomes `completed | gate_failed | needs_input | incomplete` (`driver/result.go`). The driver collects the drop (refusing a non-empty `wi_id`/`step_id` of another dispatch, `ErrIdentityMismatch`, or a stale `spawn_n`) and archives it to `artifacts/steps/<step>/s<spawn_n>/result.json`; every deeper check stays in its accept gate below.
 - Validation order (`ValidateStepResult`): shape; identity + spawn_n fence; needs_input question shape; gate verdict binding (completed with `verdict: fail` → `gate_failed`); `requires_human_answer`; `defer` verdict only on `deploy`; output schema (enforced on `release`/`deploy`, record-only elsewhere); command evidence (a list of objects on any step, else rejected; on evidence-owing steps argv non-empty, `duration_ms>0`); committed test files; pre-existing-failure boundary; authored tests unchanged; deliver binding. A rejection is retried in-process with the reason; the 4th consecutive rejection (`maxEnvelopeRejects`=3 retries) blocks the step `result_invalid`. Details: `v2-converge.md#§2.6`.
 - `gate_failed` → bounded rewind (`driver/transition.go` `applyGateFailLocked`): no `on_fail` → `failed_gate`; a bound hit → `failed_rewind_exhausted`; else `[target, gate)` archived and reset (the target as `gate_fail_rewind`, the steps strictly between it and the gate as `superseded_by_rewind`, both with `rewind_gate`), the verdict text delivered to the target as `pending_rewind_input`, candidate pointers reset.
 - `needs_input` → question stored in `execution.json`; a human answers with `pf answer` → daemon `/jobs/{wi}/answer` → the driver (`applyAnswerLocked`). Never answered by an agent (UDS step-origin refusal).
@@ -349,7 +353,7 @@ the work item's one `experience.wrap` summary guided by the project's memory pol
 `runtime-state/memory-policy.json` (`workflows/_shared/memory-wrap.md`). Step agents hold no
 aihub credential path; memory access is daemon-mediated: inside a step (`PF_WI_ID` and `PF_DAEMON_ID`
 set) `pf recall` / `pf memory show` read through `GET /step/memories/search|{id}` and `pf remember`
-posts synchronously to `POST /step/memories` (the step-origin guard's one step-allowed write), all
+posts synchronously to `POST /step/memories` (one of the step-origin guard's two step-allowed writes, §6.1), all
 scoped to the one work item whose journaled step process is the caller's ancestor (never the caller's
 own env) and its project (`daemon/stepmem.go`). The write accepts `experience.wrap` only, ≤ 2 KB, a
 title, no credential value (`internal/common/stepmem`, shared with the CLI), and creates it with the

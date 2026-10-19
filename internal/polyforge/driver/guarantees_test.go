@@ -412,3 +412,30 @@ func TestEvidenceRejectionNamesBadStartedAt(t *testing.T) {
 		t.Fatalf("rejection must name the real reason, got %v", err)
 	}
 }
+
+// polyforge#214: the delivery contract names `pf result submit` as the
+// ONLY delivery path and no longer tells the agent to hand-write the
+// drop: no path, no "working directory IS the capsule root" line, no
+// identity field to copy, and a failing helper ends the turn without a
+// hand-written file.
+func TestDeliveryContractNamesTheHelperOnly(t *testing.T) {
+	for _, p := range []promptParts{
+		{WIID: "wi_x", StepID: "fix", SpawnN: 7},
+		{WIID: "wi_x", StepID: "verification", SpawnN: 7, RequireCommandEvidence: true, Gate: true},
+	} {
+		c := deliveryContract(p)
+		for _, want := range []string{"`pf result submit`", "ONLY way to deliver a result", "never write a result file yourself", `"outcome":`, `"output":`} {
+			if !strings.Contains(c, want) {
+				t.Fatalf("contract missing %q:\n%s", want, c)
+			}
+		}
+		for _, gone := range []string{"pending-results", "(capsule-relative;", "IS the capsule root", `"wi_id"`, `"step_id"`, `"spawn_n"`, `"submitted_at"`, "wi_x", "once the file is written"} {
+			if strings.Contains(c, gone) {
+				t.Fatalf("contract still carries the hand-write instruction %q:\n%s", gone, c)
+			}
+		}
+		if p.RequireCommandEvidence && !strings.Contains(c, `"command_evidence": []`) {
+			t.Fatalf("an evidence step's example keeps command_evidence:\n%s", c)
+		}
+	}
+}

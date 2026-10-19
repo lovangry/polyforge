@@ -10,7 +10,8 @@ package driver
 //   - PROCESS DERIVATION through spawn.Params -> spawn.Spawner: the model
 //     pin rides argv, the resume session the spawn journal's latest
 //     transcript; isolation and env sanitizing stay in runtime/spawn.go;
-//   - RESULT COLLECTION: the step writes its envelope to
+//   - RESULT COLLECTION: the step submits its envelope with `pf result
+//     submit` and the daemon lands it at
 //     runtime-state/pending-results/<spawn_n>.json; the run collects it,
 //     stamps it to artifacts/steps/<step>/s<spawn_n>/result.json, consumes
 //     the drop and tears the process down. The drop path is keyed by the
@@ -47,8 +48,8 @@ const (
 	// materialized bundle: workflows/<bundle>/steps/<id>.md (the R9
 	// path convention).
 	dirStepDefs = "steps"
-	// dirPendingResults is the runtime-state subdirectory a step
-	// process delivers its R13 envelope into (one file per spawn
+	// dirPendingResults is the runtime-state subdirectory a step's R13
+	// envelope is delivered into (by the daemon's /step/result, one file per spawn
 	// ordinal — the ordinal IS the fence, so a superseded derivation's
 	// leftover file is never collected).
 	dirPendingResults = "pending-results"
@@ -276,7 +277,7 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		wiID:        a.WI.ID,
 		sp:          sp,
 		handle:      proc,
-		dropPath:    pendingResultPath(a.WI.CapsuleDir, sp.SpawnN),
+		dropPath:    PendingResultPath(a.WI.CapsuleDir, sp.SpawnN),
 		poll:        a.PollInterval,
 		meta:        meta,
 		sink:        sink,
@@ -608,41 +609,45 @@ func policyBullets(list []string) string {
 	return b.String()
 }
 
-// deliveryContract states the envelope delivery path and shape: the
-// single channel the driver reads a result from. The MINIMAL CONTRACT
+// deliveryContract states the envelope delivery channel and shape: the
+// step submits its envelope with `pf result submit` — the ONE delivery
+// path (polyforge#214) — and the daemon stamps the dispatch identity and
+// lands it at the drop path the driver collects from, so the prompt
+// names no path and no identity field. The MINIMAL CONTRACT
 // (polyforge#147): the envelope is the outcome + output pair (needs_input
-// adds the question pair) plus the dispatch identity — no protocol
-// version stamp, no envelope id, no artifact manifest, no handoff
-// digest reference; downstream and handoff readers work by path
-// convention. For a gate step it also states the verdict binding (the
-// #106 lesson): the output's top-level fail verdict and the envelope
-// outcome must agree — a fail verdict requires gate_failed, and the
-// driver re-binds a completed envelope carrying one fail-closed.
+// adds the question pair) — no protocol version stamp, no envelope id,
+// no artifact manifest, no handoff digest reference; downstream and
+// handoff readers work by path convention. A helper that cannot deliver
+// ends the turn without a result (the exited-without-result recovery
+// lane), never a hand-written file. For a gate step it also states the
+// verdict binding (the #106 lesson): the output's top-level fail verdict
+// and the envelope outcome must agree — a fail verdict requires
+// gate_failed, and the driver re-binds a completed envelope carrying one
+// fail-closed.
 func deliveryContract(p promptParts) string {
-	rel := capsule.DirRuntimeState + "/" + dirPendingResults + "/" + strconv.FormatInt(p.SpawnN, 10) + ".json"
 	evidenceLine := ""
 	if p.RequireCommandEvidence {
-		evidenceLine = "  \"command_evidence\": [],\n"
+		evidenceLine = ",\n  \"command_evidence\": []"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n# Result delivery\n\n"+
-		"When this step reaches an outcome, write exactly ONE JSON object — the polyforge result envelope — "+
-		"to `%s` (capsule-relative; your working directory IS the capsule root; create the directory if needed), "+
-		"then end your turn. The execution driver collects the envelope from that path; nothing else you print is read as a result.\n\n", rel)
+	b.WriteString("\n# Result delivery\n\n" +
+		"When this step reaches an outcome, deliver exactly ONE JSON object — the polyforge result envelope — " +
+		"with `pf result submit`, then end your turn. This command is the ONLY way to deliver a result: " +
+		"the daemon recognizes this step from your process, stamps the work item, step and spawn itself " +
+		"and lands the envelope where the execution driver collects it; nothing else you print is read as a result. " +
+		"Pass the envelope inline, on stdin (`pf result submit - <<'EOF'` … `EOF`) or from a file (`pf result submit @<path>`):\n\n")
 	fmt.Fprintf(&b, "```json\n{\n"+
-		"  \"wi_id\": %q,\n"+
-		"  \"step_id\": %q,\n"+
-		"  \"spawn_n\": %d,\n"+
 		"  \"outcome\": \"completed\" | \"gate_failed\" | \"needs_input\" | \"incomplete\",\n"+
-		"  \"output\": { },\n"+
-		"%s"+
-		"  \"submitted_at\": \"<RFC3339>\"\n"+
-		"}\n```\n\n", p.WIID, p.StepID, p.SpawnN, evidenceLine)
+		"  \"output\": { }%s\n"+
+		"}\n```\n\n", evidenceLine)
+	b.WriteString("If `pf result submit` refuses the envelope it exits non-zero and names the defect: correct the envelope and submit it again. " +
+		"If it cannot deliver at all (the daemon unreachable or refusing this process), report that and end your turn — " +
+		"never write a result file yourself.\n\n")
 	b.WriteString("Rules: `output` is a JSON object; every file this step produced that downstream steps or the owner consume is written under `artifacts/` and named by its path in the step's own instructions — the driver and downstream readers work by path convention, never by manifest")
 	if p.HandoffDue {
 		b.WriteString("; this step DECLARES handoff, so write the handoff file at `artifacts/handoff-" + p.StepID + ".md` — the next inherit step reads it by that path convention")
 	}
-	b.WriteString("; a `needs_input` result carries `question_id` (1–64 chars of `A-Za-z0-9._-`) and `question` instead. End your turn once the file is written.\n")
+	b.WriteString("; a `needs_input` result carries `question_id` (1–64 chars of `A-Za-z0-9._-`) and `question` instead. End your turn once the submit succeeds.\n")
 	if p.RequireCommandEvidence {
 		b.WriteString("\nCommand evidence: this step requires `command_evidence` — a list of OBJECTS " +
 			"`{\"argv\": [\"go\", \"test\", \"./...\"], \"cwd\": \"repos/<name>\", \"exit_code\": 0, \"duration_ms\": 1200}`, never strings. " +
@@ -878,9 +883,9 @@ func spawnToken(handle string, n int64) string {
 	return handle
 }
 
-// pendingResultPath is the absolute drop path of one derivation's
+// PendingResultPath is the absolute drop path of one derivation's
 // envelope.
-func pendingResultPath(capsuleDir string, n int64) string {
+func PendingResultPath(capsuleDir string, n int64) string {
 	return filepath.Join(capsuleDir, capsule.DirRuntimeState, dirPendingResults, strconv.FormatInt(n, 10)+".json")
 }
 
@@ -1032,6 +1037,10 @@ func (r *stepRun) collect() (*StepResult, error) {
 	}
 	if res.WIID == "" {
 		res.WIID = r.wiID
+	}
+	if res.WIID != r.wiID {
+		return nil, fmt.Errorf("%w: envelope names work item %q, dispatch is %q",
+			ErrIdentityMismatch, clipAgentText(res.WIID), r.wiID)
 	}
 	if res.SpawnN == 0 {
 		res.SpawnN = r.sp.SpawnN

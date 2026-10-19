@@ -260,7 +260,8 @@ func TestStepRememberRefusalsAndOutage(t *testing.T) {
 //	relay  — spawns a "step" child with PF_WI_ID=STEPMEM_INNER_WI
 //	step   — writes its pid to STEPMEM_PIDFILE, waits for STEPMEM_GO,
 //	         spawns the caller (PF_WI_ID=STEPMEM_CALLER_WI when set)
-//	caller — POSTs a wrap memory and prints the answer
+//	caller — POSTs a wrap memory (or STEPMEM_BODY to STEPMEM_PATH, from
+//	         STEPMEM_CWD when set) and prints the answer
 //
 // Every role relays its child's output.
 func TestStepMemoryHelperProcess(t *testing.T) {
@@ -291,8 +292,19 @@ func TestStepMemoryHelperProcess(t *testing.T) {
 		}
 		child("caller", env...)
 	default:
-		code, body := stepDo(t, sock, "POST", "/step/memories", wrapBody(""))
-		fmt.Printf("STEPMEM %d %s\n", code, body)
+		// STEPMEM_PATH/STEPMEM_BODY pick another step write (default: a
+		// wrap memory); STEPMEM_CWD moves the caller elsewhere first
+		path, body := "/step/memories", wrapBody("")
+		if p := os.Getenv("STEPMEM_PATH"); p != "" {
+			path, body = p, os.Getenv("STEPMEM_BODY")
+		}
+		if dir := os.Getenv("STEPMEM_CWD"); dir != "" {
+			if err := os.Chdir(dir); err != nil {
+				t.Fatal(err)
+			}
+		}
+		code, answer := stepDo(t, sock, "POST", path, body)
+		fmt.Printf("STEPMEM %d %s\n", code, answer)
 	}
 }
 

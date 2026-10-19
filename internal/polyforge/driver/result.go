@@ -503,6 +503,28 @@ func needsInputQuestion(res *StepResult) (id, text string, err error) {
 	return id, text, nil
 }
 
+// CheckEnvelopeShape is the light shape check of a submitted envelope
+// (`pf result submit`, the daemon's POST /step/result): the outcome is
+// in the closed set, output (when present) is a JSON object, and a
+// needs_input carries a well-formed question pair. It reuses the
+// accept gate's own checks; everything deeper (output schema, command
+// evidence, test files, …) stays with ValidateStepResult, the single
+// authority.
+func CheckEnvelopeShape(res *StepResult) error {
+	if !res.Outcome.Valid() {
+		return fmt.Errorf("driver: unknown outcome %q (one of completed, gate_failed, needs_input, incomplete)", clipAgentText(string(res.Outcome)))
+	}
+	if _, err := parseOutput(res.Output); err != nil {
+		return fmt.Errorf("driver: envelope %w", err)
+	}
+	if res.Outcome == OutcomeNeedsInput {
+		if _, _, err := needsInputQuestion(res); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // questionIDShape is the accepted needs_input question id: 1–64 chars of
 // letters, digits, '.', '_' and '-'.
 var questionIDShape = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)

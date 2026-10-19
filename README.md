@@ -257,9 +257,11 @@ CLI verbs + `pf daemon`).
 
 The routes mounted by the daemon's local Unix-socket HTTP face
 (`internal/polyforge/daemon/routes.go`). **Face** marks who calls the route:
-`user` = the operator's CLI / watch tooling. Every mutating (non-GET) route
-refuses a caller that belongs to a step agent's process tree, or whose UDS peer
-credential is unavailable, with `DAEMON-403` (polyforge#122 accident guard).
+`user` = the operator's CLI / watch tooling; `step` = a workflow step's own
+process, identified by its process tree (every other caller is refused). Every
+other mutating (non-GET) route refuses a caller that belongs to a step agent's
+process tree, or whose UDS peer credential is unavailable, with `DAEMON-403`
+(polyforge#122 accident guard).
 
 | Method | Path | Role | Face |
 | --- | --- | --- | --- |
@@ -276,6 +278,7 @@ credential is unavailable, with `DAEMON-403` (polyforge#122 accident guard).
 | GET | `/chats/{id}/subscriptions` | A chat's daemon-held subscriptions. | user |
 | POST | `/chats/{id}/subscribe`, `/unsubscribe` | Subscribe / drop a work item for a chat. | user |
 | POST | `/chats/{id}/ack` | Acknowledge consumed events / delivered decisions (advances the cursor). | user |
+| POST | `/step/result` | `pf result submit` inside a step: the daemon stamps the calling step's `wi_id`/`step_id`/`spawn_n` and lands its result envelope atomically at `runtime-state/pending-results/<spawn_n>.json`; a disagreeing identity or a shape defect is refused and nothing is written (polyforge#214). | step |
 | POST | `/chats/{id}/subscribe-owned` | Every watcher poll: subscribe the chat to the held work items it submitted or its owner owns (a work item submitted from another chat is shown as progress only; only its origin chat — or, while that chat's watcher is silent, one fallback chat — is woken), and mark the chat live. | user |
 
 Authoritative source for this table is the code itself — the
@@ -407,7 +410,7 @@ error caught by the global / verb-level flag parse. The routing skill's fragment
 | `pf help` group | Verbs |
 | --- | --- |
 | Data-plane verbs (direct to aihub) | `file`, `queue`, `cancel`, `recall`, `remember`, `memory` |
-| Execution-plane verbs (local daemon UDS face) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`), `answer`, `pause`, `resume`, `wrap`, `ops` (`status`, `auto`, `max`, `shutdown`, and `end-session` — aihub-direct, admin/maintainer), `chat init` |
+| Execution-plane verbs (local daemon UDS face) | `submit`, `watch` (snapshot, resident watcher, `subscribe`/`unsubscribe`/`list`), `answer`, `pause`, `resume`, `wrap`, `ops` (`status`, `auto`, `max`, `shutdown`, and `end-session` — aihub-direct, admin/maintainer), `chat init`, `result submit` (inside a workflow step only: its one result-delivery path) |
 | Management face (M1–M5) | `users`, `api-keys`, `projects`, `machines`, `backup` (database snapshot, see below) |
 | Diagnostics | `doctor` (`--prune-scratch` removes stale `scratch/` entries), `version` (the verb form of `pf --version`), `init` (a workspace's local layout) |
 | Process | `daemon` (run the work machine; `pf daemon ensure` starts it) |

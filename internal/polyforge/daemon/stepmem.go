@@ -10,7 +10,8 @@ package daemon
 //	GET  /step/memories/{id}     {meta, content}
 //	POST /step/memories          {type, title, tags, content[, project, work_item]}
 //
-// The POST is the step-origin guard's one step-allowed write (routes.go).
+// The POST is one of the step-origin guard's two step-allowed writes
+// (routes.go); the other is the result submit (stepresult.go).
 
 import (
 	"encoding/json"
@@ -34,6 +35,7 @@ const stepMemoriesPath = "/step/memories"
 type stepJob struct {
 	wi, slug, project, step string
 	attempt                 int
+	capsuleDir              string
 }
 
 // stepCaller resolves the request to its step's live job, or writes the
@@ -53,7 +55,7 @@ func (d *Daemon) stepCaller(w http.ResponseWriter, r *http.Request) (stepJob, bo
 		writeErr(w, api.ErrDaemonNotFound, "work item "+j.wi+" of the calling step is not running on this daemon")
 		return j, false
 	}
-	j.wi, j.slug, j.project = ji.WorkItem, ji.Slug, ji.Project
+	j.wi, j.slug, j.project, j.capsuleDir = ji.WorkItem, ji.Slug, ji.Project, ji.CapsuleDir
 	return j, true
 }
 

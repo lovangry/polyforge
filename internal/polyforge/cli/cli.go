@@ -69,8 +69,9 @@ type Command struct {
 // (file, queue, cancel, recall, remember, memory; the blocked exits are
 // `resume` = continue and `cancel` = abandon, v2-converge §7) + 7 on the
 // daemon UDS face (submit, watch, answer, pause, resume, wrap, ops) — with
-// `chat` (the harness chat identity, also GroupExec, so the help face shows
-// 8 exec verbs) between ops and watch, then the management face M1–M5, then the
+// `chat` (the harness chat identity, also GroupExec) between ops and watch
+// and `result` (a workflow step's result delivery, #214, also GroupExec, so
+// the help face shows 9 exec verbs) after watch, then the management face M1–M5, then the
 // machine health face (doctor, #113), the build version (version, #196:
 // the verb form of the `--version` flag) and the workspace layout (init,
 // #177), then the daemon
@@ -90,6 +91,7 @@ var commands = []*Command{
 	cmdOps,
 	cmdChat,
 	cmdWatch,
+	cmdResult,
 	cmdUsers,
 	cmdApiKeys,
 	cmdMachines,
