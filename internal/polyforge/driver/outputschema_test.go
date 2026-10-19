@@ -320,6 +320,27 @@ func TestShippedStepSchemasAcceptKnownGoodOutputs(t *testing.T) {
 			t.Fatalf("%s: known-good output rejected: %v", key, err)
 		}
 	}
+	// polyforge#222: the review schema accepts the optional text_only marker
+	// on both verdict branches — a marked non-blocking finding under pass,
+	// marked blocking findings under fail (the light rewind's eligibility
+	// shape) and unmarked findings beside them alike, for every bundle whose
+	// review resolves to the shared definition.
+	for _, bundle := range []string{"bug-fix", "chore", "feature-full"} {
+		bundleDir := filepath.Join(shippedWorkflowsDir, bundle)
+		s, err := loadStepOutputSchema(bundleDir, "review", shippedVars(t, bundleDir, "review"))
+		if err != nil || s == nil {
+			t.Fatalf("%s/review: %v", bundle, err)
+		}
+		for name, sample := range map[string]string{
+			"pass with marked non-blocking findings":  `{"verdict":"pass","findings":[{"severity":"non-blocking","detail":"nit: a log line could be shorter","text_only":true}]}`,
+			"fail with every blocking finding marked": `{"verdict":"fail","fail_reason":"comment wording only","findings":[{"severity":"blocking","detail":"the doc comment names the old flag","text_only":true},{"severity":"non-blocking","detail":"nit"}]}`,
+			"fail with an unmarked blocking finding":  `{"verdict":"fail","fail_reason":"an assertion is wrong","findings":[{"severity":"blocking","detail":"light round changed an assertion"}]}`,
+		} {
+			if err := checkOutputSchema(s.Schema, json.RawMessage(sample)); err != nil {
+				t.Errorf("%s/review: %s rejected: %v", bundle, name, err)
+			}
+		}
+	}
 }
 
 // TestFeatureFullMergedStepSchemasRejectContradictions (polyforge#165):

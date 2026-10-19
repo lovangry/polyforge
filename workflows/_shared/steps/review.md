@@ -17,7 +17,10 @@ output:
         properties:
           severity: { type: string, enum: [blocking, non-blocking] }
           detail: { type: string }
-      description: Individual review findings, whether or not they are severe enough to fail the gate. A pass verdict with a blocking finding is self-contradictory - the schema's oneOf forbids it.
+          text_only:
+            type: boolean
+            description: Optional per-finding classification (polyforge#222). True only when this finding's fix touches nothing but comments and documentation, in any file, test files included - the driver then rewinds {{build_step}} light (a resume of its previous session, this verdict as its rewind input) instead of fresh. Absent or false means the fix is structural (see the text-only boundary in the body) and the rewind is fresh. A fix that would change polyforge's own runtime behavior - a user-facing string literal, a workflows/** .md file, skills/** prompt material - is structural whatever the file type; never mark it text_only.
+      description: Individual review findings, whether or not they are severe enough to fail the gate. A pass verdict with a blocking finding is self-contradictory - the schema's oneOf forbids it. The text_only marker rides blocking findings only into the light-rewind eligibility - non-blocking findings never enter that rule.
     fail_reason:
       type: string
       description: Required when verdict is fail - a synthesis of the blocking findings, to be carried back to the step this gate rewinds to as its pending_rewind_input. The oneOf split below makes the requirement mechanical - a fail verdict without a non-empty fail_reason does not validate.
@@ -65,6 +68,30 @@ Then, on every lane:
   `fail_reason` — concrete and actionable enough that `{{build_step}}`'s next attempt
   (which receives this text as its `pending_rewind_input`) does not have to guess what
   to change. The schema requires `fail_reason` on any fail verdict.
+- **Classify each finding's fix against the text-only boundary** (polyforge#222),
+  defined here in exactly one place:
+  - **text-only**: comments and documentation in any file, test files included;
+  - **structural**: code, tests and assertions, user-facing string literals (error
+    messages, log lines, CLI help), `workflows/**` `.md` files, and `skills/**` prompt
+    material — prompts drive step agents, so their wording is polyforge's runtime
+    behavior.
+
+  Mark a blocking finding `text_only: true` only when its fix touches nothing but the
+  text-only side; absence (or false) means structural. The driver acts on the marker as
+  recorded — no re-classification, no owner confirmation: a fail verdict whose blocking
+  findings (at least one) are all marked `text_only` rewinds `{{build_step}}` light (a
+  resume of its previous session carrying this verdict), any unmarked blocking finding
+  keeps the rewind fresh, and non-blocking findings never enter the rule.
+- **Judge a light round for mis-marking.** Read `execution.json`'s attempts ledger
+  (`runtime-state/execution.json`). When `steps.{{build_step}}.attempts`'s latest
+  archived attempt carries `cause: gate_fail_rewind_text_only`, this re-run follows a
+  light rewind: judge the light round's changes — the commits
+  `steps.{{build_step}}.output.commits` names — against the text-only boundary above,
+  on top of your normal full-change judgment (which is unchanged and stays the
+  adjacent-issue catcher). Any structural change among them is a BLOCKING mis-marking
+  finding: record it WITHOUT `text_only` (it is structural), so the resulting FAIL
+  rewinds fresh with its own rewind slot. A light round that stayed text-only records
+  no mis-marking finding — a pass is possible if nothing else is wrong.
 
 **Do not run tests or builds.** This step reads and judges; it never runs the build, the
 test suite (`go test ./...`, `make test`, the full `./test`, `npm test`) or an e2e suite.

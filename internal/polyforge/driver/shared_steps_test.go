@@ -296,7 +296,16 @@ func TestSharedStepPromptsKeepLaneFacts(t *testing.T) {
 	common := map[string][]string{
 		"verification": {"command_evidence: [{argv, exit_code, duration_ms}]", "AT LEAST ONE entry", "## Pre-existing failures", "`test_bar`", "`no-untracked-test-files`",
 			"Write `artifacts/verification-report.md`", "which plan step or memo scope item"},
-		"review": {"No faked concurrency semantics", "**Unruled destination change.**", "**I/O under a lock.**", "**Weak tests.**", "**Stale docs.**", "**Leaked credentials**", "**Guess as fact.**", "**Do not run tests or builds.**", "Write `artifacts/review.md`", "If any of the change's own requirements"},
+		"review": {"No faked concurrency semantics", "**Unruled destination change.**", "**I/O under a lock.**", "**Weak tests.**", "**Stale docs.**", "**Leaked credentials**", "**Guess as fact.**", "**Do not run tests or builds.**", "Write `artifacts/review.md`", "If any of the change's own requirements",
+			// polyforge#222: the text-only boundary (defined once in the shared
+			// review body) and the mis-marking judgment duty ride every lane's
+			// review prompt — the marker the driver's light-rewind eligibility
+			// reads, and the record the re-run judges the light round by.
+			"comments and documentation in any file, test files included",
+			"code, tests and assertions", "`workflows/**` `.md` files", "prompts drive step agents",
+			"`text_only: true` only when its fix touches nothing but the",
+			"non-blocking findings never enter the rule", "cause: gate_fail_rewind_text_only",
+			"output.commits` names", "BLOCKING mis-marking", "record it WITHOUT `text_only`"},
 	}
 	for stepID, byBundle := range lanes {
 		for bundle, f := range byBundle {
