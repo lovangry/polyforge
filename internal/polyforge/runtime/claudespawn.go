@@ -9,7 +9,7 @@ package runtime
 //	  [--model <claude id>]
 //	  --tools <ClaudeStepTools> --allowedTools <ClaudeStepTools>
 //	  --permission-mode dontAsk --permission-prompts none
-//	  --strict-mcp-config --disable-slash-commands
+//	  --strict-mcp-config --disable-slash-commands --safe-mode
 //
 // cwd = the capsule root, own process group (as pi); stdin = the
 // assembled step prompt (the SAME text pi gets), closed once written.
@@ -25,7 +25,10 @@ package runtime
 // Clean step context (a functional requirement, not isolation): --bare
 // skips hooks, plugins, LSP, auto-memory, CLAUDE.md discovery and the
 // keychain; --strict-mcp-config with no --mcp-config loads no MCP
-// server; --disable-slash-commands keeps the human's skills out. The
+// server; --disable-slash-commands keeps the human's skills out;
+// --safe-mode is the umbrella over every customization surface the
+// enumerated flags do not list (output styles, workflows, themes,
+// keybindings and whatever a later release adds). The
 // --tools allowlist is the whole tool surface: no background, scheduling
 // or messaging tool exists in the step (background tasks are also off
 // through CLAUDE_CODE_DISABLE_BACKGROUND_TASKS and --bare). No
@@ -91,6 +94,7 @@ func (s *claudeSpawner) buildCmd(p SpawnParams) (*exec.Cmd, error) {
 		"--permission-prompts", "none",
 		"--strict-mcp-config",
 		"--disable-slash-commands",
+		"--safe-mode",
 	)
 	cmd := exec.Command(s.bin(), args...)
 	cmd.Dir = p.CapsuleDir

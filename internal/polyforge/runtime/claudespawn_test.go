@@ -34,7 +34,7 @@ func TestClaudeBuildCmdArgvEnv(t *testing.T) {
 		"--model", "claude-opus-5-5",
 		"--tools", ClaudeStepTools, "--allowedTools", ClaudeStepTools,
 		"--permission-mode", "dontAsk", "--permission-prompts", "none",
-		"--strict-mcp-config", "--disable-slash-commands"}
+		"--strict-mcp-config", "--disable-slash-commands", "--safe-mode"}
 	if strings.Join(cmd.Args, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("argv\n got %q\nwant %q", cmd.Args, want)
 	}
@@ -83,6 +83,9 @@ func TestClaudeBuildCmdArgvEnv(t *testing.T) {
 	argv = strings.Join(cmd.Args, " ")
 	if !strings.Contains(argv, "--resume "+testSession) || strings.Contains(argv, "--session-id") || strings.Contains(argv, "--model") {
 		t.Fatalf("resume argv %s", argv)
+	}
+	if n := strings.Count(argv, "--safe-mode"); n != 1 {
+		t.Fatalf("resume argv carries --safe-mode %d times, want 1: %s", n, argv)
 	}
 
 	// an invalid session id is refused (the id may come from the journal)

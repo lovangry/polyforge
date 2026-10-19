@@ -538,13 +538,15 @@ claude -p --bare --output-format stream-json --verbose --include-partial-message
   --session-id <uuid> | --resume <uuid>  [--model <claude id>]
   --tools Bash,Read,Edit,Write,Glob,Grep,TodoWrite,Agent --allowedTools <same>
   --permission-mode dontAsk --permission-prompts none
-  --strict-mcp-config --disable-slash-commands
+  --strict-mcp-config --disable-slash-commands --safe-mode
 ```
 
 with the capsule as cwd and the step prompt (the same text pi gets) on
 stdin. `--bare`, `--strict-mcp-config` and `--disable-slash-commands`
 give the step a clean context: no hooks, plugins, MCP servers, skills or
-CLAUDE.md of the human's. Background tasks are off
+CLAUDE.md of the human's. `--safe-mode` covers the customization
+surfaces those flags do not list (output styles, workflows, themes,
+keybindings and whatever later Claude Code releases add). Background tasks are off
 (`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, `--bare`, and no background
 tool in `--tools`). The native session stays at
 `~/.claude/projects/…/<uuid>.jsonl` and is copied into the capsule's
