@@ -48,6 +48,7 @@ type fakeHub struct {
 	claims     []api.SessionClaimRequest
 	attaches   []api.SessionAttachRequest
 	ends       []api.SessionEndRequest
+	verifies   map[string]int    // canonical wi → answered SessionVerify calls
 	end        map[string]error  // wi → end-error scripting (per wi)
 	repos      []api.ProjectRepo // claim-served task-repo inventory (nil = none)
 	// reposFor overrides repos per work item (canonical id).
@@ -167,6 +168,7 @@ func newFakeHub() *fakeHub {
 		end:        map[string]error{},
 		machine:    map[string]string{},
 		seals:      map[string]api.SessionClaim{},
+		verifies:   map[string]int{},
 	}
 }
 
@@ -296,6 +298,7 @@ func (h *fakeHub) SessionVerify(wi, sessionID string) (*api.SessionVerifyRespons
 	if err, ok := h.lookupErr[id]; ok {
 		return nil, err
 	}
+	h.verifies[id]++
 	st := h.status[id]
 	if st == "" {
 		st = api.StatusRunning
@@ -366,6 +369,13 @@ func (h *fakeHub) GetWorkItem(idOrSlug string) (*api.WorkItem, error) {
 	item := h.itemFor(id)
 	item.Status = st
 	return &item, nil
+}
+
+// verifyCount is the number of SessionVerify calls answered for wi.
+func (h *fakeHub) verifyCount(wi string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.verifies[h.canonicalID(wi)]
 }
 
 func (h *fakeHub) endCount() int {

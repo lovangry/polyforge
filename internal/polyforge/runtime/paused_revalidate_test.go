@@ -78,15 +78,31 @@ func TestRevalidatePausedReleasesCanceledRecord(t *testing.T) {
 func TestRevalidatePausedKeepsMatchingRecord(t *testing.T) {
 	wi := "wi_w217keep"
 	r, hub, _ := pausedHeldRuntime(t, wi)
-	time.Sleep(200 * time.Millisecond) // ~10 ticks with clean_pause set
+	// waitVerifies waits until the paused-record revalidation has answered
+	// n more verifies — proof the check ran, not merely time passing.
+	waitVerifies := func(n int, phase string) {
+		t.Helper()
+		want := hub.verifyCount(wi) + n
+		deadline := time.Now().Add(10 * time.Second)
+		for hub.verifyCount(wi) < want {
+			if time.Now().After(deadline) {
+				t.Fatalf("no paused-record revalidation ran %s (verifies=%d, want >= %d)", phase, hub.verifyCount(wi), want)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	waitVerifies(3, "with clean_pause set")
 	hub.mu.Lock()
 	hub.cleanPause[wi] = false
 	hub.mu.Unlock()
-	time.Sleep(200 * time.Millisecond) // ~10 ticks with it cleared
+	waitVerifies(3, "with clean_pause cleared")
 	if j := r.jobOf(wi); j == nil || stateOf(j) != StatePaused {
 		t.Fatal("a paused record whose session still holds the work item must stay paused")
 	}
-	if len(hub.attaches) != 0 || hub.endCount() != 0 {
-		t.Fatalf("the revalidation must not attach or end (attaches=%d ends=%d)", len(hub.attaches), hub.endCount())
+	hub.mu.Lock()
+	attaches := len(hub.attaches)
+	hub.mu.Unlock()
+	if attaches != 0 || hub.endCount() != 0 {
+		t.Fatalf("the revalidation must not attach or end (attaches=%d ends=%d)", attaches, hub.endCount())
 	}
 }
