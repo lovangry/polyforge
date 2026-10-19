@@ -3,7 +3,8 @@
 CLI-meta verb: one command reports whether this machine can do its job —
 the config, the `[workspace]` mapping (polyforge#113) and the three
 connectivity faces (aihub server reach, local daemon socket, auth), whether
-the daemon runs under supervision, plus the harness family: whether each
+the daemon runs under supervision, whether the five setup tools
+(`gh`, `curl`, `python3`, `tmux`, `git`) are on PATH, plus the harness family: whether each
 harness will display polyforge progress, whether it references the release
 the way `tools/install.sh` sets it up, and whether v1 polyforge artifacts are
 still installed — and whether each mapped workspace keeps the runtime-artifact
@@ -49,6 +50,7 @@ fails, 2 usage errors. `--json` emits one machine document:
 | `harness claude` | when some resolved candidate is `claude:…`: the daemon finds the claude binary (see below) | the binary the daemon could not resolve |
 | `aihub projects` | every mapped project is known to aihub (the project read face) | the project AND its workspace, named (an ambiguous inverse or duplicate surfaces through the config check, both workspaces named) |
 | `workspace repo clones` | no uncovered uncommitted change or unpushed local commit in the `.repo/` git clones of every existing mapped workspace and their linked worktrees (see below); `warn` at most — never `fail`, never moves the exit code; `skip` naming the unit and its reason when the covering WI state could not be read | the clone AND its owning workspace, named, with the remediation (see below) |
+| `prerequisites` | the five setup tools — `gh`, `curl`, `python3`, `tmux`, `git` — are each found on `PATH` (LookPath); `warn` at most — never `fail`, never moves the exit code — the doctor never installs anything; `skip` when the config does not load, like every config-dependent row; out of `--harness` | each missing tool named with its obtain hint (macOS: `brew install gh`, `brew install tmux`, `xcode-select --install`; Linux: `apt install …`) — install the named tools by hand; a missing `tmux` means the daemon runs unsupervised (see the daemon supervision row) |
 | `server reach` | aihub answers at all (any HTTP answer counts) | the dial failure |
 | `daemon socket` | the local daemon answers GET /status over its unix socket | the socket path and the dial error — the daemon is down: run `pf daemon ensure` (starts it under its restart loop), then re-run the doctor |
 | `auth` | the api key gets past aihub's auth boundary (the same signed read the projects check uses) | the typed 401/403 answer — fix `api_key` |
