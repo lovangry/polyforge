@@ -460,7 +460,7 @@ func (d *Driver) unconsumedResult() (*StepResult, int64) {
 	if res, _ := r.collect(); res != nil {
 		return res, n
 	}
-	r.dropPath = pendingResultPath(d.wi.CapsuleDir, n)
+	r.dropPath = PendingResultPath(d.wi.CapsuleDir, n)
 	res, _ := r.collect()
 	if res == nil || r.archive(res) != nil {
 		return nil, 0

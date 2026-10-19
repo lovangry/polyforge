@@ -586,7 +586,7 @@ func TestStepRunWaitTornWriteHeals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SpawnStep: %v", err)
 	}
-	drop := pendingResultPath(capDir, 8)
+	drop := PendingResultPath(capDir, 8)
 	// a write in flight: torn JSON first, the complete envelope after
 	writeCapsuleFile(t, capDir, capsule.DirRuntimeState+"/pending-results/8.json", `{"wi_id":"wi_sp"`)
 	go func() {

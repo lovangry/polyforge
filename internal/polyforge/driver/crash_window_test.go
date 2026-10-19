@@ -114,7 +114,7 @@ func TestCrashWithEnvelopeAtDropPathSettles(t *testing.T) {
 	e := newCrashEnv(t, spec("a"))
 	e.crashHeld(nil, func() {
 		blob, _ := json.Marshal(StepResult{StepID: "a", WIID: "wi_crash", SpawnN: 1, Outcome: OutcomeCompleted, Output: json.RawMessage(`{"x":1}`)})
-		path := pendingResultPath(e.dir, 1)
+		path := PendingResultPath(e.dir, 1)
 		_ = os.MkdirAll(filepath.Dir(path), 0o755)
 		_ = os.WriteFile(path, blob, 0o644)
 	})
@@ -128,7 +128,7 @@ func TestCrashWithEnvelopeAtDropPathSettles(t *testing.T) {
 	if x := readExec(t, e.execPath); x.WorkflowStatus != StatusCompleted {
 		t.Fatalf("completed expected: %q", x.WorkflowStatus)
 	}
-	if _, err := os.Stat(pendingResultPath(e.dir, 1)); !os.IsNotExist(err) {
+	if _, err := os.Stat(PendingResultPath(e.dir, 1)); !os.IsNotExist(err) {
 		t.Fatalf("the settled drop must be consumed: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(e.dir, capsule.DirArtifacts, "steps", "a", "s1", "result.json")); err != nil {
@@ -276,8 +276,8 @@ func TestCrashBeforeJournalLineNeverReusesOrdinal(t *testing.T) {
 		e := newCrashEnv(t, spec("a"))
 		e.crashedStart(1)
 		blob, _ := json.Marshal(StepResult{StepID: "a", WIID: "wi_crash", SpawnN: 1, Outcome: OutcomeCompleted, Output: json.RawMessage(`{}`)})
-		_ = os.MkdirAll(filepath.Dir(pendingResultPath(e.dir, 1)), 0o755)
-		if err := os.WriteFile(pendingResultPath(e.dir, 1), blob, 0o644); err != nil {
+		_ = os.MkdirAll(filepath.Dir(PendingResultPath(e.dir, 1)), 0o755)
+		if err := os.WriteFile(PendingResultPath(e.dir, 1), blob, 0o644); err != nil {
 			t.Fatal(err)
 		}
 		sp := &fakeSpawner{}

@@ -182,6 +182,9 @@ func (d *Daemon) routes() *http.ServeMux {
 	mux.HandleFunc("GET /step/memories/search", d.stepSearchRoute)
 	mux.HandleFunc("GET /step/memories/{id}", d.stepMemoryRoute)
 	mux.HandleFunc("POST "+stepMemoriesPath, d.stepRememberRoute)
+	// the step agent's result delivery (stepresult.go), stamped with
+	// and landed at the calling step's own dispatch identity
+	mux.HandleFunc("POST "+stepResultPath, d.stepResultRoute)
 	return mux
 }
 
@@ -683,9 +686,10 @@ func (d *Daemon) shutdownRoute(w http.ResponseWriter, r *http.Request) {
 // answer keeps its own #122 wording (answerFromStepProcess).
 func (d *Daemon) refuseStepOrigin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// the one write a step may send: its memory, which the route
-		// itself scopes to the caller's own work item (stepmem.go)
-		stepWrite := r.Method == http.MethodPost && r.URL.Path == stepMemoriesPath
+		// the two writes a step may send: its memory and its result,
+		// which the routes themselves scope to the caller's own step
+		// (stepmem.go, stepresult.go)
+		stepWrite := r.Method == http.MethodPost && (r.URL.Path == stepMemoriesPath || r.URL.Path == stepResultPath)
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && !stepWrite {
 			if reason := d.stepOriginRefusal(r); reason != "" {
 				writeErr(w, api.ErrDaemonForbidden, reason)

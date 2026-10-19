@@ -276,7 +276,7 @@ func (a *StepSpawnAdapter) SpawnStep(ctx context.Context, sp StepSpawn) (StepRun
 		wiID:        a.WI.ID,
 		sp:          sp,
 		handle:      proc,
-		dropPath:    pendingResultPath(a.WI.CapsuleDir, sp.SpawnN),
+		dropPath:    PendingResultPath(a.WI.CapsuleDir, sp.SpawnN),
 		poll:        a.PollInterval,
 		meta:        meta,
 		sink:        sink,
@@ -878,9 +878,9 @@ func spawnToken(handle string, n int64) string {
 	return handle
 }
 
-// pendingResultPath is the absolute drop path of one derivation's
+// PendingResultPath is the absolute drop path of one derivation's
 // envelope.
-func pendingResultPath(capsuleDir string, n int64) string {
+func PendingResultPath(capsuleDir string, n int64) string {
 	return filepath.Join(capsuleDir, capsule.DirRuntimeState, dirPendingResults, strconv.FormatInt(n, 10)+".json")
 }
 

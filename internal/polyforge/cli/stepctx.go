@@ -4,13 +4,15 @@ package cli
 // markers every step process carries). A step holds no aihub credential
 // path: recall, memory show and remember go through the daemon's
 // /step/memories face; every other aihub verb is refused and the
-// invocation carries no key. cli.toml stays readable under the shared
+// invocation carries no key. `pf result submit` is the step's one way
+// to deliver its result envelope (the daemon's /step/result). cli.toml stays readable under the shared
 // HOME — a guard against accidents, not malice.
 
 import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strconv"
@@ -114,6 +116,66 @@ func stepRemember(ctx *Context, fs *flag.FlagSet, memType, proj, content string)
 	}
 	finishAs(ctx, raw, func(m *api.Memory) {
 		fmt.Fprintf(ctx.Stdout, "stored %s (type %s, visibility %s)\n", m.ID, m.Type, m.Visibility)
+	})
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// result — the step's result delivery (polyforge#214).
+// ---------------------------------------------------------------------------
+
+// cmdResult delivers a workflow step's result envelope through the
+// daemon, which identifies the calling step from its process tree, stamps
+// wi_id / step_id / spawn_n / submitted_at itself and lands the envelope
+// at the dispatch's drop path. Reachable from a step process only: the
+// daemon refuses every other caller.
+var cmdResult = &Command{
+	Name:    "result",
+	Group:   GroupExec,
+	Summary: "Deliver this workflow step's result envelope (inside a step only)",
+	Usage:   "pf result submit <json | - (stdin) | @file>",
+	Setup:   func(fs *flag.FlagSet) {},
+	Run: func(ctx *Context, fs *flag.FlagSet, args []string) error {
+		if len(args) == 0 || args[0] != "submit" {
+			return fmt.Errorf("result: expected submit (see `pf help result`)")
+		}
+		return resultSubmit(ctx, args[1:])
+	},
+}
+
+// resultSubmit posts the envelope payload — outcome + output (or the
+// needs_input question pair), plus command_evidence when the step owes
+// it — to the daemon. A refusal exits non-zero and nothing is written.
+func resultSubmit(ctx *Context, args []string) error {
+	var raw []byte
+	var err error
+	switch {
+	case len(args) == 1 && args[0] == "-":
+		raw, err = io.ReadAll(ctx.Stdin)
+	case len(args) == 1 && strings.HasPrefix(args[0], "@"):
+		raw, err = os.ReadFile(strings.TrimPrefix(args[0], "@"))
+	case len(args) >= 1:
+		raw = []byte(strings.Join(args, " "))
+	default:
+		return fmt.Errorf("result submit: the envelope is required (positional JSON, '-' for stdin or '@file')")
+	}
+	if err != nil {
+		return fmt.Errorf("result submit: %w", err)
+	}
+	if !json.Valid(raw) {
+		return fmt.Errorf("result submit: the envelope is not valid JSON")
+	}
+	out, err := ctx.daemon().do("POST", "/step/result", "", json.RawMessage(raw), nil)
+	if err != nil {
+		return err
+	}
+	finishAs(ctx, out, func(r *struct {
+		WIID    string `json:"wi_id"`
+		StepID  string `json:"step_id"`
+		SpawnN  int64  `json:"spawn_n"`
+		Outcome string `json:"outcome"`
+	}) {
+		fmt.Fprintf(ctx.Stdout, "delivered %s result of %s step %s (spawn %d)\n", r.Outcome, r.WIID, r.StepID, r.SpawnN)
 	})
 	return nil
 }

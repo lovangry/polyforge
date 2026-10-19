@@ -38,6 +38,15 @@ func stepEnv(t *testing.T) (map[string]string, *reqRecorder, *reqRecorder) {
 		}
 		io.WriteString(w, `{"id":"mem_9","type":"experience.wrap","visibility":"project"}`)
 	})
+	mux.HandleFunc("POST /step/result", func(w http.ResponseWriter, r *http.Request) {
+		drec.record(r)
+		if strings.Contains(drec.last().Body, `"wi_id":"wi_other"`) {
+			w.WriteHeader(403)
+			io.WriteString(w, `{"code":"DAEMON-403","detail":"the calling step belongs to work item wi_st (the result names \"wi_other\")"}`)
+			return
+		}
+		io.WriteString(w, `{"wi_id":"wi_st","step_id":"fix","spawn_n":3,"outcome":"completed"}`)
+	})
 	sock := newFakeDaemon(t, mux)
 	arec := &reqRecorder{}
 	srv := newFakeAihub(t, arec, func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, `{}`) })
@@ -155,5 +164,40 @@ func TestStepModeNeedsBothMarkersAndRefusesDoctor(t *testing.T) {
 	env["PF_DAEMON_ID"] = ""
 	if code, _, stderr := runPf(t, env, "recall", "--project", "polyforge", "x"); code != 1 || !strings.Contains(stderr, "no [workspace] mapping") {
 		t.Fatalf("PF_WI_ID alone: exit %d %s", code, stderr)
+	}
+}
+
+// TestStepResultSubmitGoesToTheDaemon: `pf result submit` posts the
+// payload verbatim to the daemon's /step/result (inline or @file), a
+// daemon refusal and an invalid JSON payload exit non-zero, and nothing
+// reaches aihub.
+func TestStepResultSubmitGoesToTheDaemon(t *testing.T) {
+	env, drec, arec := stepEnv(t)
+	code, stdout, stderr := runPf(t, env, "result", "submit", `{"outcome":"completed","output":{"a":1}}`)
+	if code != 0 || !strings.Contains(stdout, "delivered completed result of wi_st step fix (spawn 3)") {
+		t.Fatalf("submit: exit %d %s %s", code, stdout, stderr)
+	}
+	if got := drec.last(); got.Method != "POST" || got.Path != "/step/result" || got.Body != `{"outcome":"completed","output":{"a":1}}` {
+		t.Fatalf("daemon request = %+v", got)
+	}
+	file := filepath.Join(t.TempDir(), "r.json")
+	if err := os.WriteFile(file, []byte(`{"outcome":"needs_input","output":{},"question_id":"q1","question":"?"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, stdout, stderr := runPf(t, env, "result", "submit", "@"+file); code != 0 || !strings.Contains(drec.last().Body, `"question_id":"q1"`) {
+		t.Fatalf("@file submit: exit %d %s %s", code, stdout, stderr)
+	}
+	n := len(drec.all())
+	if code, _, stderr := runPf(t, env, "result", "submit", `{"outcome":`); code == 0 || !strings.Contains(stderr, "not valid JSON") || len(drec.all()) != n {
+		t.Fatalf("invalid JSON: exit %d %s", code, stderr)
+	}
+	if code, _, stderr := runPf(t, env, "result", "submit", `{"wi_id":"wi_other","outcome":"completed","output":{}}`); code != 1 || !strings.Contains(stderr, "DAEMON-403") || !strings.Contains(stderr, "belongs to work item wi_st") {
+		t.Fatalf("refused submit: exit %d %s", code, stderr)
+	}
+	if code, _, stderr := runPf(t, env, "result"); code == 0 || !strings.Contains(stderr, "expected submit") {
+		t.Fatalf("bare result: exit %d %s", code, stderr)
+	}
+	if n := len(arec.all()); n != 0 {
+		t.Fatalf("a step invocation reached aihub %d time(s)", n)
 	}
 }
