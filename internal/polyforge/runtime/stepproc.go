@@ -20,8 +20,8 @@ import (
 	"strings"
 )
 
-// maxAncestry bounds the parent walk (a cycle cannot occur in procfs,
-// but a racing reparent must not loop forever).
+// maxAncestry bounds the parent walk (a cycle cannot occur in the
+// process table, but a racing reparent must not loop forever).
 const maxAncestry = 64
 
 // StepProcessOrigin reports whether pid belongs to a step process tree of

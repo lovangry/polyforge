@@ -41,7 +41,7 @@ var (
 // procIdent is one (pid, starttime) identity pair — L3's mis-kill guard.
 type procIdent struct {
 	pid   int
-	start int64 // /proc/<pid>/stat field 22, ticks since boot
+	start int64 // ticks since boot on the 100 Hz clock (Linux: /proc/<pid>/stat field 22; darwin: P_starttime − kern.boottime, procinfo_darwin.go)
 }
 
 // CleanupTarget names one WI's agent tree.
@@ -190,7 +190,7 @@ func procIdentOf(pid int) (procIdent, bool) {
 	return procIdent{pid: pid, start: start}, true
 }
 
-// procExists reports whether pid has a live (non-zombie) procfs entry.
+// procExists reports whether pid has a live (non-zombie) process entry.
 func procExists(pid int) bool {
 	state, _, _, _, ok := procStat(pid)
 	if !ok {
@@ -225,7 +225,7 @@ func rootIdentityHolds(t CleanupTarget) bool {
 	}
 	bt := bootOnce()
 	if bt == 0 {
-		return true // procfs degrade: fall back to pid existence
+		return true // boot time unreadable: fall back to pid existence
 	}
 	startWall := bt + start/100
 	recUnix := rec.Unix()
@@ -333,7 +333,7 @@ func killGroup(pgid int, bound time.Duration) error {
 // than the recorded agent start (a member predating the agent cannot be
 // its child — provably an innocent group). An unparseable/absent record
 // falls back to the group signal (the residue risk outranks); an
-// unreadable procfs fails closed (layer 4's env marker remains).
+// unreadable process list fails closed (layer 4's env marker remains).
 func groupProvableOurs(t CleanupTarget) bool {
 	if t.PID > 0 {
 		if _, _, _, _, ok := procStat(t.PID); ok {

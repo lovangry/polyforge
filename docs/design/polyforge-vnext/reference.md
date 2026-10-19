@@ -216,7 +216,7 @@ Registry `internal/common/api/errors.go`; HTTP status = numeric suffix. `core.Fa
 | `GIT-412` | Local staged gitlink refused by `pf` before commit (the hook rejects gitlinks with text only) |
 | `GIT-500` | CGI failure; push failure in `pf` |
 | `DAEMON-400` | Bad UDS request |
-| `DAEMON-403` | Mutating UDS request from a step process tree (SO_PEERCRED; fail closed) |
+| `DAEMON-403` | Mutating UDS request from a step process tree (UDS peer credential — SO_PEERCRED on Linux, LOCAL_PEERCRED + LOCAL_PEERPID on darwin; fail closed) |
 | `DAEMON-404` | No local job for the WI |
 | `DAEMON-409` | Job-state conflict (e.g. wrap/fail of a parked WI, pause/wrap while recovering, resume-paused refused) |
 | `DAEMON-410` | Daemon is shutting down; start deferred |
