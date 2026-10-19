@@ -341,6 +341,24 @@ func TestShippedStepSchemasAcceptKnownGoodOutputs(t *testing.T) {
 			}
 		}
 	}
+	// polyforge#222: the build steps' schemas accept the optional
+	// needs_code_change self-report beside the normal completion (which
+	// the main loop above proves with the field absent).
+	for _, bs := range [][2]string{{"bug-fix", "fix"}, {"chore", "code"}, {"feature-full", "code"}} {
+		bundleDir := filepath.Join(shippedWorkflowsDir, bs[0])
+		s, err := loadStepOutputSchema(bundleDir, bs[1], shippedVars(t, bundleDir, bs[1]))
+		if err != nil || s == nil {
+			t.Fatalf("%s/%s: %v", bs[0], bs[1], err)
+		}
+		with := map[string]string{
+			"bug-fix/fix":       `{"commits":[{"sha":"abc1234","message":"fix: init map"}],"build_status":"green","root_cause_addressed":true,"regression_test":"internal/x/x_test.go","needs_code_change":true,"summary":"structural fix self-reported"}`,
+			"chore/code":        `{"commits":[{"sha":"abc1234","message":"chore: drop dead code"}],"build_status":"green","needs_code_change":true}`,
+			"feature-full/code": `{"commits":[{"step_id":"s1","sha":"abc1234","message":"feat: s1"}],"build_status":"green","needs_code_change":true,"summary":"structural fix self-reported"}`,
+		}[bs[0]+"/"+bs[1]]
+		if err := checkOutputSchema(s.Schema, json.RawMessage(with)); err != nil {
+			t.Errorf("%s/%s: the needs_code_change self-report must validate: %v", bs[0], bs[1], err)
+		}
+	}
 }
 
 // TestFeatureFullMergedStepSchemasRejectContradictions (polyforge#165):

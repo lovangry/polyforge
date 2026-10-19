@@ -516,6 +516,91 @@ func TestRunLightRewindResumesBuildSession(t *testing.T) {
 	}
 }
 
+// TestRunSelfReportedStructuralFixRewindsFresh (polyforge#222, the
+// scenario-2 shape): a light re-entry whose completed result carries
+// needs_code_change: true is NOT archived done — the very next dispatch
+// is a FRESH re-entry of the same step (not the gate tail), no new rewind
+// slot is charged, and the lane then proceeds normally.
+func TestRunSelfReportedStructuralFixRewindsFresh(t *testing.T) {
+	d, sp, execPath := runEnv(t, spec("build"), gateSpec("review", "build"))
+	sp.script = []fakeEntry{
+		done(`{"b":1}`),
+		lightReviewFAIL(),
+		{res: &StepResult{Outcome: OutcomeCompleted, Output: json.RawMessage(`{"b":2,"needs_code_change":true}`)}}, // the resumed session self-reports
+		done(`{"b":3}`), // the FRESH re-entry
+		done(`{"verdict":"PASS"}`),
+	}
+	if err := d.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got := sp.dispatched()
+	want := []string{"build@1(resume=false)", "review@2(resume=false)", "build@3(resume=true)", "build@4(resume=false)", "review@5(resume=false)"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("dispatch ledger:\n got  %v\n want %v", got, want)
+	}
+	if re := sp.spawnAt(3); re.Resume || re.Fresh {
+		t.Fatalf("the self-report fallback re-entry must be fresh (no resume order): %+v", re)
+	}
+	if ri := sp.spawnAt(3).RewindInput; ri == nil || ri.Note != "" || !strings.Contains(ri.Reason, `"verdict":"fail"`) {
+		t.Fatalf("the fresh re-entry carries the same verdict, no light Note: %+v", ri)
+	}
+	exec := readExec(t, execPath)
+	if exec.WorkflowStatus != StatusCompleted || exec.RewindStats.Count != 1 {
+		t.Fatalf("the self-report reuses the light rewind's one slot: %q %+v", exec.WorkflowStatus, exec.RewindStats)
+	}
+	var causes []string
+	for _, a := range exec.Steps["build"].Attempts {
+		if a.Cause != "accepted" {
+			causes = append(causes, a.Cause)
+		}
+	}
+	if fmt.Sprint(causes) != fmt.Sprint([]string{CauseGateFailRewindTextOnly, CauseGateFailRewind}) {
+		t.Fatalf("build rewind archives: %v", causes)
+	}
+}
+
+// TestBuildResultSpecAssemblesLightRewindFact (polyforge#222): the
+// validation snapshot's light-rewind context is the same ledger-cause
+// fact the transition's self-report rewind reads — the latest
+// non-infra_failure archived attempt being the light rewind — and a
+// crash attempt interleaved after it changes nothing (audit-only), while
+// a fresh rewind archive or a plain accepted round answer false.
+func TestBuildResultSpecAssemblesLightRewindFact(t *testing.T) {
+	d, _, _ := runEnv(t, spec("build"), spec("polish"), gateSpec("review", "build"))
+	mustInit(t, d)
+	seed := func(attempts ...capsule.Attempt) *Driver {
+		d.mu.Lock()
+		st := d.exec.Steps["build"]
+		if st == nil {
+			st = &capsule.Step{Status: capsule.StepInProgress}
+			d.exec.Steps["build"] = st
+		}
+		st.Attempts = attempts
+		d.mu.Unlock()
+		return d
+	}
+	light := capsule.Attempt{Cause: CauseGateFailRewindTextOnly, RewindGate: "review"}
+	seed(light)
+	if !d.buildResultSpec("build", 3).LightRewind {
+		t.Fatal("the light rewind archive is the light context")
+	}
+	// a crash attempt interleaved after the light rewind: still light
+	seed(append([]capsule.Attempt{light}, capsule.Attempt{Cause: CauseInfraFailure, FailureCause: FailDaemonRestart})...)
+	if !d.buildResultSpec("build", 3).LightRewind {
+		t.Fatal("an audit-only crash attempt must not change the re-entry's nature")
+	}
+	// the fresh rewind archive (a self-report already happened): not light
+	seed(light, capsule.Attempt{Cause: CauseGateFailRewind, RewindGate: "review"})
+	if d.buildResultSpec("build", 3).LightRewind {
+		t.Fatal("a fresh rewind archive ends the light context")
+	}
+	// a plain accepted round: not light
+	seed(capsule.Attempt{Cause: "accepted"})
+	if d.buildResultSpec("build", 3).LightRewind {
+		t.Fatal("an accepted round is no light context")
+	}
+}
+
 func TestRunGateFailTerminate(t *testing.T) {
 	// A gate with no on_fail rewind target has no rewind edge: its FAIL
 	// verdict ends the workflow failed_gate (WF-102).

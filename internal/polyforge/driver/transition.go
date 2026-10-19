@@ -191,6 +191,13 @@ type appliedInfo struct {
 	resume   bool
 	failure  *failureDecision
 	extra    []appliedEvent
+	// selfRewind marks the needs_code_change self-report rewind
+	// (polyforge#222): the completed result was NOT accepted — the same
+	// write rewound the step fresh — so the event is the standard rewind
+	// (never step_done for a step that is not done); rewindGate names the
+	// light gate that rewound it.
+	selfRewind bool
+	rewindGate string
 }
 
 // appliedEvent is a follow-up event of one transition.
@@ -477,6 +484,18 @@ func (d *Driver) applyStepResultLocked(req TransitionRequest, info *appliedInfo)
 
 	switch res.Outcome {
 	case OutcomeCompleted:
+		// The needs_code_change self-report rewind (polyforge#222): a
+		// completed result of a LIGHT re-entry carrying
+		// needs_code_change: true is not archived done — the same write
+		// rewinds fresh with the same FAIL verdict, charging no new slot.
+		// Judged before any of the accepted-result handling below (the
+		// result is not accepted: no evidence decode, no stamps, no done).
+		if lightRewindContext(st.Attempts) {
+			if _, value, malformed := needsCodeChangeOf(out); !malformed && value {
+				d.applySelfReportRewindLocked(req.StepID, st, out, info)
+				return nil
+			}
+		}
 		// B10: the only accepted command evidence, decoded (known fields
 		// only; ValidateStepResult already proved it decodes)
 		if ev, _ := decodeCommandEvidence(res.CommandEvidence); len(ev) > 0 {
@@ -667,6 +686,99 @@ func lightRewindEligible(out map[string]any) bool {
 		blocking++
 	}
 	return blocking > 0
+}
+
+// lightRewindContext answers whether a step's latest non-infra_failure
+// archived attempt is a light rewind (gate_fail_rewind_text_only): the
+// completed result's needs_code_change self-report is legal only in that
+// context — the light rewind instructed this very re-entry, so the
+// self-report's fresh rewind reuses the light rewind's slot (a
+// classification error is not charged twice). An accepted attempt or a
+// fresh rewind archive answers false (a crash attempt interleaved after
+// the light rewind does not change the re-entry's nature).
+func lightRewindContext(attempts []capsule.Attempt) bool {
+	for i := len(attempts) - 1; i >= 0; i-- {
+		if attempts[i].Cause == CauseInfraFailure {
+			continue // audit-only interruptions do not change the re-entry
+		}
+		return attempts[i].Cause == CauseGateFailRewindTextOnly
+	}
+	return false
+}
+
+// needsCodeChangeOf answers one parsed completed output's needs_code_change
+// self-report: present, and its boolean value. A present non-boolean value
+// is malformed (the caller rejects the envelope — the field is the light
+// re-entry's structural self-report, not free text); absent or null is
+// simply not present.
+func needsCodeChangeOf(out map[string]any) (present, value, malformed bool) {
+	if out == nil {
+		return false, false, false
+	}
+	v, ok := out["needs_code_change"]
+	if !ok || v == nil {
+		return false, false, false
+	}
+	b, isBool := v.(bool)
+	if !isBool {
+		return true, false, true
+	}
+	return true, b, false
+}
+
+// applySelfReportRewindLocked lands the needs_code_change self-report
+// rewind (polyforge#222): a completed result of a light re-entry carrying
+// needs_code_change: true is NOT archived done — the same write archives
+// the resumed attempt (gate_fail_rewind, rewind_gate = the light gate that
+// rewound this step, the delivered result and consumed budget archived
+// as the range rewind does), resets the step to pending with output
+// cleared, and routes the SAME FAIL verdict — re-marshaled from the gate's
+// recorded output, the durable verdict the gate step holds — as the fresh
+// re-entry's rewind input (Note empty: a fresh re-derivation). No stats
+// mutation, no bounds check (the light rewind's slot already paid; a
+// classification error is not charged twice), position unchanged (the
+// step is the current one). The caller emits the standard rewind event —
+// never step_done for a step that is not done.
+func (d *Driver) applySelfReportRewindLocked(stepID string, st *capsule.Step, out map[string]any, info *appliedInfo) {
+	gate := ""
+	for i := len(st.Attempts) - 1; i >= 0; i-- {
+		if st.Attempts[i].Cause == CauseGateFailRewindTextOnly {
+			gate = st.Attempts[i].RewindGate // the light gate that rewound this step
+			break
+		}
+	}
+	raw, _ := json.Marshal(out)
+	consumed := st.BudgetConsumed
+	st.Attempts = append(st.Attempts, capsule.Attempt{
+		Cause:          CauseGateFailRewind,
+		AttemptSeq:     nextAttemptSeq(st),
+		StartedAt:      st.StepStartedAt,
+		ArchivedAt:     d.stamp(),
+		RewindGate:     gate,
+		Result:         raw,
+		ConsumedBudget: &consumed,
+	})
+	st.Status = capsule.StepPending
+	st.Output = nil
+	st.PendingQuestion = nil
+	st.PendingRewindInput = nil
+	st.Supervision = nil
+	st.AnswerBase = len(st.Answers)
+	// The same FAIL verdict rides as the fresh re-entry's rewind input,
+	// re-derived from the gate's recorded output (the durable verdict the
+	// gate step holds; the light Note is NOT carried — the fresh re-entry
+	// re-derives from scratch).
+	reason := ""
+	if gst := d.exec.Steps[gate]; gst != nil && gst.Output != nil {
+		if blob, err := json.Marshal(gst.Output); err == nil {
+			reason = string(blob)
+		}
+	}
+	st.PendingRewindInput = &capsule.RewindInput{ToStep: stepID, Reason: reason}
+	info.selfRewind = true
+	info.rewindGate = gate
+	info.target = stepID
+	info.archived = append(info.archived, stepID)
 }
 
 // checkRewindTarget refuses a gate FAIL policy whose rewind target is not
@@ -955,7 +1067,18 @@ func (d *Driver) emitLocked(req TransitionRequest, info *appliedInfo) {
 		body["step"] = req.StepID
 		switch req.Result.Outcome {
 		case OutcomeCompleted:
-			kind = "step_done"
+			if info.selfRewind {
+				// the needs_code_change self-report rewind: the standard rewind
+				// event (same kind, same shape — the ledger cause is the
+				// distinguishing record), never step_done for a step that is
+				// not done (polyforge#222)
+				kind = "rewind"
+				body["gate"] = info.rewindGate
+				body["target"] = info.target
+				body["archived"] = info.archived
+			} else {
+				kind = "step_done"
+			}
 		case OutcomeGateFailed:
 			kind = "gate_verdict"
 			if isTerminalStatus(d.exec.WorkflowStatus) {

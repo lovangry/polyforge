@@ -929,6 +929,10 @@ func (d *Driver) buildResultSpec(stepID string, n int64) ResultSpec {
 	d.mu.Lock()
 	if st, ok := d.exec.Steps[stepID]; ok {
 		spec.HumanAnswers = currentChainAnswers(st)
+		// polyforge#222: the light-rewind context — the same ledger-cause
+		// fact the transition's self-report rewind reads (one fact, one
+		// derivation: lightRewindContext over the archived attempts).
+		spec.LightRewind = lightRewindContext(st.Attempts)
 	}
 	outputs := make(map[string]map[string]any, len(d.exec.Steps))
 	for id, st := range d.exec.Steps {
