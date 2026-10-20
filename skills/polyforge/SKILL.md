@@ -1,7 +1,7 @@
 ---
 name: polyforge
 description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of the 13 routing verbs (file, queue, cancel, recall, remember, memory, submit, watch, answer, pause, resume, wrap, ops) plus the machine verbs doctor, version and help, the extensions fragment (`pf help extensions`: where every extension point is documented) and the init fragment (install / upgrade routing to tools/install.sh, plus `pf init` for a workspace's local layout), each carried by a fragment under verbs/ (`pf watch` is the progress verb: snapshot, resident watcher, subscriptions; `pf chat` carries the chat identity); data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
-license: proprietary
+license: PolyForm-Noncommercial-1.0.0
 compatibility:
   harnesses: [pi, claude]
 ---
