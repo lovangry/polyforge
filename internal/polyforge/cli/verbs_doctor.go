@@ -313,16 +313,19 @@ func mappingCheck(r *doctorRun) (string, string) {
 	return "pass", fmt.Sprintf("%d workspace(s) mapping %d project(s)", len(r.cfg.Mapping.Workspaces()), len(r.cfg.Mapping.Projects()))
 }
 
-// projectsCheck reads every mapped project from aihub (the same face the
-// CLI uses; no admin-only surface) and judges auth from the same reads
-// into r.auth: a 401/403 fails it, any successful read proves it.
+// projectsCheck reads every mapped project's ready queue from aihub — the
+// project-scoped read the daemon's auto-pull uses, open to any project
+// member (GET /projects/{id} is admin-only, so a member's key would 403
+// there) — and judges auth from the same reads into r.auth: a 401/403
+// fails it, any successful read proves it. aihub answers 404 both for an
+// unknown project and for one the key's user is not a member of.
 func projectsCheck(r *doctorRun) (string, string) {
 	client := aihubclient.New(r.cfg.Server, r.cfg.APIKey)
 	var fails []string
 	denied, proven := false, false
 	for _, project := range r.cfg.Mapping.Projects() {
 		ws, _ := r.cfg.Mapping.WorkspaceFor(project)
-		_, err := client.GetProject(project)
+		_, err := client.Queue(project)
 		if err == nil {
 			proven = true
 			continue
@@ -333,7 +336,7 @@ func projectsCheck(r *doctorRun) (string, string) {
 			case 401, 403:
 				denied = true
 			case 404:
-				fails = append(fails, fmt.Sprintf("project %q (workspace %s) is unknown to aihub: %s", project, ws, ae.Error()))
+				fails = append(fails, fmt.Sprintf("project %q (workspace %s) is unknown to aihub, or this api key's user is not a member of it: %s", project, ws, ae.Error()))
 				continue
 			}
 		}

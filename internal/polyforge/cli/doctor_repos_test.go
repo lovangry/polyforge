@@ -320,6 +320,18 @@ func (f *reposAihub) server(t *testing.T) string {
 			io.WriteString(w, `{"code":"CORE-404","detail":"no such work item"}`)
 			return
 		}
+		if strings.HasPrefix(r.URL.Path, "/api/v1/projects/") && strings.HasSuffix(r.URL.Path, "/ready-queue") {
+			// the doctor's aihub projects / auth probe: the member-readable read
+			p, _ := url.PathUnescape(strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/projects/"), "/ready-queue"))
+			if _, ok := f.known[p]; !ok {
+				w.WriteHeader(404)
+				io.WriteString(w, `{"code":"CORE-404","detail":"no such project"}`)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"project":"`+p+`","items":[],"running":[],"paused":[]}`)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/v1/projects/") {
 			p, _ := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/api/v1/projects/"))
 			if f.projFail[p] {
