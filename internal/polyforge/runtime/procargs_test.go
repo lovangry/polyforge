@@ -58,7 +58,43 @@ func TestProcargsEnvironSkipsExePathAndPadNULs(t *testing.T) {
 	got := procargsEnviron(raw)
 	want := []string{"PF_WI_ID=wi_x", "PF_DAEMON_ID=m"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("procargsEnviron = %q, want %q (exe path and pad NULs skipped, trailing pad ends env)", got, want)
+		t.Fatalf("procargsEnviron = %q, want %q (exe path and pad NULs skipped)", got, want)
+	}
+}
+
+func TestProcargsEnvironAfterArgvRewrite(t *testing.T) {
+	// A live node process (pi) rewrites its exec-time argument block:
+	// argv[0] survives at the head, the original argv+env strings are
+	// zeroed, and the real environment reappears behind a stretch of
+	// NULs with the kernel's platform strings (ptr_munge=, main_stack=)
+	// after it. The parser must skip the pad NULs and still find the
+	// markers; the exact-token consumers ignore the leftover
+	// argv/platform strings (captured-blob regression, macOS 15/XNU:
+	// step agents could never deliver results — the daemon's origin
+	// guard saw no markers and refused /step/result with DAEMON-403).
+	raw := []byte{}
+	raw = binary.LittleEndian.AppendUint32(raw, 13)
+	for _, s := range []string{"/usr/local/bin/node", "", "", "", ""} {
+		raw = append(raw, s...)
+		raw = append(raw, 0)
+	}
+	raw = append(raw, "pi"...)
+	raw = append(raw, make([]byte, 0x100)...) // the zeroed original block
+	for _, s := range []string{"SHELL=/bin/zsh", "PF_WI_ID=wi_r", "PF_DAEMON_ID=m", "PI_CODING_AGENT_DIR=/x"} {
+		raw = append(raw, s...)
+		raw = append(raw, 0)
+	}
+	raw = append(raw, make([]byte, 16)...)
+	for _, s := range []string{"ptr_munge=", "main_stack="} {
+		raw = append(raw, s...)
+		raw = append(raw, 0)
+	}
+	envs := procargsEnviron(raw)
+	if !envHasMarkers(envs, "wi_r", "m") {
+		t.Fatalf("markers must survive an argv-rewritten blob: %q", envs)
+	}
+	if envHasMarkers(envs, "wi_other", "m") {
+		t.Fatal("a rewritten blob must still match only its own markers")
 	}
 }
 

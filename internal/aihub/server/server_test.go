@@ -642,6 +642,15 @@ func TestAdminFaceEndpointsOverHTTP(t *testing.T) {
 		map[string]any{"visible": true}, &p); code != 200 || !p.Visible {
 		t.Fatalf("maintainer patch: %d %s", code, raw)
 	}
+	// projects get: membership OR admin (the doctor projectsCheck and the
+	// repo-units scan read it with the config's key; a non-member's read
+	// stays hidden behind the not-found detail, like every other read).
+	if code, raw := e.do(t, "GET", "/api/v1/projects/alpha", mk.Plain, nil, &p); code != 200 || p.ID == "" {
+		t.Fatalf("member gets project: %d %s", code, raw)
+	}
+	if code, _ := e.do(t, "GET", "/api/v1/projects/alpha", okey.Plain, nil, nil); code != 404 {
+		t.Fatalf("outsider gets project: %d (want the hidden 404)", code)
+	}
 	// A bad member role or unknown user is a clean 400/404.
 	if code, _ := e.do(t, "PATCH", "/api/v1/projects/alpha", e.key,
 		map[string]any{"members": []map[string]string{{"user_id": u2.ID, "role": "owner"}}}, nil); code != 400 {
@@ -658,6 +667,9 @@ func TestAdminFaceEndpointsOverHTTP(t *testing.T) {
 	}
 	if code, _ := e.do(t, "PATCH", "/api/v1/projects/alpha", mk.Plain, map[string]any{}, nil); code != 403 {
 		t.Fatalf("removed maintainer still patches: %d", code)
+	}
+	if code, _ := e.do(t, "GET", "/api/v1/projects/alpha", mk.Plain, nil, nil); code != 404 {
+		t.Fatalf("removed member still gets project: %d", code)
 	}
 	if code, _ := e.do(t, "PATCH", "/api/v1/projects/alpha", okey.Plain, map[string]any{}, nil); code != 403 {
 		t.Fatalf("writer patches project: %d", code)
