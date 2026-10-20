@@ -86,19 +86,20 @@ func liveDaemonSocket(t *testing.T, machineID string) string {
 	return newFakeDaemon(t, mux)
 }
 
-// aiSever is a fake aihub for the doctor: per-project GET /api/v1/projects/<name>.
+// aiSever is a fake aihub for the doctor: per-project GET
+// /api/v1/projects/<name>/ready-queue (the member-readable project read).
 func aiSever(t *testing.T, rec *reqRecorder, known map[string]bool, status int, body string) *httptest.Server {
 	t.Helper()
 	return newFakeAihub(t, rec, func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/v1/projects/") {
-			name := strings.TrimPrefix(r.URL.Path, "/api/v1/projects/")
+		if strings.HasPrefix(r.URL.Path, "/api/v1/projects/") && strings.HasSuffix(r.URL.Path, "/ready-queue") {
+			name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/projects/"), "/ready-queue")
 			if status != 0 {
 				w.WriteHeader(status)
 				io.WriteString(w, body)
 				return
 			}
 			if known[name] {
-				io.WriteString(w, `{"id":"prj_1","name":"`+name+`"}`)
+				io.WriteString(w, `{"project":"`+name+`","items":[],"running":[],"paused":[]}`)
 				return
 			}
 			w.WriteHeader(404)
