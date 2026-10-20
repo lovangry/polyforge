@@ -537,7 +537,8 @@ the installer scenarios, which write `/usr/local/bin/pf` (disposable hosts only)
 [--user ID] <verb> ...` (or `pf --version`) (global flags before the verb; env `PF_SERVER`,
 `PF_API_KEY`, `PF_DAEMON_SOCKET`, `PF_USER_ID`; `PF_CHAT_ID` is the
 notification label a harness adapter sets for the chat). `pf help` prints the
-registry; `pf help <verb>` one verb's usage line. Exit codes: 0 success; 1
+registry; `pf help <verb>` one verb's usage line; `pf help extensions` the
+one-line index of the [extension points](#extending). Exit codes: 0 success; 1
 client-class (4xx, transport, local validation, and a sub-action's
 flag/argument mistake); 2 server-class (5xx), an unknown verb, or a flag
 error caught by the global / verb-level flag parse. The routing skill's fragments
