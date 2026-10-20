@@ -42,11 +42,11 @@ the user saying "init workspace".
    `projects` list. Nothing rewrites cli.toml behind the operator's back —
    the agent proposes the section, the operator's config carries it.
 4. **Optionally write `.polyforge.yaml`** at the workspace root to pin
-   model candidates per project. The README's "Per-project model
-   candidates (`.polyforge.yaml`)" paragraphs (release checkout:
-   `~/.local/share/polyforge/release/current/README.md`) are the one
+   model candidates per project. The README's "Extending › Model
+   candidates" subsection (release checkout:
+   `~/.local/share/polyforge/release/current/README.md`) is the one
    authority for its closed schema, the `<harness>:<model>[:<effort>]`
-   candidate syntax and the precedence — read them before writing. The
+   candidate syntax and the precedence — read it before writing. The
    shape:
 
    ```yaml

@@ -166,13 +166,11 @@ bin/pf --config /tmp/pf-quickstart/cli.toml file create --project demo \
 ```
 
 **6. Start the local daemon** (runtime, driver and watcher behind its own UDS
-socket; keep it running in a second terminal). The `[workspace]` mapping
-in the config is the daemon's only workspace source (polyforge#113): a
-config with zero sections refuses startup, every mapped workspace
-directory must pre-exist, and the daemon creates nothing but
-`capsules/` inside each. Capsules route by the claimed work item's
-project through the mapping — the `demo` section above sends `demo`
-capsules to `/tmp/pf-quickstart/workspace/capsules/`:
+socket; keep it running in a second terminal). Capsules route by the
+claimed work item's project through the `[workspace]` mapping — the `demo`
+section above sends `demo` capsules to
+`/tmp/pf-quickstart/workspace/capsules/` (the mapping's rules:
+[Extending › Workspace mapping](#workspace-mapping)):
 
 ```
 bin/pf daemon --config /tmp/pf-quickstart/cli.toml \
@@ -539,7 +537,8 @@ the installer scenarios, which write `/usr/local/bin/pf` (disposable hosts only)
 [--user ID] <verb> ...` (or `pf --version`) (global flags before the verb; env `PF_SERVER`,
 `PF_API_KEY`, `PF_DAEMON_SOCKET`, `PF_USER_ID`; `PF_CHAT_ID` is the
 notification label a harness adapter sets for the chat). `pf help` prints the
-registry; `pf help <verb>` one verb's usage line. Exit codes: 0 success; 1
+registry; `pf help <verb>` one verb's usage line; `pf help extensions` the
+one-line index of the [extension points](#extending). Exit codes: 0 success; 1
 client-class (4xx, transport, local validation, and a sub-action's
 flag/argument mistake); 2 server-class (5xx), an unknown verb, or a flag
 error caught by the global / verb-level flag parse. The routing skill's fragments
@@ -626,35 +625,12 @@ carries `ANTHROPIC_*` or another credential-looking name, or when the pi
 step agent's `models.json` references a variable off the list — restart it
 clean with `pf ops shutdown`, wait, `pf daemon ensure`.
 
-Production starts the daemon only through `pf daemon ensure`, which
-passes only the fixed launch flags (`--config`, `-machine-id`,
-`-data-dir`, `-socket`, `-workflows-dir`). The five production knobs come
-from the `[daemon]` table of the `--config` file, which the daemon reads
-itself (decision 2026-10-16 G2). Precedence: an explicit command-line
-flag (tests/dev) > the `[daemon]` table > the built-in default.
-
-```toml
-# ~/.config/polyforge/cli.toml — after the flat keys (every key below a
-# [daemon] header belongs to the table)
-[daemon]
-step_timeout = "45m"                 # --step-timeout: Go duration, > 0
-stall_window = "10m"                 # --stall-window: Go duration, non-zero; negative disables
-harness_root = "/srv/polyforge/h"    # --harness-root: absolute path
-operator_agent_dir = "/home/u/.pi/agent"  # --operator-agent-dir: absolute path
-max_concurrent_jobs = 6              # --max-concurrent-jobs: unquoted integer >= 1
-```
-
-Every key is optional (absent = the daemon default). The file is
-validated on load by every `pf` command, by ensure and by the daemon (the
-same check): a bad value, an unknown key or a duplicate is refused naming
-the file, the line and the key (`config …: line N: [daemon] step_timeout:
-"soon" is not a Go duration`); ensure starts nothing and the daemon exits
-78. Edit the table, then restart the daemon (`pf ops shutdown`, wait,
-`pf daemon ensure`) for it to apply.
+The production knobs (the `cli.toml` `[daemon]` table, and the fixed flags
+`pf daemon ensure` passes): see [Extending › Daemon knobs](#daemon-knobs).
 
 Job cap: `pf ops max N` applies at once and lasts until the daemon
 restarts; every start takes the configured cap (an explicit
-`--max-concurrent-jobs`, else the table, else 4). The cap is never
+`--max-concurrent-jobs`, else the `[daemon]` table, else 4). The cap is never
 persisted; `pf ops max` and `pf ops status` show the one in force.
 
 Every other flag is test/dev-only: nothing in production sets it. The
@@ -685,17 +661,8 @@ resolved (stderr, a `retired_env_ignored` event, `env_warnings` in
 | `--harness-root DIR` | `[daemon] harness_root` | `<data-dir>` | Parent root of the step harness dirs: `<DIR>/step-agent` (dedicated agent dir), `/step-agent-sessions` (pi sessions) and `/claude-config` (claude config dir; its settings.json env block is the credential authority layer). The former `--harness-sessions-root` was renamed — old deployments fail loudly at startup. |
 | `--max-concurrent-jobs N` | `[daemon] max_concurrent_jobs` | `4` | Configured cap on concurrently running jobs; `pf ops max N` overrides it until the daemon restarts (see above). |
 
-The workspace mapping (polyforge#113) replaces the retired workspace and
-project launch surfaces: the `[workspace."<path>"]` sections of the
-`--config` file are the ONLY workspace source. One section per
-workspace, `projects = ["..."]` under each; `~` at the start of a key
-expands to the home directory, keys must be absolute with no trailing
-separator. Every mapped workspace directory must pre-exist; the daemon
-creates and writes only `capsules/` inside each and refuses to start
-when any is missing or unusable (or when the config carries zero
-sections). Capsules route per claimed project through the inverse
-mapping; the auto-pull covers all mapped projects. `pf doctor` checks
-the mapping.
+The `[workspace]` mapping (the daemon's only workspace source): see
+[Extending › Workspace mapping](#workspace-mapping).
 
 Workspace layout (polyforge#177). Anything meant to be shared — designs,
 reviews, decision sheets, audits, experience — lives in aihub, not in a
@@ -732,12 +699,76 @@ days — a `scratch` that is a symlink is never scanned or pruned — and `pf do
 removes them, listing each. Step agents are unaffected: they work inside
 their capsule.
 
-**Per-project model candidates (`.polyforge.yaml`).** This part (down to
-the docs/upgrade.md pointer) is the one authority for the workspace yaml's shape,
-candidate syntax and precedence; the routing skill's fragments, `pf
-submit --models` and docs/upgrade.md point here. A workspace root may carry a
-`.polyforge.yaml` with two optional sections, `steps` and `memory_policy`
-(below) (strict: unknown keys at
+`.polyforge.yaml` (per-project model candidates and memory policy): see
+[Extending › Model candidates](#model-candidates) and
+[Extending › Memory policy](#memory-policy).
+
+Supervision bounds (v2-converge 2.4) — Go duration strings (e.g. `700ms`,
+`5m`), no environment fallbacks. Omitting a flag, or passing `0`, keeps
+the default listed here. In production only T and N are settable, through
+the `cli.toml` `[daemon]` table ([Extending › Daemon knobs](#daemon-knobs)); the other
+four are test/dev-only. The only per-step override in
+`workflow.md` is `budget.wall_minutes` (an estimate: T becomes
+`max(3 x wall_minutes, --step-timeout)`); X and Y are global only — the
+former `silence_minutes` / `tool_minutes` keys were deleted (polyforge#147)
+and an old bundle that still carries them has them silently ignored.
+
+| Flag | Production source | Default | Controls |
+| --- | --- | --- | --- |
+| `--silence-window D` | test/dev-only | `10m` (token-level harness) / `30m` (message-level) | X: no real work signal after dispatch (`harness_silent`), or no model output while waiting for the model (`model_hung`). UI chatter never counts as work. |
+| `--tool-window D` | test/dev-only | `30m` | Y: one tool running longer than this is `tool_hung`. |
+| `--step-timeout D` | `[daemon] step_timeout` | `90m` | T: cumulative step runtime across all its dispatches (`step_timeout_long_task` / `step_timeout_slow_model`). |
+| `--stall-window D` | `[daemon] stall_window` | `10m` | N: the driver between steps (not waiting on a human) for longer than this is `driver_stalled`; a negative value disables it. |
+| `--model-error-grace D` | test/dev-only | `1m` | Grace after a turn ENDS with no result file: ended on a model error is `model_error` (switch candidate); ended normally is `ended_without_result` (same-model retry). |
+| `--revalidate-every D` | test/dev-only | `30s` | M4 periodic session-revalidation cadence for held records — running jobs and retained paused records (a hub-side cancel of a paused WI releases the local record at the next tick); `0`/omitted keeps the 30s default. A negative value disables both, leaving a hub-side cancel of a paused WI stale until a daemon restart. |
+
+Before starting ANY implementation or review lane: recall the v0 lessons
+ledger (`docs/design/polyforge-vnext/v0-lessons-ledger.md`, now including
+the v1 pilot findings F1–F7) and declare, item by item, how your change
+covers the entries it touches — the ledger only prevents re-hits if it is
+actually read first. After a fix lands, write its status back: append the
+「已修」/Fixed annotation (with commit reference) to the ledger entry the
+change fixes, so the ledger the next lane recalls is never stale.
+
+Minimal external dependencies: pure-Go SQLite (modernc.org/sqlite), yaml.v3, goldmark, jsonschema, klauspost/compress, x/sys.
+
+## Extending
+
+Everything a user can configure or extend without changing polyforge's
+code, one subsection each; each subsection is the one place its shape is
+documented, and every other mention points here. `pf help extensions`
+prints this list as a one-line-per-item index.
+
+### Per-repo rules
+
+A task repo's own `AGENTS.md` at its root (else its `CLAUDE.md`) carries
+the rules that hold only for that repo. A step reads it through the shared
+engineering principles (`workflows/_shared/principles.md`, rendered by a
+step definition's `{{principles}}` — most shipped steps; `grep -L
+'{{principles}}' workflows/*/steps/*.md workflows/_shared/steps/*.md` lists
+the exceptions), which open with "first read each `repos/<repo>/AGENTS.md`
+(else `CLAUDE.md`)": the repo's rules bind too and win any conflict with
+the generic principles (the step notes the conflict in its artifact). Polyforge's own rules are in this repository's
+[AGENTS.md](AGENTS.md). Keep project-specific rules there, never in
+`workflows/` (which stays project-neutral).
+
+### Area notes
+
+`docs/agents/` in a task repo holds area notes: one short note per area of
+the code (what it owns, its invariants, its traps), named after the area.
+This is a CONVENTION, not a mechanism: spec and review work reads the
+notes for the areas whose files it touches (how pi-web works today). No
+polyforge code reads or enforces `docs/agents/` yet, and no shipped step
+definition names it; a repo that wants its notes read says so in its
+`AGENTS.md` ([Per-repo rules](#per-repo-rules)).
+
+### Model candidates
+
+`steps:` in `.polyforge.yaml`. This subsection is the one authority for
+the workspace yaml's shape, candidate syntax and precedence; the routing
+skill's fragments, `pf submit --models` and docs/upgrade.md point here. A
+workspace root may carry a `.polyforge.yaml` with two optional sections,
+`steps` and `memory_policy` ([Memory policy](#memory-policy)) (strict: unknown keys at
 any level, duplicate keys, type mismatches, empty model ids and a
 per-step key that is no step id of the daemon's installed workflows, a
 project the cli.toml mapping does not route to this workspace, and
@@ -787,7 +818,9 @@ any claim. An edit takes effect on the next claim with no daemon restart
 (the file is read fresh before every claim). Upgrading from the pre-#169
 shape: see [docs/upgrade.md](docs/upgrade.md).
 
-**Memory policy (`memory_policy:` in `.polyforge.yaml`).** What the
+### Memory policy
+
+`memory_policy:` in `.polyforge.yaml`. What the
 workflow's last step puts into the work item's one `experience.wrap`
 summary memory (no other step writes memories): `record` lists what is
 worth remembering, `skip` what never is. Shape — `default` and per-project entries, each with optional
@@ -823,34 +856,74 @@ it with an idempotency key of the step dispatch (a retry returns the same
 memory); a failure is reported and never fails the step. Every other
 aihub verb, `pf doctor` and `pf daemon` are refused there (DAEMON-403).
 
-Supervision bounds (v2-converge 2.4) — Go duration strings (e.g. `700ms`,
-`5m`), no environment fallbacks. Omitting a flag, or passing `0`, keeps
-the default listed here. In production only T and N are settable, through
-the `cli.toml` `[daemon]` table, which the daemon reads itself (see `pf daemon` flags above); the other
-four are test/dev-only. The only per-step override in
-`workflow.md` is `budget.wall_minutes` (an estimate: T becomes
-`max(3 x wall_minutes, --step-timeout)`); X and Y are global only — the
-former `silence_minutes` / `tool_minutes` keys were deleted (polyforge#147)
-and an old bundle that still carries them has them silently ignored.
+### Workspace mapping
 
-| Flag | Production source | Default | Controls |
-| --- | --- | --- | --- |
-| `--silence-window D` | test/dev-only | `10m` (token-level harness) / `30m` (message-level) | X: no real work signal after dispatch (`harness_silent`), or no model output while waiting for the model (`model_hung`). UI chatter never counts as work. |
-| `--tool-window D` | test/dev-only | `30m` | Y: one tool running longer than this is `tool_hung`. |
-| `--step-timeout D` | `[daemon] step_timeout` | `90m` | T: cumulative step runtime across all its dispatches (`step_timeout_long_task` / `step_timeout_slow_model`). |
-| `--stall-window D` | `[daemon] stall_window` | `10m` | N: the driver between steps (not waiting on a human) for longer than this is `driver_stalled`; a negative value disables it. |
-| `--model-error-grace D` | test/dev-only | `1m` | Grace after a turn ENDS with no result file: ended on a model error is `model_error` (switch candidate); ended normally is `ended_without_result` (same-model retry). |
-| `--revalidate-every D` | test/dev-only | `30s` | M4 periodic session-revalidation cadence for held records — running jobs and retained paused records (a hub-side cancel of a paused WI releases the local record at the next tick); `0`/omitted keeps the 30s default. A negative value disables both, leaving a hub-side cancel of a paused WI stale until a daemon restart. |
+The workspace mapping (polyforge#113) replaces the retired workspace and
+project launch surfaces: the `[workspace."<path>"]` sections of the
+`--config` file are the ONLY workspace source. One section per
+workspace, `projects = ["..."]` under each; `~` at the start of a key
+expands to the home directory, keys must be absolute with no trailing
+separator. Every mapped workspace directory must pre-exist; the daemon
+creates and writes only `capsules/` inside each and refuses to start
+when any is missing or unusable (or when the config carries zero
+sections). Capsules route per claimed project through the inverse
+mapping; the auto-pull covers all mapped projects. `pf doctor` checks
+the mapping.
 
-Before starting ANY implementation or review lane: recall the v0 lessons
-ledger (`docs/design/polyforge-vnext/v0-lessons-ledger.md`, now including
-the v1 pilot findings F1–F7) and declare, item by item, how your change
-covers the entries it touches — the ledger only prevents re-hits if it is
-actually read first. After a fix lands, write its status back: append the
-「已修」/Fixed annotation (with commit reference) to the ledger entry the
-change fixes, so the ledger the next lane recalls is never stale.
+### Daemon knobs
 
-Minimal external dependencies: pure-Go SQLite (modernc.org/sqlite), yaml.v3, goldmark, jsonschema, klauspost/compress, x/sys.
+Production starts the daemon only through `pf daemon ensure`, which
+passes only the fixed launch flags (`--config`, `-machine-id`,
+`-data-dir`, `-socket`, `-workflows-dir`). The five production knobs come
+from the `[daemon]` table of the `--config` file, which the daemon reads
+itself (decision 2026-10-16 G2). Precedence: an explicit command-line
+flag (tests/dev) > the `[daemon]` table > the built-in default.
+
+```toml
+# ~/.config/polyforge/cli.toml — after the flat keys (every key below a
+# [daemon] header belongs to the table)
+[daemon]
+step_timeout = "45m"                 # --step-timeout: Go duration, > 0
+stall_window = "10m"                 # --stall-window: Go duration, non-zero; negative disables
+harness_root = "/srv/polyforge/h"    # --harness-root: absolute path
+operator_agent_dir = "/home/u/.pi/agent"  # --operator-agent-dir: absolute path
+max_concurrent_jobs = 6              # --max-concurrent-jobs: unquoted integer >= 1
+```
+
+Every key is optional (absent = the daemon default). The file is
+validated on load by every `pf` command, by ensure and by the daemon (the
+same check): a bad value, an unknown key or a duplicate is refused naming
+the file, the line and the key (`config …: line N: [daemon] step_timeout:
+"soon" is not a Go duration`); ensure starts nothing and the daemon exits
+78. Edit the table, then restart the daemon (`pf ops shutdown`, wait,
+`pf daemon ensure`) for it to apply.
+
+### Claude binary
+
+`claude_bin` — a flat key of `cli.toml` (before any table header), e.g.
+`claude_bin = "/opt/claude/bin/claude"` — names the Claude Code binary the
+daemon runs for steps whose harness is `claude`. Precedence: the daemon's
+`--claude-bin` flag (tests/dev) > `claude_bin` > `claude` on `PATH`. How
+the binary is invoked and where its credentials live: the `--claude-bin`
+row of the [`pf daemon` flags](#pf-daemon-flags) table. Restart the daemon
+for a change to apply.
+
+### Custom workflow bundles
+
+A workflow bundle is a directory under the daemon's workflows dir:
+`<bundle>/workflow.md` (frontmatter: the steps, their order, budgets and
+candidates) plus `<bundle>/steps/<id>.md`, one step definition per step id;
+a step with no file of its own falls back to the shared
+`_shared/steps/<id>.md` beside the bundles (the bundle's own file always
+wins; `internal/common/workflow`). A work item runs the bundle it was filed
+with (`pf file create --bundle <name>`). The daemon loads the bundles from
+its `--workflows-dir`, which `pf daemon ensure` sets to
+`<data-dir>/release/current/workflows` — the installed release's copy of
+this repository's `workflows/`. Each installed version is its own
+directory, so a bundle added there by hand does not survive the next
+install; ship a bundle by adding it under `workflows/` here and releasing.
+Authoring detail (the frontmatter schema, step definitions, rewinds,
+budgets): [docs/design/polyforge-vnext/01-workflow-skills.md](docs/design/polyforge-vnext/01-workflow-skills.md).
 
 ## `pf recall` — memory search
 

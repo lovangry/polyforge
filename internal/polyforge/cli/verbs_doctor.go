@@ -308,7 +308,7 @@ func runDoctorChecks(ctx *Context, pruneScratch bool) []doctorCheck {
 // sections) with the shape guidance.
 func mappingCheck(r *doctorRun) (string, string) {
 	if r.cfg.Mapping.Empty() {
-		return "fail", "no workspace mapping is configured: add at least one [workspace.\"<path>\"] section with a projects = [...] list to the config (`pf doctor` re-checks after editing)"
+		return "fail", "no workspace mapping is configured: add at least one [workspace.\"<path>\"] section with a projects = [...] list to the config (`pf doctor` re-checks after editing); " + extensionsPointer
 	}
 	return "pass", fmt.Sprintf("%d workspace(s) mapping %d project(s)", len(r.cfg.Mapping.Workspaces()), len(r.cfg.Mapping.Projects()))
 }
@@ -461,7 +461,7 @@ func workspaceYamlCheck(m *mapping.Plan, workflowsDir string, daemonUp bool) (st
 	}
 	switch {
 	case len(parts) > 0:
-		return "fail", strings.Join(parts, "; "), claudeSteps
+		return "fail", strings.Join(parts, "; ") + "; " + extensionsPointer, claudeSteps
 	case present == 0 && workflowsDir != "":
 		return "pass", "no mapped workspace carries a " + workspace.FileName + "; every installed bundle's candidates name their harness", claudeSteps
 	case present == 0:

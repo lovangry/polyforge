@@ -1,6 +1,6 @@
 ---
 name: polyforge
-description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of the 13 routing verbs (file, queue, cancel, recall, remember, memory, submit, watch, answer, pause, resume, wrap, ops) plus the machine verbs doctor, version and help and the init fragment (install / upgrade routing to tools/install.sh, plus `pf init` for a workspace's local layout), each carried by a fragment under verbs/ (`pf watch` is the progress verb: snapshot, resident watcher, subscriptions; `pf chat` carries the chat identity); data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
+description: The user harness's single install face — a pure intent-routing skill. Maps natural language to one of the 13 routing verbs (file, queue, cancel, recall, remember, memory, submit, watch, answer, pause, resume, wrap, ops) plus the machine verbs doctor, version and help, the extensions fragment (`pf help extensions`: where every extension point is documented) and the init fragment (install / upgrade routing to tools/install.sh, plus `pf init` for a workspace's local layout), each carried by a fragment under verbs/ (`pf watch` is the progress verb: snapshot, resident watcher, subscriptions; `pf chat` carries the chat identity); data-plane verbs go direct to AIHub through the pf CLI, execution-plane verbs go to the local daemon over its unix socket. It never parses a workflow, never touches the execution scene, never saves state, and never executes a workflow. Mechanism authority lives in docs/design/polyforge-vnext/.
 license: proprietary
 compatibility:
   harnesses: [pi, claude]
@@ -86,6 +86,7 @@ EXTENDED_GLOB and starts a comment after whitespace.
 | init / install / upgrade / machine setup / 装机 / 升级 | `verbs/init.md` (machine pointer) | CLI |
 | init this workspace / initialize the workspace / write the workspace yaml / 初始化工作区 / 生成工作区配置 | `verbs/init.md` (workspace init) | CLI |
 | help / what skills / usage / 速查 / 怎么用 | `verbs/help.md` | CLI |
+| how do I customize / extend / configure polyforge / where are the config keys / 怎么扩展 / 自定义 / 配置 polyforge | `verbs/extensions.md` (`pf help extensions`) | CLI |
 | what version / which build / what's this binary / 什么版本 / 查版本 | `verbs/version.md` | CLI |
 
 Disambiguation: "continue / go on" **mid-run** routes to `watch` (`pf watch <wi> --once`), not
@@ -251,7 +252,7 @@ Six standing rules, binding on every polyforge session:
    --models`). The daemon reads it fresh before every claim; an invalid
    file refuses the claim (DAEMON-414) WITHOUT claiming — the work item
    stays queued for other machines. Schema, syntax and precedence: the
-   README's "Per-project model candidates" paragraphs (via `verbs/init.md`).
+   README's "Extending › Model candidates" subsection (via `verbs/init.md`).
    Its second optional section, `memory_policy:` (`default` / `<project>`:
    `{ record: [...], skip: [...] }`, a project's lists appended to
    `default`'s), says what the last step puts into the work item's

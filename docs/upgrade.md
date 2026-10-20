@@ -519,7 +519,7 @@ The #169 rewrite of osp-ws, gmi-ws and yf-ws is superseded: use the
 prefixed lists in "Rewriting the three workspaces" under polyforge#175
 below (they carry both the `steps:` shape and the `pi:` / `claude:`
 prefixes). The precedence line for a file header is in the README's
-"Per-project model candidates" paragraphs.
+"Extending › Model candidates" subsection.
 
 ## Per-step harness: pi or Claude Code (polyforge#159)
 
@@ -1290,7 +1290,7 @@ it spawned — could inherit `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` /
   readable under the shared HOME — this guards against accidents, not
   against an agent that reads it on purpose.
 - `.polyforge.yaml` gains the optional `memory_policy:` section (README,
-  "Memory policy"). Nothing is required: a missing section is the
+  "Extending › Memory policy"). Nothing is required: a missing section is the
   built-in default. Run `pf init <ws>` once per workspace to append the
   default section (as text — existing bytes and comments are kept), then
   tune it; `pf doctor`'s new `workspace memory policy` row warns about a

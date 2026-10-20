@@ -146,6 +146,10 @@ func Run(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if args[0] == "help" {
+		if len(args) == 2 && args[1] == helpTopicExtensions {
+			printExtensions(stdout)
+			return 0
+		}
 		if len(args) == 2 {
 			return printCommandUsage(stdout, args[1])
 		}
@@ -324,6 +328,8 @@ func printUsage(w io.Writer) {
 			}
 		}
 	}
+	fmt.Fprintln(w, "Topics (pf help <topic>):")
+	fmt.Fprintf(w, "  %-14s %s\n", helpTopicExtensions, "where each user extension point is documented (README \"Extending\")")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Global flags (before the command):")
 	fmt.Fprintln(w, "  --json          machine-readable output (server JSON as-is)")
@@ -333,6 +339,35 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --socket PATH   daemon unix socket (env PF_DAEMON_SOCKET)")
 	fmt.Fprintln(w, "  --user ID       caller identity (env PF_USER_ID)")
 	fmt.Fprintln(w, "  --version      print version and exit")
+}
+
+// helpTopicExtensions is the one help topic: `pf help extensions`.
+const helpTopicExtensions = "extensions"
+
+// extensionsPointer is the hint naming where the extension points'
+// shapes are documented (doctor's config failure details carry it).
+const extensionsPointer = "shapes: README \"Extending\" (pf help extensions)"
+
+// extensionPoints is the index `pf help extensions` prints: one line per
+// user extension point, naming the README "Extending" subsection that
+// owns it. The README is the one authority; this index restates no shape.
+var extensionPoints = []struct{ what, section string }{
+	{"repos/<repo>/AGENTS.md (else CLAUDE.md)", "Per-repo rules"},
+	{"docs/agents/ area notes", "Area notes"},
+	{".polyforge.yaml steps.<project>.<step|default>.models", "Model candidates"},
+	{".polyforge.yaml memory_policy", "Memory policy"},
+	{"cli.toml [workspace.\"<path>\"]", "Workspace mapping"},
+	{"cli.toml [daemon]", "Daemon knobs"},
+	{"cli.toml claude_bin", "Claude binary"},
+	{"workflows dir <bundle>/workflow.md, steps/<id>.md", "Custom workflow bundles"},
+}
+
+// printExtensions prints the extension-point index (local text only).
+func printExtensions(w io.Writer) {
+	fmt.Fprintln(w, "Extension points — each documented in one README \"Extending\" subsection:")
+	for _, e := range extensionPoints {
+		fmt.Fprintf(w, "  %-54s README Extending › %s\n", e.what, e.section)
+	}
 }
 
 // printCommandUsage prints one command's usage.
