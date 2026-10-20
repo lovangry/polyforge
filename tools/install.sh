@@ -34,10 +34,11 @@
 # agent trees are terminated and recover at the next daemon start):
 #   curl ... | PF_INSTALL_FORCE=1 bash -s -- <api-key> [server-host]
 #
-# Requires: gh authenticated (repo is private); gh, curl, python3 and git
-# on PATH (checked and reported, never installed); macOS ships shasum for
-# the checksum (the installer uses sha256sum when it is there), and no
-# flock — that absence already degrades with a WARN.
+# Requires: gh authenticated (gh needs a login, even for a public repo);
+# gh, curl, python3 and git on PATH (checked and reported, never
+# installed); macOS ships shasum for the checksum (the installer uses
+# sha256sum when it is there), and no flock — that absence already
+# degrades with a WARN.
 set -e
 KEY="${1:?usage: install.sh <api-key> [server-host]}"
 HOST="${2:-${PF_HOST:-}}"
@@ -221,7 +222,7 @@ else
   CLONE="$REL.tmp.$$"
   rm -rf "$CLONE"
   # gh uses its own credentials (ssh or https), so a machine that only has
-  # gh auth can clone the private repo. The tag is cloned shallow.
+  # gh auth can clone the repo. The tag is cloned shallow.
   gh repo clone "$REPO" "$CLONE" -- --branch "$VER" --depth 1 >/dev/null 2>&1 \
     || prep_fail "cannot clone $REPO at $VER (gh auth?)"
   if [ ! -f "$CLONE/skills/polyforge/SKILL.md" ] || [ ! -d "$CLONE/workflows" ]; then
