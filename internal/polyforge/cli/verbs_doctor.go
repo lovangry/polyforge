@@ -505,7 +505,7 @@ func claudeHarnessCheck(steps []workspace.StepResolution, workflowsDir string, d
 		return "warn", table + " — the CLI is unchecked: the daemon reported no harness status (an older daemon?)"
 	}
 	if !h.Found {
-		return "fail", fmt.Sprintf("%s — the claude binary %q does not resolve on the daemon's PATH: install Claude Code (logged in by a human) or set claude_bin / --claude-bin", table, h.Bin)
+		return "fail", fmt.Sprintf("%s — the claude binary %q does not resolve on the daemon's PATH: install Claude Code (logged in by a human) or set cli.toml claude_bin; %s", table, h.Bin, extensionsPointer)
 	}
 	status := "pass"
 	var notes []string

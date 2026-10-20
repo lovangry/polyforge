@@ -188,7 +188,7 @@ in, never calls a model and never reports a credential value.
 | Result | When | What to tell the user |
 |---|---|---|
 | `pass` | the binary resolves, the version is a verified one, the claude-config `settings.json` `env` block sets `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` | — (the detail lists every step with a claude candidate: its whole chain, each candidate's harness shown by its prefix, and the level the chain came from) |
-| `fail` | the claude binary does not resolve on the daemon's PATH | Install Claude Code and log it in (a human does this), or set `claude_bin` in cli.toml / `--claude-bin`. |
+| `fail` | the claude binary does not resolve on the daemon's PATH | Install Claude Code and log it in (a human does this), or set `claude_bin` in cli.toml (README Extending › Claude binary; `pf help extensions`). |
 | `warn` | version older than the verified minimum (2.1.296) or unparsable; neither `ANTHROPIC_AUTH_TOKEN` nor `ANTHROPIC_API_KEY` in the `<harness-root>/claude-config/settings.json` `env` block (the steps' only credential source); a rejected token / gateway pairing or a `CLAUDE_CONFIG_DIR` in that `env` block | Relay the note. The claude-config `settings.json` `env` block is the single credential authority (polyforge#171; the daemon reports its keys as set/unset, never values): put ONE `ANTHROPIC_AUTH_TOKEN` (+ optional `ANTHROPIC_BASE_URL`) there, never `CLAUDE_CONFIG_DIR` — see docs/upgrade.md. |
 | `skip` | claude steps exist but the daemon is unreachable | Start the daemon and re-run. |
 
@@ -215,7 +215,7 @@ per check with its status and detail; `--json` prints the document only.
 | exit 1, `server reach` fail | aihub unreachable | Check `--server` / the config's `server` and whether the aihub host is up. |
 | exit 1, `daemon socket` fail | no live daemon | Run `pf daemon ensure` (it refuses, naming the reason, while the config has no real `[workspace]` mapping or the release workflows are missing), then re-run `pf doctor`. |
 | exit 1, `auth` fail | the credential is rejected | Fix the api key (config `api_key` / `PF_API_KEY`). |
-| exit 1, `harness claude` fail | a candidate is `claude:…` but the daemon cannot find the claude binary | Install/log in Claude Code on the machine or set `claude_bin`; or drop the `claude:` candidates. |
+| exit 1, `harness claude` fail | a candidate is `claude:…` but the daemon cannot find the claude binary | Install/log in Claude Code on the machine or set `claude_bin` in cli.toml (README Extending › Claude binary; `pf help extensions`); or drop the `claude:` candidates. |
 | exit 2 | usage error (unknown flag) | Fix the invocation. |
 
 A `dial unix …` inside the daemon-socket check's detail means the daemon
