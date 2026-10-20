@@ -1,5 +1,7 @@
 # Polyforge
 
+[![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](LICENSE)
+
 Work-item orchestration platform: an aihub server (WI store, memory, git
 revision chain) and a pf work-machine binary (CLI + daemon with the Go
 execution driver).
@@ -33,7 +35,8 @@ curl -s -H "Authorization: token $(gh auth token)" \
   | bash -s -- <your-api-key> <server-host>
 ```
 
-(requires `gh` authenticated — the repo is private. `<server-host>` is the
+(requires `gh` authenticated — `gh` needs a login, even for a public repo,
+and the one-liner reads `gh auth token`. `<server-host>` is the
 aihub host the admin gives you, as the second argument or `PF_HOST=<host>`;
 there is no built-in default. It is required for a first install — the run
 that writes `~/.config/polyforge/cli.toml`, refused before anything changes
@@ -985,3 +988,18 @@ rewrite history.
   reason accepted by review
 - [ ] Skill face triggered? → observation-window ticket registered (blocks
   cutover-grade release, not merge)
+
+## Commercial licensing
+
+Polyforge is licensed under the
+[PolyForm Noncommercial License 1.0.0](LICENSE): personal use, secondary
+development/modification and distribution are allowed for noncommercial
+purposes.
+
+In addition to that license, silgrid grants: personal and team internal use
+is free, including within for-profit organizations for their own internal
+purposes.
+
+Commercial exploitation — selling Polyforge, offering it as a paid hosted
+service, or embedding it in a commercial product — requires a separate
+commercial license. Contact <wangxk1991@gmail.com>.
