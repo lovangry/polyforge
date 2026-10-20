@@ -103,7 +103,7 @@ func (s *Server) routes() {
 	m.HandleFunc("DELETE /api/v1/api-keys/{id}", s.authAdmin(s.hRevokeAPIKey))
 	m.HandleFunc("POST /api/v1/projects", s.authAdmin(s.hCreateProject))
 	m.HandleFunc("GET /api/v1/projects", s.authAdmin(s.hListProjects))
-	m.HandleFunc("GET /api/v1/projects/{id}", s.authAdmin(s.hGetProject))
+	m.HandleFunc("GET /api/v1/projects/{id}", s.auth(s.hGetProject))
 	m.HandleFunc("PATCH /api/v1/projects/{id}", s.auth(s.hPatchProject))
 	m.HandleFunc("POST /api/v1/admin/backup", s.authAdmin(s.hBackup))
 
@@ -1233,6 +1233,16 @@ func (s *Server) hListProjects(w http.ResponseWriter, r *http.Request, idn *iden
 }
 
 func (s *Server) hGetProject(w http.ResponseWriter, r *http.Request, idn *identity) error {
+	projectID, err := s.projectIDOf(r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+	// Read face: membership OR admin (the project surfaces the doctor and
+	// the repo-units scan read; a non-member's read stays hidden behind
+	// the not-found detail, like every other object read).
+	if err := s.mustRead(idn, projectID, "project %q", r.PathValue("id")); err != nil {
+		return err
+	}
 	p, err := s.Admin.GetProject(r.PathValue("id"))
 	if err != nil {
 		return err
