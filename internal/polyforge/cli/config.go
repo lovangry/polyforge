@@ -195,11 +195,19 @@ func parseDaemonTable(file string, kvs []daemonKV) (DaemonSettings, error) {
 // $XDG_CONFIG_HOME|~/.config / polyforge / cli.toml. One location, no
 // secondary lookup — the legacy ~/.polyforge/config.toml fallback is
 // dropped (polyforge#113): a file there is simply not read.
+//
+// The path is computed from $XDG_CONFIG_HOME|~/.config on EVERY OS, not
+// via os.UserConfigDir: on darwin that helper answers
+// ~/Library/Application Support (and ignores $XDG_CONFIG_HOME), a location
+// tools/install.sh never writes and the docs never name — the macOS
+// work-machine deployment (polyforge#218) would install a config pf can
+// never read. tools/install.sh's CFG is this same path, computed the same
+// way.
 func DefaultConfigPath() string {
-	base, err := os.UserConfigDir()
-	if err != nil || base == "" {
-		home, herr := os.UserHomeDir()
-		if herr != nil {
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
 			return "polyforge/cli.toml"
 		}
 		base = filepath.Join(home, ".config")
