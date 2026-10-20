@@ -90,6 +90,26 @@ func TestClaudeHarnessCheck(t *testing.T) {
 	}
 }
 
+// polyforge#232: the missing-binary advice names the production source
+// (cli.toml claude_bin) and the extensions pointer, not the tests/dev
+// --claude-bin flag.
+func TestClaudeHarnessCheckMissingBinaryAdvice(t *testing.T) {
+	steps := []workspace.StepResolution{{Project: "p", Bundle: "bug-fix", Step: "review",
+		Models: []string{"claude:claude-opus-5-5"}, ModelsFrom: "steps.p.review.models"}}
+	st, detail := claudeHarnessCheck(steps, "/wf", true, map[string]HarnessStatus{"claude": {Bin: "claude"}})
+	if st != "fail" {
+		t.Fatalf("status %s, want fail: %q", st, detail)
+	}
+	for _, want := range []string{"does not resolve on the daemon's PATH", "set cli.toml claude_bin", extensionsPointer} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("detail %q lacks %q", detail, want)
+		}
+	}
+	if strings.Contains(detail, "--claude-bin") {
+		t.Errorf("detail %q still advises the tests/dev --claude-bin flag", detail)
+	}
+}
+
 func TestConfigClaudeKeys(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cli.toml")
 	if err := os.WriteFile(path, []byte("claude_bin = \"/opt/claude\"\n"), 0o600); err != nil {
