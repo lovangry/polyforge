@@ -56,7 +56,7 @@ var cmdWatch = &Command{
 	Name:    "watch",
 	Group:   GroupExec,
 	Summary: "Watch work items: one snapshot, or the resident per-chat watcher (progress + human-decision wake-ups)",
-	Usage: "pf watch <wi> --once [--json] [--after N] [--events N]\n" +
+	Usage: "pf watch <wi> --once [--json] [--demand] [--after N] [--events N]\n" +
 		"       pf watch --chat ID [--wait-decision] [--poll D]      (chat default: $PF_CHAT_ID)\n" +
 		"       pf watch --chat ID --statusline                       (print the progress file)\n" +
 		"       pf watch --harness-session ID|- [--harness claude|pi] ...   (resolve the chat via the daemon; - reads {\"session_id\"} from stdin)\n" +
@@ -67,6 +67,7 @@ var cmdWatch = &Command{
 		fs.Bool("json", false, "machine-readable output for --once / list")
 		fs.Int64("after", 0, "--once: only events with seq above this cursor")
 		fs.Int("events", 8, "--once: how many latest events to show")
+		fs.Bool("demand", false, "--once: refresh the snapshot on demand instead of consulting a resident watcher's cache (a --once snapshot is always fetched fresh, so today this is accepted for callers like pi-web's polyforge panel)")
 		fs.String("chat", "", "chat id (default: env PF_CHAT_ID)")
 		fs.Bool("wait-decision", false, "resident: exit 0 printing one fixed-template line per human decision")
 		fs.Bool("statusline", false, "print the resident watcher's progress lines (for a harness status line) and exit")
