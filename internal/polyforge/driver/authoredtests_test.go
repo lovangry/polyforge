@@ -186,7 +186,7 @@ func upstreamEditsTest(t *testing.T, clone, origin string) {
 }
 
 // TestAuthoredTestsUpstreamMergeIsNotAnAgentChange: verification merges the
-// latest default branch before its bar (`git merge --no-edit
+// latest default branch before its bar (`git merge -m "chore(sync): …"
 // origin/<default>`), so an authored test file upstream also edited reaches
 // HEAD with a blob that differs from the author commit's. A change that came
 // ONLY through machine-made merges of the default branch is not a change by

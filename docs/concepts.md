@@ -220,8 +220,9 @@ flip: full stays the baseline.
 
 Verification proves the merged tree: before its bar runs, it fetches and
 merges the latest origin default branch into the branch under test
-(inside each `repos/<name>/`, a machine-made `git merge --no-edit
-origin/<default>` — no rebase, squash, cherry-pick or hand edit — and
+(inside each `repos/<name>/`, a machine-made `git merge -m "chore(sync):
+merge origin/<default> (verify-run, capsule <name>)" origin/<default>` — no rebase, squash,
+cherry-pick or hand edit — and
 "Already up to date" a legal no-op whose bar still runs), so the
 driver-recorded `verified_heads` names that merged head. A conflicting
 merge is aborted with `git merge --abort`, never resolved, and the bar

@@ -162,7 +162,10 @@ in the delivery note. Work inside `repos/<name>/`.
    Judgment items (invented mechanisms, duplicated acceptance tests) belong to the
    review; list any you notice in the delivery note as review points for the human.
 3. **Merge the latest default branch.** Record `pre_merge=$(git rev-parse HEAD)`, then
-   `git merge --no-edit origin/<default>`.
+   `git merge -m "chore(sync): merge origin/<default> (deliver, <wi slug>)" origin/<default>`
+   - `<wi slug>` is this work item's `<project>#<n>` slug. The message names the ticket
+   that synced the default branch: a bare `--no-edit` merge leaves an unattributable
+   "Merge remote-tracking branch" commit on the delivered history.
    - **Verification proved the merged tree.** Verification already fetched and merged the
      latest default branch before its bar, so when, after this step's merge,
      `git rev-parse HEAD` equals `verified_heads.<name>` - the default branch has not

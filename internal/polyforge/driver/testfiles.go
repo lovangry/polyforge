@@ -307,8 +307,8 @@ func changedAuthoredTests(reposDir string, at *AuthoredTests) []string {
 
 // mergedFromDefault answers which of the differing paths changed since
 // baseline ONLY through machine-made merges of the default branch
-// verification runs `git merge --no-edit
-// origin/<default>` before its bar, so an authored test upstream also
+// verification runs (`git merge -m "chore(sync): …" origin/<default>` before
+// its bar), so an authored test upstream also
 // edited reaches HEAD with a new blob the agent never wrote — rejecting
 // it would block a correct pass, and restoring the author blob would
 // undo upstream's edit.

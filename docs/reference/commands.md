@@ -185,8 +185,9 @@ The `verification` step calls it exactly once, in the foreground, at the
 capsule root (the working directory); it is a local command — it never
 reaches the daemon or aihub and needs no `cli.toml`, so a step may run it.
 In each task repo it aborts a merge an interrupted run left in progress,
-runs `git fetch origin` and `git merge --no-edit origin/<default>` (a
-conflict is aborted and the bar runs on the unmerged tree), and skips a repo
+runs `git fetch origin` and `git merge -m "chore(sync): merge origin/<default>
+(verify-run, capsule <name>)" origin/<default>` (a conflict is aborted and the bar runs on
+the unmerged tree), and skips a repo
 with no commit beyond its default branch. For each touched repo it asks the
 release-shipped scope engine (`--engine`, default
 `<data-dir>/release/current/tools/verify-scope`) for its plan — passing the

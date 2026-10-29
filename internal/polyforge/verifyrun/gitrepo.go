@@ -3,9 +3,10 @@ package verifyrun
 // gitrepo.go: the merged-tree phase of one task repo — the MERGE_HEAD
 // self-heal, `git fetch origin`, the default-branch resolution
 // (origin/HEAD, falling back to main, then master; the remote prefix
-// stripped), `git merge --no-edit origin/<default>` with a conflict
-// aborted and the tree confirmed restored, the untouched judgment and the
-// pre-existing base — plus the untracked-test-file listing.
+// stripped), `git merge -m "chore(sync): merge origin/<default> (verify-run,
+// capsule <name>)" origin/<default>` with a conflict aborted and the tree
+// confirmed restored, the untouched judgment and the pre-existing base —
+// plus the untracked-test-file listing.
 
 import (
 	"context"
@@ -148,7 +149,11 @@ func (r *runner) mergePhase(ctx context.Context, rr *repoRun) string {
 	// the tracked-file state before the merge: a conflict's abort must
 	// restore exactly it
 	before, _ := gitQuiet(ctx, rr.dir, "status", "--porcelain", "--untracked-files=no")
-	res := git("merge", "--no-edit", "origin/"+def)
+	// The message names the work item (the capsule) and the phase, so the
+	// sync commit never lands on the delivered history as the unattributable
+	// "Merge remote-tracking branch" default message.
+	mergeMsg := fmt.Sprintf("chore(sync): merge origin/%s (verify-run, capsule %s)", def, path.Base(r.o.CapsuleDir))
+	res := git("merge", "-m", mergeMsg, "origin/"+def)
 	switch {
 	case res.Exit == 0:
 		head, err := revParse(ctx, rr.dir, "HEAD")
@@ -179,7 +184,7 @@ func (r *runner) mergePhase(ctx context.Context, rr *repoRun) string {
 		m.Outcome = MergeConflictAborted
 		m.Detail = "merging origin/" + def + " conflicts: aborted, the bar runs on the unmerged tree (the conflict is deliver's to handle)"
 	default:
-		return fail("`git merge --no-edit origin/%s` failed without a conflict (exit %d): %s", def, res.Exit, logTail(res.LogPath))
+		return fail("the merge of origin/%s failed without a conflict (exit %d): %s", def, res.Exit, logTail(res.LogPath))
 	}
 	ahead, err := gitQuiet(ctx, rr.dir, "rev-list", "--count", "origin/"+def+"..HEAD")
 	if err != nil {

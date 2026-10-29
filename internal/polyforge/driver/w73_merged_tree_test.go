@@ -74,7 +74,7 @@ func TestW73MergedTreeDutyRidesEveryDeliveryLane(t *testing.T) {
 	// same way).
 	duty := []string{
 		"git fetch origin",
-		"git merge --no-edit origin/<default>",
+		"git merge -m \"chore(sync): merge origin/<default> (verify-run, capsule <name>)\" origin/<default>",
 		"Already up to date",
 		"AFTER that merge, on the merged",
 		"git merge --abort",

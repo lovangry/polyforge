@@ -178,16 +178,18 @@ the latest origin default branch into the branch under test, in each `repos/<nam
 1. `git fetch origin`, then it resolves the default branch
    (`git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||'`, falling back
    to `main`, then `master`) - call it `<default>`.
-2. `git merge --no-edit origin/<default>`. Both are command evidence like any other
+2. `git merge -m "chore(sync): merge origin/<default> (verify-run, capsule <name>)" origin/<default>`
+   (the capsule's own name rides in the message, so the sync commit is attributable to
+   the work item). Both are command evidence like any other
    (`merge_outcomes.<repo>` records the outcome). "Already up to date" is a legal no-op: it
    creates no commit, and the bar still runs on that HEAD.
 3. Every build/lint/test and lane-check command runs AFTER that merge, on the merged
    HEAD, yours included. The driver stamps the repo's HEAD at your completed pass as
    `verified_heads.<repo>`, so the proof must be of this merged HEAD.
 
-The merge commit MUST be machine-made - exactly `git merge --no-edit origin/<default>`,
-never a rebase, squash, cherry-pick or hand edit (deliver's merge rule re-derives merges
-with `git merge-tree --write-tree`). Never merge or commit in a task repo yourself.
+The merge commit MUST be machine-made - exactly the item-2 merge command, never a rebase,
+squash, cherry-pick or hand edit (deliver's merge rule re-derives merges with
+`git merge-tree --write-tree`). Never merge or commit in a task repo yourself.
 
 - **A failed fetch:** when `git fetch origin` (or resolving `<default>`) fails, `pf verify-run`
   exits with `incomplete:` and the error: stop with outcome `incomplete` and the exact error,

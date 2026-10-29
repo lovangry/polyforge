@@ -41,8 +41,8 @@ On a re-entry, run two additive faces over the current tree:
   failed, a PASS the tree it covered), in that round's own settlement write, and the
   record survives rewinds. Never read the fix surface off `git diff <head>..HEAD`:
   after a passed round, a later verification or deliver merges the latest default
-  branch (`git merge --no-edit origin/<default>`), so that range also carries every
-  upstream change the merge brought in — none of it is the fix. When
+  branch (a machine `chore(sync)` merge of `origin/<default>`), so that range also carries
+  every upstream change the merge brought in — none of it is the fix. When
   `last_review_round.heads` is absent the fix surface is the whole change: judge it
   like a first round. Genuinely new defects are new findings and are reported as
   such, blocking when the round contract says so.

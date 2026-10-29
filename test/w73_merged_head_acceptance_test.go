@@ -201,7 +201,7 @@ func TestW73VerifiedHeadIsMergedHeadAndDeliverRecordsNoRerun(t *testing.T) {
 
 	// (a) the shipped verification text carries the fetch+merge-before-the-bar duty.
 	w73MustSay(t, w73PromptOf(t, capDir, "verification"), "verification",
-		"git fetch", "git merge --no-edit origin/", "already up to date")
+		"git fetch", "git merge -m \"chore(sync): merge origin/<default>", "already up to date")
 
 	// (b) verified_heads names the machine-made merge that contains origin/main.
 	repo := filepath.Join(capDir, "repos", "demo")
@@ -270,7 +270,7 @@ func TestW73ConflictingVerificationMergeIsAborted(t *testing.T) {
 
 	// (a) the shipped verification text carries the abort duty.
 	w73MustSay(t, w73PromptOf(t, capDir, "verification"), "verification",
-		"git fetch", "git merge --no-edit origin/", "git merge --abort")
+		"git fetch", "git merge -m \"chore(sync): merge origin/<default>", "git merge --abort")
 
 	if v, _ := x.Steps["verification"].Output["verdict"].(string); v != "pass" {
 		t.Fatalf("the gate must still pass on the unmerged tree: verdict %q (%+v)", v, x.Steps["verification"].Output)
@@ -339,7 +339,7 @@ func TestW73InterruptedVerificationLeavesNoProof(t *testing.T) {
 
 	// (a) the shipped verification text carries the restart-recovery duty.
 	w73MustSay(t, w73PromptOf(t, capDir, "verification"), "resumed verification",
-		"git fetch", "git merge --no-edit origin/", "resum")
+		"git fetch", "git merge -m \"chore(sync): merge origin/<default>", "resum")
 
 	repo := filepath.Join(capDir, "repos", "demo")
 	head := w73MachineMadeHead(t, repo)

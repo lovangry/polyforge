@@ -83,7 +83,7 @@ func TestTouchedRepoMergeCommit(t *testing.T) {
 	for _, e := range res.CommandEvidence {
 		j := strings.Join(e.Argv, " ")
 		sawFetch = sawFetch || j == "git fetch origin"
-		sawMerge = sawMerge || j == "git merge --no-edit origin/main"
+		sawMerge = sawMerge || (strings.HasPrefix(j, "git merge -m chore(sync): merge origin/main (verify-run, capsule ") && strings.HasSuffix(j, " origin/main"))
 	}
 	if !sawFetch || !sawMerge {
 		t.Errorf("fetch/merge evidence missing: %+v", res.CommandEvidence)
