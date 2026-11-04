@@ -355,6 +355,32 @@ else
   done
 fi
 
+# local bundle overlays: a fresh $VER checkout carries only upstream
+# bundles; this machine's own (feature-local, e2e-batch, chore-local,
+# macsmoke, feature-full step patch) live in <data-dir>/local-overrides,
+# untracked by design, and every release switch strands them until they
+# are re-applied. A claim of a bundle missing from the checkout then
+# materializes the capsule without it and the driver start fails late
+# with "bundle workflow.md unreadable" (cpm-for-legal#106 on 10-29,
+# #137 on 11-02: both auto-claimed right after an upgrade). The apply
+# script is idempotent and machine-optional (absent = nothing to do);
+# run it also on an "already current" re-install so a forgotten re-apply
+# self-heals. Before step 4: the daemon the installer starts would
+# otherwise auto-claim against an overlay-less checkout.
+APPLY_LOCAL="$DAEMON_DATA/local-overrides/apply-local-overrides.sh"
+if [ -x "$APPLY_LOCAL" ]; then
+  if OUT=$("$APPLY_LOCAL" "$REL" 2>&1); then
+    printf '%s\n' "$OUT" | sed 's/^/   /'
+    echo "   local bundle overlays re-applied to $REL"
+  else
+    printf '%s\n' "$OUT" | sed 's/^/   /'
+    echo "   WARN: re-applying local bundle overlays failed — until it succeeds by hand, a claim of a local bundle materializes without it and the driver start fails ('bundle workflow.md unreadable'):"
+    echo "     $APPLY_LOCAL $REL"
+  fi
+else
+  echo "   local bundle overlays: none (no $APPLY_LOCAL)"
+fi
+
 # ─── 3. config + harnesses ──────────────────────────────────────────
 echo "== 3/5 config + harnesses"
 # config: create or verify (NEVER rewritten)
