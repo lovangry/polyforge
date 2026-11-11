@@ -408,20 +408,17 @@ func TestW079PerProjectModelPrecedence(t *testing.T) {
 	capT := w079Run(t, d, inst, ws, wiT)
 
 	for step, want := range map[string]string{
-		"grill": "w079-e2e-def", "verification": w079DefaultsHead,
+		"grill": "w079-e2e-def", "verification": "w079-e2e-def",
 		"fix": "w079-e2e-code-a",
 	} {
 		if got := w079Model(t, capE, step); got != want {
-			t.Fatalf("e2e %s model %q, want %q (project step id > bundle step > project default)", step, got, want)
+			t.Fatalf("e2e %s model %q, want %q (project step id > project default > bundle defaults)", step, got, want)
 		}
 	}
-	for _, step := range []string{"grill", "fix"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if got := w079Model(t, capI, step); got != "w079-acme-ops-def" {
-			t.Fatalf("acme-ops %s model %q, want its project default w079-acme-ops-def", step, got)
+			t.Fatalf("acme-ops %s model %q, want its project default w079-acme-ops-def (no step list governs it)", step, got)
 		}
-	}
-	if got := w079Model(t, capI, "verification"); got != w079DefaultsHead {
-		t.Fatalf("acme-ops verification model %q, want the bundle defaults head %q (no project list governs it)", got, w079DefaultsHead)
 	}
 	if got := w079Model(t, capT, "verification"); got != w079DefaultsHead {
 		t.Fatalf("unlisted project verification model %q, want the bundle defaults head %q", got, w079DefaultsHead)
