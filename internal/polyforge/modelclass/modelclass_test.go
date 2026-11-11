@@ -121,7 +121,7 @@ func TestPreflightComposedDiagnosticFiresTheMovedPredicates(t *testing.T) {
 func TestPreflightFailsOpen(t *testing.T) {
 	cand, _ := harness.ParseCandidate("pi:w19p-bad/w19p-x")
 	for name, dir := range map[string]string{
-		"no models.json":   fixtureDir(t, ""),
+		"no models.json":  fixtureDir(t, ""),
 		"unparseable":     fixtureDir(t, "{not json"),
 		"empty agent dir": "",
 	} {
