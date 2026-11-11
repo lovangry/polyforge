@@ -23,6 +23,7 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/capsule"
 	"github.com/silgrid/polyforge/internal/common/harness"
+	"github.com/silgrid/polyforge/internal/polyforge/modelclass"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
@@ -360,11 +361,12 @@ var hostPatterns = regexp.MustCompile(`(?i)(no space left|enospc|disk quota|edqu
 // throttle or transport signature ("429 ... exceeded your current quota",
 // "insufficient balance ... connection reset"). verdictCause promotes a
 // live error turn naming it to exit_model_class.
-var allowanceText = regexp.MustCompile(`(?i)(\b401\b|\b403\b|unauthori[sz]ed|authentication|invalid api key|incorrect api key|api key|quota|insufficient|billing|credit|` +
-	`余额不足|欠费|(额度|配额)[^，。；,.;\n]{0,6}(用尽|用完|耗尽|不足|超出|超限)|(超出|超过)了?(额度|配额)|` +
-	`账户[^，。；,.;\n]{0,10}(停用|禁用|冻结)|鉴权失败|认证失败|无效的?(密钥|令牌)|(密钥|令牌)无效|` +
-	`(无权限|没有权限|权限不足)[^，。；,.;\n]{0,6}(模型|接口|API|服务)|(模型|接口|API|服务)[^，。；,.;\n]{0,6}(无权限|没有权限|权限不足))`)
-
+//
+// The model-class text predicates themselves (allowanceText,
+// unresolvedModel, unresolvedModelAdjacent, unresolvedModelNamed,
+// modelInfraNouns) live in the modelclass leaf (polyforge#19): every lane
+// that hands a model candidate to a harness shares that one gate.
+//
 // The name-resolution forms of a live error turn: the pinned model does
 // not exist for the provider. verdictCause promotes such a turn to
 // exit_model_class (resuming the same unresolvable model cannot help).
@@ -377,34 +379,6 @@ var allowanceText = regexp.MustCompile(`(?i)(\b401\b|\b403\b|unauthori[sz]ed|aut
 // "model endpoint not found, retrying") and stays model_error, as do the
 // model-name row's looser shapes ("model ... unavailable", "model ...
 // invalid response").
-var (
-	unresolvedModelAdjacent = regexp.MustCompile(`(?i)\b(unknown|unresolved|unsupported|no such) model\b|\bmodel_not_found\b`)
-	unresolvedModelNamed    = regexp.MustCompile("(?i)\\bmodel\\W+(\"[^\"]{1,128}\"|'[^']{1,128}'|`[^`]{1,128}`|[^\\s\"'`,;:]{1,128})\\W{0,3}(not found|cannot be resolved|could not be resolved|does not exist)\\b")
-)
-
-// modelInfraNouns are the words that, right after "model", name the
-// serving infrastructure rather than a model id: "model endpoint not
-// found" is an outage, "model xyz not found" a name that does not resolve.
-var modelInfraNouns = map[string]bool{
-	"server": true, "servers": true, "endpoint": true, "endpoints": true, "service": true, "backend": true,
-	"provider": true, "gateway": true, "host": true, "instance": true, "instances": true, "worker": true,
-	"workers": true, "api": true, "route": true, "upstream": true, "node": true, "pool": true,
-	"replica": true, "replicas": true, "container": true, "process": true, "deployment": true,
-}
-
-// unresolvedModel reports whether a live error turn names a model that
-// does not resolve (the adjacent forms above).
-func unresolvedModel(text string) bool {
-	if unresolvedModelAdjacent.MatchString(text) {
-		return true
-	}
-	for _, m := range unresolvedModelNamed.FindAllStringSubmatch(text, -1) {
-		if !modelInfraNouns[strings.ToLower(m[1])] {
-			return true
-		}
-	}
-	return false
-}
 
 // textClasses is the ordered failure-text classification: the first
 // matching row names the cause. Chinese provider texts are matched
@@ -420,7 +394,7 @@ var textClasses = []struct {
 	// I/O error, not a provider stream drop).
 	exitOnly bool
 }{
-	{allowanceText, FailExitModel, false},
+	{modelclass.AllowanceText, FailExitModel, false},
 	// rate limit (D7): ONLY transient throttling. Another model would be
 	// throttled just the same, so these never advance the candidate
 	// pointer. Allowance problems are the row above.
@@ -530,7 +504,7 @@ func verdictCause(v supervise.StepDead) string {
 	case FailRateLimited, FailUpstreamTransient:
 		return cause
 	}
-	if allowanceText.MatchString(v.TurnError) || unresolvedModel(v.TurnError) {
+	if modelclass.AllowanceText.MatchString(v.TurnError) || modelclass.UnresolvedModel(v.TurnError) {
 		return FailExitModel
 	}
 	return string(v.Cause)
