@@ -15,7 +15,8 @@ import (
 )
 
 // runMarker scopes a test's PF_WI_ID / PF_DAEMON_ID marker value to this
-// test process. The env-marker layer scans the WHOLE host's /proc, so a
+// test process. The env-marker layer scans the WHOLE host's process table
+// (procListAll — /proc on Linux, sysctls on darwin), so a
 // constant marker collides with the same test running concurrently in
 // another process (a second checkout, a release gate): one run's sweep
 // kills, or its scan counts, the other run's processes.
@@ -54,16 +55,12 @@ func spawnTreeCmd(wi string) *exec.Cmd {
 }
 
 func groupMemberCount(pgid int) int {
-	entries, err := os.ReadDir(procRoot)
+	pids, err := procListAll()
 	if err != nil {
 		return 0
 	}
 	n := 0
-	for _, e := range entries {
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil || pid <= 1 {
-			continue
-		}
+	for _, pid := range pids {
 		state, _, pgrp, _, ok := procStat(pid)
 		if ok && state != "Z" && int(pgrp) == pgid {
 			n++
