@@ -1188,9 +1188,12 @@ func TestSubStoreAdoptWithoutRecordAndMute(t *testing.T) {
 // hint), every other owner-routed subscriber is Passive, an explicit
 // subscriber stays a wake target of its own record untouched, and a
 // muted chat (no subscription) is excluded by construction. With the
-// origin holding a subscription, or an empty eligible set, or after an
-// adopt (the adopter IS the origin), today's semantics apply: no flag,
-// and the scoped demotion never fires.
+// origin holding a subscription, or after an adopt (the adopter IS
+// the origin), today's semantics apply: no flag, and the scoped
+// demotion never fires. With an empty eligible set the wake converges
+// on the single fallback target (polyforge#18): the explicit
+// subscribers stay wake targets of their own records, every
+// owner-routed subscriber is Passive.
 func TestSubStoreScopedWakeAudience(t *testing.T) {
 	const wi = "wi_g14"
 	s, err := newSubStore(filepath.Join(t.TempDir(), chatSubsFile))
@@ -1281,17 +1284,24 @@ func TestSubStoreScopedWakeAudience(t *testing.T) {
 		t.Fatalf("an owner-routed sub shares the live origin's record (Passive): %+v", x)
 	}
 
-	// an empty eligible set: today's owner-wide semantics — every
-	// subscribed chat wakes its own record, no Passive, no flag
+	// an empty eligible set: the wake converges on the single fallback
+	// target (polyforge#18) — an explicit subscriber is preferred, so
+	// chat_a and chat_e (explicit) stay wake targets of their own
+	// records while every owner-routed subscriber is Passive
 	if _, err := s.Unsubscribe("chat_o", wi); err != nil {
 		t.Fatal(err)
 	}
 	s.mu.Lock()
 	s.seen["chat_a"] = s.now().Add(-2 * chatLiveFor) // the eligible chat's watcher went silent
 	s.mu.Unlock()
-	for _, chat := range []string{"chat_a", "chat_x", "chat_u", "chat_e"} {
+	for _, chat := range []string{"chat_a", "chat_e"} {
 		if sub := subOf(chat); sub.Passive || sub.Adoptable {
-			t.Fatalf("an empty eligible set is today's owner-wide fallback (no new output): %+v", sub)
+			t.Fatalf("%s (explicit, empty eligible set) stays a wake target of its own record: %+v", chat, sub)
+		}
+	}
+	for _, chat := range []string{"chat_x", "chat_u"} {
+		if sub := subOf(chat); !sub.Passive || sub.Adoptable {
+			t.Fatalf("%s (owner-routed, empty eligible set) must be Passive under the single fallback target: %+v", chat, sub)
 		}
 	}
 	delete(s.seen, "chat_a") // silent chats read as live again (born-based)

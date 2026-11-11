@@ -180,7 +180,9 @@ own workspace: the live, subscribed, non-muted chats tagged with that
 workspace (`pf chat init` records the tag from the session cwd) are woken —
 each such line carries the hint 「可用 `pf watch adopt <wi>` 接管」 — while
 every other chat of the owner sees progress only; with no eligible chat in
-the workspace, every chat of the owner is woken as before. `pf watch adopt
+the workspace, the wake converges on a single fallback chat — an
+explicitly subscribed one, or else the lowest-id live subscribed chat —
+every other chat of the owner still seeing progress only. `pf watch adopt
 <wi>` (an eligible same-workspace chat only) takes the wake-target role
 over: the chat becomes the work item's origin chat and inherits the
 delivery record, so nothing already delivered replays. **Adopt runs ONLY on

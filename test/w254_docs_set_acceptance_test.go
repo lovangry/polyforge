@@ -462,7 +462,8 @@ func TestW254QuickstartsMovedIntact(t *testing.T) {
 // its deploy order and rollback), and the appended section (the
 // micro lane: pure text changes deliver on fast evidence), and the appended
 // section (doc.module-map: the Create convention and
-// current-revision-first recall), and nothing else)
+// current-revision-first recall), and the appended section (the
+// empty-eligible decision wake converges on one chat), and nothing else)
 // and is only routed to, from the install ops page and the README
 // landing page. The
 // pin moves in the same commit as each append (the append-only rule,
@@ -471,7 +472,7 @@ func TestW254QuickstartsMovedIntact(t *testing.T) {
 func TestW254UpgradeByteIdentical(t *testing.T) {
 	raw := []byte(w254Read(t, "docs/upgrade.md"))
 	sum := sha256.Sum256(raw)
-	if got := hex.EncodeToString(sum[:]); got != "a811e00c83dfa95001ed1ed804bf980792aea5fc603b4e2e03fa01fda171eaf8" {
+	if got := hex.EncodeToString(sum[:]); got != "c4dc18544936624cf58e68531b83eda6b7a12205d63d8f116299ac6fd20dfbef" {
 		t.Fatalf("docs/upgrade.md must stay byte-identical (only routed to, never rewritten): sha256 %s != the pinned pre-move sha256", got)
 	}
 	install := w254Norm(w254Page(t, "docs/install.md"))
