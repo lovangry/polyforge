@@ -581,16 +581,19 @@ func New(cfg Config) (*Daemon, error) {
 		}
 	}
 	d = &Daemon{
-		chats:       &chatStore{path: filepath.Join(cfg.DataDir, chatsFile)},
-		subs:        subs,
-		cfg:         cfg,
-		hub:         cfg.Hub,
-		live:        live,
-		modes:       NewModeCtl(),
-		q:           NewJobQueue(cfg.MaxConcurrent, func() map[string]bool { return d.occupiedSlots() }),
-		shutDone:    make(chan struct{}),
-		sup:         supervise.NewRegistry(),
-		lane:        summarize.New(laneDispatcher),
+		chats:    &chatStore{path: filepath.Join(cfg.DataDir, chatsFile)},
+		subs:     subs,
+		cfg:      cfg,
+		hub:      cfg.Hub,
+		live:     live,
+		modes:    NewModeCtl(),
+		q:        NewJobQueue(cfg.MaxConcurrent, func() map[string]bool { return d.occupiedSlots() }),
+		shutDone: make(chan struct{}),
+		sup:      supervise.NewRegistry(),
+		// polyforge#19: the lane's dispatch-time candidate preflight reads
+		// the dedicated step-agent dir's models.json — the same view the
+		// spawned step agent resolves its --model against.
+		lane:        summarize.New(laneDispatcher, rtCfg.StepAgentDir()),
 		remoteSnaps: newRemoteSnapCache(remoteSnapTTL, remoteSnapCap),
 		face:        machineFaceState{desiredRole: roleFromLauncher(cfg.Launcher)},
 		// the file-only baseline the reload compares against until the

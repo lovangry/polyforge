@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/silgrid/polyforge/internal/common/harness"
+	"github.com/silgrid/polyforge/internal/polyforge/modelclass"
 )
 
 // ErrLimit is the refusal of a spawn beyond the fixed concurrency limit.
@@ -42,6 +43,13 @@ type Config struct {
 	WorkDir    func(project string) (string, error)
 	OnTerminal func(Task)
 	Now        func() time.Time
+	// AgentDir is the dedicated step-agent directory whose models.json
+	// the dispatch-time candidate preflight reads (polyforge#19): the
+	// daemon binds the runtime's own derivation — the same view the
+	// spawned harness resolves its --model against (the ExecRunner's own
+	// PI_CODING_AGENT_DIR). Empty, or a file that proves nothing,
+	// skips no candidate.
+	AgentDir string
 }
 
 type entry struct {
@@ -162,18 +170,29 @@ func (m *Manager) Spawn(spec Spec) (Task, error) {
 }
 
 // run walks the candidates in order inside the one shared budget and
-// finishes the task in exactly one terminal state.
+// finishes the task in exactly one terminal state. polyforge#19: a
+// candidate the dispatch-time preflight skips (pi would refuse it at
+// startup) is skipped BEFORE the runner — no dispatch under a model
+// that cannot resolve, no budget spent on it; the task records the
+// candidate that actually ran.
 func (m *Manager) run(ctx context.Context, e *entry, dir string) {
 	t := e.t
 	var report strings.Builder
 	var tokens int64
 	var lastErr error
+	var skipped []string
+	ran := false
 	capped, completed := false, false
 	for _, cand := range t.Candidates {
 		if ctx.Err() != nil {
 			break
 		}
 		c, _ := harness.ParseCandidate(cand)
+		if skip, reason := modelclass.Preflight(m.cfg.AgentDir, c); skip {
+			skipped = append(skipped, fmt.Sprintf("%s (%s)", cand, reason))
+			continue
+		}
+		ran = true
 		m.mu.Lock()
 		e.t.Candidate = cand
 		m.mu.Unlock()
@@ -198,6 +217,11 @@ func (m *Manager) run(ctx context.Context, e *entry, dir string) {
 		}
 		completed = err == nil && ctx.Err() == nil
 		break
+	}
+	if !ran && lastErr == nil && ctx.Err() == nil && len(skipped) > 0 {
+		// every candidate was skipped before any runner ran: the failure
+		// names them, so the task record shows WHY nothing ran
+		lastErr = fmt.Errorf("every model candidate was skipped by the dispatch-time preflight: %s", strings.Join(skipped, "; "))
 	}
 	m.finish(ctx, e, report.String(), tokens, capped, completed, lastErr)
 }
