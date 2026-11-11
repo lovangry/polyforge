@@ -451,7 +451,14 @@ inherited `ANTHROPIC_*` (their credential and endpoint come only from
 `<harness-root>/claude-config/settings.json`); pi steps need their
 provider keys in `auth.json` or as literals in `models.json` — a
 `$NAME` there, or a provider `*_API_KEY`, that is not on the list never
-reaches them. `GET /status` reports the daemon's environment variable
+reaches them. A composed candidate whose `--model` names a provider
+neither that `models.json` nor pi's built-in catalog knows is skipped
+at dispatch time, before any spawn (polyforge#19): one
+`candidate_skipped` event per skip, no death, budget draw or retry slot
+counted; a step whose every candidate is skipped blocks with
+`candidates_exhausted`, and a manual `pf submit --models` list made
+entirely of such candidates is refused DAEMON-400 at the submit, naming
+each. `GET /status` reports the daemon's environment variable
 names (never values), and `pf doctor`'s `daemon env` row warns when a
 running daemon carries `ANTHROPIC_*` or another credential-looking
 name, or when the pi step agent's `models.json` references a variable

@@ -462,16 +462,22 @@ func TestW254QuickstartsMovedIntact(t *testing.T) {
 // its deploy order and rollback), and the appended section (the
 // micro lane: pure text changes deliver on fast evidence), and the appended
 // section (doc.module-map: the Create convention and
-// current-revision-first recall), and nothing else)
+// current-revision-first recall), and the appended section (the
+// dispatch-time candidate preflight, its candidate_skipped event, the
+// all-unresolvable block, the manual --models refusal and the shipped
+// bundles' step-level model_candidates removal), and nothing else
 // and is only routed to, from the install ops page and the README
 // landing page. The
 // pin moves in the same commit as each append (the append-only rule,
 // spec R14: docs change with the code, and the pin with the
-// docs).
+// docs). History note: the v2.20.21 appends landed without the pin move
+// (the pin sat red at the pre-append sha until this commit — the
+// upstream v2.20.21/PR #5 merge appended without reflecting it); this
+// move lands on the post-append sha, repairing that divergence.
 func TestW254UpgradeByteIdentical(t *testing.T) {
 	raw := []byte(w254Read(t, "docs/upgrade.md"))
 	sum := sha256.Sum256(raw)
-	if got := hex.EncodeToString(sum[:]); got != "a811e00c83dfa95001ed1ed804bf980792aea5fc603b4e2e03fa01fda171eaf8" {
+	if got := hex.EncodeToString(sum[:]); got != "e72d3306ee3ea3c1b12895ec5cf60cfae79fcef0d21c75dc56d34445835b799c" {
 		t.Fatalf("docs/upgrade.md must stay byte-identical (only routed to, never rewritten): sha256 %s != the pinned pre-move sha256", got)
 	}
 	install := w254Norm(w254Page(t, "docs/install.md"))
