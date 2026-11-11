@@ -700,7 +700,7 @@ func renderModels(w io.Writer, p *modelhealth.Profile) {
 }
 
 // renderTasksSummary prints the one-line task summary of `pf ops status`
-//; nothing for an older daemon that carries none.
+// ; nothing for an older daemon that carries none.
 func renderTasksSummary(w io.Writer, t *task.Summary) {
 	if t == nil {
 		return

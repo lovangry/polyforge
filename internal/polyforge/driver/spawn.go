@@ -789,7 +789,7 @@ func assembleStepPrompt(p promptParts) string {
 
 // ewrResumeReminder is the whole instruction of the first
 // ended_without_result retry that resumes the same harness session
-//. The resumed conversation already holds the step
+// . The resumed conversation already holds the step
 // definition, the output schema, the context-policy line and the
 // recalled memories from its original dispatch, so re-sending the
 // assembled prompt would restart the work. The reminder carries only

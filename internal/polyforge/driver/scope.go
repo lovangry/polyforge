@@ -252,7 +252,7 @@ type reviewScope struct {
 }
 
 // reviewScopeRecord reads the review step's recorded scope declaration
-//. present is false only when no scope record exists; a
+// . present is false only when no scope record exists; a
 // present-but-malformed record answers (nil, true) — present, but
 // proving nothing (fail-closed at the merge rule, which names it).
 func reviewScopeRecord(st *capsule.Step) (rec *reviewScope, present bool) {

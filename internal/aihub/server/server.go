@@ -473,7 +473,7 @@ func (g *wiGrant) requireWrite() error {
 // requireOwnerDecision conceals the work item from a caller with no
 // relationship to it. A reporter keeps the retained cancel/wrap/
 // resume-blocked right even after losing project membership
-//; the decision itself stays the reporter/
+// ; the decision itself stays the reporter/
 // maintainer/admin rule.
 func (g *wiGrant) requireOwnerDecision() error {
 	if g.scopedAway {

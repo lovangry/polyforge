@@ -781,7 +781,7 @@ func rerunWindow(repo, prURL string, events []evEvent) (int, int) {
 
 // verifyScopeConf is the repo-relative path of a task repo's declarative
 // verification conf; deliver reads its ci_evidence lines itself
-//, without the engine.
+// , without the engine.
 const verifyScopeConf = ".polyforge/verify-scope.conf"
 
 // ciEvidenceKey is the conf key — and the deliver output field — of the
@@ -861,7 +861,7 @@ func ciEvidenceAt(dir, rev string) ([]string, error) {
 
 // ciEvidenceCovers answers whether the repo's declared CI evidence shows
 // the tests pass on the pushed head instead of the test_bar re-run
-//. The declaration relaxes what counts as proof, so the
+// . The declaration relaxes what counts as proof, so the
 // authoritative job set is the one on the fetched origin default branch,
 // never the change's own: that branch must be a proper ancestor of the
 // pushed head (the change is not on it yet) and the pushed head must
@@ -1043,7 +1043,7 @@ func originDefaultRef(dir string) string {
 // origin default branch. capsule.json repos is not the anchor: a
 // re-materialization re-stamps it to the restored HEAD (the carrier
 // restore), which would make any restored work look delivered
-//. A pushed feature branch is not the anchor either —
+// . A pushed feature branch is not the anchor either —
 // pushed-but-unmerged work is still undelivered.
 func checkNothingToDeliver(reposDir, repo string) error {
 	if reposDir == "" {

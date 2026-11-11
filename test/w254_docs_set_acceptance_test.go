@@ -420,10 +420,10 @@ func TestW254QuickstartsMovedIntact(t *testing.T) {
 // TestW254UpgradeByteIdentical: docs/upgrade.md — per-version upgrade
 // records, append-only history — stays byte-identical (the sha256 of the
 // file is pinned here: main's bytes plus the appended,
-//, and entries, plus the absorbed
+// , and entries, plus the absorbed
 // public PR #15/#16 rewrites — polyforge#262 identifier anonymization and
 // history-proof api-key example, polyforge#263 neutral candidate names, plus
-//'s expected_deltas contract — plus the appended
+// 's expected_deltas contract — plus the appended
 // v2.20.10 section (the signed-heartbeat version gate, its ratchet and the
 // owner-accepted leaked-key limit), plus the appended entries
 // (the recall duty rides the steps declaring `recall: true`; the parked

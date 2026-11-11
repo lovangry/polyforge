@@ -1,5 +1,5 @@
 // planobligations.go: the plan step's coupled-obligation contract
-//.
+// .
 //
 // A plan names, for every file it declares with `write` intent, the
 // documents, tables and projection rules that must change with it —
