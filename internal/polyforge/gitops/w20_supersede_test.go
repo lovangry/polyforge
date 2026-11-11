@@ -276,7 +276,9 @@ func TestRewindWithoutRestoreRecordStaysRefused(t *testing.T) {
 	if len(w20BackupRefs(t, o.RemoteURL, name)) != 0 {
 		t.Fatalf("a refused rewind created backup refs, want none")
 	}
-	_ = head
+	if head == tip {
+		t.Fatalf("the rewind must produce a different head (%q) from the archived tip (%q) — a refusal of a fast-forward proves nothing", head, tip)
+	}
 }
 
 // Even WITH the record, only the capsule's own line from the recorded
@@ -319,7 +321,9 @@ func TestDivergedHeadBelowRestoreRecordRefused(t *testing.T) {
 	if len(w20BackupRefs(t, o.RemoteURL, name)) != 0 {
 		t.Fatalf("a refused divergence created backup refs, want none")
 	}
-	_ = head
+	if head == tip {
+		t.Fatalf("the divergence must produce a different head (%q) from the archived tip (%q) — a refusal of a fast-forward proves nothing", head, tip)
+	}
 }
 
 // Fail closed: a hub that refuses the backup half of the supersede moves
@@ -365,10 +369,12 @@ exit 0
 	if len(w20BackupRefs(t, o.RemoteURL, name)) != 0 {
 		t.Fatalf("a failed supersede left backup refs, want none")
 	}
-	if len(events) == 0 || events[0] != EventCarrierPushFailed {
-		t.Fatalf("events = %v, want %s first", events, EventCarrierPushFailed)
+	if len(events) != 2 || events[0] != EventCarrierPushFailed || events[1] != EventTaskRefDiverged {
+		t.Fatalf("events = %v, want exactly [%s %s]: a failed authorized supersede keeps the diverged-carrier signal (the daemon surfaces the conflict for the owner), not the failed backup alone", events, EventCarrierPushFailed, EventTaskRefDiverged)
 	}
-	_ = head
+	if head == tip {
+		t.Fatalf("the rewind must produce a different head (%q) from the archived tip (%q) — a fail-closed supersede of a fast-forward proves nothing", head, tip)
+	}
 }
 
 // The supersede is ONE push of TWO refspecs: the pre-receive hook sees

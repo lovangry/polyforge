@@ -743,10 +743,14 @@ func pushTaskRefsLocked(o Opts, chainOK bool) (string, []carrierSrc, []string) {
 		// stale tip is not contained in this head (pushCarrier answered
 		// both cases above) means the carrier and this worktree DIVERGED
 		// (e.g. a re-claim that started from a clone lacking the carried
-		// commits, or foreign content). The carrier is left untouched and
-		// the divergence is raised as an error event, not left to stderr —
+		// commits, or foreign content) — and so does an authorized rewind
+		// supersede whose atomic push the hub refused (ErrCarrierSupersedeFailed:
+		// the carrier keeps the surpassed tip while the worktree holds the
+		// rewind head, the same state — the rewind keeps its refusal). The
+		// carrier is left untouched and the divergence is raised as an
+		// error event, not left to stderr —
 		// once per repo per job, like carrier_push_failed.
-		if IsNonFastForward(err, out) && chainOK && !o.laneCancelled() && o.EventSink != nil && o.CarrierAlerts.firstDiverged(TaskRefName(s.name)) {
+		if (IsNonFastForward(err, out) || errors.Is(err, ErrCarrierSupersedeFailed)) && chainOK && !o.laneCancelled() && o.EventSink != nil && o.CarrierAlerts.firstDiverged(TaskRefName(s.name)) {
 			o.EventSink(EventTaskRefDiverged, map[string]any{
 				"repo":  s.name,
 				"ref":   TaskRefName(s.name),
@@ -1094,7 +1098,15 @@ func pushCarrier(o Opts, reposDir, objects, sha, name string, credAdditions []st
 		// tip in a timestamped backup ref. Every other divergence keeps
 		// this refusal.
 		if sup, sout, serr := carrierSupersedePush(o, env, tmp, name, sha, ref, tip, credAdditions); sup {
-			return sout, false, serr
+			if serr != nil {
+				// A failed authorized supersede leaves the diverged state
+				// (carrier holds the surpassed tip, worktree holds the
+				// rewind head) — mark the error so the caller raises
+				// task_ref_diverged with carrier_push_failed, exactly the
+				// refusal's event pair.
+				return sout, false, fmt.Errorf("%w: %v", ErrCarrierSupersedeFailed, serr)
+			}
+			return sout, false, nil
 		}
 		return out, false, err
 	}
@@ -1853,10 +1865,20 @@ func ClearIndexLocks(workItemID, gitDir, capsuleDir string) []string {
 // push of one task repo is rejected non-fast-forward, its HEAD is not an
 // ancestor of the carried head (a HEAD merely behind it is no divergence:
 // nothing to carry), and the carried tip's content is not contained in
-// that HEAD (a same-line rewind is reconciled instead). Raised once per
-// repo per job until a carrier push of that repo succeeds again, like
-// carrier_push_failed.
+// that HEAD (a same-line rewind is reconciled instead) — and when an
+// authorized rewind supersede fails (ErrCarrierSupersedeFailed: the
+// carrier keeps the surpassed tip while the worktree holds the rewind
+// head — the same diverged state, the rewind keeps its refusal). Raised
+// once per repo per job until a carrier push of that repo succeeds
+// again, like carrier_push_failed.
 const EventTaskRefDiverged = "task_ref_diverged"
+
+// ErrCarrierSupersedeFailed marks the error of an authorized rewind
+// supersede whose atomic push (or its tip fetch) the hub refused: the
+// carrier keeps the surpassed tip while the worktree holds the rewind
+// head — the same diverged state a non-fast-forward refusal leaves, so
+// the caller raises task_ref_diverged beside carrier_push_failed.
+var ErrCarrierSupersedeFailed = errors.New("authorized rewind supersede failed")
 
 // EventCarrierPushFailed is the event kind raised when the carrier push
 // of one task repo fails for any reason (blob limit, divergence,
