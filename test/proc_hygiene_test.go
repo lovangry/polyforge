@@ -47,7 +47,7 @@ func ownGroup(cmd *exec.Cmd) {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Setpgid = true
-	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
+	setPdeathsig(cmd.SysProcAttr)
 }
 
 // killGroup SIGKILLs the whole process group cmd leads (see ownGroup).
