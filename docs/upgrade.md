@@ -2557,11 +2557,13 @@ sections and become cli.toml tables.
   only (Passive), exactly as under a scoped wake. The fanout that
   woke every online session per decision — and with them exhausted a
   personal key's per-minute rate limit — is gone.
-- **The fallback target's ack is shared.** The target's ack lands in
-  the Passive subscribers' records the way an eligible chat's does
-  under a scoped wake (cursor max, delivered keys mirrored, done or),
-  so a later switch of the target — a daemon restart, the target
-  going quiet, an explicit subscribe appearing — prints only what
+- **The fallback target's ack is shared.** The target's ack — an
+  explicit subscriber's or the lowest-id live subscribed chat's,
+  whichever holds the role — lands in the Passive subscribers'
+  records the way an eligible chat's does under a scoped wake
+  (cursor max, delivered keys mirrored, done or), so a later switch
+  of the target — a daemon restart, the target going quiet, an
+  explicit subscriber appearing or unsubscribing — prints only what
   nobody has delivered; nothing replays.
 - **No action needed.** No configuration, migration or deploy-order
   change: the ruling is computed per subscriptions answer, from state

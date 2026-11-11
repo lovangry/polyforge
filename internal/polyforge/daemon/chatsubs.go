@@ -38,10 +38,10 @@ package daemon
 // (polyforge#18): every explicit subscriber — a wake target of its own
 // record in every case — or, when there is none, the lowest-id live
 // subscribed chat, while every other owner-routed subscriber is Passive;
-// the fallback target's ack lands durably in those Passive records too
-// (see Ack), so a later switch of the target never replays what it
-// delivered. An explicit subscribe
-// is a wake target of its own record in every case. "Live" is the
+// the target's ack — an explicit subscriber's or the lowest-id live
+// chat's, whichever holds the role — lands durably in those Passive
+// records too (see Ack), so a later switch of the target never replays
+// what it delivered. "Live" is the
 // in-memory last subscribe-owned call of the chat's watcher (every poll
 // makes one), within chatLiveFor.
 //
@@ -233,11 +233,14 @@ func (s *subStore) Subscribe(chat, wi, slug string, cursor int64) (bool, error) 
 		if fill {
 			sub.Slug = slug // a subscription recorded before its slug was known
 		}
-		if sub.OriginChat != "" {
+		if sub.OwnerRouted {
 			// an explicit subscribe makes an owner-routed subscription
 			// a wake target of its own, with a record of its own that
-			// starts like a new subscription
-			sub.OriginChat, sub.Cursor, sub.Notified, sub.Done = "", cursor, nil, false
+			// starts like a new subscription — and clears the owner-routed
+			// mark (SubscribeNew's doc): the empty-eligible fallback's
+			// preferred target is recognized by it (polyforge#18)
+			sub.OriginChat, sub.OwnerRouted = "", false
+			sub.Cursor, sub.Notified, sub.Done = cursor, nil, false
 			return true, s.persistLocked()
 		}
 		if !sub.Done {
@@ -477,9 +480,10 @@ type scopedWake struct {
 	// wake target of its own record in every case) or no subscribed
 	// chat is live; otherwise the lowest-id live chat holding a
 	// subscription to the WI. Every other owner-routed subscriber is
-	// Passive, and the target's ack lands in their records too (see
-	// Ack), so a later switch of the target never replays what it
-	// delivered.
+	// Passive, and the target's ack — an explicit subscriber's or the
+	// lowest-id live one's, whichever holds the role — lands in their
+	// records too (see Ack), so a later switch of the target never
+	// replays what it delivered.
 	fallback string
 }
 
@@ -500,25 +504,35 @@ func (s *subStore) scopedWakeOfLocked(cache map[string]*scopedWake, wi string) (
 		if origin := s.scope.originChat(wi); origin == "" || !s.holdsLocked(origin, wi) {
 			ws := s.scope.workspace(wi)
 			eligible := map[string]bool{}
-			var explicit bool
-			var lowest string
 			for id, c := range s.doc.Chats {
 				if c.Subs[wi] == nil {
 					continue
 				}
-				if !c.Subs[wi].OwnerRouted {
-					explicit = true // a wake target of its own record, in every case
-				}
 				if ws != "" && c.Workspace == ws && s.liveLocked(id) {
 					eligible[id] = true
 				}
-				if s.liveLocked(id) && (lowest == "" || id < lowest) {
-					lowest = id
-				}
 			}
 			w = &scopedWake{eligible: eligible, any: len(eligible) > 0}
-			if !w.any && !explicit {
-				w.fallback = lowest
+			if !w.any {
+				// the single fallback target: an explicit subscriber
+				// first (a wake target of its own record, in every
+				// case), else the lowest-id live subscribed chat
+				var explicit bool
+				var lowest string
+				for id, c := range s.doc.Chats {
+					if c.Subs[wi] == nil {
+						continue
+					}
+					if !c.Subs[wi].OwnerRouted {
+						explicit = true
+					}
+					if s.liveLocked(id) && (lowest == "" || id < lowest) {
+						lowest = id
+					}
+				}
+				if !explicit {
+					w.fallback = lowest
+				}
 			}
 		}
 	}
@@ -580,10 +594,12 @@ func (s *subStore) liveLocked(chat string) bool {
 // are ignored (the subscription may have been removed meanwhile).
 //
 // Under a scoped decision wake an eligible chat's ack — and, under
-// the empty-eligible fallback, the single target's (polyforge#18) —
-// also lands in the record of every owner-routed subscriber outside
-// the eligible set — the Passive ones, which never ack themselves —
-// the way an ack lands in a shared record: cursor max, delivered keys
+// the empty-eligible fallback, the single target's, an explicit
+// subscriber's or the lowest-id live subscribed chat's, whichever
+// holds the role (polyforge#18) — also lands in the record of every
+// owner-routed subscriber outside the eligible set — the Passive
+// ones, which never ack themselves — the way an ack lands in a
+// shared record: cursor max, delivered keys
 // set to the acker's (still-pending keys only, so a key that cleared
 // is pruned and its recurrence fires again), done or. What the wake
 // target delivered is then delivered for them too, durably, in the
@@ -604,7 +620,10 @@ func (s *subStore) Ack(chat string, a protocol.ChatAck) error {
 	sub := s.recordLocked(c.Subs[a.WI])
 	sub.Cursor, sub.Notified, sub.Done = a.Cursor, a.Notified, a.Done
 	if sub == c.Subs[a.WI] {
-		if w, ok := s.scopedWakeOfLocked(map[string]*scopedWake{}, a.WI); ok && (w.eligible[chat] || (!w.any && chat == w.fallback)) {
+		// the acking chat's own subscription is explicit: under the
+		// empty-eligible fallback it holds the target role (its record
+		// is its own — the fallback id is "" exactly then)
+		if w, ok := s.scopedWakeOfLocked(map[string]*scopedWake{}, a.WI); ok && (w.eligible[chat] || (!w.any && (chat == w.fallback || !c.Subs[a.WI].OwnerRouted))) {
 			for id, other := range s.doc.Chats {
 				o := other.Subs[a.WI]
 				if o == nil || !o.OwnerRouted || w.eligible[id] || s.recordLocked(o) != o {
