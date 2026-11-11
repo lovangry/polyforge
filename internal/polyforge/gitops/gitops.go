@@ -604,6 +604,44 @@ const TaskCarrierNamespace = "refs/pf-task/"
 // TaskRefName answers the carrier ref for one task repo.
 func TaskRefName(repo string) string { return TaskCarrierNamespace + repo }
 
+// TaskBackupNamespace is the carrier's backup namespace (polyforge#20,
+// owner ruling 2026-11-11): refs/pf-task-backup/<name>/<UTC stamp>
+// preserves the tip an authorized rewind superseded. The namespace is
+// write-once from the daemon's supersede push — polyforge never deletes
+// or rewrites a backup ref — and it is not a restore source (a re-claim
+// restores the carrier ref, which holds the CURRENT line); it exists so
+// the surpassed line stays fetchable for a manual recovery, exactly
+// like the carrier ref.
+const TaskBackupNamespace = "refs/pf-task-backup/"
+
+// TaskBackupRefName answers a fresh backup ref name for one task repo:
+// a UTC nanosecond stamp, so each authorized supersede lands beside —
+// never over — the backups before it (the hub keeps a backup ref
+// fast-forward-only, so even a stamp collision cannot overwrite an
+// earlier backup; it fails the supersede instead).
+func TaskBackupRefName(repo string) string {
+	return TaskBackupNamespace + repo + "/" + time.Now().UTC().Format("20060102T150405.000000000Z07:00")
+}
+
+// RelCarrierRestores is the capsule's daemon-private carrier-restore
+// record (polyforge#20): sync/ is daemon-private state that never enters
+// the revision chain (the capsule .gitignore carries /sync/), so the
+// file is written only by the daemon's claim (the runtime's
+// cloneTaskRepos, via gitops.WriteCarrierRestores) and regenerated on
+// every claim. It records the one fact the authorized rewind supersede
+// is gated on: the head the daemon itself restored each task repo to
+// from the WI's carrier ref (the incident's "restored the previous
+// session's head ... from the capsule carrier ref"). It is a flat JSON
+// object, task repo name -> restored head; a repo absent from it was
+// never carrier-restored at this claim (a first claim), and a missing or
+// unreadable file answers nothing — fail closed. The capsule directory
+// is the agent's workspace, so the record is trusted as daemon-written
+// state, not as unforgeable state: the worst a forged record can do is
+// drive the supersede below, whose every push preserves the surpassed
+// tip in a backup ref nothing ever deletes — the refusal stays the
+// fail-closed default.
+const RelCarrierRestores = "sync/carrier-restores.json"
+
 // pushTaskRefsLocked mirrors every task-repo worktree's HEAD under the
 // capsule into the WI's bare repo (HEAD:refs/pf-task/<name>). Runs under
 // the per-WI lock (called from pushLocked), AFTER the chain push, and is
@@ -1048,6 +1086,16 @@ func pushCarrier(o Opts, reposDir, objects, sha, name string, credAdditions []st
 		return out, true, nil
 	}
 	if !carrierContainsTip(o, env, tmp, tip, sha) {
+		// polyforge#20, owner ruling 2026-11-11: an INTENTIONAL rewind of
+		// the WI's own line may supersede the surpassed tip — but only
+		// through carrierSupersedePush, whose authorization is the capsule's
+		// daemon-recorded claim baseline (trusted workflow state, not this
+		// graph shape) and whose push atomically preserves the surpassed
+		// tip in a timestamped backup ref. Every other divergence keeps
+		// this refusal.
+		if sup, sout, serr := carrierSupersedePush(o, env, tmp, name, sha, ref, tip, credAdditions); sup {
+			return sout, false, serr
+		}
 		return out, false, err
 	}
 	if rout, rerr := carrierReconcilePush(o, env, tmp, sha, ref, tip, credAdditions); rerr == nil {
@@ -1156,6 +1204,39 @@ func capsuleRepoBaseline(capsuleDir, name string) string {
 		return ""
 	}
 	return idn.Repos[name]
+}
+
+// WriteCarrierRestores records the claim's per-repo carrier restores
+// (task repo name -> the head restoreTaskRepoState moved the fresh clone
+// to from the WI's carrier ref). The runtime calls it once per claim,
+// after the restores; an empty map writes nothing (a first claim carries
+// no restore, and the fresh claim's capsule cannot hold an older claim's
+// record — sync/ never enters the chain). Atomic (tmp+rename), so a
+// crash leaves either no record or a complete one.
+func WriteCarrierRestores(capsuleDir string, restored map[string]string) error {
+	if len(restored) == 0 {
+		return nil
+	}
+	raw, err := json.Marshal(restored)
+	if err != nil {
+		return err
+	}
+	return atomicfile.Write(filepath.Join(capsuleDir, filepath.FromSlash(RelCarrierRestores)), raw, 0o600)
+}
+
+// carrierRestores reads the claim's carrier-restore record ("" for a repo
+// never restored at this claim; a missing or corrupt file answers
+// nothing — the supersede gate then stays closed, fail closed).
+func carrierRestores(capsuleDir string) map[string]string {
+	raw, err := os.ReadFile(filepath.Join(capsuleDir, filepath.FromSlash(RelCarrierRestores)))
+	if err != nil {
+		return nil
+	}
+	var restored map[string]string
+	if json.Unmarshal(raw, &restored) != nil {
+		return nil
+	}
+	return restored
 }
 
 // carrierTip reads the hub's current tip of ref with one ls-remote from
@@ -1280,6 +1361,78 @@ func carrierPush(o Opts, env []string, tmp, refspec string, credAdditions []stri
 // clobbering that update.
 func carrierReconcilePush(o Opts, env []string, tmp, sha, ref, tip string, credAdditions []string) (string, error) {
 	return carrierPushWithOpts(o, env, tmp, sha+":"+ref, credAdditions, "--force-with-lease="+ref+":"+tip)
+}
+
+// carrierSupersedePush is the owner-authorized rewind supersede
+// (polyforge#20, ruling 2026-11-11): a rewind publication whose head does
+// not contain the carrier tip may replace it, but only atomically
+// preserving the surpassed tip in a timestamped backup ref
+// (refs/pf-task-backup/<name>/<stamp>). It answers superseded=false when
+// the rewind is NOT authorized (the caller keeps the ordinary refusal);
+// superseded=true with a nil error when the carrier was superseded and
+// the surpassed line preserved; superseded=true with an error when an
+// authorized supersede failed — fail closed: the carrier and every
+// existing backup ref stay exactly as they were, and the caller reports
+// the failure instead.
+//
+// Authorization is trusted workflow intent, never the graph's shape: the
+// claim's carrier-restore record (sync/carrier-restores.json, written by
+// the daemon when it moved the fresh clone to the carrier head — the
+// incident's "restored the previous session's head from the capsule
+// carrier ref") must name a head that is an ancestor of BOTH the pushed
+// head and the observed tip. Both ends of the replacement are then the
+// capsule's own line from the exact point the daemon handed it over, so
+// replacing the archive discards no other line and no work from before
+// the capsule's restore point. Without that record — a first claim, or
+// the diverged shape of an agent's own local reset, which is
+// structurally identical to an intentional rewind and can never be told
+// apart by ancestry, file loss or ticket numbers — the rewind keeps the
+// old refusal; so does a head that does not descend from the recorded
+// restore, and a tip that does not (a foreign line). This is exactly the
+// boundary of the ruling: accidental divergence (pinned by
+// TestTaskRefDivergenceIsRejectedAndRaisedAsEvent) stays refused, and
+// nothing classifies non-containing siblings as rewinds.
+//
+// Mechanics: ONE push, two refspecs — the observed tip to the new backup
+// ref, and the replacement under a lease on that same tip. The lease
+// pins the replaced ref to exactly the tip that was backed up (a writer
+// that moved the tip in between fails the lease and supersedes
+// nothing); --atomic makes the hub apply both updates or neither, so
+// the carrier never moves without the surpassed tip being preserved
+// under the backup name (a hub without the atomic capability refuses
+// the whole push — fail closed). The surpassed tip's objects may never
+// have been in this capsule's task repo (another session's carried
+// commits): they are fetched from the hub first, and an unreadable tip
+// is not authorized.
+func carrierSupersedePush(o Opts, env []string, tmp, name, sha, ref, tip string, credAdditions []string) (superseded bool, out string, err error) {
+	base := carrierRestores(o.CapsuleDir)[name]
+	if base == "" {
+		return false, "", nil
+	}
+	// The surpassed tip may be another session's commits this task repo
+	// never held (the incident's archived line): make it readable before
+	// the ancestry check. A tip that cannot be read or fetched keeps the
+	// refusal — fail closed, an unreadable tip is never authorized.
+	if _, cerr := o.gitT(carrierCheckTimeout, env, tmp, append(carrierTmpFlags(tmp), "cat-file", "-e", tip+"^{commit}")...); cerr != nil {
+		args := append(append(carrierTmpFlags(tmp), carrierProtocolFlags(o)...), "fetch", "--no-tags", o.RemoteURL, ref)
+		if fout, ferr := o.gitT(carrierPushTimeout, append(env, credAdditions...), tmp, args...); ferr != nil {
+			return true, fout, ferr
+		}
+	}
+	if !carrierIsAncestor(o, env, tmp, base, sha) || !carrierIsAncestor(o, env, tmp, base, tip) {
+		return false, "", nil
+	}
+	backup := TaskBackupRefName(name)
+	args := append(append(carrierTmpFlags(tmp), carrierProtocolFlags(o)...),
+		"push", "--no-recurse-submodules", "--atomic",
+		"--force-with-lease="+ref+":"+tip,
+		o.RemoteURL, tip+":"+backup, sha+":"+ref)
+	pout, perr := o.gitT(carrierPushTimeout, append(env, credAdditions...), tmp, args...)
+	if perr != nil {
+		return true, pout, perr
+	}
+	fmt.Fprintf(os.Stderr, "gitops: %s: repo %s: authorized rewind superseded the carrier tip %s with %s (the surpassed line is preserved at %s)\n", o.WorkItemID, name, tip, sha, backup)
+	return true, pout, nil
 }
 
 // carrierPushWithOpts is carrierPush with extra push options before the
