@@ -306,6 +306,12 @@ type Daemon struct {
 	// demand-marked request.
 	locateTranscript func(capsuleDir string, entries []capsule.SpawnJournalEntry) string
 
+	// stepAgentDir is the dedicated step-agent directory (the runtime
+	// config's own derivation): the submit route's manual --models
+	// preflight reads its models.json (polyforge#19) — the same view every
+	// spawned step agent resolves its --model against.
+	stepAgentDir string
+
 	runCtx    context.Context // the loops' context; the shutdown cancels it
 	cancelRun context.CancelFunc
 
@@ -605,6 +611,7 @@ func New(cfg Config) (*Daemon, error) {
 		},
 	}
 	d.runCtx, d.cancelRun = context.WithCancel(context.Background())
+	d.stepAgentDir = rtCfg.StepAgentDir()
 	d.tasks = d.newTaskManager(&rtCfg)
 	// The paused-record owner revision: the runtime cannot
 	// import the driver (the driver's internal tests import runtime), so the
