@@ -25,7 +25,13 @@ package gitops
 // topology (per-WI carrier repos, one shared task-repo origin) and the
 // work item's concurrent-capsule acceptance; it passes today.
 // TestRewoundCapsuleRepublishesItsCarrierWithoutDivergenceSignal encodes
-// the incident's same-WI sequence and FAILS on the current tree.
+// the incident's same-WI sequence and FAILED on the pre-fix tree (the
+// non-fast-forward refusal plus the carrier_push_failed /
+// task_ref_diverged pair); it is strengthened per the owner's ruling
+// (2026-11-11, answered question fix-w20-repro-intent) to encode the
+// authorization the ruling gates the supersede on — the daemon-written
+// claim restore record — and the atomic backup the supersede must
+// preserve the surpassed tip with.
 
 import (
 	"context"
@@ -182,11 +188,12 @@ func TestConcurrentCapsulesIsolatedCarriersNeverReject(t *testing.T) {
 // to an older head of that line ("restored the previous session's head
 // ... from the capsule carrier ref", daemon.log) and the next session
 // commits its own work on top. Every close-point publish of that head
-// must be clean — the capsule is pushing to its OWN carrier, and the
-// tip's content is the shared branch's, not this capsule's work — and a
-// re-claim's fresh clone must read the capsule's current head back. On
-// the current tree the publish is rejected non-fast-forward and raises
-// carrier_push_failed + task_ref_diverged, the incident's pause signal.
+// must be clean — the capsule is pushing to its OWN carrier, the rewind
+// is the daemon's own restore, and the tip's content is the shared
+// branch's, not this capsule's work — the rewound session's publish
+// supersedes the surpassed tip while atomically preserving it in a
+// timestamped refs/pf-task-backup/<repo>/<stamp> ref, and a re-claim's
+// fresh clone must read the capsule's current head back.
 func TestRewoundCapsuleRepublishesItsCarrierWithoutDivergenceSignal(t *testing.T) {
 	setIdentity(t)
 	base := t.TempDir()
@@ -217,6 +224,17 @@ func TestRewoundCapsuleRepublishesItsCarrierWithoutDivergenceSignal(t *testing.T
 	// of the carrier tip, and the next session's work is committed on
 	// top of it — so it does not contain the tip's later changes.
 	mustRun(t, "git", "-C", repoDir, "reset", "--hard", older)
+	// The rewind IS the daemon's own restore (the same claim-time
+	// carrier restore the runtime's cloneTaskRepos performs), so it
+	// leaves the claim's trusted intent record — the head the restore
+	// landed on, written through the same entry point the runtime uses.
+	// The owner's ruling (2026-11-11) gates the authorized supersede on
+	// exactly this daemon-written record: the structurally identical
+	// agent-side reset (no record) keeps the refusal, pinned by
+	// TestTaskRefDivergenceIsRejectedAndRaisedAsEvent.
+	if err := WriteCarrierRestores(o.CapsuleDir, map[string]string{repo: older}); err != nil {
+		t.Fatalf("record the rewind's restore head: %v", err)
+	}
 	commitInTaskRepo(t, repoDir, "rewind-work.txt", "the rewound session's own work")
 	current := taskHead(t, repoDir)
 
@@ -243,5 +261,24 @@ func TestRewoundCapsuleRepublishesItsCarrierWithoutDivergenceSignal(t *testing.T
 	}
 	if sha != current {
 		t.Fatalf("the carrier answered %q, want the capsule's current head %q (the rewound session's archive must be readable back)", sha, current)
+	}
+
+	// The authorized supersede preserves the surpassed tip (owner ruling
+	// 2026-11-11): exactly one timestamped backup ref, holding the
+	// session-1 archive the rewound session's head did not contain, and
+	// readable back for a recovery. Round 2's publish is the supersede;
+	// round 3 is a fast-forward, so no second backup appears.
+	backups := w20BackupRefs(t, o.RemoteURL, repo)
+	if len(backups) != 1 {
+		t.Fatalf("the authorized rewind supersede left %d backup refs (%v), want exactly one", len(backups), backups)
+	}
+	for ref, bsha := range backups {
+		if bsha != archived {
+			t.Fatalf("backup ref %s holds %s, want the surpassed session-1 head %s", ref, bsha, archived)
+		}
+		mustRun(t, "git", "-C", fresh, "fetch", "-q", "--no-tags", o.RemoteURL, ref)
+		if got := strings.TrimSpace(mustRun(t, "git", "-C", fresh, "rev-parse", "FETCH_HEAD")); got != archived {
+			t.Fatalf("backup ref %s fetched back %s, want the surpassed head %s", ref, got, archived)
+		}
 	}
 }
