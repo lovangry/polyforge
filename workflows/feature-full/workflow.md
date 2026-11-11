@@ -85,7 +85,6 @@ steps:
     requires_command_evidence: true
     mechanical_fix: true
     on_fail: { target: code }
-    model_candidates: [pi:example-gateway/model-a, pi:example-claude/claude-opus-5]
     vars:
       output_required: verdict, checks, authored_titles, scenarios
       build_step: code

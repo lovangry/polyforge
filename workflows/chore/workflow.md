@@ -57,7 +57,6 @@ steps:
     requires_command_evidence: true
     plan_conformance: true
     on_fail: { target: code }
-    model_candidates: [pi:example-gateway/model-a, pi:example-claude/claude-opus-5]
     vars:
       output_required: verdict, checks
       build_step: code

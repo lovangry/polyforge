@@ -14,7 +14,6 @@ steps:
     gate: true
     requires_command_evidence: true
     on_fail: { target: fix }
-    model_candidates: [pi:example-gateway/model-a, pi:example-claude/claude-opus-5]
     vars:
       output_required: verdict, checks
       build_step: fix
