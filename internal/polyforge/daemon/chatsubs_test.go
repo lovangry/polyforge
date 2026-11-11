@@ -1328,6 +1328,61 @@ func TestSubStoreScopedWakeAudience(t *testing.T) {
 	}
 }
 
+// TestSubStoreEmptyEligibleSilentAudienceWakesNobody — the empty-eligible
+// fallback's own last edge (polyforge#18): with the origin gone, the
+// eligible set empty and NO subscribed chat live, the fallback role is
+// held by nobody — every owner-routed subscriber is Passive, the
+// decision waits; a watcher's next poll (its subscribe-owned call)
+// marks it live and it becomes the single fallback target. The
+// recovery is the next poll, not a timer.
+func TestSubStoreEmptyEligibleSilentAudienceWakesNobody(t *testing.T) {
+	const wi = "wi_p18e"
+	s, err := newSubStore(filepath.Join(t.TempDir(), chatSubsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.scope = wakeScope{
+		originChat: func(string) string { return "" },      // no origin chat
+		workspace:  func(string) string { return "/ws/a" }, // nobody is tagged with it
+	}
+	// five owner-routed subscribers, no explicit one — the same shape
+	// the fanout repro builds, but with every watcher silent
+	audience := []string{"chat_a", "chat_b", "chat_c", "chat_d", "chat_e"}
+	for _, chat := range audience {
+		if _, err := s.SubscribeNew(chat, wi, "proj#18", "", 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.mu.Lock()
+	for _, chat := range audience {
+		s.seen[chat] = s.now().Add(-2 * chatLiveFor) // silent: no subscribed chat is live
+	}
+	s.mu.Unlock()
+	// no live subscribed chat holds the fallback role: nobody is a
+	// wake target, the decision waits — no broadcast either
+	for _, chat := range audience {
+		for _, sub := range s.List(chat) {
+			if sub.WI == wi && !sub.Passive {
+				t.Fatalf("%s (owner-routed, no live subscribed chat) must be Passive — the wake waits for a poll: %+v", chat, sub)
+			}
+		}
+	}
+	// a watcher polls again: it is live now and becomes the single
+	// fallback target — the recovery is the next poll, not a timer
+	s.Seen("chat_c")
+	targets := map[string]bool{}
+	for _, chat := range audience {
+		for _, sub := range s.List(chat) {
+			if sub.WI == wi && !sub.Passive {
+				targets[chat] = true
+			}
+		}
+	}
+	if len(targets) != 1 || !targets["chat_c"] {
+		t.Fatalf("the chat that polled is the single fallback target: %v", targets)
+	}
+}
+
 // TestSubStoreFreshChatGetsWIMutedElsewhere — #154 guard (carried by the
 // #224 ledger): mute is per chat. A WI one chat of the owner muted
 // (unsubscribed from) still reaches a fresh chat of the same owner
