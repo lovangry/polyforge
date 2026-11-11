@@ -493,6 +493,11 @@ func New(cfg Config) (*Daemon, error) {
 				Attrs:         in.Attrs,
 				Interrupted:   interruptedFromCause(in.InterruptedCause),
 				StepEnded:     in.StepEnded,
+				// polyforge#19: the dispatch-time candidate preflight reads the
+				// dedicated step-agent dir's models.json — the exact file the
+				// spawned step agent resolves its --model against (the per-spawn
+				// refresh keeps the two in sync).
+				StepAgentDir: rtCfg.StepAgentDir(),
 				// polyforge#171: the resume decision for claude dispatches
 				// locates the native session under the claude-config dir
 				// the spawner hard-set (never the daemon's process env).

@@ -86,6 +86,11 @@ type StartConfig struct {
 	// Attrs is the runtime's dispatch-time attr-override composition
 	// (Config.Attrs), called at every dispatch beside Compose.
 	Attrs func() (map[string]map[string]string, error)
+	// StepAgentDir is the dedicated step-agent directory whose models.json
+	// the dispatch-time preflight reads (polyforge#19): the daemon binds
+	// the runtime's own derivation — the same file the spawned step agent
+	// reads. Empty disables the preflight.
+	StepAgentDir string
 	// Interrupted archives the dispatch the previous derivation left
 	// without a result (nil on a fresh claim or a deliberate stop).
 	Interrupted *InterruptedDispatch
@@ -129,20 +134,21 @@ func Start(ctx context.Context, cfg StartConfig) (*Handle, error) {
 		cfg.Link.Reset() // a new driver epoch: no fence or verdict of a predecessor leaks in
 	}
 	drv, err := New(Config{
-		WI:          wi,
-		BundleDir:   adapter.BundleDir,
-		Workflow:    adapter.Workflow,
-		Spawner:     adapter,
-		SpawnN:      int64(stepSeed),
-		Log:         cfg.Log,
-		Link:        cfg.Link,
-		Limits:      cfg.Limits,
-		LimitsFunc:  cfg.LimitsFunc,
-		Compose:     cfg.Compose,
-		Attrs:       cfg.Attrs,
-		Interrupted: cfg.Interrupted,
-		StepEnded:   cfg.StepEnded,
-		DataDir:     cfg.DataDir,
+		WI:           wi,
+		BundleDir:    adapter.BundleDir,
+		Workflow:     adapter.Workflow,
+		Spawner:      adapter,
+		SpawnN:       int64(stepSeed),
+		Log:          cfg.Log,
+		Link:         cfg.Link,
+		Limits:       cfg.Limits,
+		LimitsFunc:   cfg.LimitsFunc,
+		Compose:      cfg.Compose,
+		Attrs:        cfg.Attrs,
+		StepAgentDir: cfg.StepAgentDir,
+		Interrupted:  cfg.Interrupted,
+		StepEnded:    cfg.StepEnded,
+		DataDir:      cfg.DataDir,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("driver: %w", err)
