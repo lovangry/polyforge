@@ -40,6 +40,15 @@ package git
 // refs, so the WI's work is already in origin and a re-claim loses
 // nothing.
 //
+// The refs/pf-task-backup/<repo>/<stamp> namespace (polyforge#20) is the
+// carrier's preservation lane: every authorized rewind supersede that
+// replaces a carrier tip pushes the surpassed tip to a fresh timestamped
+// backup ref in the SAME atomic push as the replacement, so a superseded
+// line is never lost. Its history is the task repo's own — the carrier's
+// — so it shares the carrier's gitlink exemption and task blob limit; a
+// backup is write-once (the daemon never rewrites or deletes one), so
+// the fast-forward rule stands for it and deletion stays banned.
+//
 // The refs/pf-wip/<repo> namespace (polyforge#167) carries a snapshot
 // of a task repo's UNCOMMITTED work (one daemon-made commit on top of the
 // carried head) across a re-claim. It is scratch by design — every close
@@ -106,21 +115,24 @@ while read -r old new ref; do
     range="$new"
   fi
 
-  # blob size limit (every ref; the carrier namespace has its own,
-  # larger limit: task-repo history includes the upstream's).
+  # blob size limit (every ref; the carrier and backup namespaces have
+  # their own, larger limit: task-repo history includes the upstream's).
   limit="$MAXBLOB"
-  case "$ref" in refs/pf-task/*) limit="$MAXTASKBLOB" ;; esac
+  case "$ref" in refs/pf-task/*|refs/pf-task-backup/*) limit="$MAXTASKBLOB" ;; esac
   badblob=$(git rev-list --objects "$range" | awk '{print $1}' \
     | git cat-file --batch-check='%%(objecttype) %%(objectsize) %%(objectname)' \
     | awk -v max="$limit" '$1=="blob" && $2>max {print $3" ("$2" bytes)"}') \
     || reject "blob size check failed for $ref (rev-list/cat-file pipeline)"
   [ -z "$badblob" ] || reject "blob exceeds the ${limit}-byte limit: $badblob"
 
-  # Task-repo carrier namespace: foreign (task-repo) history — the
-  # chain-only gitlink invariant stops here. Deletion and the blob limit
-  # above stay for every ref; fast-forward is relaxed above for this
-  # namespace only.
-  case "$ref" in refs/pf-task/*) continue ;; esac
+  # Task-repo carrier and backup namespaces: foreign (task-repo)
+  # history — the chain-only gitlink invariant stops here. Deletion and
+  # the blob limit above stay for every ref; fast-forward is relaxed
+  # above for the carrier namespace only (a backup ref is write-once:
+  # the daemon mints a fresh timestamped name for every supersede, so
+  # an existing backup name is never rewritten, and the ordinary
+  # fast-forward rule below stands if one ever is).
+  case "$ref" in refs/pf-task/*|refs/pf-task-backup/*) continue ;; esac
 
   # gitlink: mode 160000 entries are submodule commits; the capsule chain
   # must stay a single flat history. Both commands are checked explicitly
