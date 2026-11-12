@@ -5,8 +5,10 @@ package runtime
 // PID-reuse guard, the env-marker sweep and the warn-only cwd scan.
 
 import (
+	"bufio"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -139,16 +141,51 @@ func TestCleanupReusedRootPidIsNotKilled(t *testing.T) {
 	}
 }
 
+// layer4SquatterEnv is the switch that re-execs the test binary as the
+// marker-carrying escapee of TestCleanupLayer4EnvMarkerSweep.
+const layer4SquatterEnv = "PF_TEST_LAYER4_SQUATTER"
+
+// TestCleanupLayer4Squatter is not a test: re-executed as the escapee
+// whose environment carries the markers. The escapee must be a binary
+// whose environment the proc seam can read cross-process — on darwin
+// kern.procargs2 omits the environment of CS_RESTRICT system binaries
+// such as /bin/sleep (procinfo_darwin.go's header) — so it is THIS
+// binary, the same re-exec idiom as TestMarkedTaskOriginHelper. It
+// prints one readiness line and parks on stdin until killed.
+func TestCleanupLayer4Squatter(t *testing.T) {
+	if os.Getenv(layer4SquatterEnv) == "" {
+		t.Skip("helper process only: re-executed with the env markers by TestCleanupLayer4EnvMarkerSweep")
+	}
+	os.Stdout.WriteString("ready\n")
+	buf := make([]byte, 1)
+	for {
+		if _, err := os.Stdin.Read(buf); err != nil {
+			return
+		}
+	}
+}
+
 func TestCleanupLayer4EnvMarkerSweep(t *testing.T) {
 	wi := runMarker("wi_c5_marker")
-	cmd := exec.Command("sleep", "300")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestCleanupLayer4Squatter$", "-test.count=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = append(os.Environ(), "PF_WI_ID="+wi, "PF_DAEMON_ID=")
+	cmd.Env = append(os.Environ(), "PF_WI_ID="+wi, "PF_DAEMON_ID=", layer4SquatterEnv+"=1")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	pid := cmd.Process.Pid
-	t.Cleanup(func() { _ = killFn(-pid, syscall.SIGKILL); _ = cmd.Wait() })
+	t.Cleanup(func() { _ = stdin.Close(); _ = killFn(-pid, syscall.SIGKILL); _ = cmd.Wait() })
+	if line, err := bufio.NewReader(stdout).ReadString('\n'); err != nil || strings.TrimSpace(line) != "ready" {
+		t.Fatalf("squatter helper never became ready (line=%q err=%v)", line, err)
+	}
 	// the escapee sits OUTSIDE any target tree: only the env marker finds it
 	rep, err := Cleanup(CleanupTarget{WIID: wi}, 5*time.Second)
 	if err != nil {
@@ -161,7 +198,15 @@ func TestCleanupLayer4EnvMarkerSweep(t *testing.T) {
 }
 
 func TestCleanupLayer5CwdScanWarnsOnly(t *testing.T) {
-	capDir := t.TempDir()
+	// the kernel answers the cwd RESOLVED — the /proc/<pid>/cwd readlink
+	// target on Linux, the /private/... spelling on darwin — so the
+	// capsule dir must carry the same resolution or the prefix match
+	// below never sees a squatter under a symlinked TempDir (/tmp on
+	// darwin).
+	capDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.Command("sleep", "300")
 	cmd.Dir = capDir // cwd inside the capsule; no marker, own group
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
