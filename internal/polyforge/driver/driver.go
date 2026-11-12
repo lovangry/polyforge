@@ -741,7 +741,7 @@ const unchangedTreeSummaryRunes = 300
 // plan-conformance facts (planconformance.go), and the designed repair for
 // the "changed but not declared" fact is metadata — the build step cites
 // the finding in its `declared_extensions` output and commits nothing
-//. After the tree-hash equality, the guard recomputes the
+// . After the tree-hash equality, the guard recomputes the
 // facts the gate last judged (the same diff, folding the build round the
 // FAIL's rewind archived as the live output and the older archives as
 // carried) and re-runs the gate only when those judged facts carried a

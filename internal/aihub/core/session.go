@@ -174,7 +174,7 @@ func (db *DB) waitingForBatch(ids []string) (map[string][]WaitingBlocker, error)
 // Claim (reference.md §3.2)
 
 // resolveSessionMachine resolves the machine id a claim/attach records
-//, on the caller's own transaction snapshot: a machines
+// , on the caller's own transaction snapshot: a machines
 // row owned by the caller records its id; a row owned by another
 // operator is refused AUTH-403 with nothing written; an absent row, or
 // a row with no operator, records NULL and the claim/attach succeeds.
