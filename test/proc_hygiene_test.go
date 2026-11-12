@@ -41,13 +41,15 @@ const fakepiTestPIDEnv = "FAKEPI_TEST_PID"
 
 // ownGroup prepares cmd (before Start) to lead its own process group and
 // to be SIGKILLed by the kernel if the test binary dies first (a timeout
-// panic or a kill skips every t.Cleanup).
+// panic or a kill skips every t.Cleanup). The parent-death signal exists
+// only on Linux (setPdeathsig); off Linux the group and bin-dir sweeps
+// below are the backstop.
 func ownGroup(cmd *exec.Cmd) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Setpgid = true
-	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
+	setPdeathsig(cmd.SysProcAttr)
 }
 
 // killGroup SIGKILLs the whole process group cmd leads (see ownGroup).

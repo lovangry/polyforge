@@ -54,16 +54,12 @@ func spawnTreeCmd(wi string) *exec.Cmd {
 }
 
 func groupMemberCount(pgid int) int {
-	entries, err := os.ReadDir(procRoot)
+	pids, err := procListAll()
 	if err != nil {
 		return 0
 	}
 	n := 0
-	for _, e := range entries {
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil || pid <= 1 {
-			continue
-		}
+	for _, pid := range pids {
 		state, _, pgrp, _, ok := procStat(pid)
 		if ok && state != "Z" && int(pgrp) == pgid {
 			n++
