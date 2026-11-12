@@ -213,7 +213,7 @@ func TestW19TemplatesCarryNoStepLevelModelCandidates(t *testing.T) {
 	// append-only history and deliberately not in this grep).
 	var files []string
 	for _, p := range []string{"README.md", "docs/bundles.md", "docs/extending.md", "docs/quickstart-developers.md", "docs/quickstart-macos.md"} {
-		files = append(files, p)
+		files = append(files, filepath.Join("..", p))
 	}
 	_ = filepath.WalkDir(filepath.Join("..", "docs", "reference"), func(path string, e os.DirEntry, err error) error {
 		if err == nil && !e.IsDir() && strings.HasSuffix(path, ".md") {
@@ -222,7 +222,7 @@ func TestW19TemplatesCarryNoStepLevelModelCandidates(t *testing.T) {
 		return nil
 	})
 	for _, p := range files {
-		raw, err := os.ReadFile(filepath.Join("..", p))
+		raw, err := os.ReadFile(p)
 		if err != nil {
 			t.Fatalf("%s: %v", p, err)
 		}
