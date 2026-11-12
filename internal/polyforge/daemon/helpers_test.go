@@ -686,7 +686,8 @@ func newTestDaemon(t *testing.T, mutate func(*Config)) *testDaemon {
 	ws := filepath.Join(dir, "ws")
 	data := filepath.Join(dir, "data")
 	hubBase := filepath.Join(dir, "hub")
-	for _, d := range []string{ws, data, hubBase} {
+	opAgent := filepath.Join(dir, "op-agent")
+	for _, d := range []string{ws, data, hubBase, opAgent} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -696,6 +697,14 @@ func newTestDaemon(t *testing.T, mutate func(*Config)) *testDaemon {
 	cfg := Config{
 		MachineID:  "m-test",
 		SocketPath: filepath.Join(dir, "s.sock"),
+		// polyforge#19: the lanes' dispatch-time candidate preflight reads
+		// the step-agent dir's models.json — the file the daemon-start sync
+		// copies from the operator agent dir. Without a fixture here the
+		// implicit default (~/.pi/agent) would make the preflight decisions
+		// host-dependent: a developer's real models.json deciding which test
+		// candidate resolves. An empty source dir carries no models.json,
+		// so the preflight fails open and every rig stays hermetic.
+		OperatorAgentDir: filepath.Join(dir, "op-agent"),
 		// The driver is the only engine (polyforge#106); these tests bind
 		// a FAKE engine starter that delegates to the fake spawner so the
 		// scripted WI-Agent semantics (spawn call params, agent handles)

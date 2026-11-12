@@ -341,8 +341,19 @@ func runOneShotSummarize() {
 	if strings.Contains(model, "slow") {
 		time.Sleep(12 * time.Second)
 	}
-	fmt.Printf("w224 fake summary: model=%s, %d prompt bytes on stdin, ctx=%s, argv=%s, pid=%d\n",
+	line := fmt.Sprintf("w224 fake summary: model=%s, %d prompt bytes on stdin, ctx=%s, argv=%s, pid=%d",
 		model, len(prompt), ctx, argvPrompt, os.Getpid())
+	// The task lane's one-shot dispatch runs `--mode json` (test/fakepi
+	// persona keying: the summarize lane's argv carries no --mode), whose
+	// stream is pi json records with usage — the lane refuses a candidate
+	// that reports no token usage, so the persona answers the same
+	// narration line as the record burst the step spawn uses (withKind's
+	// usage object: output tokens = the narration's length).
+	if claudeArg("--mode") == "json" {
+		emitAssistantTurn(nil, line, "")
+		os.Exit(0)
+	}
+	fmt.Println(line)
 	os.Exit(0)
 }
 

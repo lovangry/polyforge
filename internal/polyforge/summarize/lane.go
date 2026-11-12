@@ -22,8 +22,13 @@
 package summarize
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/silgrid/polyforge/internal/common/harness"
+	"github.com/silgrid/polyforge/internal/polyforge/modelclass"
 )
 
 // The lane's named constants — the spec's picks, never scattered
@@ -76,6 +81,12 @@ type Lane struct {
 	mu       sync.Mutex
 	now      func() time.Time
 	dispatch Dispatcher
+	// agentDir is the dedicated step-agent directory whose models.json
+	// the dispatch-time preflight reads (polyforge#19): the daemon binds
+	// the runtime's own derivation — the same view the spawned step
+	// agent resolves its --model against. Empty (or a file that proves
+	// nothing) skips no candidate.
+	agentDir string
 	wis      map[string]*wiLane
 }
 
@@ -120,12 +131,15 @@ type wiLane struct {
 }
 
 // New answers a lane wired to the dispatch seam (the daemon binds the
-// exec dispatcher in production; the tests bind a fake). The clock seam
-// (now) defaults to time.Now — the package's own tests swap it.
-func New(dispatch Dispatcher) *Lane {
+// exec dispatcher in production; the tests bind a fake) and the
+// step-agent directory the dispatch-time preflight reads (empty = no
+// skip; polyforge#19). The clock seam (now) defaults to time.Now — the
+// package's own tests swap it.
+func New(dispatch Dispatcher, agentDir string) *Lane {
 	return &Lane{
 		now:      time.Now,
 		dispatch: dispatch,
+		agentDir: agentDir,
 		wis:      map[string]*wiLane{},
 	}
 }
@@ -191,6 +205,20 @@ func (l *Lane) Marked(wi string, models []string, language string, interval time
 		l.mu.Unlock()
 		return // at the cap: no further call this attempt; capped holds
 	}
+	// polyforge#19: the dispatch-time preflight — an unresolvable
+	// candidate is skipped before any dispatch. The gates above have
+	// passed, so this is the one place the models list is consumed: the
+	// one models.json read happens here, under no lock (the filter builds
+	// its own slice; the caller's list is never touched). A list left
+	// empty lands the skip as the lane's error — naming every skipped
+	// candidate, never a dispatch under a model that cannot resolve.
+	kept, skipped := l.preflight(models)
+	if len(kept) == 0 {
+		w.summaryErr = fmt.Sprintf("every summarize model candidate was skipped by the dispatch-time preflight: %s", strings.Join(skipped, ", "))
+		l.mu.Unlock()
+		return
+	}
+	models = kept
 	// All gates pass: record the position (the size at gate time), the
 	// interval clock and the in-flight marker, and count the call.
 	w.position = cur.Size
@@ -207,6 +235,31 @@ func (l *Lane) Marked(wi string, models []string, language string, interval time
 	candidate := models[idx]
 	l.mu.Unlock()
 	l.startCall(wi, models, language, candidate, cur)
+}
+
+// preflight applies the dispatch-time candidate skip (polyforge#19) to
+// the lane's model list: every candidate pi would refuse at startup is
+// dropped before any dispatch, and the kept order is the original one.
+// It answers the kept list and the skipped candidates' texts (the
+// caller's list is never mutated). An empty agentDir, or a models.json
+// that proves nothing, answers the list unchanged.
+func (l *Lane) preflight(models []string) (kept, skipped []string) {
+	if l.agentDir == "" {
+		return models, nil
+	}
+	for _, m := range models {
+		c, err := harness.ParseCandidate(m)
+		if err != nil {
+			kept = append(kept, m)
+			continue
+		}
+		if skip, _ := modelclass.Preflight(l.agentDir, c); skip {
+			skipped = append(skipped, m)
+			continue
+		}
+		kept = append(kept, m)
+	}
+	return kept, skipped
 }
 
 // startCall runs ONE summarize call in the background: build the

@@ -29,7 +29,14 @@ or duplicate candidates, else a local bad-input refusal. Every candidate is
 `<harness>:<model>[:<effort>]` (e.g. `--models
 claude:claude-opus-5-5:high,pi:example-gateway/model-a`); a candidate without a
 prefix, with an unknown prefix, an empty model or an effort the harness does
-not take is refused up front, naming it. Syntax and precedence (`--models`
+not take is refused up front, naming it. A list whose EVERY candidate fails
+the dispatch-time preflight — no model the daemon's dedicated step-agent
+`models.json`, nor pi's built-in catalog, resolves (polyforge#19) — is
+refused by the daemon (DAEMON-400, non-zero from the CLI) naming each
+candidate and its reason, before anything is queued or claimed; a mixed
+list is accepted in full (its unresolvable entries are skipped at
+dispatch, each with a `candidate_skipped` event, never counted as a
+death). Syntax and precedence (`--models`
 is the highest level): the "Model candidates" subsection of
 docs/extending.md (routing to docs/reference/config.md's `steps:`
 section, the one authority). Before the daemon is

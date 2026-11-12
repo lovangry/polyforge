@@ -4,9 +4,9 @@ description: Release lane - cut a release from the verified origin head via the 
 defaults:
   model_candidates: [pi:example-gateway/model-a, pi:example-claude/claude-opus-5, pi:example-openai/gpt-x]
 steps:
-  - { id: release, context_policy: fresh, gate: true, requires_command_evidence: true, budget: { wall_minutes: 45 }, model_candidates: [pi:example-gateway/model-a, pi:example-claude/claude-opus-5] }
-  - { id: verify, context_policy: fresh, gate: true, requires_command_evidence: true, model_candidates: [pi:example-claude/claude-opus-5, pi:example-openai/gpt-x, pi:example-gateway/model-a] }
-  - { id: deploy, context_policy: fresh, gate: true, requires_command_evidence: true, model_candidates: [pi:example-gateway/model-a, pi:example-claude/claude-opus-5] }
+  - { id: release, context_policy: fresh, gate: true, requires_command_evidence: true, budget: { wall_minutes: 45 } }
+  - { id: verify, context_policy: fresh, gate: true, requires_command_evidence: true }
+  - { id: deploy, context_policy: fresh, gate: true, requires_command_evidence: true }
 ---
 
 # release - release lane

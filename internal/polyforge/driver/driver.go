@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -42,6 +43,7 @@ import (
 	"github.com/silgrid/polyforge/internal/common/harness"
 	"github.com/silgrid/polyforge/internal/common/scopetier"
 	"github.com/silgrid/polyforge/internal/polyforge/crashpoint"
+	"github.com/silgrid/polyforge/internal/polyforge/modelclass"
 	"github.com/silgrid/polyforge/internal/polyforge/supervise"
 )
 
@@ -88,6 +90,14 @@ type Config struct {
 	// candidate's dispatch runs on (a malformed one blocks like a compose
 	// failure).
 	Compose func() (map[string][]string, error)
+	// StepAgentDir is the dedicated step-agent directory whose
+	// models.json the dispatch-time preflight reads (polyforge#19): the
+	// exact file the spawned step agent reads (the daemon's per-spawn
+	// refresh keeps it in sync with the operator agent dir). Empty — or a
+	// file that is absent, unreadable or unparseable — disables the
+	// preflight (no candidate is ever skipped; tests without a fixture
+	// run exactly today's behavior).
+	StepAgentDir string
 	// Attrs answers the per-step attr overrides that differ from their
 	// declaration's default (workspace.ComposeAttrs: step id → attr name →
 	// value as text), called at EVERY dispatch beside Compose, outside the
@@ -1527,10 +1537,96 @@ func (d *Driver) composeDispatch(stepID string) (blocked bool, err error) {
 		}
 		return true, nil
 	}
+	// polyforge#19: the dispatch-time preflight — the placeholder-candidate
+	// skip. Every composed candidate of the step about to dispatch that pi
+	// would refuse at startup (a provider neither the step-agent
+	// models.json nor pi's built-in catalog names) is skipped BEFORE any
+	// process is spawned: no death cycle, no failed attempt on the ledger,
+	// one identifying event per skipped candidate (never a death count).
+	// The kept list is what modelForLocked and the failure decision walk,
+	// so a skipped candidate never re-enters the chain of this dispatch;
+	// the next dispatch recomposes (an owner edit that fixes the config
+	// takes effect at once). A step whose every candidate is skipped blocks
+	// through the same candidates-exhausted door a spent chain does — its
+	// reason names every skipped candidate — instead of burning a death
+	// cycle per candidate or silently running the harness default model.
+	if skipped := d.preflightStep(stepID, m); len(skipped) > 0 {
+		for _, s := range skipped {
+			d.emit("candidate_skipped", map[string]any{
+				"step": stepID, "candidate": s.cand, "reason": s.reason,
+				"note": "skipped by the dispatch-time preflight: never dispatched, never a death",
+			})
+		}
+		if len(m[stepID]) == 0 {
+			named := make([]string, len(skipped))
+			for i, s := range skipped {
+				named[i] = fmt.Sprintf("%s (%s)", s.cand, s.reason)
+			}
+			reason := fmt.Sprintf("step %s: every model candidate failed the dispatch-time preflight, so none was spawned and the candidate chain is spent: %s. Add a model the step agent's models.json (or pi's built-in catalog) resolves — edit .polyforge.yaml (steps.%s.models) or the bundle — then `pf resume` re-dispatches from the checkpoint.",
+				stepID, strings.Join(named, "; "), stepID)
+			if err := d.transition(TransitionRequest{Kind: TransBlocked, StepID: stepID, Reason: reason, SpawnN: d.currentSpawnN()}); err != nil {
+				return false, fmt.Errorf("driver: step %s blocked write failed: %w", stepID, err)
+			}
+			d.emit("candidates_exhausted", map[string]any{
+				"step": stepID, "candidates": skippedNames(skipped),
+				"note": "every candidate failed the dispatch-time preflight before any spawn: the chain is spent without a death cycle",
+			})
+			return true, nil
+		}
+	}
 	d.mu.Lock()
 	d.cands, d.attrs = m, attrs
 	d.mu.Unlock()
 	return false, nil
+}
+
+// candidateSkip is one preflight skip decision: the composed candidate
+// (its `<harness>:<model>` text) and the classification-shaped reason that
+// names it.
+type candidateSkip struct{ cand, reason string }
+
+func skippedNames(skips []candidateSkip) []string {
+	named := make([]string, len(skips))
+	for i, s := range skips {
+		named[i] = s.cand
+	}
+	return named
+}
+
+// preflightStep applies the dispatch-time preflight to the step's
+// composed candidate list IN PLACE (the kept candidates keep their
+// order) and answers the skipped ones, each with its reason. A step
+// without a list, or an agent dir whose models.json proves nothing,
+// answers nil: nothing is skipped. The composed lists of OTHER steps are
+// left untouched — each of their dispatches recomposes and re-runs this
+// gate over its own list.
+func (d *Driver) preflightStep(stepID string, m map[string][]string) []candidateSkip {
+	list := m[stepID]
+	if len(list) == 0 {
+		return nil
+	}
+	pred := modelclass.Predicate(d.cfg.StepAgentDir)
+	var skipped []candidateSkip
+	for _, c := range list {
+		cand, err := harness.ParseCandidate(c)
+		if err != nil {
+			continue // validateCandidates already refused this shape
+		}
+		if skip, reason := pred(cand); skip {
+			skipped = append(skipped, candidateSkip{cand: c, reason: reason})
+		}
+	}
+	if len(skipped) == 0 {
+		return nil
+	}
+	kept := make([]string, 0, len(list)-len(skipped))
+	for _, c := range list {
+		if !slices.ContainsFunc(skipped, func(s candidateSkip) bool { return s.cand == c }) {
+			kept = append(kept, c)
+		}
+	}
+	m[stepID] = kept
+	return skipped
 }
 
 // validateCandidates refuses any candidate that does not name its harness

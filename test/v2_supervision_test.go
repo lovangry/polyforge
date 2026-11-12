@@ -346,11 +346,15 @@ func TestV2StepTimeoutLongTaskRelaxesThenBlocks(t *testing.T) {
 // cannot resolve makes it exit non-zero at startup with the reason on
 // stderr — an exit WITHOUT a result. The driver reads the model-class
 // text and advances the candidate chain (the old same-model retry kept
-// re-pinning the dead model forever).
+// re-pinning the dead model forever). The chain rides the workspace
+// yaml's STEP level — the tier above the project default since
+// polyforge#19 slimmed the shipped bundles' step-level lists away: the
+// project default keeps the healthy steps, the verification step list's
+// head is the one the harness cannot resolve.
 func TestV2ModelPinFailureAdvancesCandidate(t *testing.T) {
 	inst := newV1Install(t)
 	// grill and fix run healthy on a project-default candidate; verification
-	// keeps its own bundle step list, whose head this harness cannot resolve,
+	// rides its own yaml step list, whose head this harness cannot resolve,
 	// so ordinal 3 dies at birth and its action is never reached.
 	actions := []map[string]any{
 		{"do": "envelope", "id": "grill", "outcome": "completed", "handoff": true},
@@ -361,10 +365,11 @@ func TestV2ModelPinFailureAdvancesCandidate(t *testing.T) {
 	wi := inst.newWI(t, "f4: model pin failure exit", actions, nil)
 	writePlanExtra(t, inst, wi, actions, nil, map[string]any{"bad_models": []string{"example-gateway/model-a"}})
 	d := newV1Daemon(t, inst)
-	// The project default keeps grill/fix/deliver off the bundle's step-list
-	// head; verification has its own bundle list and ignores the default, so
-	// only verification's head is the one bad_models singles out.
-	w079Yaml(t, d.workspace, "steps:\n  e2e:\n    default: { models: [pi:example-claude/claude-opus-5, pi:example-openai/gpt-x] }\n")
+	// The project default keeps grill/fix on healthy candidates; the yaml's
+	// verification step list outranks it (a step list beats the project
+	// default, polyforge#164), so only verification's head is the one
+	// bad_models singles out.
+	w079Yaml(t, d.workspace, "steps:\n  e2e:\n    default: { models: [pi:example-claude/claude-opus-5, pi:example-openai/gpt-x] }\n    verification: { models: [pi:example-gateway/model-a, pi:example-claude/claude-opus-5] }\n")
 	d.start()
 	t.Cleanup(func() { killOrphans(wi) })
 	d.pf(t, "submit", wi)

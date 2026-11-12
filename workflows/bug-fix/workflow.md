@@ -12,7 +12,7 @@ steps:
   # judged conversation — driver rule, separation of powers) and takes the
   # repro record (artifacts/repro.md) by path convention: it reads the
   # artifact, not the chat.
-  - { id: root-cause, context_policy: fresh, handoff: true, gate: true, model_candidates: [pi:example-claude/claude-opus-5, pi:example-openai/gpt-x, pi:example-gateway/model-a], on_fail: { target: repro }, recall: true }
+  - { id: root-cause, context_policy: fresh, handoff: true, gate: true, on_fail: { target: repro }, recall: true }
   - { id: fix, context_policy: inherit, recall: true }
   - id: review
     context_policy: fresh
@@ -59,7 +59,6 @@ steps:
     gate: true
     requires_command_evidence: true
     on_fail: { target: fix }
-    model_candidates: [pi:example-gateway/model-a, pi:example-claude/claude-opus-5]
     vars:
       output_required: verdict, checks
       build_step: fix

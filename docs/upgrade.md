@@ -2544,3 +2544,50 @@ sections and become cli.toml tables.
 - **No action needed.** No configuration, migration or deploy-order
   change; a `doc.module-map` written by an older client that misses the
   convention is refused and has to be re-sent conforming.
+
+## Dispatch-time candidate preflight; shipped bundles carry no step-level `model_candidates`
+
+- **A candidate the step agent cannot resolve is skipped before the
+  spawn.** At every dispatch the daemon composes the step's candidate
+  list as before, then filters it against the classification the
+  harness itself would exit with: a pi candidate whose `--model` names
+  a provider neither the daemon's dedicated step-agent `models.json`
+  nor pi's built-in catalog knows — the `Model … not found` startup
+  failure — is skipped without a spawn, without counting a death, a
+  budget draw or a retry slot, and the chain advances to the next
+  candidate. A `claude:` candidate is never skipped. Each skip emits a
+  `candidate_skipped` event (step, candidate, reason). The gate is the
+  classification text alone: an absent, unreadable or nothing-proving
+  `models.json` skips nothing — there is no second notion of model
+  availability. The task lane and the summarize lane apply the same
+  skip to their own candidate walks (a task records the candidate that
+  actually ran; a fully-skipped task fails naming each candidate, and
+  a fully-skipped summarize list lands the skip as the lane's summary
+  error).
+- **A step whose every candidate is skipped blocks loudly.** The
+  existing blocked transition plus a `candidates_exhausted` event, the
+  reason naming each candidate and its reason; fix the candidate source
+  (the workspace yaml, the bundle or the step agent's `models.json`)
+  and `pf resume` continues from the checkpoint. No default-model
+  fallback ever fires.
+- **A manual `--models` list is refused when nothing in it resolves.**
+  `pf submit <id> --models` with a list whose every candidate would be
+  skipped is refused DAEMON-400 at the submit, naming each candidate
+  and its reason, before any queue entry or claim exists. A mixed list
+  is accepted in full — its unresolvable entries are skipped at
+  dispatch exactly like any composed chain's.
+- **The shipped bundles ship no step-level `model_candidates` anymore.**
+  Their step-level placeholder lists
+  (`pi:example-gateway/model-a`, `pi:example-claude/claude-opus-5`,
+  `pi:example-openai/gpt-x`) were placeholders no real install could
+  resolve, so that tier only existed to place itself ahead of the
+  operator's project default; each bundle's `defaults:` line stays
+  byte-identical. Per-step tiering now lives in explicit config only —
+  a workspace `.polyforge.yaml` step list or a custom bundle's own
+  `model_candidates`, both of which still outrank the project default
+  (polyforge#164). The five-level precedence chain itself is untouched,
+  and no queued or in-flight work item changes behavior: a step that
+  previously resolved a bundle step-level placeholder now resolves the
+  bundle's defaults list — the same head the old tier pinned.
+- **No action needed.** No migration, no configuration change; the
+  skip is silent for every install whose models resolve.

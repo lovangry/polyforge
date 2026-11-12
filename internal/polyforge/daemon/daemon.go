@@ -306,6 +306,12 @@ type Daemon struct {
 	// demand-marked request.
 	locateTranscript func(capsuleDir string, entries []capsule.SpawnJournalEntry) string
 
+	// stepAgentDir is the dedicated step-agent directory (the runtime
+	// config's own derivation): the submit route's manual --models
+	// preflight reads its models.json (polyforge#19) — the same view every
+	// spawned step agent resolves its --model against.
+	stepAgentDir string
+
 	runCtx    context.Context // the loops' context; the shutdown cancels it
 	cancelRun context.CancelFunc
 
@@ -493,6 +499,11 @@ func New(cfg Config) (*Daemon, error) {
 				Attrs:         in.Attrs,
 				Interrupted:   interruptedFromCause(in.InterruptedCause),
 				StepEnded:     in.StepEnded,
+				// polyforge#19: the dispatch-time candidate preflight reads the
+				// dedicated step-agent dir's models.json — the exact file the
+				// spawned step agent resolves its --model against (the per-spawn
+				// refresh keeps the two in sync).
+				StepAgentDir: rtCfg.StepAgentDir(),
 				// polyforge#171: the resume decision for claude dispatches
 				// locates the native session under the claude-config dir
 				// the spawner hard-set (never the daemon's process env).
@@ -576,16 +587,19 @@ func New(cfg Config) (*Daemon, error) {
 		}
 	}
 	d = &Daemon{
-		chats:       &chatStore{path: filepath.Join(cfg.DataDir, chatsFile)},
-		subs:        subs,
-		cfg:         cfg,
-		hub:         cfg.Hub,
-		live:        live,
-		modes:       NewModeCtl(),
-		q:           NewJobQueue(cfg.MaxConcurrent, func() map[string]bool { return d.occupiedSlots() }),
-		shutDone:    make(chan struct{}),
-		sup:         supervise.NewRegistry(),
-		lane:        summarize.New(laneDispatcher),
+		chats:    &chatStore{path: filepath.Join(cfg.DataDir, chatsFile)},
+		subs:     subs,
+		cfg:      cfg,
+		hub:      cfg.Hub,
+		live:     live,
+		modes:    NewModeCtl(),
+		q:        NewJobQueue(cfg.MaxConcurrent, func() map[string]bool { return d.occupiedSlots() }),
+		shutDone: make(chan struct{}),
+		sup:      supervise.NewRegistry(),
+		// polyforge#19: the lane's dispatch-time candidate preflight reads
+		// the dedicated step-agent dir's models.json — the same view the
+		// spawned step agent resolves its --model against.
+		lane:        summarize.New(laneDispatcher, rtCfg.StepAgentDir()),
 		remoteSnaps: newRemoteSnapCache(remoteSnapTTL, remoteSnapCap),
 		face:        machineFaceState{desiredRole: roleFromLauncher(cfg.Launcher)},
 		// the file-only baseline the reload compares against until the
@@ -597,6 +611,7 @@ func New(cfg Config) (*Daemon, error) {
 		},
 	}
 	d.runCtx, d.cancelRun = context.WithCancel(context.Background())
+	d.stepAgentDir = rtCfg.StepAgentDir()
 	d.tasks = d.newTaskManager(&rtCfg)
 	// The paused-record owner revision: the runtime cannot
 	// import the driver (the driver's internal tests import runtime), so the

@@ -91,6 +91,10 @@ func (d *Daemon) newTaskManager(rtCfg *runtime.Config) *task.Manager {
 		Runner:  runner,
 		Resolve: func(project string) ([]string, string, error) { return d.rt.TaskModels(project) },
 		WorkDir: d.taskWorkDir,
+		// polyforge#19: the candidate walk's dispatch-time preflight reads
+		// the dedicated step-agent dir's models.json — the same view the
+		// spawned task harness resolves its --model against.
+		AgentDir: rtCfg.StepAgentDir(),
 	})
 }
 

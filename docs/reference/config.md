@@ -488,6 +488,25 @@ rotate to the next candidate like a model error; at the chain end it counts
 as a same-model retry, and the failure bound's block reason names the model
 and the edit-the-yaml-then-`pf resume` escape hatch.
 
+A composed candidate the step agent could never resolve — pi's
+`--model` against a provider neither the daemon's dedicated step-agent
+`models.json` nor pi's built-in catalog knows, the same
+"classification" startup failure the harness would exit with — is
+skipped at dispatch time, before any spawn (polyforge#19): the chain
+advances to the next candidate without counting a death, a budget draw
+or a retry slot. Each skip emits a `candidate_skipped` event (step,
+candidate, reason — the composed diagnostic). A step whose every
+at-or-after-pointer candidate is skipped blocks with the existing
+blocked transition plus a `candidates_exhausted` event, the reason
+naming each one; fix the candidate source (the yaml, the bundle or the
+step agent's `models.json`) and `pf resume` continues. A `claude:`
+candidate is never skipped, and an absent, unreadable or
+nothing-proving `models.json` skips nothing — the classification text
+is the only gate, never a second notion of availability. A manual
+`pf submit --models` list whose every candidate would be skipped is
+refused at the submit itself (DAEMON-400, naming each) — never a
+claimed work item whose steps can never dispatch.
+
 An ABSENT file and an EMPTY or comments-only file are both
 absent-equivalent — never an error. A file that declares anything must
 parse strictly: unknown keys at any level, duplicate keys, type

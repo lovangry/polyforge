@@ -102,9 +102,9 @@ func (r *w33Rig) daemon(t *testing.T, extra ...string) *w113Daemon {
 }
 
 // w33StepYaml builds a workspace yaml pinning one candidate list on every
-// autopilot step. The yaml STEP level outranks the bundle's own step-level
-// model_candidates (the shipped autopilot pins its verification step), so
-// the scenarios — not the bundle — govern every dispatch's list.
+// autopilot step. The shipped bundles carry no step-level
+// model_candidates since polyforge#19 (their tier is the defaults), so
+// the yaml — not the bundle — governs every dispatch's list.
 func w33StepYaml(list string) string {
 	return "steps:\n  e2e:\n" +
 		"    grill: { models: [" + list + "] }\n" +

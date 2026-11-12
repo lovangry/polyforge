@@ -35,13 +35,13 @@ import (
 	"github.com/silgrid/polyforge/internal/common/api"
 )
 
-// The autopilot bundle's pinned heads (frontmatter at HEAD): the
-// defaults head and the verification step's step-level head (fix has no
-// list of its own). Kept-face guards assert these stay in effect
-// wherever the yaml layer is silent.
+// The autopilot bundle's pinned head: the defaults head (polyforge#19
+// slimmed the shipped bundles' step-level model_candidates away, so
+// every step without a project yaml list resolves the defaults head —
+// no shipped step carries a list of its own anymore). Kept-face guards
+// assert it stays in effect wherever the yaml layer is silent.
 const (
-	w079DefaultsHead         = "example-gateway/model-a"
-	w079VerificationStepHead = "example-gateway/model-a"
+	w079DefaultsHead = "example-gateway/model-a"
 )
 
 // ---------------------------------------------------------------------------
@@ -366,8 +366,8 @@ func TestW079AbsentAndEmptyYamlRunExactlyAsHead(t *testing.T) {
 		if err != nil || string(marker) != "registry marker\n" {
 			t.Fatalf("%s: the registry clone did not land: %q, %v", name, marker, err)
 		}
-		if got := w079Model(t, capDir, "verification"); got != w079VerificationStepHead {
-			t.Fatalf("%s: verification model %q, want the bundle step-level head %q", name, got, w079VerificationStepHead)
+		if got := w079Model(t, capDir, "verification"); got != w079DefaultsHead {
+			t.Fatalf("%s: verification model %q, want the bundle defaults head %q", name, got, w079DefaultsHead)
 		}
 		if got := w079Model(t, capDir, "fix"); got != w079DefaultsHead {
 			t.Fatalf("%s: fix model %q, want the bundle defaults head %q", name, got, w079DefaultsHead)
@@ -379,13 +379,13 @@ func TestW079AbsentAndEmptyYamlRunExactlyAsHead(t *testing.T) {
 }
 
 // TestW079PerProjectModelPrecedence pins the chain inside ONE workspace
-// serving three projects: project step-id list > bundle step list > project
-// default > bundle defaults. e2e declares default + fix (the fix step
-// gets the fix list, verification keeps its own step list, the rest get
-// the default), acme-ops declares only a default (it governs every step
-// without a list of its own, never a step's own list — polyforge#164),
-// and a third project the yaml does not list stays bundle-only — no
-// cross-project leak.
+// serving three projects: project step-id list > project default >
+// bundle defaults. e2e declares default + fix (the fix step gets the fix
+// list, the rest get the default), acme-ops declares only a default (it
+// governs every step without a list of its own, never a step's own list
+// — polyforge#164), and a third project the yaml does not list stays
+// bundle-only — no cross-project leak (the shipped bundles carry no
+// step-level lists since polyforge#19, so their tier is the defaults).
 func TestW079PerProjectModelPrecedence(t *testing.T) {
 	inst := newV1Install(t)
 	w113EnsureProject(t, inst, "acme-ops")
@@ -408,23 +408,20 @@ func TestW079PerProjectModelPrecedence(t *testing.T) {
 	capT := w079Run(t, d, inst, ws, wiT)
 
 	for step, want := range map[string]string{
-		"grill": "w079-e2e-def", "verification": w079VerificationStepHead,
+		"grill": "w079-e2e-def", "verification": "w079-e2e-def",
 		"fix": "w079-e2e-code-a",
 	} {
 		if got := w079Model(t, capE, step); got != want {
-			t.Fatalf("e2e %s model %q, want %q (project step id > bundle step > project default)", step, got, want)
+			t.Fatalf("e2e %s model %q, want %q (project step id > project default > bundle defaults)", step, got, want)
 		}
 	}
-	for _, step := range []string{"grill", "fix"} {
+	for _, step := range []string{"grill", "fix", "verification"} {
 		if got := w079Model(t, capI, step); got != "w079-acme-ops-def" {
-			t.Fatalf("acme-ops %s model %q, want its project default w079-acme-ops-def", step, got)
+			t.Fatalf("acme-ops %s model %q, want its project default w079-acme-ops-def (no step list governs it)", step, got)
 		}
 	}
-	if got := w079Model(t, capI, "verification"); got != w079VerificationStepHead {
-		t.Fatalf("acme-ops verification model %q, want its own step-level head %q (a step list outranks the project default)", got, w079VerificationStepHead)
-	}
-	if got := w079Model(t, capT, "verification"); got != w079VerificationStepHead {
-		t.Fatalf("unlisted project verification model %q, want the bundle step-level head %q", got, w079VerificationStepHead)
+	if got := w079Model(t, capT, "verification"); got != w079DefaultsHead {
+		t.Fatalf("unlisted project verification model %q, want the bundle defaults head %q", got, w079DefaultsHead)
 	}
 	if got := w079Model(t, capT, "grill"); got != w079DefaultsHead {
 		t.Fatalf("unlisted project grill model %q, want the bundle defaults head %q", got, w079DefaultsHead)
@@ -456,8 +453,8 @@ func TestW079ProjectStepOnlyFallsThroughToBundle(t *testing.T) {
 	if got := w079Model(t, capDir, "fix"); got != w079DefaultsHead {
 		t.Fatalf("fix model %q, want the bundle defaults head %q", got, w079DefaultsHead)
 	}
-	if got := w079Model(t, capDir, "verification"); got != w079VerificationStepHead {
-		t.Fatalf("verification model %q, want its bundle step-level head %q", got, w079VerificationStepHead)
+	if got := w079Model(t, capDir, "verification"); got != w079DefaultsHead {
+		t.Fatalf("verification model %q, want its bundle defaults head %q", got, w079DefaultsHead)
 	}
 }
 

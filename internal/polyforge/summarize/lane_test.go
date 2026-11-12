@@ -70,7 +70,7 @@ func (f *fakeDispatcher) n() int {
 // newTestLane answers a lane on a fake dispatcher (the caller wires the
 // clock when a test advances time).
 func newTestLane(d *fakeDispatcher) *Lane {
-	l := New(d)
+	l := New(d, "")
 	return l
 }
 

@@ -21,10 +21,12 @@ import (
 
 	"github.com/silgrid/polyforge/internal/common/api"
 	"github.com/silgrid/polyforge/internal/common/capsule"
+	"github.com/silgrid/polyforge/internal/common/harness"
 	"github.com/silgrid/polyforge/internal/common/protocol"
 	"github.com/silgrid/polyforge/internal/polyforge/cli"
 	"github.com/silgrid/polyforge/internal/polyforge/driver"
 	"github.com/silgrid/polyforge/internal/polyforge/liveconfig"
+	"github.com/silgrid/polyforge/internal/polyforge/modelclass"
 	"github.com/silgrid/polyforge/internal/polyforge/modelhealth"
 	"github.com/silgrid/polyforge/internal/polyforge/observe"
 	"github.com/silgrid/polyforge/internal/polyforge/runtime"
@@ -327,6 +329,36 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 // its entry is on disk; the dispatcher claims it within one tick,
 // priority-desc against the concurrency cap.
 //
+// refuseUnresolvableModels answers the refusal text for a manual
+// --models list (already normalized) whose EVERY candidate fails the
+// dispatch-time preflight — pi would refuse each of them at startup, so
+// the submit can never dispatch a step under any of them. "" = accepted:
+// an empty list is not this gate's business, and a list with at least
+// one resolvable candidate is a mixed list (its unresolvable entries are
+// skipped at dispatch like any composed chain's, never a silent
+// dispatch). The preflight reads the dedicated step-agent dir's
+// models.json — the same view the spawned step agents resolve against;
+// a file that proves nothing fails open here too.
+func (d *Daemon) refuseUnresolvableModels(models []string) string {
+	if len(models) == 0 {
+		return ""
+	}
+	var skipped []string
+	for _, m := range models {
+		c, err := harness.ParseCandidate(m)
+		if err != nil {
+			continue // NormalizeModels' own refusal already covered the shape
+		}
+		if skip, reason := modelclass.Preflight(d.stepAgentDir, c); skip {
+			skipped = append(skipped, fmt.Sprintf("%s (%s)", m, reason))
+		}
+	}
+	if len(skipped) != len(models) {
+		return ""
+	}
+	return fmt.Sprintf("models: every candidate failed the dispatch-time preflight (no model the step agent's models.json — or pi's built-in catalog — resolves): %s. Name at least one resolvable candidate.", strings.Join(skipped, "; "))
+}
+
 // "resume": true is the claim half of `pf resume` on a workflow parked
 // blocked (polyforge#116). The CLI has already landed the hub's
 // resume-blocked door with the human's own credential (its
@@ -353,6 +385,18 @@ func (d *Daemon) submitRoute() http.HandlerFunc {
 			m, merr := workspace.NormalizeModels(body.Models)
 			if merr != nil {
 				writeErr(w, api.ErrDaemonBadInput, "models: "+merr.Error())
+				return
+			}
+			// polyforge#19: a manual --models list whose EVERY candidate
+			// fails the dispatch-time preflight is refused here — before
+			// the admission gate, the queue, the claim or any capsule state:
+			// an operator pinning only unresolvable models gets the loud,
+			// names-each-candidate refusal at the CLI instead of a claim
+			// that dispatches nothing. A mixed list is accepted; its
+			// unresolvable candidates are skipped at dispatch like any
+			// composed chain's.
+			if rerr := d.refuseUnresolvableModels(m); rerr != "" {
+				writeErr(w, api.ErrDaemonBadInput, rerr)
 				return
 			}
 			body.Models = m
