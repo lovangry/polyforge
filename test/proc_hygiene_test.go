@@ -2,7 +2,9 @@ package test
 
 // proc_hygiene_test.go: process-leak discipline for the acceptance
 // harness (polyforge#168). Every aihub / `pf daemon` the harness starts
-// leads its own process group (Setpgid) and carries Pdeathsig=SIGKILL,
+// leads its own process group (Setpgid) and, on Linux, carries
+// Pdeathsig=SIGKILL (no parent-death signal exists off Linux; the group
+// and bin-dir sweeps below are the backstop there),
 // its teardown ends the whole group and waits, and fakepi agents (which
 // the daemon detaches into their own groups by design: they must outlive
 // a daemon crash) watch the test binary's pid and exit once it is gone.
