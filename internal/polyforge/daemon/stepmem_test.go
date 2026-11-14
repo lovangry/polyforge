@@ -525,7 +525,7 @@ func TestStepMemorySearchForwardsNoBrowseParameters(t *testing.T) {
 }
 
 // TestDaemonRouteSetHasNoWebRoute (extended by
-//): the daemon proxies no web face — neither the deleted
+// ): the daemon proxies no web face — neither the deleted
 // /view/ prefix nor the /web/ console — a web request on the daemon
 // socket answers the daemon's own 404, so no step or task process
 // reaches the console through the daemon.

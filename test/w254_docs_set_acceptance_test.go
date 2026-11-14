@@ -420,10 +420,10 @@ func TestW254QuickstartsMovedIntact(t *testing.T) {
 // TestW254UpgradeByteIdentical: docs/upgrade.md — per-version upgrade
 // records, append-only history — stays byte-identical (the sha256 of the
 // file is pinned here: main's bytes plus the appended,
-//, and entries, plus the absorbed
+// , and entries, plus the absorbed
 // public PR #15/#16 rewrites — polyforge#262 identifier anonymization and
 // history-proof api-key example, polyforge#263 neutral candidate names, plus
-//'s expected_deltas contract — plus the appended
+// 's expected_deltas contract — plus the appended
 // v2.20.10 section (the signed-heartbeat version gate, its ratchet and the
 // owner-accepted leaked-key limit), plus the appended entries
 // (the recall duty rides the steps declaring `recall: true`; the parked
@@ -465,7 +465,9 @@ func TestW254QuickstartsMovedIntact(t *testing.T) {
 // current-revision-first recall), and the appended section (the
 // dispatch-time candidate preflight, its candidate_skipped event, the
 // all-unresolvable block, the manual --models refusal and the shipped
-// bundles' step-level model_candidates removal), and nothing else
+// bundles' step-level model_candidates removal), and the appended
+// section (the empty-eligible decision wake converges on one chat), and
+// nothing else)
 // and is only routed to, from the install ops page and the README
 // landing page. The
 // pin moves in the same commit as each append (the append-only rule,
@@ -477,7 +479,7 @@ func TestW254QuickstartsMovedIntact(t *testing.T) {
 func TestW254UpgradeByteIdentical(t *testing.T) {
 	raw := []byte(w254Read(t, "docs/upgrade.md"))
 	sum := sha256.Sum256(raw)
-	if got := hex.EncodeToString(sum[:]); got != "e72d3306ee3ea3c1b12895ec5cf60cfae79fcef0d21c75dc56d34445835b799c" {
+	if got := hex.EncodeToString(sum[:]); got != "17f3b6a9c8ac5252943d4bc423738a23400d09ca5c70ebe6e0a80ece031aa31f" {
 		t.Fatalf("docs/upgrade.md must stay byte-identical (only routed to, never rewritten): sha256 %s != the pinned pre-move sha256", got)
 	}
 	install := w254Norm(w254Page(t, "docs/install.md"))

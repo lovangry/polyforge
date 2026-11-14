@@ -8,8 +8,8 @@ package daemon
 // when it recurs (blocked again, paused again, a needs_input with a
 // reused question id). Had the outsiders kept every key ever delivered,
 // a recurrence the eligible chat never delivered (it went quiet first)
-// would be suppressed in every one of them under the owner-wide fallback
-// (design ruling 6), and the decision would wake no chat at all.
+// would be suppressed in every one of them under the empty-eligible
+// fallback (design ruling 6), and the decision would wake no chat at all.
 
 import (
 	"encoding/json"
@@ -78,9 +78,19 @@ func gmi15ClearPendingQuestion(t *testing.T, td *testDaemon, wi string) {
 
 // TestRecurringDecisionReachesTheFallbackAudience — gone origin; the
 // eligible chat delivers needs_input q-1; the question clears and the
-// eligible chat acks the cleared state; it goes quiet past chatLiveFor;
-// the same question id recurs. Nobody delivered the recurrence, so the
-// owner-wide fallback must print it in the cross-workspace subscriber.
+// eligible chat acks the cleared state; it goes quiet past chatLiveFor
+// (and so does the untagged chat, leaving the wsB chat the only live
+// subscribed one — the single fallback target, polyforge#18); the same
+// question id recurs. Nobody delivered the recurrence, so the fallback
+// target must print it — and its ack must land in the Passive
+// subscribers' records, so the next switch of the target (the untagged
+// chat's watcher comes back) never replays it. The explicit flavor of
+// the target: a foreign-workspace chat that explicitly subscribes —
+// never eligible, so only the fallback role can wake it — is the
+// target of its own record even while a lower live chat could hold
+// the role; its ack must land in the Passive records the same way, so
+// its unsubscribe — which hands the role to the next fallback target
+// — replays nothing.
 func TestRecurringDecisionReachesTheFallbackAudience(t *testing.T) {
 	for _, originChat := range []bool{true, false} {
 		s := gmi14ScopedWakeScene(t, originChat) // needs_input q-1 pending
@@ -89,7 +99,7 @@ func TestRecurringDecisionReachesTheFallbackAudience(t *testing.T) {
 		}
 		gmi15ClearPendingQuestion(t, s.td, s.wi)
 		// the eligible chat's next cycle acks the cleared state (no key)
-		if out := gmi14RunChat(t, s.td, s.a2, 400*time.Millisecond); strings.Contains(out, "[polyforge]") {
+		if out := gmi14RunChat(t, s.td, s.a2, time.Second); strings.Contains(out, "[polyforge]") {
 			t.Fatalf("nothing to deliver once q-1 cleared: %q", out)
 		}
 		s.td.subs.mu.Lock()
@@ -97,12 +107,48 @@ func TestRecurringDecisionReachesTheFallbackAudience(t *testing.T) {
 			s.td.subs.mu.Unlock()
 			t.Fatalf("the eligible chat must have acked the cleared state: %+v", r)
 		}
-		// the eligible chat goes quiet (its session closed)
+		// the eligible chat goes quiet (its session closed), and so does
+		// the untagged chat: the wsB chat is the only live subscribed chat
+		// left — the single fallback target
 		s.td.subs.seen[s.a2] = s.td.subs.now().Add(-2 * chatLiveFor)
+		s.td.subs.seen[s.untagged] = s.td.subs.now().Add(-2 * chatLiveFor)
 		s.td.subs.mu.Unlock()
 		gmi14SeedQ(t, s.td, s.wi, "q-1") // the same question id recurs
 		if out := gmi14RunChat(t, s.td, s.b1, 5*time.Second); !strings.Contains(out, "needs_input q-1") {
-			t.Fatalf("the recurrence nobody delivered must reach the owner-wide fallback audience: %q", out)
+			t.Fatalf("the recurrence nobody delivered must reach the single fallback target: %q", out)
+		}
+		// the fallback target's ack landed in the Passive records: a
+		// later switch of the target (b1 quiet, the untagged chat back)
+		// must not replay the recurrence
+		s.td.subs.mu.Lock()
+		s.td.subs.seen[s.b1] = s.td.subs.now().Add(-2 * chatLiveFor)
+		s.td.subs.mu.Unlock()
+		if out := gmi14RunChat(t, s.td, s.untagged, time.Second); strings.Contains(out, "[polyforge]") {
+			t.Fatalf("the recurrence the fallback target delivered must not replay after the switch: %q", out)
+		}
+
+		// the explicit flavor of the target: the wsB chat — never
+		// eligible, its workspace tag is foreign to the WI's — explicitly
+		// subscribes and holds the fallback role now, a wake target of
+		// its own record even while the untagged chat is live (an
+		// explicit subscriber is preferred over the lowest-id live
+		// chat, which stays Passive); it delivers the new recurrence
+		// q-2 and acks; when it unsubscribes again, the role falls back
+		// to the next target (the untagged chat, the only live
+		// subscribed one left), which must print nothing new
+		s.td.subs.mu.Lock()
+		s.td.subs.seen[s.untagged] = s.td.subs.now() // still live after its run
+		s.td.subs.mu.Unlock()
+		gmi14SeedQ(t, s.td, s.wi, "q-2")
+		if _, err := s.td.client.ChatSubscribe(s.b1, s.wi, true); err != nil {
+			t.Fatal(err)
+		}
+		if out := gmi14RunChat(t, s.td, s.b1, 5*time.Second); !strings.Contains(out, "needs_input q-2") {
+			t.Fatalf("the explicit subscriber must deliver q-2: %q", out)
+		}
+		gmi14Mute(t, s.td, s.b1, s.wi)
+		if out := gmi14RunChat(t, s.td, s.untagged, time.Second); strings.Contains(out, "[polyforge]") {
+			t.Fatalf("the recurrence the explicit target delivered must not replay after the switch: %q", out)
 		}
 	}
 }

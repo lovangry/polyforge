@@ -1188,9 +1188,12 @@ func TestSubStoreAdoptWithoutRecordAndMute(t *testing.T) {
 // hint), every other owner-routed subscriber is Passive, an explicit
 // subscriber stays a wake target of its own record untouched, and a
 // muted chat (no subscription) is excluded by construction. With the
-// origin holding a subscription, or an empty eligible set, or after an
-// adopt (the adopter IS the origin), today's semantics apply: no flag,
-// and the scoped demotion never fires.
+// origin holding a subscription, or after an adopt (the adopter IS
+// the origin), today's semantics apply: no flag, and the scoped
+// demotion never fires. With an empty eligible set the wake converges
+// on the single fallback target (polyforge#18): the explicit
+// subscribers stay wake targets of their own records, every
+// owner-routed subscriber is Passive.
 func TestSubStoreScopedWakeAudience(t *testing.T) {
 	const wi = "wi_g14"
 	s, err := newSubStore(filepath.Join(t.TempDir(), chatSubsFile))
@@ -1281,17 +1284,24 @@ func TestSubStoreScopedWakeAudience(t *testing.T) {
 		t.Fatalf("an owner-routed sub shares the live origin's record (Passive): %+v", x)
 	}
 
-	// an empty eligible set: today's owner-wide semantics — every
-	// subscribed chat wakes its own record, no Passive, no flag
+	// an empty eligible set: the wake converges on the single fallback
+	// target (polyforge#18) — an explicit subscriber is preferred, so
+	// chat_a and chat_e (explicit) stay wake targets of their own
+	// records while every owner-routed subscriber is Passive
 	if _, err := s.Unsubscribe("chat_o", wi); err != nil {
 		t.Fatal(err)
 	}
 	s.mu.Lock()
 	s.seen["chat_a"] = s.now().Add(-2 * chatLiveFor) // the eligible chat's watcher went silent
 	s.mu.Unlock()
-	for _, chat := range []string{"chat_a", "chat_x", "chat_u", "chat_e"} {
+	for _, chat := range []string{"chat_a", "chat_e"} {
 		if sub := subOf(chat); sub.Passive || sub.Adoptable {
-			t.Fatalf("an empty eligible set is today's owner-wide fallback (no new output): %+v", sub)
+			t.Fatalf("%s (explicit, empty eligible set) stays a wake target of its own record: %+v", chat, sub)
+		}
+	}
+	for _, chat := range []string{"chat_x", "chat_u"} {
+		if sub := subOf(chat); !sub.Passive || sub.Adoptable {
+			t.Fatalf("%s (owner-routed, empty eligible set) must be Passive under the single fallback target: %+v", chat, sub)
 		}
 	}
 	delete(s.seen, "chat_a") // silent chats read as live again (born-based)
@@ -1315,6 +1325,61 @@ func TestSubStoreScopedWakeAudience(t *testing.T) {
 	}
 	if u := subOf("chat_u"); !u.Passive || u.Adoptable {
 		t.Fatalf("a re-pointed cross-workspace subscriber is Passive to the adopter: %+v", u)
+	}
+}
+
+// TestSubStoreEmptyEligibleSilentAudienceWakesNobody — the empty-eligible
+// fallback's own last edge (polyforge#18): with the origin gone, the
+// eligible set empty and NO subscribed chat live, the fallback role is
+// held by nobody — every owner-routed subscriber is Passive, the
+// decision waits; a watcher's next poll (its subscribe-owned call)
+// marks it live and it becomes the single fallback target. The
+// recovery is the next poll, not a timer.
+func TestSubStoreEmptyEligibleSilentAudienceWakesNobody(t *testing.T) {
+	const wi = "wi_p18e"
+	s, err := newSubStore(filepath.Join(t.TempDir(), chatSubsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.scope = wakeScope{
+		originChat: func(string) string { return "" },      // no origin chat
+		workspace:  func(string) string { return "/ws/a" }, // nobody is tagged with it
+	}
+	// five owner-routed subscribers, no explicit one — the same shape
+	// the fanout repro builds, but with every watcher silent
+	audience := []string{"chat_a", "chat_b", "chat_c", "chat_d", "chat_e"}
+	for _, chat := range audience {
+		if _, err := s.SubscribeNew(chat, wi, "proj#18", "", 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.mu.Lock()
+	for _, chat := range audience {
+		s.seen[chat] = s.now().Add(-2 * chatLiveFor) // silent: no subscribed chat is live
+	}
+	s.mu.Unlock()
+	// no live subscribed chat holds the fallback role: nobody is a
+	// wake target, the decision waits — no broadcast either
+	for _, chat := range audience {
+		for _, sub := range s.List(chat) {
+			if sub.WI == wi && !sub.Passive {
+				t.Fatalf("%s (owner-routed, no live subscribed chat) must be Passive — the wake waits for a poll: %+v", chat, sub)
+			}
+		}
+	}
+	// a watcher polls again: it is live now and becomes the single
+	// fallback target — the recovery is the next poll, not a timer
+	s.Seen("chat_c")
+	targets := map[string]bool{}
+	for _, chat := range audience {
+		for _, sub := range s.List(chat) {
+			if sub.WI == wi && !sub.Passive {
+				targets[chat] = true
+			}
+		}
+	}
+	if len(targets) != 1 || !targets["chat_c"] {
+		t.Fatalf("the chat that polled is the single fallback target: %v", targets)
 	}
 }
 

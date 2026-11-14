@@ -166,7 +166,8 @@ The order the system actually runs:
    woken (each such line carries one hint,
    「可用 `pf watch adopt <id>` 接管」), every other owner-routed subscriber
    sees progress only, and with no eligible chat in the workspace the
-   owner-wide wake of before applies. An eligible chat — the hint line is
+   wake converges on a single fallback chat — an explicit subscriber, or
+   else the lowest-id live subscribed one. An eligible chat — the hint line is
    only a hint, adoption is never automatic — takes the wake-target role
    over with `pf watch adopt <id>`: it becomes the origin chat and inherits
    the delivery record, so nothing that was already delivered replays; a

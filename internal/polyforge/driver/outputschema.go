@@ -76,7 +76,7 @@ type stepOutputSchema struct {
 
 // promptWhenKey is the draft-07 annotation a step's declared output
 // schema may put on a `properties` entry: `x-prompt-when: <condition>`,
-//. The schema keeps compiling the FULL node (unknown
+// . The schema keeps compiling the FULL node (unknown
 // keywords are annotations); only the text the prompt shows is pruned:
 // entries whose condition does not hold are dropped and the marker
 // keys themselves never appear in it. Validation never sees a pruned

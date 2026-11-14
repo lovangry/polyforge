@@ -78,7 +78,7 @@ func MissingTaskModelsError(project string) error {
 
 // DefaultSummarizeLanguage is the summarize lane's narration language
 // when cli.toml's [summarize] table declares no `language` (polyforge#243,
-//).
+// ).
 const DefaultSummarizeLanguage = "中文"
 
 // The summarize lane's per-WI call-start spacing bounds and default, in
