@@ -88,6 +88,7 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 		}
 		store.RemoteURL, store.Username, store.Secret = local, "", ""
 	}
+	restores := map[string]string{}
 	for _, pr := range repos {
 		if !safeRepoName(pr.Name) {
 			return nil, repoCloneErr(j.wi, pr, "repo name %q is not a single safe path element", pr.Name)
@@ -120,11 +121,26 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 		}
 		if restored != "" {
 			sha = restored
+			// The claim's trusted carrier-restore record (polyforge#20):
+			// restoreTaskRepoState is the only operation that moves a task
+			// repo onto the carried line, so the head it landed on is the
+			// daemon's own statement of the line this capsule works from.
+			// The close-point publish's rewind supersede is gated on it —
+			// an agent's local reset never writes it — so the record is
+			// intent, not shape. Best-effort: a failed write keeps the
+			// supersede gate closed (the rewind then keeps its refusal,
+			// fail closed), never the claim.
+			restores[pr.Name] = restored
 		}
 		// The previous session's uncommitted work (polyforge#167):
 		// checked out on top of the restored head, never committed.
 		r.restoreTaskWIP(ctx, j, store, pr.Name, dir, sha)
 		out[pr.Name] = sha
+	}
+	if len(restores) > 0 {
+		if werr := gitops.WriteCarrierRestores(j.capsuleDir, restores); werr != nil {
+			fmt.Fprintf(os.Stderr, "runtime: %s: recording the carrier-restore record failed: %v (an authorized rewind will keep its non-fast-forward refusal; fix the cause and re-claim)\n", j.wi, werr)
+		}
 	}
 	return out, nil
 }

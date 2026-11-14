@@ -467,7 +467,9 @@ func TestW254QuickstartsMovedIntact(t *testing.T) {
 // all-unresolvable block, the manual --models refusal and the shipped
 // bundles' step-level model_candidates removal), and the appended
 // section (the empty-eligible decision wake converges on one chat), and
-// nothing else)
+// the appended section (carrier rewind supersede: the timestamped
+// `refs/pf-task-backup/*` namespace, its claim restore-record gate and
+// the unconstrained upgrade order), and nothing else)
 // and is only routed to, from the install ops page and the README
 // landing page. The
 // pin moves in the same commit as each append (the append-only rule,
@@ -479,7 +481,7 @@ func TestW254QuickstartsMovedIntact(t *testing.T) {
 func TestW254UpgradeByteIdentical(t *testing.T) {
 	raw := []byte(w254Read(t, "docs/upgrade.md"))
 	sum := sha256.Sum256(raw)
-	if got := hex.EncodeToString(sum[:]); got != "17f3b6a9c8ac5252943d4bc423738a23400d09ca5c70ebe6e0a80ece031aa31f" {
+	if got := hex.EncodeToString(sum[:]); got != "f59085e7ca21309809f297990e2d032d959987466c7ee3b93e54a7c96d6d023a" {
 		t.Fatalf("docs/upgrade.md must stay byte-identical (only routed to, never rewritten): sha256 %s != the pinned pre-move sha256", got)
 	}
 	install := w254Norm(w254Page(t, "docs/install.md"))

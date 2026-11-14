@@ -2,10 +2,11 @@
 
 package test
 
-// The no-op twin of pdeathsig_linux_test.go: SysProcAttr has no
-// Pdeathsig field off Linux, so nothing can be armed here — an agent
-// orphaned by a killed test binary is reaped by its FAKEPI_TEST_PID
-// watch instead (proc_hygiene_test.go's header).
+// pdeathsig_other_test.go: the non-Linux half of ownGroup's death-signal
+// seam — a no-op where the kernel offers no parent-death signal (darwin):
+// the group and bin-dir sweeps in proc_hygiene_test.go catch the leftover
+// processes a Linux Pdeathsig would have reaped.
+
 import "syscall"
 
 func setPdeathsig(*syscall.SysProcAttr) {}
