@@ -48,6 +48,10 @@ const jiti = createJiti(import.meta.url, {
     "@/lib/polyforge-panel-preferences": modulePath("lib/polyforge-panel-preferences.ts"),
     "@/hooks/useIsMobile": modulePath("hooks/useIsMobile.ts"),
     "@/hooks/usePolyforgeProgress": modulePath("hooks/usePolyforgeProgress.ts"),
+    // pi#1's restored view choices (the queue's card/list, the progress
+    // order): the real hook and its pure preference module.
+    "@/hooks/usePolyforgeViewPreferences": modulePath("hooks/usePolyforgeViewPreferences.ts"),
+    "@/lib/polyforge-view-preferences": modulePath("lib/polyforge-view-preferences.ts"),
     // polyforge#53: the shared ThinkingFold's own dependencies resolve to
     // the real pure modules (the preview and the preference), with
     // react-markdown stubbed in the stubs file below.
