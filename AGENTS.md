@@ -1,3 +1,30 @@
+<!-- polyforge:managed:version="1.0" -->
+<!-- polyforge:layout -->
+## Workspace layout (polyforge)
+
+Anything meant to be shared — designs, reviews, decision sheets, audits,
+experience — goes to aihub, never into a file here:
+
+- a design → its work item's content while the work item is open
+  (`pf file edit <wi> --content @file`), else a memory
+  `pf remember --project <p> --type doc.design --work-item <wi> @file`;
+- a review / decision sheet / audit → `pf remember --project <p> --type doc.review` /
+  `doc.decision` / `doc.audit` (with `--work-item` when it belongs to one);
+- experience → `experience.*` / `fact.*` memories.
+
+Locally only:
+
+- `.repo/<repo>/` — repository clones;
+- `capsules/<wi>/` — work item workspaces (the daemon manages them);
+- `scratch/` — disposable output (logs, briefs, e2e output, downloads);
+  `pf doctor` reports entries older than 14 days, `pf doctor --prune-scratch` removes them;
+- `.polyforge/` — polyforge-generated files only.
+
+Never write documents into the workspace root or `.polyforge/`;
+`pf doctor` warns about anything else found there.
+<!-- /polyforge:layout -->
+<!-- /polyforge:managed -->
+
 # polyforge — project rules
 
 Rules for any agent working in this repository. They add to the generic

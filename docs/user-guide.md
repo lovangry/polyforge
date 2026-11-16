@@ -165,8 +165,11 @@ The order the system actually runs:
    workspace: the live, subscribed, non-muted chats of that workspace are
    woken (each such line carries one hint,
    「可用 `pf watch adopt <id>` 接管」), every other owner-routed subscriber
-   sees progress only, and with no eligible chat in the workspace the
-   owner-wide wake of before applies. An eligible chat — the hint line is
+   sees progress only, and with no eligible chat in the workspace exactly
+   one chat is woken instead — the lowest-id live subscriber, whatever its
+   workspace tag, with no adopt hint (it may be untagged; a chat opened in
+   the work item's workspace enters the eligible set and the scoped wake
+   with its adopt hint applies). An eligible chat — the hint line is
    only a hint, adoption is never automatic — takes the wake-target role
    over with `pf watch adopt <id>`: it becomes the origin chat and inherits
    the delivery record, so nothing that was already delivered replays; a

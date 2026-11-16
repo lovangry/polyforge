@@ -33,9 +33,18 @@ package daemon
 // Passive and an explicit subscriber stays a wake target of its own
 // record, untouched. An eligible chat's ack lands durably in those
 // Passive subscribers' records too (see Ack), so what the scoped
-// audience delivered never replays when the scope later lapses. With no
-// eligible chat the owner-wide broadcast of
-// before applies, unchanged, with no new output. An explicit subscribe
+// audience delivered never replays when the scope later lapses. With
+// no eligible chat the wake still stops at one chat: the lowest-id
+// live subscriber is the elected fallback target — a wake target of
+// its own record, without the adopt hint (the adopt route requires
+// the chat to be tagged with the WI's workspace, and every live
+// subscriber so tagged is already in the eligible set) — and every
+// other owner-routed subscriber is Passive, its record fed by the
+// elected chat's acks, so a later re-election (the elected chat gone
+// quiet, a daemon restart) never prints what it delivered. The
+// owner-wide broadcast of before — every subscribed chat of the owner
+// waking a WI none of them chose, the pi#122 blast radius — is gone.
+// An explicit subscribe
 // is a wake target of its own record in every case. "Live" is the
 // in-memory last subscribe-owned call of the chat's watcher (every poll
 // makes one), within chatLiveFor.
@@ -124,8 +133,8 @@ type subStore struct {
 	// scope answers the wake-target facts of a WI the scoped-broadcast
 	// computation reads: its origin chat id and its
 	// project-mapping workspace root. Wired by the daemon (in-memory
-	// resolvers; nil in a bare store — the scoped broadcast then never
-	// fires, which is exactly today's semantics).
+	// resolvers; nil in a bare store — it then answers not-gone and
+	// every subscriber wakes its own record).
 	scope wakeScope
 }
 
@@ -406,9 +415,11 @@ func (s *subStore) Unsubscribe(chat, wi string) (bool, error) {
 // eligible chats are wake targets of their own records with Adoptable
 // set (the adopt hint flag), every other owner-routed subscriber is
 // Passive, and an explicit subscriber stays a wake target of its own
-// record, untouched. With an empty eligible set today's owner-wide
-// semantics apply unchanged — every subscribed chat wakes its own
-// record, no Passive, no flag, no new output.
+// record, untouched. With an empty eligible set the elected fallback
+// applies instead: the lowest-id live subscriber is the wake target
+// of its own record (not flagged — it may be untagged, and the adopt
+// route refuses), every other owner-routed subscriber is Passive.
+// No case wakes more than one chat the owner did not choose.
 func (s *subStore) List(chat string) []protocol.ChatSub {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -423,16 +434,21 @@ func (s *subStore) List(chat string) []protocol.ChatSub {
 		if o := s.recordLocked(sub); o != sub {
 			cp.Cursor, cp.Notified, cp.Done = o.Cursor, o.Notified, o.Done
 			cp.Passive = !s.fallbackLocked(chat, sub)
-		} else if w, ok := s.scopedWakeOfLocked(scoped, sub.WI); ok && w.any {
-			// the WI's origin is gone and its workspace holds a live
-			// subscribed chat: the decision wake is scoped
+		} else if w, ok := s.scopedWakeOfLocked(scoped, sub.WI); ok && (w.any || w.elected != "") {
+			// the WI's origin is gone: the decision wake is scoped — to
+			// its workspace's live subscribed chats when it holds one,
+			// else to the single elected fallback target
 			if w.eligible[chat] {
-				// this chat IS one of them: a wake target of its own
-				// record, flagged for the adopt hint
-				cp.Adoptable = true
+				// this chat is a wake target of its own record
+				if w.any {
+					// flagged for the adopt hint (the workspace-scoped
+					// audience only: the elected fallback target may be
+					// untagged, and the adopt route refuses)
+					cp.Adoptable = true
+				}
 			} else if sub.OwnerRouted {
-				// an owner-routed subscriber outside the eligible set:
-				// Passive — the owner-wide fanout is what stops
+				// an owner-routed subscriber outside the wake set:
+				// Passive — the fanout is what stops
 				cp.Passive = true
 			}
 			// an explicit subscriber stays a wake target of its own
@@ -454,9 +470,23 @@ type scopedWake struct {
 	// for decisions not delivered yet (an eligible chat's ack marks a
 	// delivered one delivered for the Passive subscribers too, see Ack).
 	eligible map[string]bool
-	// any: the eligible set is non-empty — the scoped broadcast fires;
-	// empty falls back to today's owner-wide semantics.
+	// any: the workspace-scoped eligible set is non-empty — the
+	// scoped broadcast fires. When it is empty the wake falls to the
+	// elected fallback target instead, never to every subscriber.
 	any bool
+	// elected: with an empty eligible set, the single chat the wake
+	// falls to — the lowest-id live subscriber (the same rule the
+	// shared-record fallback uses), whatever its workspace tag: the
+	// owner-wide fanout would wake every chat of the owner for a WI
+	// none of them chose (the pi#122 blast radius). An explicit
+	// subscriber wins the election just as well — it already is a wake
+	// target of its own record, so the election only stops the fanout
+	// behind it. It sits in eligible too (a wake target of its own
+	// record; its acks feed the Passive subscribers), but never
+	// Adoptable: every live subscriber tagged with the WI's workspace
+	// is in the eligible set above, and the adopt route refuses any
+	// other chat.
+	elected string
 }
 
 // scopedWakeOfLocked answers the scoped-broadcast facts of one WI,
@@ -465,7 +495,8 @@ type scopedWake struct {
 // wake-target model's record sharing applies, and after an adopt the
 // condition is false by construction: the adopter IS the origin and
 // holds the subscription, so no further scoped broadcast fires). A
-// bare store (no scope resolvers) answers not-gone: today's semantics.
+// bare store (no scope resolvers) answers not-gone: every
+// subscriber wakes its own record.
 func (s *subStore) scopedWakeOfLocked(cache map[string]*scopedWake, wi string) (*scopedWake, bool) {
 	if w, ok := cache[wi]; ok {
 		return w, w != nil
@@ -483,6 +514,16 @@ func (s *subStore) scopedWakeOfLocked(cache map[string]*scopedWake, wi string) (
 				}
 			}
 			w = &scopedWake{eligible: eligible, any: len(eligible) > 0}
+			if !w.any {
+				for id, c := range s.doc.Chats {
+					if c.Subs[wi] != nil && s.liveLocked(id) && (w.elected == "" || id < w.elected) {
+						w.elected = id
+					}
+				}
+				if w.elected != "" {
+					w.eligible[w.elected] = true
+				}
+			}
 		}
 	}
 	cache[wi] = w
@@ -542,19 +583,20 @@ func (s *subStore) liveLocked(chat string) bool {
 // origin chat's for an owner-routed one, see recordLocked); unknown WIs
 // are ignored (the subscription may have been removed meanwhile).
 //
-// Under a scoped decision wake an eligible chat's ack also
+// Under a scoped decision wake an eligible chat's ack — and under the
+// elected fallback the elected chat's — also
 // lands in the record of every owner-routed subscriber outside the
-// eligible set — the Passive ones, which never ack themselves — the way
+// wake set — the Passive ones, which never ack themselves — the way
 // an ack lands in a shared record: cursor max, delivered keys set to the
 // acker's (still-pending keys only, so a key that cleared is pruned and
-// its recurrence fires again), done or. What the scoped audience
+// its recurrence fires again), done or. What the wake target
 // delivered is then delivered for them too, durably, in the same atomic
-// write. The eligible set is volatile (liveness, the runtime's in-memory
-// scope facts); the delivered keys are not, so a later owner-wide
-// fallback (a daemon restart, every eligible chat gone quiet) prints only
-// what the scoped audience has not delivered — the shared-record
-// semantics of a live origin. Explicit subscribers and the other
-// eligible chats keep their own records, untouched.
+// write. The wake set is volatile (liveness, the runtime's in-memory
+// scope facts); the delivered keys are not, so a later re-election (the
+// elected chat gone quiet, a daemon restart, every eligible chat gone
+// quiet) prints only what the wake target has not delivered — the
+// shared-record semantics of a live origin. Explicit subscribers and
+// the other eligible chats keep their own records, untouched.
 func (s *subStore) Ack(chat string, a protocol.ChatAck) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

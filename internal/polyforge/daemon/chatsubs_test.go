@@ -589,7 +589,8 @@ func TestSubStoreWakesTheOriginChatElseOneFallback(t *testing.T) {
 	if b := get("chat_b", "wi_1"); b.Passive || b.Cursor != 0 {
 		t.Fatalf("without an origin subscription the chat uses its own record and wakes: %+v", b)
 	}
-	// a WI without an origin chat wakes every subscribed chat
+	// a bare store (no scope resolvers wired) has no scope facts: a WI
+	// without an origin chat still wakes every subscribed chat
 	if _, err := s.SubscribeNew("chat_b", "wi_2", "", "", 0); err != nil {
 		t.Fatal(err)
 	}
@@ -1281,17 +1282,36 @@ func TestSubStoreScopedWakeAudience(t *testing.T) {
 		t.Fatalf("an owner-routed sub shares the live origin's record (Passive): %+v", x)
 	}
 
-	// an empty eligible set: today's owner-wide semantics — every
-	// subscribed chat wakes its own record, no Passive, no flag
+	// an empty eligible set: the wake falls to the single elected
+	// fallback target — the lowest-id live subscriber (here an
+	// explicit one, chat_e: it already is a wake target of its own
+	// record, so the election only stops the fanout behind it) — and
+	// every owner-routed subscriber is Passive. No owner-wide fanout.
 	if _, err := s.Unsubscribe("chat_o", wi); err != nil {
 		t.Fatal(err)
 	}
 	s.mu.Lock()
 	s.seen["chat_a"] = s.now().Add(-2 * chatLiveFor) // the eligible chat's watcher went silent
 	s.mu.Unlock()
-	for _, chat := range []string{"chat_a", "chat_x", "chat_u", "chat_e"} {
-		if sub := subOf(chat); sub.Passive || sub.Adoptable {
-			t.Fatalf("an empty eligible set is today's owner-wide fallback (no new output): %+v", sub)
+	if e := subOf("chat_e"); e.Passive || e.Adoptable {
+		t.Fatalf("the elected fallback target is a wake target of its own record, unflagged: %+v", e)
+	}
+	for _, chat := range []string{"chat_x", "chat_u"} {
+		if sub := subOf(chat); !sub.Passive || sub.Adoptable {
+			t.Fatalf("%s (owner-routed, outside the wake set) must be Passive, unflagged: %+v", chat, sub)
+		}
+	}
+	if a := subOf("chat_a"); a.Passive || a.Adoptable {
+		t.Fatalf("an explicit subscriber outside the wake set stays a wake target of its own record: %+v", a)
+	}
+	// the elected target's ack feeds the Passive records durably — a
+	// later re-election never replays what it delivered
+	if err := s.Ack("chat_e", protocol.ChatAck{WI: wi, Cursor: 5, Notified: []string{"needs_input:q-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, chat := range []string{"chat_x", "chat_u"} {
+		if sub := subOf(chat); sub.Cursor != 5 || len(sub.Notified) != 1 || sub.Notified[0] != "needs_input:q-1" {
+			t.Fatalf("%s mirrors the elected target's delivery: %+v", chat, sub)
 		}
 	}
 	delete(s.seen, "chat_a") // silent chats read as live again (born-based)
@@ -1315,6 +1335,128 @@ func TestSubStoreScopedWakeAudience(t *testing.T) {
 	}
 	if u := subOf("chat_u"); !u.Passive || u.Adoptable {
 		t.Fatalf("a re-pointed cross-workspace subscriber is Passive to the adopter: %+v", u)
+	}
+}
+
+// TestSubStoreElectedFallbackWakeTarget — the no-eligible-chat case: a
+// WI with no origin chat (auto-claimed) whose workspace holds no live
+// subscribed chat wakes exactly ONE chat, the lowest-id live subscriber
+// (the same rule the shared-record fallback uses), never every chat the
+// owner routing subscribed. Every other owner-routed subscriber is
+// Passive and its record is fed by the elected target's acks, so a
+// re-election (the target gone quiet) never replays a delivered
+// decision; the elected target carries no adopt hint (the adopt route
+// requires the chat to be tagged with the WI's workspace); an explicit
+// subscriber stays a wake target of its own record, untouched; a muted
+// chat never wins the election; and a live workspace-tagged subscriber
+// appearing later replaces the election with the scoped broadcast.
+func TestSubStoreElectedFallbackWakeTarget(t *testing.T) {
+	const wi = "wi_g21"
+	s, err := newSubStore(filepath.Join(t.TempDir(), chatSubsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := s.born
+	s.now = func() time.Time { return now }
+	s.scope = wakeScope{
+		originChat: func(string) string { return "" }, // an auto-claimed WI: no origin chat
+		workspace:  func(string) string { return "/ws/a" },
+	}
+	// the owner routing's audience: chat_b (tagged /ws/b —
+	// cross-workspace), chat_c (untagged), chat_d (tagged /ws/a but
+	// muted — it opted out), chat_e (an explicit subscriber, untagged).
+	// Nobody is tagged /ws/a AND subscribed, so the workspace broadcast
+	// has no eligible chat.
+	for _, c := range []string{"chat_b", "chat_c"} {
+		if _, err := s.SubscribeNew(c, wi, "proj#21", "", 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.TagWorkspace("chat_b", "/ws/b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.TagWorkspace("chat_d", "/ws/a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Subscribe("chat_d", wi, "proj#21", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Unsubscribe("chat_d", wi); err != nil { // muted: the /ws/a tag cannot make it eligible
+		t.Fatal(err)
+	}
+	if _, err := s.Subscribe("chat_e", wi, "proj#21", 3); err != nil {
+		t.Fatal(err)
+	}
+	subOf := func(chat string) protocol.ChatSub {
+		t.Helper()
+		for _, sub := range s.List(chat) {
+			if sub.WI == wi {
+				return sub
+			}
+		}
+		t.Fatalf("%s holds no subscription to %s", chat, wi)
+		return protocol.ChatSub{}
+	}
+	// no eligible chat: the lowest-id live subscriber is the single
+	// elected fallback target — a wake target of its own record, without
+	// the adopt hint — and every other owner-routed subscriber is Passive
+	if b := subOf("chat_b"); b.Passive || b.Adoptable {
+		t.Fatalf("the elected fallback target wakes its own record, unflagged: %+v", b)
+	}
+	if c := subOf("chat_c"); !c.Passive || c.Adoptable {
+		t.Fatalf("an owner-routed subscriber outside the wake set is Passive: %+v", c)
+	}
+	if e := subOf("chat_e"); e.Passive || e.Adoptable || e.Cursor != 3 {
+		t.Fatalf("an explicit subscriber stays a wake target of its own record, untouched: %+v", e)
+	}
+	// the elected target delivers: its ack lands in the Passive
+	// subscribers' records too, durably — the same shared-record
+	// semantics a scoped audience's ack has
+	if err := s.Ack("chat_b", protocol.ChatAck{WI: wi, Cursor: 7, Notified: []string{"needs_input:q-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if c := subOf("chat_c"); c.Cursor != 7 || len(c.Notified) != 1 || c.Notified[0] != "needs_input:q-1" {
+		t.Fatalf("the Passive record mirrors the elected target's delivery: %+v", c)
+	}
+	if e := subOf("chat_e"); e.Cursor != 3 || len(e.Notified) != 0 {
+		t.Fatalf("an explicit subscriber's record is untouched by the fanout: %+v", e)
+	}
+	// the elected target goes quiet: the next live subscriber takes
+	// over, and what the record says was delivered never replays
+	now = now.Add(2 * chatLiveFor)
+	s.Seen("chat_c")
+	s.Seen("chat_e")
+	if c := subOf("chat_c"); c.Passive || c.Adoptable {
+		t.Fatalf("the re-elected fallback target wakes: %+v", c)
+	}
+	if b := subOf("chat_b"); !b.Passive || b.Cursor != 7 || len(b.Notified) != 1 {
+		t.Fatalf("the quiet ex-target is Passive and its record holds the delivery: %+v", b)
+	}
+	if err := s.Ack("chat_c", protocol.ChatAck{WI: wi, Cursor: 9, Notified: []string{"needs_input:q-1", "carrier_push_failed:step"}}); err != nil {
+		t.Fatal(err)
+	}
+	if b := subOf("chat_b"); b.Cursor != 9 || len(b.Notified) != 2 {
+		t.Fatalf("the ex-target mirrors the new delivery: %+v", b)
+	}
+	// a live subscriber tagged with the WI's workspace appears: the
+	// workspace broadcast takes over — it is the flagged adopt candidate,
+	// the elected target steps back to Passive, the explicit subscriber
+	// stays untouched
+	if err := s.TagWorkspace("chat_a", "/ws/a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Subscribe("chat_a", wi, "proj#21", 0); err != nil {
+		t.Fatal(err)
+	}
+	s.Seen("chat_a")
+	if a := subOf("chat_a"); !a.Adoptable || a.Passive {
+		t.Fatalf("the workspace-eligible chat is the flagged wake target: %+v", a)
+	}
+	if c := subOf("chat_c"); !c.Passive || c.Adoptable {
+		t.Fatalf("the elected target steps back once the scope fires: %+v", c)
+	}
+	if e := subOf("chat_e"); e.Passive || e.Adoptable {
+		t.Fatalf("an explicit subscriber stays a wake target of its own record: %+v", e)
 	}
 }
 

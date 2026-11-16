@@ -545,8 +545,8 @@ func New(cfg Config) (*Daemon, error) {
 	// (terminal close: stopOp moves the job to DONE and dropJob drops
 	// it) — the terminal decision is exactly the one that fires the
 	// scoped wake, so the scope must survive the drop (otherwise the
-	// eligible set reads empty and List falls back to the owner-wide
-	// broadcast — the pi#122 blast radius). In-memory only, called under
+	// eligible set reads empty and the wake falls to the elected
+	// single fallback chat). In-memory only, called under
 	// subStore.mu (List): ScopeOf takes the job's own mutex (or the
 	// table lock over the retained facts) briefly and WorkspaceFor is a
 	// map lookup — no I/O under any lock, no lock inversion (routes hold
