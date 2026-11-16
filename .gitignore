@@ -14,3 +14,18 @@ webui/node_modules/
 # clean run (entry scripts set sys.dont_write_bytecode), but a hand run of
 # the shared library may; nothing under __pycache__ is ever tracked.
 __pycache__/
+
+# daemon-managed work-item capsules (one per claimed work item)
+capsules/
+
+# this machine's per-project, per-step model candidates (endpoint choices
+# belong to the work machine, not to the repository)
+.polyforge.yaml
+
+# local single-container development scaffolding (dev only; the production
+# shape lives in deploy/)
+local-dev/
+.dockerignore
+
+# daemon/CLI runtime lock
+.polyforge.lock
