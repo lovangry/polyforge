@@ -106,6 +106,7 @@ def run(inv: Invocation, a: argparse.Namespace, held: List[Details]) -> int:
                 raise GoError("%s is not the JSON expected: a repos entry is not an object" % a.publish)
             for k in ("name", "skipped_reason", "branch", "pr_url", "head"):
                 _field(e, k, str, a.publish)
+            _field(e, "no_forge", bool, a.publish)
     except GoError as err:
         return inv.usage("--publish: %s" % err)
     try:
@@ -121,7 +122,12 @@ def run(inv: Invocation, a: argparse.Namespace, held: List[Details]) -> int:
         name = gostr.trim_text(p.get("name") or "")
         if name == "":
             return inv.usage("--publish %s: repos[%d] has no name" % (a.publish, i))
-        if gostr.trim_text(p.get("skipped_reason") or "") != "":
+        # no_forge, or the same fact written by a skill that predates the flag: an
+        # entry with a branch and no pr_url was published without a forge, and its
+        # skipped_reason says why — it is judged with git, never dropped as a skip.
+        no_forge = p.get("no_forge") is True or (
+            gostr.trim_text(p.get("pr_url") or "") == "" and gostr.trim_text(p.get("branch") or "") != "")
+        if gostr.trim_text(p.get("skipped_reason") or "") != "" and not no_forge:
             continue
         branch = gostr.trim_text(p.get("branch") or "")
         if branch.startswith("refs/heads/"):
@@ -129,7 +135,8 @@ def run(inv: Invocation, a: argparse.Namespace, held: List[Details]) -> int:
         r = MergeRepo(name=name, pr_url=gostr.trim_text(p.get("pr_url") or ""), branch=branch,
                       published=gostr.trim_text(p.get("head") or ""), head=vheads.get(name, ""),
                       dir=os.path.join(capsule, "repos", name))
-        if r.pr_url == "" or r.branch == "" or r.published == "":
+        r.no_forge = no_forge or r.pr_url == ""
+        if (r.pr_url == "" and not no_forge) or r.branch == "" or r.published == "":
             return inv.usage("--publish %s: repos[%d] (%s) needs pr_url, branch and head (or a skipped_reason)" % (a.publish, i, name))
         if r.head == "":
             return inv.usage("--verified %s names no head for the published repo %s: there is no verified head to record (the"
@@ -157,8 +164,12 @@ def run(inv: Invocation, a: argparse.Namespace, held: List[Details]) -> int:
     if moved:
         inv.summary = "nothing recorded — %d PR(s) not at the verified head: %s" % (len(moved), "; ".join(moved))
         return 1
+    no_pr = [r for r in details.repos if r.no_forge]
     inv.summary = "%d PR(s) published at the verified heads, awaiting a human review: %s" % (
         len(details.repos), ", ".join("repos/%s %s" % (r.name, gostr.short(r.head)) for r in details.repos))
+    if no_pr:
+        inv.summary += " (no forge, no PR opened — the owner merges by hand: %s)" % (
+            ", ".join("repos/%s %s" % (r.name, r.branch) for r in no_pr))
     return 0
 
 

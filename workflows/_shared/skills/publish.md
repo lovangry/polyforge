@@ -52,7 +52,11 @@ the source and what did not hold (the lane goes back to the step that makes the 
    number,url,state`: an OPEN one — `gh pr edit <url> --body-file artifacts/publish-pr-<name>.md`;
    a MERGED one whose branch carries new commits since — exactly one follow-up PR; none —
    `gh pr create --base <default> --head <branch> --title "<slug>: <one line>" --body-file
-   artifacts/publish-pr-<name>.md`. No GitHub origin, or no `gh`: hand off `blocked`.
+   artifacts/publish-pr-<name>.md`. **No forge** (an origin that is not GitHub, or no `gh` on
+   PATH): open nothing — record `pr_url` empty, `no_forge: true` and a `skipped_reason` naming it
+   ("no forge (GitHub only): <branch> at <head> pushed, no PR opened"), and go on: this is not a
+   `blocked`.
+   The merge step takes such a repo as a manual landing (the owner merges the branch by hand).
 2. **The PR body**, in this order: the slug and a change summary; when the verifying gate
    was waived, first the line that the change's verification (micro: its evidence) was red
    and waived (the owner's words verbatim, as the header quotes them) and that the
@@ -79,7 +83,8 @@ the source and what did not hold (the lane goes back to the step that makes the 
    The material is read-only — never edit, regenerate or commit it. No such line anywhere:
    ask nothing; the note says "no owner-review declared".
 4. **Write** `artifacts/publish.json` — `{"repos": [{name, branch, pr_url, head,
-   skipped_reason}]}`, `head` the sha you pushed (what the merge step matches) — and
+   skipped_reason, no_forge}]}`, `head` the sha you pushed (what the merge step matches); with no
+   forge `pr_url` is empty, `no_forge` is `true` and `skipped_reason` says why — and
    `artifacts/delivery.md` (the PR body's content plus the owner-review record).
 5. **The last step.** Only when the step order of your dispatch header notes you as the last
    step (the
@@ -105,10 +110,12 @@ the source and what did not hold (the lane goes back to the step that makes the 
 
 ## 交接要写什么 — what your hand-off carries
 
-- **Status.** `done` once every repo with commits is pushed and its PR open (and the owner
-  passed an owner-review; as the last step, once the `wrap-attrs` line was accepted); `fail` when a check before you started did not hold, or on the
-  owner's 「不通过」 (`--per-owner`); `blocked` on a push identity, an origin or a `gh` that
-  is not there, or a branch moved outside the lane.
+- **Status.** `done` once every repo with commits is pushed and — when a forge answered — its
+  PR open (with no forge, `no_forge: true` and its pushed branch recorded instead, the merge left to the
+  owner); and the owner passed an owner-review; as the last step, once the `wrap-attrs` line
+  was accepted. `fail` when a check before you started did not hold, or on the
+  owner's 「不通过」 (`--per-owner`). `blocked` on a push identity, an origin that is not
+  there, or a branch moved outside the lane.
 - **回应上一轮** (a later round): what failed the earlier publication (a check, or the
   owner's 「不通过」), and what is different now.
 - **做了什么**: per repo the branch, the PR link and the head pushed (or why skipped).

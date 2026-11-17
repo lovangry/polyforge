@@ -106,7 +106,9 @@ and `artifacts/merge/landing.json`. The daemon orchestrates; it judges no conten
 - **publish** (gate; skill `publish`) — checks that the verification's result names every
   repo's HEAD and passed (or that the owner's waiver of that same round is quoted on the
   verification's section) and that review passed; pushes `polyforge/<capsule directory
-  name>`, opens or updates the PR (its body: the sync record, the verification's record or
+  name>`, opens or updates the PR — with no forge (an origin that is not GitHub, or no `gh`) it
+  opens nothing and records `pr_url` empty with `no_forge: true` and a `skipped_reason` instead,
+  leaving the merge to the owner — (its body: the sync record, the verification's record or
   the waiver verbatim, the review verdict, the acceptance list, the coverage table and a
   `## Follow-up` with every non-blocking finding), writes `artifacts/publish.json` and
   `artifacts/delivery.md`, and holds for the owner's 「过目通过」 when an `owner-review:`
@@ -120,7 +122,10 @@ and `artifacts/merge/landing.json`. The daemon orchestrates; it judges no conten
 - **merge** (gate, `skippable: true`; skill `merge`, `merge.py`, the per-repo merge lock,
   tool window 10 minutes; wrap attrs `integration`) — checks publish's heads against the verified heads, then
   merges each PR with `gh pr merge --merge --match-head-commit <verified head>` under the
-  daemon's merge lock (one per repository, every repo of the item locked in one order). A
+  daemon's merge lock (one per repository, every repo of the item locked in one order); a repo
+  published with no forge (an empty `pr_url`) merges nothing — its branch must stand at the
+  verified head and the landing record carries `manual_merge_required`, the owner merging it by
+  hand. A
   PR that moved, the default branch gained commits after verification, closed, was retargeted, merged elsewhere off the verified head or refused
   by the forge FAILs back to `sync`; sync merges the new default branch and verification runs again. On a pass the command writes the landing record
   (`artifacts/merge/landing.json`: `{state: landed, repos, merge_commits}`) and the step

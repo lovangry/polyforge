@@ -11,7 +11,12 @@ Usage (from the capsule root, or with --capsule)::
 
 ``--publish`` is the publish step's artifact: ``{"repos": [{name, branch,
 pr_url, head, skipped_reason}]}`` (a repo with a skipped_reason has nothing
-to merge). ``--verified`` is the verifying gate's result file (schema
+to merge). An entry with **``no_forge: true``** (or a branch with no pr_url) is
+a repo published with no forge (a local or intranet origin, or no ``gh``): it is
+judged with git alone — origin's branch must stand at the verified head —
+recorded ``how: manual``, and **nothing is merged for it** (the landing record
+says ``manual_merge_required``; the owner merges that branch by hand). No merge
+commit is invented. ``--verified`` is the verifying gate's result file (schema
 pf-step-result/1): its ``heads`` are the heads the merge matches, one per
 published repo — a published repo it names no head for is exit 2. Every
 repo is judged before anything merges, in name order: its PR read (``gh pr
@@ -50,9 +55,10 @@ the verified head (``how: merged``) or, for a merge made elsewhere
 with ``accepted: true``. It carries no waiver. On any other exit a stale
 landing file is removed.
 
-Exit 0: every published PR is landed. Exit 1: a PR moved (its head is not
-the verified one), is closed or retargeted, was merged elsewhere off the
-verified head, or the forge refused the merge. Exit 2: not judged — an
+Exit 0: every published PR is landed, and every no-forge repo is a manual
+landing (its branch stands at the verified head; the owner merges it). Exit 1: a
+PR moved (its head is not the verified one), is closed or retargeted, was merged
+elsewhere off the verified head, or the forge refused the merge. Exit 2: not judged — an
 unreadable publish or verified file, a missing verified head, a task repo
 missing, gh or git unreachable, the deadline — or the invocation unusable.
 """
@@ -80,6 +86,10 @@ NAME = "merge.py"
 
 HOW_MERGED = "merged"
 HOW_MERGED_ELSEWHERE = "merged_elsewhere"
+# how: a repo published without a forge (no PR: the origin is not GitHub, or
+# gh is not there). The branch standing at the verified head is all this step
+# can prove; the merge itself is the owner's, and no merge commit is invented.
+HOW_MANUAL = "manual"
 
 
 @dataclass
@@ -100,6 +110,9 @@ class MergeRepo:
     # this run asked the forge to merge it
     branch_side: str = ""
     by_this_run: bool = False
+    # no_forge: publish opened no PR for this repo (pr_url empty); how becomes
+    # manual and the landing record says the owner merges by hand.
+    no_forge: bool = False
     why: str = ""
     # The default branch commit recorded by verification (before the branch
     # was published).  ``base`` below is the branch name learned from the
@@ -115,6 +128,8 @@ class MergeRepo:
                 d[k] = getattr(self, k)
         if self.by_this_run:
             d["by_this_run"] = True
+        if self.no_forge:
+            d["no_pr"] = True
         if self.why:
             d["why"] = self.why
         return d
@@ -172,6 +187,10 @@ def landing_of(d: Details) -> Dict[str, Any]:
             e["merge_commit"] = r.merge_commit
         if r.how == HOW_MERGED_ELSEWHERE:
             e["accepted"] = True
+        if r.how == HOW_MANUAL:
+            # no forge: nothing was merged here, and the record says so instead
+            # of inventing a merge commit — the owner merges the branch by hand.
+            e["manual_merge_required"] = True
         repos.append(e)
     out: Dict[str, Any] = {"state": "landed", "repos": repos}
     if d.merge_commits:
@@ -223,13 +242,48 @@ class Merge:
             pass
         self.inv.say("repos/%s: landed as %s (%s)" % (r.name, gostr.short(merge), r.how))
 
+    def judge_local(self, r: MergeRepo) -> None:
+        """A repo published without a forge (no PR): the branch on origin must
+        stand at the verified head — that is all this step can prove with git
+        alone. The merge itself stays the owner's: r.how becomes ``manual`` and
+        no merge commit is invented."""
+        g = self.g
+        try:
+            g.fetch(r.dir, r.base, r.branch)
+        except GoError as err:
+            r.why = "fetching %s and %s: %s" % (r.base, r.branch, err)
+            return
+        try:
+            r.tip = g.rev(r.dir, "refs/remotes/origin/" + r.branch)
+        except GoError:
+            r.why = "origin has no branch %s (deleted outside the lane?)" % r.branch
+            return
+        if r.tip != r.head:
+            r.why = ("origin's %s is at %s, not the verified head %s — the branch moved since verification"
+                     % (r.branch, gostr.short(r.tip), gostr.short(r.head)))
+            return
+        if r.verified_base:
+            current_base = g.rev(r.dir, "refs/remotes/origin/" + r.base)
+            moved = default_branch_update_reason(r.verified_base, current_base)
+            if moved:
+                r.why = moved + " (no forge: no PR exists to refuse it; sync, verify and publish again)"
+                return
+        r.how = HOW_MANUAL
+        self.inv.say("repos/%s: no forge — %s stands at the verified head %s; the owner merges it by hand"
+                     % (r.name, r.branch, gostr.short(r.head)))
+
     def judge(self, details: Details) -> int:
         g, inv = self.g, self.inv
-        # 1. every PR judged, nothing merged
+        # 1. every repo judged, nothing merged
         opened: List[MergeRepo] = []
         refused: List[str] = []
         for r in details.repos:
             r.base = g.default_branch(r.dir)
+            if r.no_forge:
+                self.judge_local(r)
+                if r.why:
+                    refused.append("repos/" + r.name + ": " + r.why)
+                continue
             try:
                 pr = g.view_pr(r.dir, r.pr_url)
             except GoError as err:
@@ -313,8 +367,17 @@ class Merge:
                 if later > 0:
                     inv.summary += "; the %d later PR(s) stay open" % later
                 return 1
-        landed = ["repos/%s %s (%s)" % (r.name, gostr.short(r.merge_commit), r.how) for r in details.repos]
-        inv.summary = "%d PR(s) landed on the default branch: %s" % (len(details.repos), ", ".join(landed))
+        ran = [r for r in details.repos if r.how != HOW_MANUAL]
+        manual = [r for r in details.repos if r.how == HOW_MANUAL]
+        bits: List[str] = []
+        if ran:
+            bits.append("%d PR(s) landed on the default branch: %s" % (
+                len(ran), ", ".join("repos/%s %s (%s)" % (r.name, gostr.short(r.merge_commit), r.how) for r in ran)))
+        if manual:
+            bits.append("%d repo(s) have no forge (no PR): %s — the branch stands at the verified head, the owner merges"
+                        " it by hand (no merge commit recorded)" % (
+                            len(manual), ", ".join("repos/%s %s" % (r.name, gostr.short(r.head)) for r in manual)))
+        inv.summary = "; ".join(bits)
         return 0
 
 
@@ -358,6 +421,7 @@ def run(inv: Invocation, a: argparse.Namespace, held: List[Details]) -> int:
                 raise GoError("%s is not the JSON expected: a repos entry is not an object" % a.publish)
             for k in ("name", "skipped_reason", "branch", "pr_url", "head"):
                 _field(e, k, str, a.publish)
+            _field(e, "no_forge", bool, a.publish)
     except GoError as err:
         return inv.usage("--publish: %s" % err)
     try:
@@ -383,7 +447,12 @@ def run(inv: Invocation, a: argparse.Namespace, held: List[Details]) -> int:
         name = gostr.trim_text(p.get("name") or "")
         if name == "":
             return inv.usage("--publish %s: repos[%d] has no name" % (a.publish, i))
-        if gostr.trim_text(p.get("skipped_reason") or "") != "":
+        # no_forge, or the same fact written by a skill that predates the flag: an
+        # entry with a branch and no pr_url was published without a forge, and its
+        # skipped_reason says why — it is judged with git, never dropped as a skip.
+        no_forge = p.get("no_forge") is True or (
+            gostr.trim_text(p.get("pr_url") or "") == "" and gostr.trim_text(p.get("branch") or "") != "")
+        if gostr.trim_text(p.get("skipped_reason") or "") != "" and not no_forge:
             continue
         branch = gostr.trim_text(p.get("branch") or "")
         if branch.startswith("refs/heads/"):
@@ -392,9 +461,10 @@ def run(inv: Invocation, a: argparse.Namespace, held: List[Details]) -> int:
                       published=gostr.trim_text(p.get("head") or ""), head=vheads.get(name, ""),
                       verified_base=vbases.get(name, ""),
                       dir=os.path.join(capsule, "repos", name))
+        r.no_forge = no_forge or r.pr_url == ""
 
-        if r.pr_url == "" or r.branch == "" or r.published == "":
-            return inv.usage("--publish %s: repos[%d] (%s) needs pr_url, branch and head (or a skipped_reason)" % (a.publish, i, name))
+        if r.branch == "" or r.published == "":
+            return inv.usage("--publish %s: repos[%d] (%s) needs branch and head (or a skipped_reason)" % (a.publish, i, name))
         if r.head == "":
             return inv.usage("--verified %s names no head for the published repo %s: the merge has nothing to match (the"
                              " verification must have run over it)" % (a.verified, name))

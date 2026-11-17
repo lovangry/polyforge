@@ -846,7 +846,11 @@ the lane's own identity.
   published PRs (`{repos: [{name, branch, pr_url, head, skipped_reason}]}`)
   at the heads the verification's result file carries, `gh pr merge
   --merge --match-head-commit <verified head>`, every repo judged before
-  anything merges: a PR MERGED already is taken by the landing rules
+  anything merges (a repo whose entry carries `no_forge: true` has no forge: it is judged
+  with git alone — origin's branch must stand at the verified head — and its
+  landing record carries `manual_merge_required: true` and no merge commit,
+  the owner merging that branch by hand): a PR MERGED already is taken by the
+  landing rules
   (its branch side is the verified head, `how:
   merged`; or, merged outside the lane, its merge commit is on the default
   branch and contains the verified head, `how: merged_elsewhere`); an open

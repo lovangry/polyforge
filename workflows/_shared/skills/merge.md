@@ -1,6 +1,6 @@
 ---
 name: merge
-description: Merge the published PRs at the verified heads with one pre-written script and register the landing record it writes for the work item's wrap (pf step hub wrap-attrs integration); a PR that moved, the default branch gained commits after verification when the verified result records a base, closed or was refused is this gate's FAIL back to sync.
+description: Merge the published PRs at the verified heads with one pre-written script and register the landing record it writes for the work item's wrap (pf step hub wrap-attrs integration); a PR that moved, the default branch gained commits after verification when the verified result records a base, closed or was refused is this gate's FAIL back to sync. A repo published with no forge (empty pr_url) is a manual landing — its branch must stand at the verified head and the record says the owner merges it by hand; nothing is merged for it.
 commands: [merge.py]
 ---
 # merge
@@ -22,7 +22,8 @@ is wrapped with. You never merge by hand, and you never write the landing record
 ## 开工前读什么、核对什么 — before you start: what you read and check
 
 1. **publish's hand-off against the verified heads.** Read publish's latest section and
-   `artifacts/publish.json`. For every entry of `repos[]` without a `skipped_reason`: its
+   `artifacts/publish.json`. For every entry of `repos[]` that is not a skip (`skipped_reason`
+   set and `no_forge` not true): its
    `head` equals that repo's entry in the `heads` of the verified result file (waived or
    not, those are the heads the verifying gate ran over). A mismatch is this gate's FAIL:
    hand off `fail`, the body naming "publish hand-off mismatch: <repo>: published <sha> but
@@ -36,6 +37,14 @@ is wrapped with. You never merge by hand, and you never write the landing record
    section, read that section: what the forge refused then.
 
 ## Procedure
+
+**A repo with no forge** — its `publish.json` entry carries `no_forge: true` and an empty
+`pr_url` (a local or intranet origin, or no `gh`) — is judged with git alone and **nothing is merged for it**: origin's
+`<branch>` must stand at the verified head, and when the verified result records a base, origin's
+default branch must still be at it; the script then records it `how: manual` (the landing record
+carries `manual_merge_required: true` and no merge commit). That is this step's done, not a
+refusal — the owner merges that branch by hand, and your hand-off says so per repo. A branch that
+moved, or a default branch that gained commits, is the same FAIL as a PR that moved.
 
 1. **Reuse or run.** An `artifacts/merge/result.json` whose `round` equals `$PF_ROUND` and
    whose `verdict` is `pass`, with `artifacts/merge/landing.json` beside it, is this round's:
@@ -64,11 +73,13 @@ is wrapped with. You never merge by hand, and you never write the landing record
 
 ## 交接要写什么 — what your hand-off carries
 
-- **Status.** `done` on exit 0 after the `wrap-attrs` line was accepted; `fail` on a
+- **Status.** `done` on exit 0 after the `wrap-attrs` line was accepted (a no-forge repo is
+  covered: its branch stands at the verified head and the merge is the owner's); `fail` on a
   hand-off or verified result mismatch or exit 1; `blocked` on exit 2 after the retries.
 - **回应上一轮** (a later round): what the forge refused in the earlier round, and whether
   it lands now.
-- **结论**: each repo's PR and merge commit, or why the merge was refused.
+- **结论**: each repo's PR and merge commit, or why the merge was refused; for a no-forge repo
+  the branch and its verified head, named as "not merged: the owner merges it by hand".
 - **发现的问题和风险**: on a fail, the result's `summary` and each refused repo's `why` —
   what `sync` must merge again.
 - **关键决定和理由**: any merge made elsewhere that the landing rule took (`accepted: true`):

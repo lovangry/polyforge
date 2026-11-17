@@ -539,7 +539,10 @@ rewind — and reads no content, and no agent merges by hand:
   commit on the default branch that contains the verified head
   (`merged_elsewhere`); an open one must target the default branch, head the
   published branch and stand on origin at the verified head — and merges each
-  open PR with `gh pr merge --merge --match-head-commit <verified head>`. A
+  open PR with `gh pr merge --merge --match-head-commit <verified head>`; a repo
+  published with no forge (empty `pr_url`) merges nothing — the branch must
+  stand at the verified head, the landing record carries `manual_merge_required`
+  and the owner merges it by hand. A
   default branch that moved after verification (origin's default branch no
   longer at the base the verification result records in `details.repos[].base`)
   is never merged into the branch here and never merged over: the merge

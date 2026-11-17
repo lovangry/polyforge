@@ -9,10 +9,15 @@ lanes, `develop` and `micro` (`workflows/<lane>/README.md`):
    `polyforge/polyforge-140`) — never main/master — at exactly the verified
    head (develop: its `verification`'s; micro: its `evidence` step's, the
    `run.py` re-run of fix's evidence plan), opens a PR for it or reuses the
-   open one, and never merges;
+   open one (with **no forge** — an origin that is not GitHub, or no `gh` — it
+   opens nothing and records the branch as published, leaving the merge to the
+   owner), and never merges;
 2. `merge` merges the PR with `gh pr merge --merge
    --match-head-commit <head>` under the repo's merge lock and lands the work
-   item — on both lanes through the merge agent step's `merge.py` (a PR it
+   item (with no forge it merges nothing: the branch must stand at the
+   verified head and the landing record carries `manual_merge_required`, so the
+   owner merges that branch by hand) — on both lanes through the merge agent
+   step's `merge.py` (a PR it
    cannot take — closed, moved, refused, a moved default branch that
    conflicts — FAILs back to `sync`; gh unreachable is `incomplete`,
    `pf resume` once fixed). It asks nobody.
