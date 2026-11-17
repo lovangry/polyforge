@@ -2,8 +2,10 @@ package test
 
 // proc_hygiene_test.go: process-leak discipline for the acceptance
 // harness (polyforge#168). Every aihub / `pf daemon` the harness starts
-// leads its own process group (Setpgid) and carries Pdeathsig=SIGKILL,
-// its teardown ends the whole group and waits, and fakepi agents (which
+// leads its own process group (Setpgid). Linux also carries
+// Pdeathsig=SIGKILL; Darwin uses the process-group and fakepi pid-watch
+// fallback described by setOwnGroupAttr. Its teardown ends the whole group
+// and waits, and fakepi agents (which
 // the daemon detaches into their own groups by design: they must outlive
 // a daemon crash) watch the test binary's pid and exit once it is gone.
 // On top of that, two sweeps over the binaries this run built:
@@ -39,15 +41,13 @@ import (
 // test binary (no cleanup runs then) does not linger for hours.
 const fakepiTestPIDEnv = "FAKEPI_TEST_PID"
 
-// ownGroup prepares cmd (before Start) to lead its own process group and
-// to be SIGKILLed by the kernel if the test binary dies first (a timeout
-// panic or a kill skips every t.Cleanup).
+// ownGroup prepares cmd (before Start) to lead its own process group.
+// Platform-specific process-death behavior is applied by setOwnGroupAttr.
 func ownGroup(cmd *exec.Cmd) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
-	cmd.SysProcAttr.Setpgid = true
-	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
+	setOwnGroupAttr(cmd.SysProcAttr)
 }
 
 // killGroup SIGKILLs the whole process group cmd leads (see ownGroup).
