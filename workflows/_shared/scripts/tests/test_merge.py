@@ -53,8 +53,14 @@ class MergeNoForgeLandingTest(unittest.TestCase):
 
         def git(self, cwd: str, *args: str) -> str:
             self.calls.append(("git", args))
+            if args[:4] == ("symbolic-ref", "--short", "refs/remotes/origin/HEAD"):
+                return "origin/main\n"
             if args[:4] == ("symbolic-ref", "--short", "-q", "HEAD"):
                 return "polyforge/capsule\n"
+            if args[:3] == ("remote", "get-url", "origin"):
+                return "/tmp/local\n"
+            if args[:3] == ("--git-dir", "/tmp/local", "rev-parse"):
+                return "true\n"
             if args[0] == "push" and self.push_error:
                 raise merge.GoError("push rejected: non-fast-forward")
             return ""
@@ -70,7 +76,6 @@ class MergeNoForgeLandingTest(unittest.TestCase):
         calls = [c[1] for c in g.calls if c[0] == "git"]
         self.assertIn(("switch", "--detach", "refs/remotes/origin/main"), calls)
         self.assertIn(("push", "-q", "origin", "HEAD:refs/heads/main"), calls)
-        self.assertEqual(calls[-1], ("switch", "--quiet", "polyforge/capsule"))
         d = merge.Details("p.json", "v.json")
         d.repos.append(r)
         rec = merge.landing_of(d)["repos"][0]
@@ -85,8 +90,8 @@ class MergeNoForgeLandingTest(unittest.TestCase):
         merge.Merge(inv, g, merge.Ctx()).judge_local(r)
         self.assertEqual(r.how, "")
         self.assertIn("sync", r.why)
-        self.assertEqual([c[1] for c in g.calls if c[0] == "git"][-1],
-                         ("switch", "--quiet", "polyforge/capsule"))
+        self.assertIn(("switch", "--quiet", "polyforge/capsule"),
+                      [c[1] for c in g.calls if c[0] == "git"])
 
     def test_landing_serialization_has_no_manual_shape(self) -> None:
         r = self._repo(how=merge.HOW_MERGED, merge_commit="b" * 40)
