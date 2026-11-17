@@ -2,7 +2,7 @@
 """回归测试：merge 在执行外部合入前必须重新确认默认分支版本。"""
 import importlib.util
 import os
-from typing import Callable, cast
+from typing import Any, Callable, cast
 import unittest
 
 MERGE_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "merge.py")
@@ -31,14 +31,14 @@ class MergeNoForgeManualLandingTest(unittest.TestCase):
     """本地/内网仓库（origin 不是 GitHub、无 gh）时 publish 不开 PR：merge 不得因此 FAIL，
     只校验 origin 分支停在 verified head，landing 记 manual_merge_required 且不造 merge commit。"""
 
-    def _repo(self, **kw):
+    def _repo(self, **kw: Any) -> Any:
         base = dict(name="lantay-client", pr_url="", branch="polyforge/cpm-for-legal-400",
                     head="a" * 40, published="a" * 40, dir="/tmp/no-such-capsule/repos/lantay-client")
         base.update(kw)
         return merge.MergeRepo(**base)
 
     def test_manual_repo_yields_manual_landing_record(self) -> None:
-        build = getattr(merge, "landing_of", None)
+        build = cast(Callable[[Any], dict[str, Any]], getattr(merge, "landing_of", None))
         self.assertIsNotNone(build)
         d = merge.Details("p.json", "v.json")
         r = self._repo()
