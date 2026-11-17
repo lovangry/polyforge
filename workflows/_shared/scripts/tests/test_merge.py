@@ -36,7 +36,7 @@ class MergeNoForgeLandingTest(unittest.TestCase):
 
     class FakeGit:
         def __init__(self, push_error: bool = False) -> None:
-            self.calls = []
+            self.calls: list[tuple[str, tuple[str, ...]]] = []
             self.push_error = push_error
 
         def fetch(self, cwd: str, *branches: str) -> None:
