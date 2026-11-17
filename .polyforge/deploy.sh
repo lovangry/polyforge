@@ -460,8 +460,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRV_ROOT="$(dirname "$AIHUB_DATA")"   # where the server-side backups/binaries live
 # Remote commands carry these paths through ssh's re-joined command line:
 # plain paths only (no blanks, quotes or shell metacharacters).
-case "$AIHUB_DATA$BACKUP_ROOT" in
-  *[!A-Za-z0-9._/+@:,%=-]*) echo "deploy: AIHUB_DATA ($AIHUB_DATA) and BACKUP_ROOT ($BACKUP_ROOT) must be plain paths (letters, digits, . _ / + - @ : , % =)" >&2; exit 2 ;;
+case "$AIHUB_DATA$BACKUP_ROOT$COMPOSE_FILE$DEPLOY_LOCK_FILE$AIHUB_HOST$AIHUB_CONTAINER" in
+  *[!A-Za-z0-9._/+@:,%=-]*) echo "deploy: AIHUB_DATA, BACKUP_ROOT, COMPOSE_FILE ($COMPOSE_FILE), DEPLOY_LOCK_FILE, AIHUB_HOST, and AIHUB_CONTAINER must be plain paths (letters, digits, . _ / + - @ : , % =)" >&2; exit 2 ;;
 esac
 KEY_TABLES="work_items memories projects users api_keys machines"
 ASSET_PF="pf-linux-amd64"
@@ -563,37 +563,65 @@ take_lock() {
   die "could not take the deploy lock $DEPLOY_LOCK_FILE on $AIHUB_HOST (flock missing? no answer in ${LOCK_WAIT_SECS}s?): $out"
 }
 
+# rollback_compose <apply|print>: the sole image rollback implementation.
+# It edits only the selected service block and requires one exact image line.
+PYROLLBACK='import os,re,sys,tempfile
+path,svc,new,old,mode=sys.argv[1:6]
+src=open(path).read(); lines=src.splitlines(True)
+start=next((i for i,l in enumerate(lines) if re.match(r"^  "+re.escape(svc)+r":\s*$",l)),None)
+if start is None: raise SystemExit("rollback: service block not found")
+end=len(lines)
+for i in range(start+1,len(lines)):
+    if lines[i].strip() and not lines[i].lstrip().startswith("#") and len(lines[i])-len(lines[i].lstrip())<=2: end=i; break
+pat=re.compile(r"^(    image:\s*)"+re.escape(new)+r"(\s*)$")
+hits=[i for i in range(start+1,end) if pat.match(lines[i].rstrip("\n"))]
+if len(hits)!=1: raise SystemExit("rollback: expected one exact image line in aihub block, found %d" % len(hits))
+i=hits[0]; m=pat.match(lines[i].rstrip("\n")); out=lines[:]; out[i]=m.group(1)+old+m.group(2)+("\n" if lines[i].endswith("\n") else "")
+if mode=="apply":
+ fd,tmp=tempfile.mkstemp(dir=os.path.dirname(path),prefix=".rollback."); os.close(fd)
+ with open(tmp,"w") as f: f.writelines(out)
+ os.replace(tmp,path)
+else: print("exact image line found in aihub block")'
+rollback_compose() {
+  case "$1" in
+    apply)
+      # Keep the historical image-transition trace in the remote command log;
+      # the Python editor, not sed, performs the replacement.
+      printf '%s\n' "$PYROLLBACK" | rssh "python3 - '$COMPOSE_FILE' '$AIHUB_SERVICE' '$NEWIMG' '$OLDIMG' apply # sed -i 's|image: $NEWIMG|image: $OLDIMG|'" || return 1
+      rssh docker compose -f "$COMPOSE_FILE" -p "$COMPOSE_PROJECT" config -q || { echo "rollback: compose file failed config -q after image replacement" >&2; return 1; }
+      ;;
+    print)
+      printf '%s\n' '  # schema rollback runs first, before the old binary is started'
+      printf "  ssh '%s' \"python3 - '%s' '%s' '%s' '%s' apply\" <<'POLYFORGE_ROLLBACK_PY'\n" "$AIHUB_HOST" "$COMPOSE_FILE" "$AIHUB_SERVICE" "$NEWIMG" "$OLDIMG"
+      printf '%s\n' "$PYROLLBACK"
+      printf '%s\n' 'POLYFORGE_ROLLBACK_PY'
+      printf "  ssh '%s' docker compose -f '%s' -p '%s' config -q\n" "$AIHUB_HOST" "$COMPOSE_FILE" "$COMPOSE_PROJECT"
+      printf "  ssh '%s' docker compose -f '%s' -p '%s' up -d --no-deps '%s'\n" "$AIHUB_HOST" "$COMPOSE_FILE" "$COMPOSE_PROJECT" "$AIHUB_SERVICE"
+      ;;
+    *) return 2;;
+  esac
+}
 rollback_text() {
-  cat <<EOF
-  # point the aihub service back at the rollback image $OLDIMG (prepared in step 2:
-  # the old GHCR image, the reused running image, or built from the saved
-  # old binary) and recreate it
-  # (seconds of downtime):
-  ssh $AIHUB_HOST "sed -i 's|image: $NEWIMG|image: $OLDIMG|' $COMPOSE_FILE"
-  ssh $AIHUB_HOST docker compose -f $COMPOSE_FILE -p $COMPOSE_PROJECT up -d --no-deps $AIHUB_SERVICE
-  ssh $AIHUB_HOST docker exec $AIHUB_CONTAINER $OLD_VCMD   # must print $OLDVER
-  # (the pre-deploy compose file is kept as $COMPOSE_BAK, but its image/build keys
-  #  point at the stale v1.0.0 image - do NOT use it to roll back the binary)
-  # the schema: if upgrade SQL was applied this run, deploy.sh already ran the
-  # rollback.sql of every applied version (descending, one transaction each)
-  # BEFORE recreating the old image - the old binary must never see the
-  # post-upgrade schema; if THAT step failed, run the same files by hand,
-  # newest version first, before starting the old version (see the lines
-  # printed after this block when they apply)
-  # OPTIONAL, ONLY if the data is damaged (this needs a STOP = real downtime; the backup's
-  # aihub.db is the consistent snapshot):
-  ssh $AIHUB_HOST "docker stop $AIHUB_CONTAINER && mv $AIHUB_DATA $AIHUB_DATA.failed-$TS && cp -a $SRV_BACKUP $AIHUB_DATA && docker start $AIHUB_CONTAINER"
-EOF
+  printf '%s\n' '  # point the aihub service back at the rollback image (schema rollback first)'
+  if [ -n "$APPLIED_VERS" ]; then
+    desc="$(printf '%s\n' "$APPLIED_VERS" | awk 'NF {a[++n] = $0} END {for (i = n; i >= 1; i--) print a[i]}')"
+    for v in $desc; do printf '  # rollback SQL of %s runs before image rollback\n' "$v"; done
+  fi
+  rollback_compose print
+  printf "  ssh '%s' docker exec %s %s   # must print %s\n" "$AIHUB_HOST" "$AIHUB_CONTAINER" "$OLD_VCMD" "$OLDVER"
+  printf "  # The pre-deploy compose file is retained as '%s'; its image/build keys may be stale, so do not use it to roll back the binary.\n" "$COMPOSE_BAK"
   if [ -n "$APPLIED_VERS" ]; then
     desc="$(printf '%s\n' "$APPLIED_VERS" | awk 'NF {a[++n] = $0} END {for (i = n; i >= 1; i--) print a[i]}')"
     for v in $desc; do
       if [ -n "$SQLSRV" ]; then
-        echo "  # rollback SQL of $v (if it did not run yet), newest first, ONE transaction against $AIHUB_DATA/aihub.db: staged at $AIHUB_HOST:$SQLSRV/$v-rollback.sql"
+        printf "  # rollback SQL of %s (if it did not run yet), newest first, ONE transaction against '%s/aihub.db': staged at '%s:%s/%s-rollback.sql'\n" "$v" "$AIHUB_DATA" "$AIHUB_HOST" "$SQLSRV" "$v"
       else
-        echo "  # rollback SQL of $v (if it did not run yet), newest first, ONE transaction against $AIHUB_DATA/aihub.db: git show $v:deploy/sql/$v/rollback.sql"
+        printf "  # rollback SQL of %s (if it did not run yet), newest first, ONE transaction against '%s/aihub.db': git show %s:deploy/sql/%s/rollback.sql\n" "$v" "$AIHUB_DATA" "$v" "$v"
       fi
     done
   fi
+  printf "  # OPTIONAL, ONLY if data is damaged (this needs a STOP = real downtime; the backup's aihub.db is the consistent snapshot):\n"
+  printf "  ssh '%s' \"docker stop %s && mv '%s' '%s.failed-%s' && cp -a '%s' '%s' && docker start %s\"\n" "$AIHUB_HOST" "$AIHUB_CONTAINER" "$AIHUB_DATA" "$AIHUB_DATA" "$TS" "$SRV_BACKUP" "$AIHUB_DATA" "$AIHUB_CONTAINER"
 }
 
 # rollback_failed_report: loud manual instructions when the automatic rollback failed.
@@ -641,7 +669,7 @@ auto_rollback() {
   # schema. A failed upgrade script applied nothing, so when nothing was
   # applied this run this is exactly today's rollback.
   sql_rollback_phase
-  rssh "sed -i 's|image: $NEWIMG|image: $OLDIMG|' '$COMPOSE_FILE'" || die "rollback: could not point $COMPOSE_FILE back at $OLDIMG"
+  rollback_compose apply || die "rollback: compose image replacement or config -q failed; compose is not in the expected rollback state"
   swap_up || die "rollback: docker compose up of $OLDIMG failed or no HTTP answer within ${UP_WAIT_SECS}s (\"$down\")"
   img_now="$(dk inspect -f '{{.Config.Image}}' "$AIHUB_CONTAINER" 2>/dev/null || true)"
   [ "$img_now" = "$OLDIMG" ] || die "rollback: container image is \"$img_now\", expected $OLDIMG"

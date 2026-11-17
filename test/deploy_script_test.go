@@ -593,7 +593,7 @@ func TestDeployBackupRetentionDryRunAndUnverified(t *testing.T) {
 // ssh's re-joined remote command line, so a blank or quote is a usage
 // error before any work.
 func TestDeployRefusesNonPlainPaths(t *testing.T) {
-	for _, kv := range []string{"AIHUB_DATA=/data/ai hub", "BACKUP_ROOT=/tmp/it's"} {
+	for _, kv := range []string{"AIHUB_DATA=/data/ai hub", "BACKUP_ROOT=/tmp/it's", "COMPOSE_FILE=/srv/ai hub/docker-compose.yml"} {
 		d := newReadyWorld(t)
 		d.env = append(d.env, kv)
 		out, err := d.run("", "v2.3.0", "--dry-run")
