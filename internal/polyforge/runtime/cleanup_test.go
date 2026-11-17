@@ -7,6 +7,7 @@ package runtime
 // PID-reuse guard, the env-marker sweep and the warn-only cwd scan.
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
