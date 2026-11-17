@@ -426,6 +426,10 @@ func TestW241GuideDriftCheckRedSide(t *testing.T) {
 	}
 }
 
+// w241TreeSkip names the entries of the repository root that are not part of the
+// tree under test: .git itself, and the polyforge workspace's own directories.
+var w241TreeSkip = map[string]bool{".git": true, "capsules": true, ".repo": true, "scratch": true, "artifacts": true, "node_modules": true}
+
 // copyTreeExceptGit copies the whole tree at src into dst, .git
 // excepted: the drift scenario's throwaway tree must be the whole source
 // tree (the drift check resolves the guide's links against the repo root
@@ -438,7 +442,12 @@ func copyTreeExceptGit(t *testing.T, dst, src string) {
 		t.Fatalf("read %s for the throwaway tree: %v", src, err)
 	}
 	for _, e := range entries {
-		if e.Name() == ".git" {
+		// .git is not part of the tree under test, and the polyforge
+		// workspace directories (a daemon's capsules, clones, scratch,
+		// build output) hold copies of this repository and no repository
+		// code: copying them into the throwaway tree copies every clone's
+		// .git with it (a socket there is not copyable at all).
+		if w241TreeSkip[e.Name()] {
 			continue
 		}
 		if e.IsDir() {
