@@ -41,8 +41,8 @@ record exactly what ran.
    on the same tree only with, per point, the evidence for that reading in 回应上一轮:
    `review` reads the commits the daemon stamps on your section and judges the reason. When
    the point is the owner's to settle, `pf step ask` instead.
-2. **Ask only in these cases** — run `pf step ask "<question>"`, then end your turn; the
-   answer is your next turn. Never at the end of your work; without one of these you do
+2. **Ask only in these cases** — run `pf step ask -` with the Simplified Chinese
+   question body via stdin with real newlines, then end your turn; the answer is your next turn. Never at the end of your work; without one of these you do
    not ask:
    (a) the code reveals something the ticket did not decide — a dead end, a ticket that
    contradicts the code or itself (a defect you cannot reproduce: the evidence tried and

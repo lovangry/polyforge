@@ -1,3 +1,4 @@
+// carries: workflows/_shared/batch_questions.md, workflows/_shared/skills/build.md, test/grill_question_table_contract_test.go, internal/polyforge/driver/w403_develop_prompts_test.go
 package test
 
 // grill_question_table_contract_test.go: text contract for how grill-family
@@ -41,6 +42,23 @@ func TestGrillStepsRequireQuestionTable(t *testing.T) {
 	} {
 		bundle, step, _ := strings.Cut(rel, "/")
 		s := grillStepDef(t, bundle, step)
+		flat := strings.Join(strings.Fields(s), " ")
+		for _, want := range []string{
+			"Write the entire question body in Simplified Chinese",
+			"Keep the four-column header, `预期效果` and `注意事项` in Chinese exactly as written; do not translate them",
+			"run `pf step ask -`",
+			"via stdin with real newlines",
+			"Never substitute literal `\\n` sequences for real newlines",
+		} {
+			if !strings.Contains(flat, want) {
+				t.Errorf("%s lacks owner-question requirement %q", rel, want)
+			}
+		}
+		for _, stale := range []string{"single argument", "one argument", "pf step ask \"<question>\""} {
+			if strings.Contains(flat, stale) {
+				t.Errorf("%s still teaches positional question transport %q", rel, stale)
+			}
+		}
 		if !strings.Contains(s, grillTableHeader) {
 			t.Errorf("%s does not require the %q question table", rel, grillTableHeader)
 		}

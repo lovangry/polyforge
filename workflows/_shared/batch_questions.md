@@ -10,9 +10,14 @@ literal `|` inside a cell as `\|`. Context or evidence goes in prose above the
 table. After the table ALWAYS (even for a one-row batch; each may be one line)
 add `预期效果` (what happens once the batch is answered) and then `注意事项`
 (inter-row dependencies or conflicts, relation to prior rulings, which rows are
-rubber stamps answerable in bulk). The table rides in one question, and the
-owner's combined answer comes back as one text. To ask: run `pf step ask` with the
-whole question - the prose, the table, 预期效果 and 注意事项 - as its one argument,
-then end your turn. The owner's reply is your next turn - continue from it; never
+rubber stamps answerable in bulk). Write the entire question body in Simplified
+Chinese, regardless of the step's working language. Keep the four-column header,
+`预期效果` and `注意事项` in Chinese exactly as written; do not translate them.
+The table rides in one question, and the owner's combined answer comes back as
+one text. To ask: run `pf step ask -` and pass the whole question - the prose,
+the table, 预期效果 and 注意事项 - via stdin with real newlines (for example,
+a quoted heredoc). Never substitute literal `\n` sequences for real newlines.
+Keep the body within the existing 8 KiB limit; shorten the prose and put details
+in an artifact if needed. Then end your turn. The owner's reply is your next turn - continue from it; never
 fabricate or guess an answer you did not receive. A reply that cancels the work
 is yours to read: hand off `--status cancel --per-owner <its at>`.
