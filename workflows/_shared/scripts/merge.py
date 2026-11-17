@@ -13,10 +13,8 @@ Usage (from the capsule root, or with --capsule)::
 pr_url, head, skipped_reason}]}`` (a repo with a skipped_reason has nothing
 to merge). An entry with **``no_forge: true``** (or a branch with no pr_url) is
 a repo published with no forge (a local or intranet origin, or no ``gh``): it is
-judged with git alone — origin's branch must stand at the verified head —
-recorded ``how: manual``, and **nothing is merged for it** (the landing record
-says ``how: merged + merge_commit``; the owner merges that branch by hand). No merge
-commit is invented. ``--verified`` is the verifying gate's result file (schema
+landed in the origin-side baseline worktree and recorded with ``how: merged`` and
+its merge commit. A local origin is advanced without pushing to a remote service. ``--verified`` is the verifying gate's result file (schema
 pf-step-result/1): its ``heads`` are the heads the merge matches, one per
 published repo — a published repo it names no head for is exit 2. Every
 repo is judged before anything merges, in name order: its PR read (``gh pr
@@ -300,6 +298,12 @@ class Merge:
             try:
                 g.git(target, *merge_args)
             except GoError as first:
+                if "would be overwritten" not in str(first).lower() and "local changes" not in str(first).lower():
+                    try:
+                        g.git(target, "merge", "--abort")
+                    except GoError:
+                        pass
+                    raise first
                 try:
                     g.git(target, "merge", "--abort")
                 except GoError:

@@ -43,7 +43,7 @@ is wrapped with. You never merge by hand, and you never write the landing record
 `<branch>` must stand at the verified head, and when the verified result records a base, origin's
 default branch must still be at it; the script then records it `how: manual` (the landing record
 carries `how: merged + merge_commit` and no merge commit). That is this step's done, not a
-refusal — the owner merges that branch by hand, and your hand-off says so per repo. A branch that
+refusal — the local merge is recorded with its merge commit, and your hand-off names the local target and whether origin was pushed. A branch that
 moved, or a default branch that gained commits, is the same FAIL as a PR that moved.
 
 1. **Reuse or run.** An `artifacts/merge/result.json` whose `round` equals `$PF_ROUND` and
