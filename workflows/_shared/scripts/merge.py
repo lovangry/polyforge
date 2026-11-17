@@ -55,8 +55,7 @@ the verified head (``how: merged``) or, for a merge made elsewhere
 with ``accepted: true``. It carries no waiver. On any other exit a stale
 landing file is removed.
 
-Exit 0: every published PR is landed, and every no-forge repo is a manual
-landing (its branch stands at the verified head; the owner merges it). Exit 1: a
+Exit 0: every published PR and no-forge repo is landed with a merge commit. Exit 1: a
 PR moved (its head is not the verified one), is closed or retargeted, was merged
 elsewhere off the verified head, or the forge refused the merge. Exit 2: not judged — an
 unreadable publish or verified file, a missing verified head, a task repo
@@ -86,10 +85,6 @@ NAME = "merge.py"
 
 HOW_MERGED = "merged"
 HOW_MERGED_ELSEWHERE = "merged_elsewhere"
-# how: a repo published without a forge (no PR: the origin is not GitHub, or
-# gh is not there). The branch standing at the verified head is all this step
-# can prove; the merge itself is the owner's, and no merge commit is invented.
-HOW_MANUAL = "manual"
 
 
 @dataclass
@@ -179,6 +174,8 @@ def landing_of(d: Details) -> Dict[str, Any]:
     repos = []
     for r in d.repos:
         e: Dict[str, Any] = {"repo": r.name, "pr": r.pr_url, "head": r.head}
+        if r.how:
+            e["how"] = r.how
         if r.how == HOW_MERGED_ELSEWHERE:
             e["head"] = gostr.or_text(r.branch_side, r.head)
         if r.head:
@@ -187,10 +184,6 @@ def landing_of(d: Details) -> Dict[str, Any]:
             e["merge_commit"] = r.merge_commit
         if r.how == HOW_MERGED_ELSEWHERE:
             e["accepted"] = True
-        if r.how == HOW_MANUAL:
-            # no forge: nothing was merged here, and the record says so instead
-            # of inventing a merge commit — the owner merges the branch by hand.
-            e["manual_merge_required"] = True
         repos.append(e)
     out: Dict[str, Any] = {"state": "landed", "repos": repos}
     if d.merge_commits:
@@ -243,10 +236,7 @@ class Merge:
         self.inv.say("repos/%s: landed as %s (%s)" % (r.name, gostr.short(merge), r.how))
 
     def judge_local(self, r: MergeRepo) -> None:
-        """A repo published without a forge (no PR): the branch on origin must
-        stand at the verified head — that is all this step can prove with git
-        alone. The merge itself stays the owner's: r.how becomes ``manual`` and
-        no merge commit is invented."""
+        """Merge a no-forge publication into origin's default branch locally."""
         g = self.g
         try:
             g.fetch(r.dir, r.base, r.branch)
@@ -266,11 +256,43 @@ class Merge:
             current_base = g.rev(r.dir, "refs/remotes/origin/" + r.base)
             moved = default_branch_update_reason(r.verified_base, current_base)
             if moved:
-                r.why = moved + " (no forge: no PR exists to refuse it; sync, verify and publish again)"
+                r.why = moved + " (no forge: sync, verify and publish again)"
                 return
-        r.how = HOW_MANUAL
-        self.inv.say("repos/%s: no forge — %s stands at the verified head %s; the owner merges it by hand"
-                     % (r.name, r.branch, gostr.short(r.head)))
+        original = ""
+        merging = False
+        try:
+            original = g.git(r.dir, "symbolic-ref", "--short", "-q", "HEAD").strip()
+            if not original:
+                raise GoError("the capsule is not on a branch")
+            g.git(r.dir, "switch", "--detach", "refs/remotes/origin/" + r.base)
+            merging = True
+            g.git(r.dir, "-c", "user.name=polyforge", "-c", "user.email=polyforge@local",
+                  "merge", "--no-ff", "--no-edit", r.head)
+            merge_commit = g.rev(r.dir, "HEAD")
+            g.git(r.dir, "push", "-q", "origin", "HEAD:refs/heads/" + r.base)
+            r.merge_commit, r.how, r.by_this_run = merge_commit, HOW_MERGED, True
+            self.inv.say("repos/%s: no forge — merged %s into %s" %
+                         (r.name, gostr.short(r.head), r.base))
+        except GoError as err:
+            if merging:
+                try:
+                    g.git(r.dir, "merge", "--abort")
+                except GoError:
+                    pass
+            text = str(err)
+            if "push" in text:
+                r.why = "origin/%s moved while this step ran (%s): sync, verify and publish again" % (r.base, gostr.short(r.tip))
+            else:
+                r.why = "merging %s into %s failed: %s; sync, verify and publish again" % (r.head, r.base, text)
+        finally:
+            if original:
+                try:
+                    g.git(r.dir, "switch", "--quiet", original)
+                except GoError:
+                    try:
+                        g.git(r.dir, "checkout", "-q", original)
+                    except GoError:
+                        pass
 
     def judge(self, details: Details) -> int:
         g, inv = self.g, self.inv
@@ -367,17 +389,9 @@ class Merge:
                 if later > 0:
                     inv.summary += "; the %d later PR(s) stay open" % later
                 return 1
-        ran = [r for r in details.repos if r.how != HOW_MANUAL]
-        manual = [r for r in details.repos if r.how == HOW_MANUAL]
-        bits: List[str] = []
-        if ran:
-            bits.append("%d PR(s) landed on the default branch: %s" % (
-                len(ran), ", ".join("repos/%s %s (%s)" % (r.name, gostr.short(r.merge_commit), r.how) for r in ran)))
-        if manual:
-            bits.append("%d repo(s) have no forge (no PR): %s — the branch stands at the verified head, the owner merges"
-                        " it by hand (no merge commit recorded)" % (
-                            len(manual), ", ".join("repos/%s %s" % (r.name, gostr.short(r.head)) for r in manual)))
-        inv.summary = "; ".join(bits)
+        ran = details.repos
+        inv.summary = "%d repo(s) landed on the default branch: %s" % (
+            len(ran), ", ".join("repos/%s %s (%s)" % (r.name, gostr.short(r.merge_commit), r.how) for r in ran))
         return 0
 
 
