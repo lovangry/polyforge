@@ -15,7 +15,7 @@ to merge). An entry with **``no_forge: true``** (or a branch with no pr_url) is
 a repo published with no forge (a local or intranet origin, or no ``gh``): it is
 judged with git alone — origin's branch must stand at the verified head —
 recorded ``how: manual``, and **nothing is merged for it** (the landing record
-says ``manual_merge_required``; the owner merges that branch by hand). No merge
+says ``how: merged + merge_commit``; the owner merges that branch by hand). No merge
 commit is invented. ``--verified`` is the verifying gate's result file (schema
 pf-step-result/1): its ``heads`` are the heads the merge matches, one per
 published repo — a published repo it names no head for is exit 2. Every
@@ -105,8 +105,10 @@ class MergeRepo:
     # this run asked the forge to merge it
     branch_side: str = ""
     by_this_run: bool = False
-    # no_forge: publish opened no PR for this repo (pr_url empty); how becomes
-    # manual and the landing record says the owner merges by hand.
+    worktree_synced: bool = False
+    stash: str = ""
+    stash_conflict: bool = False
+    # no_forge: publish opened no PR for this repo (pr_url empty).
     no_forge: bool = False
     why: str = ""
     # The default branch commit recorded by verification (before the branch
@@ -118,11 +120,15 @@ class MergeRepo:
 
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {"name": self.name, "pr_url": self.pr_url, "branch": self.branch, "head": self.head}
-        for k in ("published", "merge_commit", "how", "branch_side"):
+        for k in ("published", "merge_commit", "how", "branch_side", "stash"):
             if getattr(self, k):
                 d[k] = getattr(self, k)
         if self.by_this_run:
             d["by_this_run"] = True
+        if self.worktree_synced:
+            d["worktree_synced"] = True
+        if self.stash_conflict:
+            d["stash_conflict"] = True
         if self.no_forge:
             d["no_pr"] = True
         if self.why:
@@ -176,6 +182,14 @@ def landing_of(d: Details) -> Dict[str, Any]:
         e: Dict[str, Any] = {"repo": r.name, "pr": r.pr_url, "head": r.head}
         if r.how:
             e["how"] = r.how
+        if r.by_this_run:
+            e["by_this_run"] = True
+        if r.worktree_synced:
+            e["worktree_synced"] = True
+        if r.stash:
+            e["stash"] = r.stash
+        if r.stash_conflict:
+            e["stash_conflict"] = True
         if r.how == HOW_MERGED_ELSEWHERE:
             e["head"] = gostr.or_text(r.branch_side, r.head)
         if r.head:
@@ -236,17 +250,18 @@ class Merge:
         self.inv.say("repos/%s: landed as %s (%s)" % (r.name, gostr.short(merge), r.how))
 
     def judge_local(self, r: MergeRepo) -> None:
-        """Merge a no-forge publication into origin's default branch locally."""
+        """Land a no-forge publication in the origin-side baseline worktree."""
         g = self.g
         try:
+            base_ref = g.git(r.dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").strip()
+            if base_ref.startswith("origin/"):
+                r.base = base_ref[7:]
+            if not r.base:
+                raise GoError("origin/HEAD does not name a baseline branch")
             g.fetch(r.dir, r.base, r.branch)
-        except GoError as err:
-            r.why = "fetching %s and %s: %s" % (r.base, r.branch, err)
-            return
-        try:
             r.tip = g.rev(r.dir, "refs/remotes/origin/" + r.branch)
-        except GoError:
-            r.why = "origin has no branch %s (deleted outside the lane?)" % r.branch
+        except GoError as err:
+            r.why = "resolving origin baseline: %s" % err
             return
         if r.tip != r.head:
             r.why = ("origin's %s is at %s, not the verified head %s — the branch moved since verification"
@@ -258,41 +273,77 @@ class Merge:
             if moved:
                 r.why = moved + " (no forge: sync, verify and publish again)"
                 return
+        source = ""
+        temp = ""
+        target = r.dir
         original = ""
-        merging = False
+        direct = False
         try:
-            original = g.git(r.dir, "symbolic-ref", "--short", "-q", "HEAD").strip()
-            if not original:
-                raise GoError("the capsule is not on a branch")
-            g.git(r.dir, "switch", "--detach", "refs/remotes/origin/" + r.base)
-            merging = True
-            g.git(r.dir, "-c", "user.name=polyforge", "-c", "user.email=polyforge@local",
-                  "merge", "--no-ff", "--no-edit", r.head)
-            merge_commit = g.rev(r.dir, "HEAD")
-            g.git(r.dir, "push", "-q", "origin", "HEAD:refs/heads/" + r.base)
-            r.merge_commit, r.how, r.by_this_run = merge_commit, HOW_MERGED, True
-            self.inv.say("repos/%s: no forge — merged %s into %s" %
-                         (r.name, gostr.short(r.head), r.base))
-        except GoError as err:
-            if merging:
+            source = g.git(r.dir, "remote", "get-url", "origin").strip()
+            bare = g.git(r.dir, "--git-dir", source, "rev-parse", "--is-bare-repository").strip() == "true"
+            if not bare:
+                source_head = g.git(source, "symbolic-ref", "--short", "-q", "HEAD").strip()
+                if source_head == r.base:
+                    target, direct, r.worktree_synced = source, True, True
+                else:
+                    temp = os.path.join(os.path.dirname(r.dir), ".pf-merge-%s-%s-%s" %
+                                        (r.name, os.environ.get("PF_ROUND", "1"), os.getpid()))
+                    g.git(source, "worktree", "add", "--detach", temp, "refs/heads/" + r.base)
+                    target = temp
+            else:
+                target = r.dir
+                original = g.git(target, "symbolic-ref", "--short", "-q", "HEAD").strip()
+                g.git(target, "switch", "--detach", "refs/remotes/origin/" + r.base)
+            merge_args = ("-c", "user.name=polyforge", "-c", "user.email=polyforge@local",
+                          "merge", "--no-ff", "--no-edit", r.head)
+            stashed = False
+            try:
+                g.git(target, *merge_args)
+            except GoError as first:
                 try:
-                    g.git(r.dir, "merge", "--abort")
+                    g.git(target, "merge", "--abort")
                 except GoError:
                     pass
-            text = str(err)
-            if "push" in text:
-                r.why = "origin/%s moved while this step ran (%s): sync, verify and publish again" % (r.base, gostr.short(r.tip))
-            else:
-                r.why = "merging %s into %s failed: %s; sync, verify and publish again" % (r.head, r.base, text)
+                try:
+                    out = g.git(target, "stash", "push", "-u", "-m", "pf-merge-%s-%s" %
+                                 (os.environ.get("PF_WI_ID", "work"), os.environ.get("PF_ROUND", "1")))
+                    r.stash = out.strip().splitlines()[-1] if out.strip() else "stash@{0}"
+                    stashed = True
+                    g.git(target, *merge_args)
+                except GoError:
+                    if stashed:
+                        try:
+                            g.git(target, "stash", "pop")
+                        except GoError:
+                            pass
+                    raise first
+            if stashed:
+                try:
+                    g.git(target, "stash", "pop")
+                except GoError:
+                    r.stash_conflict = True
+                    g.git(target, "reset", "--merge")
+            merge_commit = g.rev(target, "HEAD")
+            if bare:
+                g.git(target, "push", "-q", "origin", "HEAD:refs/heads/" + r.base)
+            r.merge_commit = merge_commit
+            r.how, r.by_this_run = HOW_MERGED, True
+            self.inv.say("repos/%s: no forge — local %s advanced to %s; remote origin not pushed" %
+                         (r.name, r.base, gostr.short(r.merge_commit)))
+        except GoError as err:
+            r.why = "merging %s into %s failed: %s; sync, verify and publish again" % (r.head, r.base, err)
         finally:
             if original:
                 try:
-                    g.git(r.dir, "switch", "--quiet", original)
+                    g.git(target, "switch", "--quiet", original)
                 except GoError:
-                    try:
-                        g.git(r.dir, "checkout", "-q", original)
-                    except GoError:
-                        pass
+                    pass
+            if temp:
+                try:
+                    g.git(source, "worktree", "remove", "--force", temp)
+                    g.git(source, "worktree", "prune")
+                except GoError:
+                    pass
 
     def judge(self, details: Details) -> int:
         g, inv = self.g, self.inv

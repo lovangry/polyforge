@@ -124,7 +124,7 @@ and `artifacts/merge/landing.json`. The daemon orchestrates; it judges no conten
   merges each PR with `gh pr merge --merge --match-head-commit <verified head>` under the
   daemon's merge lock (one per repository, every repo of the item locked in one order); a repo
   published with no forge (an empty `pr_url`) merges nothing — its branch must stand at the
-  verified head and the landing record carries `manual_merge_required`, the owner merging it by
+  verified head and the landing record carries `how: merged + merge_commit`, the owner merging it by
   hand. A
   PR that moved, the default branch gained commits after verification, closed, was retargeted, merged elsewhere off the verified head or refused
   by the forge FAILs back to `sync`; sync merges the new default branch and verification runs again. On a pass the command writes the landing record

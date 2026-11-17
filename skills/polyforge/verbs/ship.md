@@ -15,7 +15,7 @@ lanes, `develop` and `micro` (`workflows/<lane>/README.md`):
 2. `merge` merges the PR with `gh pr merge --merge
    --match-head-commit <head>` under the repo's merge lock and lands the work
    item (with no forge it merges nothing: the branch must stand at the
-   verified head and the landing record carries `manual_merge_required`, so the
+   verified head and the landing record carries `how: merged and merge_commit`, so the
    owner merges that branch by hand) — on both lanes through the merge agent
    step's `merge.py` (a PR it
    cannot take — closed, moved, refused, a moved default branch that

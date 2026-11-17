@@ -195,3 +195,7 @@ change, so it was not already red; review classes that `test_weakened`).
 Everything else is unchanged: an ordinary unit keeps its test commit and
 the four requirements of the test-first shape, and verification still
 runs every recorded run green on the final tree.
+
+## v0.2.1, no-forge repositories are merged locally
+
+The merge step now creates and pushes a no-ff merge commit for repositories without a forge, recording `how: merged` and `merge_commit` in the landing record.
