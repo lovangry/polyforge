@@ -67,7 +67,11 @@ var w495Patterns = []*regexp.Regexp{
 
 var w495CodeExt = map[string]bool{".go": true, ".ts": true, ".tsx": true, ".js": true, ".mjs": true, ".py": true, ".sh": true}
 
-var w495SkipDir = map[string]bool{".git": true, "node_modules": true, ".next": true, "dist": true, "test-results": true, "playwright-report": true}
+var w495SkipDir = map[string]bool{".git": true, "node_modules": true, ".next": true, "dist": true, "test-results": true, "playwright-report": true,
+	// polyforge workspace directories: a daemon's capsules, clones and scratch
+	// hold copies of this repository, not this repository's code, and a
+	// workspace that has run work items has all three.
+	"capsules": true, ".repo": true, "scratch": true}
 
 func w495RepoRoot(t *testing.T) string {
 	t.Helper()

@@ -1833,7 +1833,13 @@ class Engine:
             surfaces = " --go"
         npm_dirs: Set[str] = set()
         for dirpath, dirnames, filenames in os.walk(self.root):
-            dirnames[:] = [d for d in dirnames if d not in ("node_modules", ".git")]
+            # .git is not a surface, node_modules is not one by design,
+            # and the polyforge workspace directories (a daemon's capsules,
+            # clones, scratch) hold copies of this repository rather than
+            # its own tree: walking them reports every clone's locks as a
+            # surface of this repository.
+            dirnames[:] = [d for d in dirnames
+                           if d not in ("node_modules", ".git", "capsules", ".repo", "scratch")]
             for fn in filenames:
                 if fn in ("package-lock.json", "npm-shrinkwrap.json"):
                     npm_dirs.add(rel_dir(self.root, dirpath))
