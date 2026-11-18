@@ -1,0 +1,120 @@
+# carries: workflows/_shared/scripts/merge.py
+"""Real-Git landing contracts: refs, owner bytes, recovery and landing output."""
+import os
+from typing import Any
+
+from .gitworld import GitCase, Repo, git, write
+from .test_merge import merge
+
+
+class LocalLandingTest(GitCase):
+    def fixture(self, bare: bool = False, two_worktrees: bool = False) -> Any:
+        owner = Repo(self.new_dir("owner"), {"edit": "one\n" + "middle\n" * 30 + "last\n", "other": "keep\n"})
+        if two_worktrees:
+            owner.git("branch", "-m", "master")
+            owner.git("worktree", "add", "-b", "feat-knowledge", os.path.join(self.tmp, "feature"))
+            base = "feat-knowledge"
+        else:
+            base = "main"
+        source = owner.dir
+        if bare:
+            source = os.path.join(self.tmp, "bare.git")
+            git(self.tmp, "clone", "--bare", owner.dir, source)
+        capsule = os.path.join(self.tmp, "capsule")
+        git(self.tmp, "clone", source, capsule)
+        git(capsule, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/" + base)
+        git(capsule, "switch", "-c", "topic", "origin/" + base)
+        self.owner, self.capsule, self.source, self.base = owner, capsule, source, base
+        self.before = git(source, "rev-parse", "refs/heads/" + base)
+        return owner
+
+    def publish(self, files: dict[str, str]) -> Any:
+        write(self.capsule, files)
+        git(self.capsule, "add", "-A")
+        git(self.capsule, "commit", "-qm", "verified")
+        head = git(self.capsule, "rev-parse", "HEAD")
+        git(self.capsule, "push", "origin", "HEAD:refs/heads/topic")
+        return merge.MergeRepo(name="app", pr_url="", branch="topic", head=head,
+                               published=head, dir=self.capsule, no_forge=True,
+                               verified_base=self.before)
+
+    def land(self, r: Any, expected: int = 0) -> dict[str, Any]:
+        inv = type("I", (), {"say": lambda self, text: None})()
+        ctx = merge.Ctx()
+        details = merge.Details("", "")
+        details.repos.append(r)
+        result = merge.Merge(inv, merge.Git(ctx), ctx).judge(details)
+        self.assertEqual(result, expected, r.why)
+        if expected == 0:
+            self.assertEqual(r.how, "merged")
+            self.assertEqual(git(self.source, "rev-parse", "refs/heads/" + self.base), r.merge_commit)
+            self.assertEqual(git(self.source, "rev-parse", r.merge_commit + "^2"), r.head)
+        return merge.landing_of(details)["repos"][0]
+
+    def test_clean(self) -> None:
+        self.fixture()
+        r = self.publish({"new": "verified\n"})
+        rec = self.land(r)
+        self.assertTrue(rec["worktree_synced"])
+        self.assertEqual(git(self.owner.dir, "status", "--porcelain"), "")
+        self.assertEqual(git(self.capsule, "branch", "--show-current"), "topic")
+
+    def test_dirty_nonoverlap(self) -> None:
+        owner = self.fixture()
+        r = self.publish({"new": "verified\n"})
+        write(owner.dir, {"other": "owner bytes\n", "untracked": "precious\n"})
+        self.land(r)
+        self.assertEqual(git(owner.dir, "diff", "--", "other").splitlines()[-1], "+owner bytes")
+        with open(os.path.join(owner.dir, "untracked")) as f:
+            self.assertEqual(f.read(), "precious\n")
+        self.assertEqual(git(owner.dir, "stash", "list"), "")
+
+    def test_dirty_overlap_stash_pop(self) -> None:
+        owner = self.fixture()
+        r = self.publish({"edit": "verified\n" + "middle\n" * 30 + "last\n"})
+        write(owner.dir, {"edit": "one\n" + "middle\n" * 30 + "owner\n", "untracked": "precious\n"})
+        self.land(r)
+        with open(os.path.join(owner.dir, "edit")) as f:
+            self.assertEqual(f.read(), "verified\n" + "middle\n" * 30 + "owner\n")
+        self.assertEqual(git(owner.dir, "stash", "list"), "")
+        self.assertTrue(r.stash)
+
+    def test_stash_pop_conflict(self) -> None:
+        owner = self.fixture()
+        r = self.publish({"edit": "verified\n"})
+        write(owner.dir, {"edit": "owner\n", "untracked": "precious\n"})
+        rec = self.land(r)
+        self.assertTrue(rec["stash_conflict"])
+        self.assertEqual(git(owner.dir, "rev-parse", rec["stash"]), git(owner.dir, "rev-parse", "refs/stash"))
+        self.assertEqual(git(owner.dir, "show", rec["stash"] + ":edit"), "owner")
+        self.assertEqual(git(owner.dir, "ls-files", "-u"), "")
+        with open(os.path.join(owner.dir, "edit")) as f:
+            self.assertNotIn("<<<<<<<", f.read())
+
+    def test_content_conflict_aborts(self) -> None:
+        owner = self.fixture()
+        owner.commit("base moved before verification", {"edit": "base change\n"})
+        r = self.publish({"edit": "topic change\n"})
+        r.verified_base = owner.head()
+        before = owner.head()
+        self.land(r, expected=1)
+        self.assertEqual(owner.head(), before)
+        self.assertEqual(git(owner.dir, "status", "--porcelain"), "")
+        self.assertIn("sync", r.why)
+
+    def test_two_worktrees(self) -> None:
+        owner = self.fixture(two_worktrees=True)
+        master = owner.head()
+        r = self.publish({"new": "verified\n"})
+        rec = self.land(r)
+        self.assertFalse(rec["worktree_synced"])
+        self.assertEqual(owner.head(), master)
+        self.assertEqual(owner.git("branch", "--show-current"), "master")
+        self.assertEqual(git(os.path.join(self.tmp, "feature"), "branch", "--show-current"), "feat-knowledge")
+        self.assertEqual(len(owner.git("worktree", "list", "--porcelain").split("worktree ")) - 1, 2)
+
+    def test_bare_origin(self) -> None:
+        self.fixture(bare=True)
+        r = self.publish({"new": "verified\n"})
+        self.land(r)
+        self.assertEqual(git(self.capsule, "branch", "--show-current"), "topic")
