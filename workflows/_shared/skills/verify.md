@@ -44,7 +44,7 @@ call, and a pass is the command's, not yours.
    `units.json sha256:` line of `artifacts/verify/report.md`) and the change analysis is
    unchanged (its `change-analysis sha256:` line of that report) — nothing changed, so it
    would fail the same way: `pf step ask` the owner with that round's red checks (run again /
-   accept the red / cancel). The explanation 使用简体中文, then end your turn.
+   accept the red / cancel). Write all owner-facing explanatory prose in Simplified Chinese, then end your turn.
 2. **Run this line as written** — no argument added or removed, no Bash timeout:
    `"$PF_PYTHON" "$PF_SHARED_DIR/scripts/verify.py" --tier auto --unit-runs artifacts/build/units.json --analysis artifacts/build/change-analysis.json --json --out artifacts/verify/result.json`
    (a repo carrying `.polyforge/Dockerfile.verify` runs its bar in its verification
@@ -75,7 +75,7 @@ call, and a pass is the command's, not yours.
      as already pinning this change: the change's, on build's own word), a file the change
      touched (`git -C repos/<name> diff --stat origin/<default>...HEAD`), a suite whose
      check names what the change touched — is the change's: hand off `fail` (the lane goes
-     back to `build`). A red you cannot place: `pf step ask` the owner with the red checks, the log tails and your reading, then end your turn. The explanation 使用简体中文; on the
+     back to `build`). A red you cannot place: `pf step ask` the owner with the red checks, the log tails and your reading, then end your turn. Write all owner-facing explanatory prose in Simplified Chinese; on the
      reply — run again: 2; the owner wants it fixed: `fail --per-owner <the reply's at>`;
      the owner accepts the red: `waive --per-owner <the reply's at>`. Keep result paths,
      commit SHAs and the exact structured commands unchanged.

@@ -39,7 +39,7 @@ definition's judgment.
 ## Owner-facing reports
 
 When a later-round report or an owner decision request is sent with `pf step ask`, write
-说明性正文使用简体中文。Keep artifact paths, commit SHAs, verdict
+Write all owner-facing explanatory prose in Simplified Chinese. Keep artifact paths, commit SHAs, verdict
 values and the exact structured commands unchanged.
 
 ## Procedure
