@@ -290,7 +290,7 @@ class Merge:
                     target, direct, r.worktree_synced = source, True, True
                 else:
                     temp = os.path.join(os.path.dirname(r.dir), ".pf-merge-%s-%s-%s" %
-                                        (os.environ.get("PF_WORK_ITEM", r.name), os.environ.get("PF_ROUND", "1"), os.getpid()))
+                                        (os.environ.get("PF_WI_ID", r.name), os.environ.get("PF_ROUND", "1"), os.getpid()))
                     g.git(source, "worktree", "add", "--detach", temp, "refs/heads/" + r.base)
                     target = temp
             else:

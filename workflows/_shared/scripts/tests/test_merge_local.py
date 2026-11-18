@@ -4,7 +4,7 @@ import os
 import json
 import subprocess
 import sys
-from typing import Any
+from typing import Any, cast
 
 from .gitworld import GitCase, Repo, git, write
 from .test_merge import merge
@@ -52,7 +52,7 @@ class LocalLandingTest(GitCase):
             self.assertEqual(r.how, "merged")
             self.assertEqual(git(self.source, "rev-parse", "refs/heads/" + self.base), r.merge_commit)
             self.assertEqual(git(self.source, "rev-parse", r.merge_commit + "^2"), r.head)
-        return merge.landing_of(details)["repos"][0]
+        return cast(dict[str, Any], merge.landing_of(details)["repos"][0])
 
     def test_clean(self) -> None:
         self.fixture()
@@ -128,7 +128,7 @@ class LocalLandingTest(GitCase):
         out = os.path.join(self.tmp, "result.json")
         landing = os.path.join(self.tmp, "landing.json")
         # No origin exists: even attempting to resolve or fetch it would fail.
-        proc = subprocess.run([sys.executable, merge.MERGE_PATH if hasattr(merge, "MERGE_PATH") else merge.__file__,
+        proc = subprocess.run([sys.executable, cast(str, merge.__file__),
                                "--capsule", self.tmp, "--publish", os.path.join(self.tmp, "publish.json"),
                                "--verified", os.path.join(self.tmp, "verified.json"),
                                "--landing-out", landing, "--json", "--out", out],
