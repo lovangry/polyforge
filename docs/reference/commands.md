@@ -848,8 +848,9 @@ the lane's own identity.
   --merge --match-head-commit <verified head>`, every repo judged before
   anything merges (a repo whose entry carries `no_forge: true` has no forge: it is judged
   with git alone — origin's branch must stand at the verified head — and its
-  landing record carries `how: merged + merge_commit: true` and no merge commit,
-  the owner merging that branch by hand): a PR MERGED already is taken by the
+  landing record carries `how: merged`, `merge_commit`, and `worktree_synced`.
+  Local non-bare origins advance the capsule baseline in an origin-side worktree
+  without pushing a remote service; bare or remote origins use push): a PR MERGED already is taken by the
   landing rules
   (its branch side is the verified head, `how:
   merged`; or, merged outside the lane, its merge commit is on the default

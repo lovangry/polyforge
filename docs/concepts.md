@@ -540,9 +540,11 @@ rewind — and reads no content, and no agent merges by hand:
   (`merged_elsewhere`); an open one must target the default branch, head the
   published branch and stand on origin at the verified head — and merges each
   open PR with `gh pr merge --merge --match-head-commit <verified head>`; a repo
-  published with no forge (empty `pr_url`) merges nothing — the branch must
-  stand at the verified head, the landing record carries `how: merged and merge_commit`
-  and the merge step merges it into the default branch. A
+  published with no forge (empty `pr_url`) lands at the capsule's `origin/HEAD`
+  baseline. The published branch must stand at the verified head; a local origin
+  is merged in its worktree (or a temporary detached worktree), without pushing
+  a remote service. Landing records `how: merged`, `merge_commit`, and
+  `worktree_synced`; dirty owner changes are preserved with stash recovery. A
   default branch that moved after verification (origin's default branch no
   longer at the base the verification result records in `details.repos[].base`)
   is never merged into the branch here and never merged over: the merge

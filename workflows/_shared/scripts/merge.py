@@ -275,7 +275,6 @@ class Merge:
         temp = ""
         target = r.dir
         original = ""
-        direct = False
         try:
             source = g.git(r.dir, "remote", "get-url", "origin").strip()
             if source.startswith("file://"):
@@ -287,7 +286,7 @@ class Merge:
             if not bare:
                 source_head = g.git(source, "symbolic-ref", "--short", "-q", "HEAD").strip()
                 if source_head == r.base:
-                    target, direct, r.worktree_synced = source, True, True
+                    target, r.worktree_synced = source, True
                 else:
                     temp = os.path.join(os.path.dirname(r.dir), ".pf-merge-%s-%s-%s" %
                                         (os.environ.get("PF_WI_ID", r.name), os.environ.get("PF_ROUND", "1"), os.getpid()))
@@ -314,6 +313,8 @@ class Merge:
                 except GoError:
                     pass
                 try:
+                    # stash internally uses wildcard pathspecs to remove untracked
+                    # files; literal-pathspecs would save but not remove them.
                     g.git(target, "--no-literal-pathspecs", "stash", "push", "-u", "-m", "pf-merge-%s-%s" %
                           (os.environ.get("PF_WI_ID", "work"), os.environ.get("PF_ROUND", "1")))
                     r.stash = g.rev(target, "refs/stash")
@@ -344,8 +345,12 @@ class Merge:
                       g.rev(r.dir, "refs/remotes/origin/" + r.base))
             r.merge_commit = merge_commit
             r.how, r.by_this_run = HOW_MERGED, True
-            self.inv.say("repos/%s: no forge — local %s advanced to %s; remote origin not pushed" %
-                         (r.name, r.base, gostr.short(r.merge_commit)))
+            delivery = "pushed to origin" if bare else "remote origin not pushed"
+            self.inv.say("repos/%s: no forge — local %s advanced to %s; %s" %
+                         (r.name, r.base, gostr.short(r.merge_commit), delivery))
+            if r.stash_conflict:
+                self.inv.say("repos/%s: owner changes retained in stash %s (stash pop conflicted)" %
+                             (r.name, r.stash))
         except GoError as err:
             r.why = "merging %s into %s failed: %s; sync, verify and publish again" % (r.head, r.base, err)
         finally:
@@ -459,8 +464,13 @@ class Merge:
                     inv.summary += "; the %d later PR(s) stay open" % later
                 return 1
         ran = details.repos
-        inv.summary = "%d repo(s) landed on the default branch: %s" % (
+        inv.summary = "%d repo(s) landed on the baseline: %s" % (
             len(ran), ", ".join("repos/%s %s (%s)" % (r.name, gostr.short(r.merge_commit), r.how) for r in ran))
+        for r in ran:
+            if r.no_forge and r.worktree_synced:
+                inv.summary += "; local %s advanced to %s; remote origin not pushed" % (r.base, r.merge_commit)
+            if r.stash_conflict:
+                inv.summary += "; repos/%s retained stash %s" % (r.name, r.stash)
         return 0
 
 

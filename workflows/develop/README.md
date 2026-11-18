@@ -123,9 +123,11 @@ and `artifacts/merge/landing.json`. The daemon orchestrates; it judges no conten
   tool window 10 minutes; wrap attrs `integration`) — checks publish's heads against the verified heads, then
   merges each PR with `gh pr merge --merge --match-head-commit <verified head>` under the
   daemon's merge lock (one per repository, every repo of the item locked in one order); a repo
-  published with no forge (an empty `pr_url`) merges nothing — its branch must stand at the
-  verified head and the landing record carries `how: merged + merge_commit`, the owner merging it by
-  hand. A
+  published with no forge (an empty `pr_url`) must stand at the verified head and
+  is merged into the capsule baseline (`origin/HEAD`) in the local origin worktree,
+  or a temporary detached worktree when another branch is checked out. Landing
+  records `how: merged`, `merge_commit`, and `worktree_synced`; dirty changes use
+  stash recovery when necessary. Bare or remote origins use push. A
   PR that moved, the default branch gained commits after verification, closed, was retargeted, merged elsewhere off the verified head or refused
   by the forge FAILs back to `sync`; sync merges the new default branch and verification runs again. On a pass the command writes the landing record
   (`artifacts/merge/landing.json`: `{state: landed, repos, merge_commits}`) and the step
