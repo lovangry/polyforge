@@ -76,12 +76,14 @@ the source and what did not hold (the lane goes back to the step that makes the 
    review."
 3. **Owner review.** An `owner-review: <paths> — <description>` line in `artifacts/plan.md`
    or in the latest hand-off of the step that makes the change holds the publication: once
-   the PRs are open, `pf step ask` the owner once — per repo the PR link, each line verbatim
-   and whether each path exists — then end your turn. 「过目通过」: continue. 「不通过: <what to
-   change>」: hand off `fail --per-owner <the reply's at>`, the instruction verbatim and the PR
-   links in the body (the owner answered, so it spends no rewind). Anything else: ask again.
-   The material is read-only — never edit, regenerate or commit it. No such line anywhere:
-   ask nothing; the note says "no owner-review declared".
+   the PRs are open, use `pf step ask` the owner once — per repo the PR link, each line verbatim
+   and whether each path exists. Write all owner-facing explanatory prose in Simplified Chinese; name each repo's PR link
+   and end your turn. Keep the declaration line and the exact reply tokens
+   「过目通过」 and 「不通过: <what to change>」 unchanged. 「过目通过」: continue.
+   「不通过: <what to change>」: hand off `fail --per-owner <the reply's at>`, the
+   instruction verbatim and the PR links in the body (the owner answered, so it spends no
+   rewind). Anything else: ask again. The material is read-only — never edit, regenerate
+   or commit it. No such line anywhere: ask nothing; the note says "no owner-review declared".
 4. **Write** `artifacts/publish.json` — `{"repos": [{name, branch, pr_url, head,
    skipped_reason, no_forge}]}`, `head` the sha you pushed (what the merge step matches); with no
    forge `pr_url` is empty, `no_forge` is `true` and `skipped_reason` says why — and

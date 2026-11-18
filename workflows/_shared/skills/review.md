@@ -36,6 +36,12 @@ definition's judgment.
    rewind budget bounds such loops; when the command refuses the `fail` because the budget
    is spent, `pf step ask` the owner.
 
+## Owner-facing reports
+
+When a later-round report or an owner decision request is sent with `pf step ask`, write
+Write all owner-facing explanatory prose in Simplified Chinese. Keep artifact paths, commit SHAs, verdict
+values and the exact structured commands unchanged.
+
 ## Procedure
 
 1. **Run these lines as written**, from the capsule root — no argument added or removed, no
