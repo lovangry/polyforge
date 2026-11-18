@@ -192,7 +192,7 @@ def landing_of(d: Details) -> Dict[str, Any]:
             e["head"] = gostr.or_text(r.branch_side, r.head)
         if r.head:
             e["light_verified_head"] = r.head
-        if r.merge_commit:
+        if r.merge_commit or r.how == "nothing":
             e["merge_commit"] = r.merge_commit
         if r.how == HOW_MERGED_ELSEWHERE:
             e["accepted"] = True
@@ -367,6 +367,8 @@ class Merge:
         opened: List[MergeRepo] = []
         refused: List[str] = []
         for r in details.repos:
+            if r.how == "nothing":
+                continue
             r.base = g.default_branch(r.dir)
             if r.no_forge:
                 self.judge_local(r)
@@ -533,7 +535,11 @@ def run(inv: Invocation, a: argparse.Namespace, held: List[Details]) -> int:
         # skipped_reason says why — it is judged with git, never dropped as a skip.
         no_forge = p.get("no_forge") is True or (
             gostr.trim_text(p.get("pr_url") or "") == "" and gostr.trim_text(p.get("branch") or "") != "")
-        if gostr.trim_text(p.get("skipped_reason") or "") != "" and not no_forge:
+        if (not gostr.trim_text(p.get("branch") or "") and
+                gostr.trim_text(p.get("skipped_reason") or "")):
+            details.repos.append(MergeRepo(name=name, pr_url="", branch="", published="",
+                                           head=vheads.get(name, ""), dir=os.path.join(capsule, "repos", name),
+                                           how="nothing"))
             continue
         branch = gostr.trim_text(p.get("branch") or "")
         if branch.startswith("refs/heads/"):
