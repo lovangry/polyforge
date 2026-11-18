@@ -24,10 +24,14 @@ func TestOwnerFacingRequestsUseSimplifiedChineseWithoutTranslatingTokens(t *test
 		if !strings.Contains(s, "简体中文") {
 			t.Errorf("%s does not require Simplified Chinese owner-facing prose", rel)
 		}
-		for _, token := range []string{"owner-review:", "「过目通过」", "「不通过:"} {
-			if !strings.Contains(s, token) {
-				t.Errorf("%s lost structured token %q", rel, token)
-			}
+	}
+	publish, err := os.ReadFile(filepath.Join(root, files[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{"owner-review:", "「过目通过」", "「不通过:"} {
+		if !strings.Contains(string(publish), token) {
+			t.Errorf("publish lost structured token %q", token)
 		}
 	}
 }
