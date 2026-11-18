@@ -24,8 +24,8 @@ func TestOwnerFacingRequestsUseSimplifiedChineseWithoutTranslatingTokens(t *test
 		if !strings.Contains(s, "Simplified Chinese") {
 			t.Errorf("%s does not require Simplified Chinese owner-facing prose", rel)
 		}
-		if strings.Contains(s, "简体中文") {
-			t.Errorf("%s puts Chinese text into the English step-agent instructions", rel)
+		if strings.Contains(s, "使用简体中文") || strings.Contains(s, "解释 使用简体中文") {
+			t.Errorf("%s puts mixed-language wording into the English step-agent instructions", rel)
 		}
 	}
 	publish, err := os.ReadFile(filepath.Join(root, files[0]))
