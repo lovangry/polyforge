@@ -178,11 +178,11 @@ def landing_of(d: Details) -> Dict[str, Any]:
     repos = []
     for r in d.repos:
         e: Dict[str, Any] = {"repo": r.name, "pr": r.pr_url, "head": r.head}
-        if r.how:
+        if r.no_forge or r.how == "nothing":
             e["how"] = r.how
-        if r.by_this_run:
+        if r.no_forge and r.by_this_run:
             e["by_this_run"] = True
-        if r.how == HOW_MERGED:
+        if r.no_forge and r.how == HOW_MERGED:
             e["worktree_synced"] = r.worktree_synced
         if r.stash:
             e["stash"] = r.stash
