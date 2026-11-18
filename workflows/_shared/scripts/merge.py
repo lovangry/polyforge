@@ -182,8 +182,8 @@ def landing_of(d: Details) -> Dict[str, Any]:
             e["how"] = r.how
         if r.by_this_run:
             e["by_this_run"] = True
-        if r.worktree_synced:
-            e["worktree_synced"] = True
+        if r.how == HOW_MERGED:
+            e["worktree_synced"] = r.worktree_synced
         if r.stash:
             e["stash"] = r.stash
         if r.stash_conflict:
@@ -278,14 +278,19 @@ class Merge:
         direct = False
         try:
             source = g.git(r.dir, "remote", "get-url", "origin").strip()
-            bare = g.git(r.dir, "--git-dir", source, "rev-parse", "--is-bare-repository").strip() == "true"
+            if source.startswith("file://"):
+                source = source[7:]
+            if not os.path.isabs(source):
+                source = os.path.join(r.dir, source)
+            local = os.path.isdir(source)
+            bare = not local or g.git(source, "rev-parse", "--is-bare-repository").strip() == "true"
             if not bare:
                 source_head = g.git(source, "symbolic-ref", "--short", "-q", "HEAD").strip()
                 if source_head == r.base:
                     target, direct, r.worktree_synced = source, True, True
                 else:
                     temp = os.path.join(os.path.dirname(r.dir), ".pf-merge-%s-%s-%s" %
-                                        (r.name, os.environ.get("PF_ROUND", "1"), os.getpid()))
+                                        (os.environ.get("PF_WORK_ITEM", r.name), os.environ.get("PF_ROUND", "1"), os.getpid()))
                     g.git(source, "worktree", "add", "--detach", temp, "refs/heads/" + r.base)
                     target = temp
             else:
@@ -309,12 +314,16 @@ class Merge:
                 except GoError:
                     pass
                 try:
-                    out = g.git(target, "stash", "push", "-u", "-m", "pf-merge-%s-%s" %
-                                 (os.environ.get("PF_WI_ID", "work"), os.environ.get("PF_ROUND", "1")))
-                    r.stash = out.strip().splitlines()[-1] if out.strip() else "stash@{0}"
+                    g.git(target, "--no-literal-pathspecs", "stash", "push", "-u", "-m", "pf-merge-%s-%s" %
+                          (os.environ.get("PF_WI_ID", "work"), os.environ.get("PF_ROUND", "1")))
+                    r.stash = g.rev(target, "refs/stash")
                     stashed = True
                     g.git(target, *merge_args)
                 except GoError:
+                    try:
+                        g.git(target, "merge", "--abort")
+                    except GoError:
+                        pass
                     if stashed:
                         try:
                             g.git(target, "stash", "pop")
@@ -330,6 +339,9 @@ class Merge:
             merge_commit = g.rev(target, "HEAD")
             if bare:
                 g.git(target, "push", "-q", "origin", "HEAD:refs/heads/" + r.base)
+            elif temp:
+                g.git(source, "update-ref", "refs/heads/" + r.base, merge_commit,
+                      g.rev(r.dir, "refs/remotes/origin/" + r.base))
             r.merge_commit = merge_commit
             r.how, r.by_this_run = HOW_MERGED, True
             self.inv.say("repos/%s: no forge — local %s advanced to %s; remote origin not pushed" %
