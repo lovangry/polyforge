@@ -1,6 +1,9 @@
 # carries: workflows/_shared/scripts/merge.py
 """Real-Git landing contracts: refs, owner bytes, recovery and landing output."""
 import os
+import json
+import subprocess
+import sys
 from typing import Any
 
 from .gitworld import GitCase, Repo, git, write
@@ -112,6 +115,32 @@ class LocalLandingTest(GitCase):
         self.assertEqual(owner.git("branch", "--show-current"), "master")
         self.assertEqual(git(os.path.join(self.tmp, "feature"), "branch", "--show-current"), "feat-knowledge")
         self.assertEqual(len(owner.git("worktree", "list", "--porcelain").split("worktree ")) - 1, 2)
+
+    def test_nothing_published(self) -> None:
+        repo = Repo(os.path.join(self.tmp, "repos", "app"))
+        head = repo.head()
+        write(self.tmp, {
+            "publish.json": json.dumps({"repos": [{"name": "app", "branch": "", "pr_url": "",
+                                                      "head": head, "no_forge": True,
+                                                      "skipped_reason": "nothing to publish"}]}),
+            "verified.json": json.dumps({"schema": "pf-step-result/1", "heads": {"app": head}}),
+        })
+        out = os.path.join(self.tmp, "result.json")
+        landing = os.path.join(self.tmp, "landing.json")
+        # No origin exists: even attempting to resolve or fetch it would fail.
+        proc = subprocess.run([sys.executable, merge.MERGE_PATH if hasattr(merge, "MERGE_PATH") else merge.__file__,
+                               "--capsule", self.tmp, "--publish", os.path.join(self.tmp, "publish.json"),
+                               "--verified", os.path.join(self.tmp, "verified.json"),
+                               "--landing-out", landing, "--json", "--out", out],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        with open(out) as f:
+            self.assertEqual(json.load(f)["verdict"], "pass")
+        with open(landing) as f:
+            rec = json.load(f)["repos"][0]
+        self.assertEqual(rec["how"], "nothing")
+        self.assertEqual(rec["merge_commit"], "")
+        self.assertEqual(repo.head(), head)
 
     def test_bare_origin(self) -> None:
         self.fixture(bare=True)
