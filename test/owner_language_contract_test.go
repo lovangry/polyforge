@@ -21,7 +21,11 @@ func TestOwnerFacingRequestsUseSimplifiedChineseWithoutTranslatingTokens(t *test
 			t.Fatal(err)
 		}
 		s := string(b)
-		required := "Write all owner-facing explanatory prose in Simplified Chinese."
+		required := map[string]string{
+			"workflows/_shared/skills/publish.md": "Write all owner-facing explanatory prose in Simplified Chinese;",
+			"workflows/_shared/skills/review.md":  "Write all owner-facing explanatory prose in Simplified Chinese.",
+			"workflows/_shared/skills/verify.md":  "Write all owner-facing explanatory prose in Simplified Chinese",
+		}[rel]
 		if !strings.Contains(s, required) {
 			t.Errorf("%s does not require English instruction for Simplified Chinese owner-facing prose", rel)
 		}
