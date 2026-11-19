@@ -1028,7 +1028,7 @@ test("the detail order is summary (title row, goal, facts, narration, pi#117 fac
     "{/* pi#119 summarize narration",
     "{/* pi#117 facts, moved into the summary",
     "data-pf-detail-graph",
-    "<PolyforgeDetailProgress wi={progressWi} profile={selectedJob?.profile} running={progressLive} snapshot={selectedProgressSnapshot} emptyMessage={progressEmptyMessage} resetKey={selectedStep ?? \"\"} resetFollow={selectedStepManual ? \"step\" : \"bottom\"} echoes={detailEchoes} allLines={progressSnapshot?.lines ?? EMPTY_PROGRESS_LINES} scrollRef={detailScrollRef} />",
+    "<PolyforgeDetailProgress wi={progressWi} profile={selectedJob?.profile} running={progressLive} snapshot={selectedProgressSnapshot} emptyMessage={progressEmptyMessage} resetKey={selectedStep ?? \"\"} resetFollow={selectedStepManual ? \"step\" : \"bottom\"} echoes={detailEchoes} allLines={progressSnapshot?.lines ?? EMPTY_PROGRESS_LINES} scrollRef={detailScrollRef} onRetry={() => setRetryCount((count) => count + 1)} />",
   ].map((needle) => detail.indexOf(needle));
   assert.ok(marks.every((index, i) => index >= 0 && (i === 0 || index > marks[i - 1])), `detail order: ${marks}`);
   const after = detail.slice(detail.indexOf("<PolyforgeDetailProgress"));
@@ -1044,7 +1044,11 @@ test("the detail order is summary (title row, goal, facts, narration, pi#117 fac
   // under the scroll region shares the stream); it polls while the job runs
   // (the rule): a waiting job is read once, a reply makes it run.
   assert.match(source, /const progressLive = selectedJob\?\.status === "running";/);
-  assert.match(source, /const progressSnapshot = usePolyforgeProgress\(progressWi, progressLive, selectedJob\?\.profile\);/);
+  assert.match(source, /const progressSnapshot = usePolyforgeProgress\(progressWi, progressLive, selectedJob\?\.profile, retryCount\)/, "the read is the panel's (workflow contract v2, change 14)");
+  // The unavailable state's own way out (N5): a retry generation the hook
+  // keys its read cycle on — one fresh read for a job not running, without
+  // deselecting it.
+  assert.match(source, /const \[retryCount, setRetryCount\] = useState\(0\);/, "the retry generation is the panel's local state");
 });
 
 test("the progress section renders every stream line in full (wrapping, no ellipsis) with hover text, thinking narration dim italic, tones and its states localized, no nested scroller", () => {
@@ -1054,6 +1058,14 @@ test("the progress section renders every stream line in full (wrapping, no ellip
   assert.match(block, /data-pf-progress=""/);
   assert.match(block, /t\("polyforge\.progress\.title"\)/);
   assert.match(block, /!wi \|\| snapshot\?\.available === false \? t\("polyforge\.progress\.unavailable"\)/, "nothing readable: the unavailable state, no fabricated line");
+  // The unavailable state's own way out of a failed first read (N5): a retry
+  // generation the hook keys its read cycle on — one fresh read for a job
+  // not running, without deselecting it. Only where a read is possible to
+  // re-issue: an unavailable snapshot with a wi; a selection without one
+  // stays the plain label.
+  assert.match(block, /data-pf-progress-retry=""/, "the retry is a button on the message line");
+  assert.match(block, /wi && snapshot\?\.available === false && onRetry && \(/, "the retry renders only where a read is possible to re-issue");
+  assert.match(source, /onRetry=\{\(\) => setRetryCount\(\(count\) => count \+ 1\)\}/, "a click bumps the generation");
   assert.match(block, /: !snapshot \? t\("polyforge\.loading"\)/, "Loading only until the first read settles");
   assert.match(block, /snapshot\.lines\.length === 0 \? \(emptyMessage \?\? t\("polyforge\.progress\.empty"\)\)/);
   assert.match(block, /snapshot\.omitted > 0 && \(\s*<span data-pf-progress-omitted="" [^>]*>\{t\("polyforge\.progress\.omitted", \{ count: snapshot\.omitted \}\)\}<\/span>/, "a legacy omitted count still renders before the lines");
@@ -1098,7 +1110,7 @@ test("the progress section renders every stream line in full (wrapping, no ellip
   }
   assert.match(source, /line\.tone \? PROGRESS_TONE_COLORS\[line\.tone\] : "var\(--text-muted\)"/, "an event line without a tone is neutral");
   for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
-    for (const key of ["polyforge.progress.title", "polyforge.progress.empty", "polyforge.progress.unavailable"]) {
+    for (const key of ["polyforge.progress.title", "polyforge.progress.empty", "polyforge.progress.unavailable", "polyforge.progress.retry"]) {
       assert.match(localeSource, new RegExp(`"${key.replace(/\./g, "\\.")}": "\\S`), `${name} must translate ${key}`);
     }
     assert.match(localeSource, /"polyforge\.progress\.omitted": "[^"]*\{count\}[^"]*"/, `${name} must translate the omitted marker with its count`);

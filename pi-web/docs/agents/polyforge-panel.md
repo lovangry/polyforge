@@ -3151,7 +3151,15 @@ full text as its expanded body (polyforge#53). States:
 available snapshot with no line, `polyforge.progress.unavailable` (进度不可用 /
 Progress unavailable / 進度不可用) for an unavailable snapshot, a first read
 that fails outright, or a selection with no wi in either the selected job or
-the selection's watch snapshot — never a fabricated line. The read is keyed on
+the selection's watch snapshot — never a fabricated line. The unavailable
+state carries its own re-read where one is possible (an unavailable snapshot
+with a wi): the dim label followed by ` · ` and an accent
+`[data-pf-progress-retry]` button (`polyforge.progress.retry`: 重试 / Retry /
+重試) that bumps the hook's read generation — one fresh read for a job not
+running, the cadence restarted for one that is, without deselecting the job.
+A selection without a wi stays the plain label (nothing to re-issue); a
+running job's unavailable state is transient anyway (the next poll can
+replace it), so the button is the same affordance in both cases. The read is keyed on
 `selectedJob?.wi ?? watchStatus?.wi`: the daemon drops a terminated job from
 `runtime-state.json` and `pf ops status` (runtime `dropJob`) moments after its
 terminal event, so a job that finishes while its detail is open leaves the
@@ -3265,7 +3273,12 @@ deselecting unmounts it), keyed on the selected job's `wi` (a card click
 stores the slug as the selection ref, so the wi comes from the selected job).
 A `running` job: an immediate read, then one every `PROGRESS_POLL_MS` = 2000
 ms — a fixed constant, no setting, never the card poll interval. Any other
-status: exactly one read, no interval. A hidden page clears the interval and
+status: exactly one read, no interval. The hook's fourth argument is the read
+generation (the retry button's count, the panel's state passed down as
+`onRetry`): a bump re-runs the whole cycle (the cleanup aborts any read in
+flight, the new cycle reads at once) with the held snapshot and the merge
+rules unchanged — a retry that succeeds replaces the unavailable state
+wholesale, one that fails again keeps it. A hidden page clears the interval and
 aborts the request in flight (zero requests while hidden); becoming visible
 reads at once. One request in flight, bounded at
 `PROGRESS_REQUEST_TIMEOUT_MS` = 5000 ms. `nextProgressSnapshot` keeps the last
@@ -3277,7 +3290,10 @@ another job never shows the previous
 job's snapshot. A first read that fails outright (HTTP error, network error,
 timeout, malformed body) with nothing held is the unavailable state, never a
 perpetual Loading (the #210 ledger's N5); a later good read
-replaces it. An abort by hiding, deselecting or unmounting writes nothing.
+replaces it — and for a job not running (no interval: that one read is the
+whole story) the retry button is how a later good read ever happens without
+deselecting the job. An abort by hiding, deselecting or unmounting writes
+nothing.
 
 ## Client behavior
 

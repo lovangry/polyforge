@@ -500,7 +500,7 @@ export function rereadToolIds(
   return out;
 }
 
-export function PolyforgeDetailProgress({ wi, profile, running, snapshot, echoes, allLines, scrollRef, emptyMessage, resetKey, resetFollow }: {
+export function PolyforgeDetailProgress({ wi, profile, running, snapshot, echoes, allLines, scrollRef, emptyMessage, resetKey, resetFollow, onRetry }: {
   wi: string | null;
   profile?: string;
   running: boolean;
@@ -521,6 +521,10 @@ export function PolyforgeDetailProgress({ wi, profile, running, snapshot, echoes
    *  unpins — a choice whose start is already on screen leaves the follow
    *  untouched (the region still parks at its bottom). */
   resetFollow?: "bottom" | "step";
+  /** Bumps the panel's progress read generation (the retry button's way out
+   *  of the unavailable state, N5): one fresh read for a job not running,
+   *  the cadence restarted for one that is. */
+  onRetry?: () => void;
 }) {
   const { t, locale } = useI18n();
   // The order control (restored from the 0.1.x fork's pi#1): newest first
@@ -902,7 +906,26 @@ export function PolyforgeDetailProgress({ wi, profile, running, snapshot, echoes
         </button>
       </div>
       {!snapshot || message !== null ? (
-        <span style={{ color: "var(--text-dim)" }}>{message}</span>
+        <span style={{ color: "var(--text-dim)", minWidth: 0 }}>
+          {message}
+          {/* the retry, only where a read is possible to re-issue: an
+              unavailable snapshot with a wi (a selection without one has
+              nothing to re-read). A running job self-heals on its next
+              poll; this is for the one read a not-running job gets. */}
+          {wi && snapshot?.available === false && onRetry && (
+            <>
+              {" · "}
+              <button
+                type="button"
+                data-pf-progress-retry=""
+                onClick={onRetry}
+                style={{ padding: 0, background: "none", border: "none", color: "var(--accent)", cursor: "pointer", font: "inherit", lineHeight: "16px" }}
+              >
+                {t("polyforge.progress.retry")}
+              </button>
+            </>
+          )}
+        </span>
       ) : (
         <>
           {!desc && snapshot.omitted > 0 && (
@@ -1765,7 +1788,13 @@ export function PolyforgePanel({
   // resumes, and the echo covers the gap.
   const progressWi = selectedWi ? (selectedJob?.wi ?? watchStatus?.wi ?? null) : null;
   const progressLive = selectedJob?.status === "running";
-  const progressSnapshot = usePolyforgeProgress(progressWi, progressLive, selectedJob?.profile);
+  // The unavailable state's own way out (N5): a read generation the hook keys
+  // its cycle on (a bump re-runs the effect — one fresh read for a job not
+  // running, the 2 s cadence restarted for one that is). A not-running
+  // job's unavailable first read is otherwise final — no interval, no
+  // retry — and only deselecting the job would read again.
+  const [retryCount, setRetryCount] = useState(0);
+  const progressSnapshot = usePolyforgeProgress(progressWi, progressLive, selectedJob?.profile, retryCount);
   const [selectedStep, setSelectedStep] = useState<string | null>(null);
   const [selectedStepManual, setSelectedStepManual] = useState(false);
   const latestProgressStep = progressSnapshot?.lines ? progressBlocks(progressSnapshot.lines).blocks.at(-1)?.step : undefined;
@@ -2506,7 +2535,7 @@ export function PolyforgePanel({
                               onApplied={onRefresh}
                             />
                           )}
-                          <PolyforgeDetailProgress wi={progressWi} profile={selectedJob?.profile} running={progressLive} snapshot={selectedProgressSnapshot} emptyMessage={progressEmptyMessage} resetKey={selectedStep ?? ""} resetFollow={selectedStepManual ? "step" : "bottom"} echoes={detailEchoes} allLines={progressSnapshot?.lines ?? EMPTY_PROGRESS_LINES} scrollRef={detailScrollRef} />
+                          <PolyforgeDetailProgress wi={progressWi} profile={selectedJob?.profile} running={progressLive} snapshot={selectedProgressSnapshot} emptyMessage={progressEmptyMessage} resetKey={selectedStep ?? ""} resetFollow={selectedStepManual ? "step" : "bottom"} echoes={detailEchoes} allLines={progressSnapshot?.lines ?? EMPTY_PROGRESS_LINES} scrollRef={detailScrollRef} onRetry={() => setRetryCount((count) => count + 1)} />
                         </>
                       ) : (
                       <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>{t("polyforge.selectJob")}</div>

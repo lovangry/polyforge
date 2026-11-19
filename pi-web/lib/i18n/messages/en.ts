@@ -2004,6 +2004,7 @@ export const enLocale: LocalePlugin = {
     "polyforge.stepControls.waiveHint": "this step cannot be skipped; to let it pass use a waiver",
     "polyforge.progress.notRun": "Not run yet",
     "polyforge.progress.unavailable": "Progress unavailable",
+    "polyforge.progress.retry": "Retry",
     "polyforge.progress.omitted": "{count} earlier lines omitted",
     "polyforge.progress.lines": "{count} lines",
     "polyforge.progress.latest": "Scroll to latest",

@@ -2004,6 +2004,7 @@ export const zhTWLocale: LocalePlugin = {
     "polyforge.stepControls.waiveHint": "這一步不支援跳過；要放行請用豁免",
     "polyforge.progress.notRun": "尚未執行",
     "polyforge.progress.unavailable": "進度不可用",
+    "polyforge.progress.retry": "重試",
     "polyforge.progress.omitted": "已省略更早的 {count} 行",
     "polyforge.progress.lines": "{count} 行",
     "polyforge.progress.latest": "回到最新",

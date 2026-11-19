@@ -28,7 +28,7 @@ const setVisibility = (state) => {
   page.dispatchEvent(new Event("visibilitychange"));
 };
 
-async function setup({ wi = WI, running = true, visible = true } = {}) {
+async function setup({ wi = WI, running = true, visible = true, retryCount = 0 } = {}) {
   page.visibilityState = visible ? "visible" : "hidden";
   mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   // `answer`: "ok" (the current `body`), "error" (HTTP 500), "offline" or "never".
@@ -47,7 +47,7 @@ async function setup({ wi = WI, running = true, visible = true } = {}) {
       default: request.settled = true; return new Response(JSON.stringify(server.body), { status: 200, headers: { "Content-Type": "application/json" } });
     }
   };
-  const hook = renderHook((props) => usePolyforgeProgress(props.wi, props.running), { wi, running });
+  const hook = renderHook((props) => usePolyforgeProgress(props.wi, props.running, props.profile, props.retryCount), { wi, running, retryCount });
   await settle();
   hook.flush();
   const tick = async (ms) => { mock.timers.tick(ms); await settle(); hook.flush(); };
@@ -243,6 +243,42 @@ test(" (N5): hiding or deselecting during the first read writes nothing — only
     await settle();
     state.hook.flush();
     assert.equal(state.hook.result, null, "an abort by hiding is not a failed read");
+  } finally {
+    await teardown(state);
+  }
+});
+
+test("a retry generation bump re-reads: the unavailable state of a not-running job is not final, and no interval follows", async () => {
+  const state = await setup({ running: false, visible: false });
+  try {
+    state.server.answer = "offline";
+    setVisibility("visible");
+    await settle();
+    state.hook.flush();
+    assert.equal(state.requests.length, 1, "one read");
+    assert.deepEqual(state.hook.result, UNAVAILABLE, "the failed first read is the unavailable state");
+    // the retry: the generation bumps, the cycle re-runs — one fresh read
+    // for the not-running job, the unavailable state replaced wholesale.
+    state.server.answer = "ok";
+    state.server.body = GOOD;
+    await state.rerender({ wi: WI, running: false, retryCount: 1 });
+    assert.equal(state.requests.length, 2, "the bump re-reads");
+    assert.equal(state.requests[1].url, `/api/polyforge/progress?wi=${WI}`);
+    assert.deepEqual(state.hook.result, GOOD, "a good retry replaces the unavailable state wholesale");
+    await state.tick(PROGRESS_POLL_MS * 3);
+    assert.equal(state.requests.length, 2, "still no interval for a not-running job");
+    // a retry that fails again keeps the held snapshot (unavailable here):
+    // never a flash, never Loading.
+    state.server.answer = "error";
+    await state.rerender({ wi: WI, running: false, retryCount: 2 });
+    assert.equal(state.requests.length, 3);
+    assert.deepEqual(state.hook.result, GOOD, "a failed retry keeps the last good snapshot");
+    // a bump while running restarts the cadence at once, one request open.
+    state.server.answer = "ok";
+    await state.rerender({ wi: WI, running: true, retryCount: 3 });
+    assert.equal(state.requests.length, 4, "a running retry reads at once");
+    await state.tick(PROGRESS_POLL_MS);
+    assert.equal(state.requests.length, 5, "and resumes the cadence");
   } finally {
     await teardown(state);
   }
