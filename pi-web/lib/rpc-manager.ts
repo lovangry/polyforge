@@ -11,6 +11,7 @@ import { invalidateModelsCache } from "./models-cache";
 import { invalidateModelRuntimeWithExtensions } from "./model-runtime";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import { findDeferredModel, findDeferredStartupModel, rememberProviderModels } from "./deferred-provider-models";
+import { pickRotatedModel } from "./provider-rotation";
 import { isBlockingExtensionUiRequest } from "./extension-ui-queue";
 import {
   createProjectCommandBashExtension,
@@ -3499,6 +3500,30 @@ export async function startRpcSession(
       void wrapper.waitUntilReady()
         .then(() => rememberProviderModels(inner.modelRuntime as ModelRuntime))
         .catch(() => undefined);
+    }
+
+    // A model several equivalent providers offer (same id, endpoint and API, different keys —
+    // a key pool) starts every session on the first entry and exhausts that key's rate limit
+    // while the rest idle. Spread sessions that chose no model over the keys
+    // (lib/provider-rotation.ts); one that did, a subagent, a resumed branch or a deferred
+    // switch keeps pi's pick. Rotation applies to Chat only as well: its candidates are plain
+    // models every runtime has, not ones an extension registers.
+    if (
+      !subagentResources && !hasExistingMessages && !effectiveInitialModel && !deferredInitialModel
+      && !deferredModel && inner.model
+    ) {
+      const rotated = await pickRotatedModel(inner.model, scope.visible, (provider) =>
+        services.modelRuntime.getAuth(provider)
+          .then((auth) => auth?.auth.apiKey)
+          .catch(() => undefined));
+      if (rotated && (rotated.provider !== inner.model.provider || rotated.modelId !== inner.model.id)) {
+        try {
+          await wrapper.waitUntilReady();
+          await wrapper.send({ type: "set_model", provider: rotated.provider, modelId: rotated.modelId });
+        } catch (error) {
+          console.error(`[pi-web] could not spread to ${rotated.provider}/${rotated.modelId}:`, error instanceof Error ? error.message : error);
+        }
+      }
     }
 
     return { session: wrapper, realSessionId };

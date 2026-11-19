@@ -30,6 +30,13 @@ const FAILED_READ: PolyforgeProgressSnapshot = { available: false, lines: [], om
  *   shows the previous job's snapshot.
  * - `running`: an immediate read, then one every PROGRESS_POLL_MS while the
  *   page is visible. Not running: exactly one read, no interval.
+ * - `retryCount`: the manual retry's read generation. A bump re-runs the
+ *   whole read cycle (the cleanup aborts any read in flight, the new cycle
+ *   reads at once — one read for a job not running, the cadence restarted
+ *   for one that is): the unavailable state's own way out of the failed
+ *   first read (N5 below), without deselecting the job. The held snapshot
+ *   and the merge rules are unchanged — a retry that succeeds replaces
+ *   the unavailable state wholesale, one that fails again keeps it.
  * - Hidden page: the interval is cleared and the request in flight aborted
  *   at once (zero requests while hidden); becoming visible reads at once.
  * - At most one request in flight, each bounded by PROGRESS_REQUEST_TIMEOUT_MS.
@@ -42,7 +49,7 @@ const FAILED_READ: PolyforgeProgressSnapshot = { available: false, lines: [], om
  *   the first read settles; a first read that fails outright (HTTP error,
  *   network error, timeout, malformed body) is the unavailable state (N5).
  */
-export function usePolyforgeProgress(wi: string | null, running: boolean, profile?: string): PolyforgeProgressSnapshot | null {
+export function usePolyforgeProgress(wi: string | null, running: boolean, profile?: string, retryCount = 0): PolyforgeProgressSnapshot | null {
   const [state, setState] = useState<{ wi: string; snapshot: PolyforgeProgressSnapshot | null } | null>(null);
   const ref = `${profile ?? ""}/${wi ?? ""}`;
 
@@ -112,7 +119,7 @@ export function usePolyforgeProgress(wi: string | null, running: boolean, profil
       document.removeEventListener("visibilitychange", onVisibilityChange);
       stop();
     };
-  }, [wi, running, profile, ref]);
+  }, [wi, running, profile, ref, retryCount]);
 
   return state && state.wi === ref ? state.snapshot : null;
 }
