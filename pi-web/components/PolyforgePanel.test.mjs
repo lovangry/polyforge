@@ -563,12 +563,13 @@ test("pi#120/#238: with a job selected, the whole detail is ONE vertical scroll 
   assert.match(source, /flexWrap: "wrap", alignItems: "center", rowGap: 6/, "the graph node row still wraps");
 });
 
-test("the detail opens at its bottom, offers ↓ Latest and folds spawn blocks", () => {
-  // Owner-ruled change: the open-at-top reset is gone and
-  // the follow starts pinned, so the first stream ends at the whole region's
-  // bottom.
+test("the detail opens at its order's park (newest first at the top, oldest first at the bottom), offers ↓ Latest and folds spawn blocks", () => {
+  // Owner-ruled change, then pi#1's restored order control: the follow starts
+  // pinned exactly for oldest-first (asc) — the first stream ends at the whole
+  // region's bottom; the default newest-first opens at its top instead.
   assert.doesNotMatch(source, /detailScrollRef\.current\.scrollTop = 0/);
-  assert.match(source, /const pinned = useRef\(true\);/);
+  assert.match(source, /const pinned = useRef\(progressOrder === "asc"\);/);
+  assert.match(source, /if \(region\) region\.scrollTop = progressOrder === "asc" \? region\.scrollHeight : 0;/, "a selection's park follows the order");
   assert.match(source, /streamed && pinned\.current\) region\.scrollTop = region\.scrollHeight/);
   // The floating control is outside the flow, shown only off the bottom, and
   // jumps without an animation.
@@ -694,12 +695,23 @@ test("each card has a stable key and test identity, toggles the existing selecti
   assert.match(panelLayoutSource, /border: "1px solid var\(--border\)"/, "the shared block keeps its 1px frame width ( changes only the card colour)");
   assert.match(card, /borderColor: jobCardBorderColor\(job\.status\)/, "the card frame colour follows the job's status");
   assert.doesNotMatch(card, /borderWidth|border: `[^`]*\$\{/, "the card changes no border width");
-  // owner-intended change: the row opens with the feed-only
-  // attention cards, then the live cards.
-  assert.match(source, /<div style=\{\{ display: "flex", flexWrap: "nowrap", gap: 8, padding: 8, overflowX: "auto", scrollbarWidth: "thin" \}\}>\s*(?:\{\/\*[\s\S]*?\*\/\}\s*)?\{droppedItems\.map\(\(decision\) => \(\s*<PolyforgeAttentionCard[\s\S]*?\/>\s*\)\)\}\s*\{shownCards\.map/,
-    "the Jobs stream is one row that scrolls horizontally, gap and padding unchanged, feed-only attention cards first");
+  // pi#1's restored 卡片视图 (owner-intended change): the fork's two-row
+  // wrapping grid, opening with the feed-only attention cards, then the live
+  // cards; the grid caps at two measured rows and the third scrolls inside the
+  // stream.
+  assert.match(source, /const JOB_CARD_GAP = 8;/, "the grid's gap is 8px");
+  assert.match(source, /const JOB_CARD_STREAM_PADDING = 8;/, "the grid's own padding is 8px");
+  assert.match(source, /export function jobCardStreamMaxHeight\(rowHeight: number\): number \{\s*return 2 \* rowHeight \+ JOB_CARD_GAP \+ 2 \* JOB_CARD_STREAM_PADDING;\s*\}/,
+    "the cap is two rows, their gap and the stream's padding");
+  assert.match(source, /<div\s*ref=\{cardStreamRef\}\s*style=\{\{\s*display: "flex", flexWrap: "wrap", alignContent: "flex-start",\s*gap: JOB_CARD_GAP, padding: JOB_CARD_STREAM_PADDING,\s*overflowX: "hidden", overflowY: "auto", scrollbarWidth: "thin",\s*maxHeight: cardRowHeight === null \? undefined : jobCardStreamMaxHeight\(cardRowHeight\),/,
+    "the Jobs stream is a wrapping grid capped at two measured rows, gap and padding unchanged");
+  assert.match(source, /\{droppedItems\.map\(\(decision\) => \(\s*<PolyforgeAttentionCard[\s\S]*?\{shownCards\.map/,
+    "the grid opens with the feed-only attention cards, then the live cards");
   assert.match(source, /scrollbarWidth: "thin"/, "the scrollbar stays visible but thin");
-  assert.doesNotMatch(source, /gridTemplateColumns: "repeat\(auto-fill, minmax\(\d+px, 1fr\)\)"/, "the Jobs stream is no longer a wrapping grid");
+  // (the list view's feed-only attention row keeps its own nowrap row; this
+  // slice pins the card grid itself.)
+  const cardStreamBlock = source.slice(source.indexOf("ref={cardStreamRef}"), source.indexOf("ref={cardStreamRef}") + 600);
+  assert.doesNotMatch(cardStreamBlock, /flexWrap: "nowrap"|overflowX: "auto"/, "the card view is no longer one horizontally scrolling row");
   // Title (s14#2): the slug (wrapping) and the status at the
   // right end of the same row, the truncated goal under them clamped to 2
   // lines (full goal on hover). The status may ellipsize (flex 0 1 auto,
@@ -972,8 +984,8 @@ test("the sub-tab badges show running counts from the one status snapshot; zero 
   assert.doesNotMatch(source, /fetch\(/, "the panel adds no read for the badges");
   // the panel's one timer is the card's local age clock (it
   // reads Date.now() and fetches nothing); the badge path adds none.
-  assert.deepEqual(source.match(/setInterval\(/g) ?? ["x"], ["setInterval("], "the only panel timer is the card's running-age clock");
-  assert.match(source, /const clock = setInterval\(\(\) => setNow\(Date\.now\(\)\), 30_000\);/, "the one timer is the card clock");
+  assert.deepEqual(source.match(/setInterval\(/g) ?? ["x"], ["setInterval(", "setInterval("], "the only panel timers are the card's and the list row's local running-age clocks");
+  assert.match(source, /const clock = setInterval\(\(\) => setNow\(Date\.now\(\)\), 30_000\);/, "the timers are the age clocks");
   for (const [name, localeSource] of [["en", enSource], ["zh-CN", zhCNSource], ["zh-TW", zhTWSource]]) {
     for (const key of ["polyforge.work.jobsRunning", "polyforge.work.tasksRunning", "polyforge.work.itemsRunning"]) {
       assert.match(localeSource, new RegExp(`"${key.replaceAll(".", "\\.")}": "[^"]*\\{count\\}`), `${name} names the ${key} badge with its count`);
@@ -1093,11 +1105,12 @@ test("the progress section renders every stream line in full (wrapping, no ellip
   }
 });
 
-test(" (owner intentional change, reversing #238): the detail opens at its bottom, follows while pinned and offers ↓ Latest off the bottom", () => {
+test(" (owner intentional change, reversing #238; pi#1's order control): the detail parks by order, follows while pinned and offers ↓ Latest off the bottom", () => {
   assert.doesNotMatch(source, /detailScrollRef\.current\.scrollTop = 0;/, "a selection change no longer resets the detail to its top");
   const start = source.indexOf("function PolyforgeDetailProgress(");
   const block = source.slice(start, source.indexOf("\n}\n", start));
-  assert.match(block, /const pinned = useRef\(true\);/, "a selection and a remount start pinned");
+  assert.match(block, /const pinned = useRef\(progressOrder === "asc"\);/, "a selection and a remount start pinned only for oldest first");
+  assert.match(block, /const \{ progressOrder, setProgressOrder \} = usePolyforgeViewPreferences\(\);/, "the order rides the restored view preference");
   assert.match(block, /const streamed = Boolean\(snapshot\?\.available && lines\.length > 0\);/, "nothing is forced while loading, empty or unavailable");
   assert.match(block, /useLayoutEffect\(\(\) => \{\s*const region = scrollRef\.current;\s*if \(region && streamed && pinned\.current\) region\.scrollTop = region\.scrollHeight;\s*\}, \[snapshot, visibleCount, streamed, shownEchoes\.length, scrollRef\]\);/, "the first stream, every later chunk and an echoed owner message end at the whole region's bottom while pinned");
   assert.match(block, /setVisibleCount\(PROGRESS_RENDER_CHUNK\);/, "another job re-chunks its stream");

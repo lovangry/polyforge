@@ -51,7 +51,11 @@ test("an ask over MAX_MARKDOWN_CHARS renders inline in full as plain wrapped tex
   const text = `${TABLE_QUESTION}\n${"x".repeat(MAX_MARKDOWN_CHARS)}\nE2E502-TAIL`;
   const ask = renderAsk(text);
   assert.ok(!ask.includes("<table"), "no Markdown table");
-  assert.ok(!ask.includes("<button"), "no click-to-reveal box");
+  // the slice starts at the progress region's frame, whose title row now
+  // carries pi#1's order control — the reveal-box check pins the reveal's own
+  // ⚠ marker inside the ask block instead of any button in the slice.
+  const askBlock = ask.slice(ask.indexOf('data-pf-progress-kind="ask"'));
+  assert.ok(!askBlock.includes("⚠"), "no click-to-reveal box");
   assert.match(ask, /<div style="white-space:pre-wrap;overflow-wrap:anywhere">Two choices for the badge:/);
   assert.ok(ask.includes("|---|---|---|---|") && ask.includes("E2E502-TAIL"), "the raw text, in full");
   assert.match(ask, /border-left:3px solid #d97706/);
