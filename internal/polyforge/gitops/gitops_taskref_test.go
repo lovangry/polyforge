@@ -269,11 +269,13 @@ func TestTaskRefNonFastForwardIsFusePerSHA(t *testing.T) {
 		t.Fatalf("seed CommitPush: %v", err)
 	}
 
-	countFile := filepath.Join(base, "carrier-attempts")
-	hook := "#!/bin/sh\nprintf '%s\\n' attempt >> '" + countFile + "'\nwhile read old new ref; do case \"$ref\" in refs/pf-task/*) exit 1;; esac; done\nexit 0\n"
-	if err := os.WriteFile(filepath.Join(bare.dir, "hooks", "pre-receive"), []byte(hook), 0o755); err != nil {
-		t.Fatal(err)
+	var attempts int
+	gitArgsProbe = func(args []string) {
+		if strings.Contains(strings.Join(args, " "), "refs/pf-task/demo-src") {
+			attempts++
+		}
 	}
+	t.Cleanup(func() { gitArgsProbe = nil })
 	repoDir := filepath.Join(o.CapsuleDir, capsule.DirRepos, "demo-src")
 	mustRun(t, "git", "-C", repoDir, "reset", "-q", "--hard", "HEAD~1")
 	if err := os.WriteFile(filepath.Join(repoDir, "diverged.txt"), []byte("one\n"), 0o644); err != nil {
@@ -292,8 +294,8 @@ func TestTaskRefNonFastForwardIsFusePerSHA(t *testing.T) {
 	}
 	publish("rejected one")
 	publish("same sha")
-	if got := strings.Count(mustRun(t, "cat", countFile), "attempt"); got != 1 {
-		t.Fatalf("same SHA caused %d carrier attempts, want 1", got)
+	if attempts != 1 {
+		t.Fatalf("same SHA caused %d carrier attempts, want 1", attempts)
 	}
 	if len(kinds) != 2 || kinds[0] != EventCarrierPushFailed || kinds[1] != EventTaskRefDiverged {
 		t.Fatalf("events = %v, want one carrier failure and divergence", kinds)
@@ -304,8 +306,8 @@ func TestTaskRefNonFastForwardIsFusePerSHA(t *testing.T) {
 	mustRun(t, "git", "-C", repoDir, "add", "-A")
 	mustRun(t, "git", "-C", repoDir, "commit", "-q", "-m", "diverged two")
 	publish("rejected two")
-	if got := strings.Count(mustRun(t, "cat", countFile), "attempt"); got != 2 {
-		t.Fatalf("new SHA caused %d carrier attempts, want 2", got)
+	if attempts != 2 {
+		t.Fatalf("new SHA caused %d carrier attempts, want 2", attempts)
 	}
 	if len(kinds) != 2 {
 		t.Fatalf("new rejection repeated events: %v", kinds)
