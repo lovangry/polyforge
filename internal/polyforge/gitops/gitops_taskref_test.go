@@ -257,6 +257,64 @@ func TestPushTaskRefsWithoutReposIsANoop(t *testing.T) {
 	}
 }
 
+// A non-fast-forward rejection is a per-(repo,sha) fuse: the same task head
+// is not pushed again, while a new task head gets one fresh attempt.
+func TestTaskRefNonFastForwardIsFusePerSHA(t *testing.T) {
+	setIdentity(t)
+	o, base := taskOpts(t, "wi_taskref_fuse")
+	mkBare(t, o.RemoteURL, false)
+	mkTaskCapsule(t, o)
+	mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
+	if _, _, _, err := CommitPush(context.Background(), o, "seed"); err != nil {
+		t.Fatalf("seed CommitPush: %v", err)
+	}
+
+	var attempts int
+	gitArgsProbe = func(args []string) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "refs/pf-task/demo-src") && !strings.Contains(joined, "ls-remote") {
+			attempts++
+		}
+	}
+	t.Cleanup(func() { gitArgsProbe = nil })
+	repoDir := filepath.Join(o.CapsuleDir, capsule.DirRepos, "demo-src")
+	mustRun(t, "git", "-C", repoDir, "reset", "-q", "--hard", "HEAD~1")
+	if err := os.WriteFile(filepath.Join(repoDir, "diverged.txt"), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, "git", "-C", repoDir, "add", "-A")
+	mustRun(t, "git", "-C", repoDir, "commit", "-q", "-m", "diverged one")
+	o.CarrierAlerts = &CarrierAlerts{}
+	var kinds []string
+	o.EventSink = func(kind string, _ map[string]any) { kinds = append(kinds, kind) }
+	publish := func(label string) {
+		t.Helper()
+		if _, _, _, err := CommitPush(context.Background(), o, label); err != nil {
+			t.Fatalf("CommitPush(%s): %v", label, err)
+		}
+	}
+	publish("rejected one")
+	publish("same sha")
+	if attempts != 1 {
+		t.Fatalf("same SHA caused %d carrier attempts, want 1", attempts)
+	}
+	if len(kinds) != 2 || kinds[0] != EventCarrierPushFailed || kinds[1] != EventTaskRefDiverged {
+		t.Fatalf("events = %v, want one carrier failure and divergence", kinds)
+	}
+	if err := os.WriteFile(filepath.Join(repoDir, "diverged.txt"), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, "git", "-C", repoDir, "add", "-A")
+	mustRun(t, "git", "-C", repoDir, "commit", "-q", "-m", "diverged two")
+	publish("rejected two")
+	if attempts != 2 {
+		t.Fatalf("new SHA caused %d carrier attempts, want 2", attempts)
+	}
+	if len(kinds) != 2 {
+		t.Fatalf("new rejection repeated events: %v", kinds)
+	}
+}
+
 // Never force: a re-claim that started from a clone LACKING the carried
 // commits publishes a diverged head. The carrier push is rejected
 // non-fast-forward, the carrier on the hub stays on the WI's commits, and
