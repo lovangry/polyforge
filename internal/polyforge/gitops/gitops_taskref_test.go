@@ -262,7 +262,7 @@ func TestPushTaskRefsWithoutReposIsANoop(t *testing.T) {
 func TestTaskRefNonFastForwardIsFusePerSHA(t *testing.T) {
 	setIdentity(t)
 	o, base := taskOpts(t, "wi_taskref_fuse")
-	bare := mkBare(t, o.RemoteURL, false)
+	mkBare(t, o.RemoteURL, false)
 	mkTaskCapsule(t, o)
 	mkTaskRepoWithWork(t, o.CapsuleDir, "demo-src", filepath.Join(base, "origin"))
 	if _, _, _, err := CommitPush(context.Background(), o, "seed"); err != nil {
@@ -271,7 +271,8 @@ func TestTaskRefNonFastForwardIsFusePerSHA(t *testing.T) {
 
 	var attempts int
 	gitArgsProbe = func(args []string) {
-		if strings.Contains(strings.Join(args, " "), "refs/pf-task/demo-src") {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "refs/pf-task/demo-src") && !strings.Contains(joined, "ls-remote") {
 			attempts++
 		}
 	}
