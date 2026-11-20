@@ -168,7 +168,7 @@ def run(inv: Invocation, a: argparse.Namespace, held: List[Details]) -> int:
     inv.summary = "%d PR(s) published at the verified heads, awaiting a human review: %s" % (
         len(details.repos), ", ".join("repos/%s %s" % (r.name, gostr.short(r.head)) for r in details.repos))
     if no_pr:
-        inv.summary += " (no forge, no PR opened — the owner merges by hand: %s)" % (
+        inv.summary += " (no forge, no PR opened — merge step lands locally; remote origin is not pushed: %s)" % (
             ", ".join("repos/%s %s" % (r.name, r.branch) for r in no_pr))
     return 0
 

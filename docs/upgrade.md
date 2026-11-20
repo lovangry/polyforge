@@ -195,3 +195,11 @@ change, so it was not already red; review classes that `test_weakened`).
 Everything else is unchanged: an ordinary unit keeps its test commit and
 the four requirements of the test-first shape, and verification still
 runs every recorded run green on the final tree.
+
+## v0.2.1, no-forge repositories are merged locally
+
+The merge step now creates and pushes a no-ff merge commit for repositories without a forge, recording `how: merged` and `merge_commit` in the landing record.
+
+## v0.2.1, local landing follows the capsule baseline
+
+For a local non-bare origin, the merge step now advances the capsule's `origin/HEAD` baseline in the origin-side worktree rather than pushing a hosting service. If the owner has another branch checked out, a temporary detached worktree advances only the baseline ref. Dirty changes are preserved through a stash retry when necessary; a conflicting stash stays available by its recorded object ID, while landing still succeeds with `stash_conflict: true`. Bare or remote origins use push. Landing records `worktree_synced`, and repositories with nothing to publish record an empty published branch and land as `how: nothing` with an empty merge commit.

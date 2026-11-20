@@ -40,8 +40,10 @@ the source and what did not hold (the lane goes back to the step that makes the 
 1. **Per task repo** (`repos/<name>/`; a capsule with none publishes nothing and writes
    `{"repos": []}`): `git fetch origin`; `<default>` is
    `git symbolic-ref --short refs/remotes/origin/HEAD` less `origin/` (else `main`).
-   `git rev-list --count origin/<default>..HEAD` of 0: record `skipped_reason`, nothing to
-   publish. Else: `git status --porcelain --untracked-files=all` is empty, no tag points at
+   `git rev-list --count origin/<default>..HEAD` of 0: record `branch: ""`,
+   `pr_url: ""`, and `skipped_reason: "nothing to publish"`; do not push or claim a
+   published branch. Merge records `how: "nothing"` and `merge_commit: ""` without
+   fetching or judging this repo. Else: `git status --porcelain --untracked-files=all` is empty, no tag points at
    a commit of this work item (a hit is a `## Follow-up` point, not a stop). The branch is
    `polyforge/<capsule directory name>` (`basename "$PWD"`). **Push, idempotent:**
    `git ls-remote origin refs/heads/<branch>` absent, or an ancestor of HEAD:
@@ -56,7 +58,7 @@ the source and what did not hold (the lane goes back to the step that makes the 
    PATH): open nothing — record `pr_url` empty, `no_forge: true` and a `skipped_reason` naming it
    ("no forge (GitHub only): <branch> at <head> pushed, no PR opened"), and go on: this is not a
    `blocked`.
-   The merge step takes such a repo as a manual landing (the owner merges the branch by hand).
+   The merge step takes such a repo as a local merge (the merge step merges the branch into the default branch).
 2. **The PR body**, in this order: the slug and a change summary; when the verifying gate
    was waived, first the line that the change's verification (micro: its evidence) was red
    and waived (the owner's words verbatim, as the header quotes them) and that the
@@ -113,7 +115,7 @@ the source and what did not hold (the lane goes back to the step that makes the 
 ## 交接要写什么 — what your hand-off carries
 
 - **Status.** `done` once every repo with commits is pushed and — when a forge answered — its
-  PR open (with no forge, `no_forge: true` and its pushed branch recorded instead, the merge left to the
+  PR open (with no forge, `no_forge: true` and its pushed branch recorded instead, the merge step will handle the
   owner); and the owner passed an owner-review; as the last step, once the `wrap-attrs` line
   was accepted. `fail` when a check before you started did not hold, or on the
   owner's 「不通过」 (`--per-owner`). `blocked` on a push identity, an origin that is not

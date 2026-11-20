@@ -27,41 +27,79 @@ class MergeDefaultBranchFreshnessTest(unittest.TestCase):
         self.assertIn("sync", reason)
 
 
-class MergeNoForgeManualLandingTest(unittest.TestCase):
-    """本地/内网仓库（origin 不是 GitHub、无 gh）时 publish 不开 PR：merge 不得因此 FAIL，
-    只校验 origin 分支停在 verified head，landing 记 manual_merge_required 且不造 merge commit。"""
-
+class MergeNoForgeLandingTest(unittest.TestCase):
     def _repo(self, **kw: Any) -> Any:
-        base = dict(name="lantay-client", pr_url="", branch="polyforge/cpm-for-legal-400",
-                    head="a" * 40, published="a" * 40, dir="/tmp/no-such-capsule/repos/lantay-client")
+        base = dict(name="local", pr_url="", branch="polyforge/capsule", head="a" * 40,
+                    published="a" * 40, dir="/tmp/local", no_forge=True, base="main")
         base.update(kw)
         return merge.MergeRepo(**base)
 
-    def test_manual_repo_yields_manual_landing_record(self) -> None:
-        build = cast(Callable[[Any], dict[str, Any]], getattr(merge, "landing_of", None))
-        self.assertIsNotNone(build)
+    class FakeGit:
+        def __init__(self, push_error: bool = False) -> None:
+            self.calls: list[tuple[str, tuple[str, ...]]] = []
+            self.push_error = push_error
+
+        def fetch(self, cwd: str, *branches: str) -> None:
+            self.calls.append(("fetch", branches))
+
+        def rev(self, cwd: str, ref: str) -> str:
+            if ref.endswith("origin/polyforge/capsule"):
+                return "a" * 40
+            if ref == "HEAD":
+                return "b" * 40
+            if ref.endswith("origin/main"):
+                return "base" * 10
+            raise AssertionError(ref)
+
+        def git(self, cwd: str, *args: str) -> str:
+            self.calls.append(("git", args))
+            if args[:4] == ("symbolic-ref", "--short", "refs/remotes/origin/HEAD"):
+                return "origin/main\n"
+            if args[:4] == ("symbolic-ref", "--short", "-q", "HEAD"):
+                return "polyforge/capsule\n"
+            if args[:3] == ("remote", "get-url", "origin"):
+                return "/tmp/local\n"
+            if args[:3] == ("--git-dir", "/tmp/local", "rev-parse"):
+                return "true\n"
+            if args[0] == "push" and self.push_error:
+                raise merge.GoError("push rejected: non-fast-forward")
+            return ""
+
+    def test_local_landing_creates_merge_commit_and_landing_shape(self) -> None:
+        r = self._repo()
+        g = self.FakeGit()
+        inv = type("I", (), {"say": lambda self, text: None})()
+        merge.Merge(inv, g, merge.Ctx()).judge_local(r)
+        self.assertEqual(r.how, merge.HOW_MERGED)
+        self.assertEqual(r.merge_commit, "b" * 40)
+        self.assertTrue(r.by_this_run)
+        calls = [c[1] for c in g.calls if c[0] == "git"]
+        self.assertIn(("switch", "--detach", "refs/remotes/origin/main"), calls)
+        self.assertIn(("push", "-q", "origin", "HEAD:refs/heads/main"), calls)
         d = merge.Details("p.json", "v.json")
-        r = self._repo()
-        r.no_forge = True
-        r.how = merge.HOW_MANUAL
         d.repos.append(r)
-        rec = build(d)
-        self.assertEqual(rec["state"], "landed")
-        self.assertEqual(rec["repos"][0]["pr"], "")
-        self.assertEqual(rec["repos"][0]["light_verified_head"], r.head)
-        self.assertIs(rec["repos"][0].get("manual_merge_required"), True)
-        self.assertNotIn("merge_commit", rec["repos"][0])
+        rec = merge.landing_of(d)["repos"][0]
+        self.assertEqual(rec["how"] if "how" in rec else r.how, "merged")
+        self.assertEqual(rec["merge_commit"], "b" * 40)
+        self.assertNotIn("manual_merge_required", rec)
 
-    def test_no_forge_repo_is_marked_in_details(self) -> None:
+    def test_push_failure_restores_branch_and_routes_to_sync(self) -> None:
         r = self._repo()
-        r.no_forge = True
-        self.assertIs(r.to_dict().get("no_pr"), True)
-        r.no_forge = False
-        self.assertNotIn("no_pr", r.to_dict())
+        g = self.FakeGit(push_error=True)
+        inv = type("I", (), {"say": lambda self, text: None})()
+        merge.Merge(inv, g, merge.Ctx()).judge_local(r)
+        self.assertEqual(r.how, "")
+        self.assertIn("sync", r.why)
+        self.assertIn(("switch", "--quiet", "polyforge/capsule"),
+                      [c[1] for c in g.calls if c[0] == "git"])
 
-    def test_manual_constant_is_a_distinct_how(self) -> None:
-        self.assertEqual(getattr(merge, "HOW_MANUAL", None), "manual")
-        self.assertNotEqual(merge.HOW_MANUAL, merge.HOW_MERGED)
+    def test_landing_serialization_has_no_manual_shape(self) -> None:
+        r = self._repo(how=merge.HOW_MERGED, merge_commit="b" * 40)
+        d = merge.Details("p.json", "v.json")
+        d.repos.append(r)
+        rec = merge.landing_of(d)["repos"][0]
+        self.assertNotIn("manual_merge_required", rec)
+        self.assertEqual(rec["merge_commit"], "b" * 40)
 
 
 if __name__ == "__main__":

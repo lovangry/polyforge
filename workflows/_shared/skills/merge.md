@@ -1,6 +1,6 @@
 ---
 name: merge
-description: Merge the published PRs at the verified heads with one pre-written script and register the landing record it writes for the work item's wrap (pf step hub wrap-attrs integration); a PR that moved, the default branch gained commits after verification when the verified result records a base, closed or was refused is this gate's FAIL back to sync. A repo published with no forge (empty pr_url) is a manual landing — its branch must stand at the verified head and the record says the owner merges it by hand; nothing is merged for it.
+description: Merge the published PRs at the verified heads with one pre-written script and register the landing record it writes for the work item's wrap (pf step hub wrap-attrs integration); a PR that moved, the default branch gained commits after verification when the verified result records a base, closed or was refused is this gate's FAIL back to sync. A repo published with no forge (empty pr_url) is a local merge — its branch must stand at the verified head and the script merges it into the capsule baseline and records the merge commit and worktree synchronization.
 commands: [merge.py]
 ---
 # merge
@@ -39,11 +39,17 @@ is wrapped with. You never merge by hand, and you never write the landing record
 ## Procedure
 
 **A repo with no forge** — its `publish.json` entry carries `no_forge: true` and an empty
-`pr_url` (a local or intranet origin, or no `gh`) — is judged with git alone and **nothing is merged for it**: origin's
-`<branch>` must stand at the verified head, and when the verified result records a base, origin's
-default branch must still be at it; the script then records it `how: manual` (the landing record
-carries `manual_merge_required: true` and no merge commit). That is this step's done, not a
-refusal — the owner merges that branch by hand, and your hand-off says so per repo. A branch that
+`pr_url` (a local or intranet origin, or no `gh`) — is judged with git alone:
+origin's `<branch>` must stand at the verified head and the capsule's `origin/HEAD`
+baseline must still match verification. A local non-bare origin is merged in its
+worktree, or in a temporary detached worktree if another branch is checked out.
+Dirty changes are preserved, retrying through stash push/pop if necessary. A stash
+pop conflict retains the stash, records `stash_conflict: true`, removes conflict
+markers, and still passes. Landing records `how: merged`, `merge_commit`, and
+`worktree_synced`. Bare or remote origins use push. An empty published branch with
+a skipped reason records `how: nothing` and an empty merge commit without a fetch.
+Your hand-off names the baseline and commit, states that no remote service was
+pushed for local worktree landing, and names any retained stash object ID. A branch that
 moved, or a default branch that gained commits, is the same FAIL as a PR that moved.
 
 1. **Reuse or run.** An `artifacts/merge/result.json` whose `round` equals `$PF_ROUND` and
@@ -79,7 +85,8 @@ moved, or a default branch that gained commits, is the same FAIL as a PR that mo
 - **回应上一轮** (a later round): what the forge refused in the earlier round, and whether
   it lands now.
 - **结论**: each repo's PR and merge commit, or why the merge was refused; for a no-forge repo
-  the branch and its verified head, named as "not merged: the owner merges it by hand".
+  the baseline and merge commit, whether the owner worktree was synchronized, and
+  any retained stash object ID; distinguish local advancement from remote push.
 - **发现的问题和风险**: on a fail, the result's `summary` and each refused repo's `why` —
   what `sync` must merge again.
 - **关键决定和理由**: any merge made elsewhere that the landing rule took (`accepted: true`):
