@@ -741,6 +741,11 @@ func pushTaskRefsLocked(o Opts, chainOK bool) (string, []carrierSrc, []string) {
 	}
 	defer cleanup()
 	for _, s := range srcs {
+		if o.CarrierAlerts.fused(TaskRefName(s.name), s.sha) {
+			fmt.Fprintf(os.Stderr, "gitops: %s: task-ref push for repo %s skipped: non-fast-forward fuse for HEAD %s\n", o.WorkItemID, s.name, s.sha)
+			failed = append(failed, s.name)
+			continue
+		}
 		out, behind, err := pushCarrier(o, reposDir, s.objects, s.sha, s.name, additions)
 		if behind {
 			// The worktree sits on an ancestor of the carried head (an
@@ -767,6 +772,9 @@ func pushTaskRefsLocked(o Opts, chainOK bool) (string, []carrierSrc, []string) {
 		// commits, or foreign content). The carrier is left untouched and
 		// the divergence is raised as an error event, not left to stderr —
 		// once per repo per job, like carrier_push_failed.
+		if IsNonFastForward(err, out) {
+			o.CarrierAlerts.fuse(TaskRefName(s.name), s.sha)
+		}
 		if IsNonFastForward(err, out) && chainOK && !o.laneCancelled() && o.EventSink != nil && o.CarrierAlerts.firstDiverged(TaskRefName(s.name)) {
 			o.EventSink(EventTaskRefDiverged, map[string]any{
 				"repo":  s.name,
@@ -1810,6 +1818,7 @@ type CarrierAlerts struct {
 	mu       sync.Mutex
 	m        map[string]bool
 	diverged map[string]bool
+	refused  map[string]string
 }
 
 // first records a failure of repo and reports whether it is the first
@@ -1848,6 +1857,29 @@ func (a *CarrierAlerts) firstDiverged(ref string) bool {
 	return true
 }
 
+// fused reports whether this repo's exact rejected head is already known.
+func (a *CarrierAlerts) fused(ref, sha string) bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.refused[ref] == sha
+}
+
+// fuse records the exact head rejected non-fast-forward.
+func (a *CarrierAlerts) fuse(ref, sha string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.refused == nil {
+		a.refused = map[string]string{}
+	}
+	a.refused[ref] = sha
+}
+
 // clear forgets repo's raised failure after a successful carrier push.
 func (a *CarrierAlerts) clear(repo string) {
 	if a == nil {
@@ -1856,6 +1888,7 @@ func (a *CarrierAlerts) clear(repo string) {
 	a.mu.Lock()
 	delete(a.m, repo)
 	delete(a.diverged, repo)
+	delete(a.refused, repo)
 	a.mu.Unlock()
 }
 
