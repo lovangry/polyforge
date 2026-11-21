@@ -42,7 +42,7 @@ class AnalysisDecl:
 class BaselineComplete:
     """Explicit proof that a ticket is complete on the baseline."""
     justification: str
-    criteria: List[dict]
+    criteria: List[dict[str, Any]]
 
 
 @dataclass
