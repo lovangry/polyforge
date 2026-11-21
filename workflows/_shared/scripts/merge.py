@@ -359,10 +359,7 @@ class Merge:
                 g.git(source, "update-ref", "refs/heads/" + r.base, merge_commit,
                       g.rev(r.dir, "refs/remotes/origin/" + r.base))
             r.merge_commit = merge_commit
-            # (r1#3) red dance: the tree of the corrected test commit must
-            # not carry the unit's impl — record how: merged again, as
-            # before the squash change; re-applied after the red run.
-            r.how, r.by_this_run = HOW_MERGED, True
+            r.how, r.by_this_run = HOW_SQUASH, True
             delivery = "pushed to origin" if bare else "remote origin not pushed"
             self.inv.say("repos/%s: no forge — local %s advanced to %s; %s" %
                          (r.name, r.base, gostr.short(r.merge_commit), delivery))
