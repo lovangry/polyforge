@@ -39,12 +39,20 @@ class AnalysisDecl:
 
 
 @dataclass
+class BaselineComplete:
+    """Explicit proof that a ticket is complete on the baseline."""
+    justification: str
+    criteria: List[dict]
+
+
+@dataclass
 class Analysis:
     """The analysis as the machine consumes it: the cap and the listed
     tests in their order (the order is the cut's)."""
 
     limit: int = DEFAULT_SUPPLEMENT_LIMIT
     decls: List[AnalysisDecl] = field(default_factory=list)
+    baseline_complete: Any = None
 
 
 def _text(v: Any, what: str) -> str:
@@ -95,6 +103,26 @@ def read_analysis(path: str) -> Analysis:
                              % (path, gostr.quote(json.dumps(v))))
         limit = v
 
+    baseline = None
+    if "baseline_complete" in doc:
+        b = doc["baseline_complete"]
+        if not isinstance(b, dict):
+            raise ValueError("%s: baseline_complete is not an object" % path)
+        justification = b.get("justification")
+        criteria = b.get("criteria")
+        if not isinstance(justification, str) or not justification or len(justification) > 500:
+            raise ValueError("%s: baseline_complete justification must be non-empty and at most 500 characters" % path)
+        if not isinstance(criteria, list) or not criteria:
+            raise ValueError("%s: baseline_complete criteria must be non-empty" % path)
+        for i, c in enumerate(criteria):
+            if not isinstance(c, dict) or isinstance(c.get("ac"), bool) or not isinstance(c.get("ac"), int):
+                raise ValueError("%s: baseline_complete criteria[%d] ac must be an integer" % (path, i))
+            for key in ("impl", "tests"):
+                paths = c.get(key)
+                if not isinstance(paths, list) or not paths or not all(isinstance(p, str) and p for p in paths):
+                    raise ValueError("%s: baseline_complete criteria[%d].%s must be a non-empty array of paths" % (path, i, key))
+        baseline = BaselineComplete(justification, criteria)
+
     tests = doc.get("tests", [])
     if not isinstance(tests, list):
         raise ValueError("%s is not %s: tests is not an array" % (path, shape))
@@ -126,4 +154,4 @@ def read_analysis(path: str) -> Analysis:
             raise ValueError("%s: %s repeats the id %s" % (path, at, d.id))
         ids.append(d.id)
         decls.append(d)
-    return Analysis(limit=limit, decls=decls)
+    return Analysis(limit=limit, decls=decls, baseline_complete=baseline)
