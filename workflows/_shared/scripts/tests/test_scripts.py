@@ -306,10 +306,10 @@ class MergeScriptTest(unittest.TestCase):
                                "--capsule", w.capsule, "--json", "--out", out)
         assert res is not None
         r = repo_of(res, "app")
-        self.assertEqual((code, r["how"], r["by_this_run"], r["branch_side"]), (0, "merged", True, head), err)
+        self.assertEqual((code, r["how"], r["by_this_run"]), (0, "squash", True), err)
         with open(landing, encoding="utf-8") as f:
             self.assertEqual(json.load(f), {"state": "landed", "repos": [
-                {"repo": "app", "pr": r["pr_url"], "head": head, "light_verified_head": head, "merge_commit": r["merge_commit"]}],
+                {"repo": "app", "pr": r["pr_url"], "head": head, "how": "squash", "light_verified_head": head, "merge_commit": r["merge_commit"]}],
                 "merge_commits": {"app": [r["merge_commit"]]}})
 
     def test_default_branch_freshness_controls_merge(self) -> None:
@@ -321,7 +321,7 @@ class MergeScriptTest(unittest.TestCase):
         code, res, err = w.run("merge.py", "--publish", publish, "--verified", verified, "--landing-out", landing,
                                "--capsule", w.capsule, "--json", "--out", out)
         assert res is not None
-        self.assertEqual((code, res["verdict"], repo_of(res, "app")["how"]), (0, "pass", "merged"), err)
+        self.assertEqual((code, res["verdict"], repo_of(res, "app")["how"]), (0, "pass", "squash"), err)
         self.assertTrue(os.path.exists(landing))
         self.assertEqual(repo_of(res, "app")["head"], head)
 

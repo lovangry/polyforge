@@ -82,6 +82,7 @@ from pfstep.gitmerge.landing import take_as_landing  # noqa: E402
 NAME = "merge.py"
 
 HOW_MERGED = "merged"
+HOW_SQUASH = "squash"
 HOW_MERGED_ELSEWHERE = "merged_elsewhere"
 
 
@@ -97,7 +98,8 @@ class MergeRepo:
     published: str
     dir: str
     merge_commit: str = ""
-    # how: merged or merged_elsewhere ("" = not landed)
+    title: str = ""
+    # how: squash for new landings; merged or merged_elsewhere for historical PRs
     how: str = ""
     # branch_side: the merge commit's second parent ("" = none); by_this_run:
     # this run asked the forge to merge it
@@ -178,12 +180,14 @@ def landing_of(d: Details) -> Dict[str, Any]:
     repos = []
     for r in d.repos:
         e: Dict[str, Any] = {"repo": r.name, "pr": r.pr_url, "head": r.head}
-        if r.no_forge or r.how == "nothing":
+        if r.no_forge or r.how in ("nothing", HOW_SQUASH):
             e["how"] = r.how
         if r.no_forge and r.by_this_run:
             e["by_this_run"] = True
-        if r.no_forge and r.how == HOW_MERGED:
+        if r.no_forge and r.how in (HOW_MERGED, HOW_SQUASH):
             e["worktree_synced"] = r.worktree_synced
+        if r.how == HOW_SQUASH:
+            e["how"] = HOW_SQUASH
         if r.stash:
             e["stash"] = r.stash
         if r.stash_conflict:
@@ -297,7 +301,7 @@ class Merge:
                 original = g.git(target, "symbolic-ref", "--short", "-q", "HEAD").strip()
                 g.git(target, "switch", "--detach", "refs/remotes/origin/" + r.base)
             merge_args = ("-c", "user.name=polyforge", "-c", "user.email=polyforge@local",
-                          "merge", "--no-ff", "--no-edit", r.head)
+                          "merge", "--squash", r.head)
             stashed = False
             try:
                 g.git(target, *merge_args)
@@ -306,7 +310,10 @@ class Merge:
                     try:
                         g.git(target, "merge", "--abort")
                     except GoError:
-                        pass
+                        try:
+                            g.git(target, "reset", "--merge")
+                        except GoError:
+                            pass
                     raise first
                 try:
                     g.git(target, "merge", "--abort")
@@ -331,6 +338,9 @@ class Merge:
                         except GoError:
                             pass
                     raise first
+            commit_title = r.title or (r.name + ": squash")
+            g.git(target, "-c", "user.name=polyforge", "-c", "user.email=polyforge@local",
+                  "commit", "-m", commit_title)
             if stashed:
                 try:
                     g.git(target, "stash", "pop")
@@ -344,7 +354,7 @@ class Merge:
                 g.git(source, "update-ref", "refs/heads/" + r.base, merge_commit,
                       g.rev(r.dir, "refs/remotes/origin/" + r.base))
             r.merge_commit = merge_commit
-            r.how, r.by_this_run = HOW_MERGED, True
+            r.how, r.by_this_run = HOW_SQUASH, True
             delivery = "pushed to origin" if bare else "remote origin not pushed"
             self.inv.say("repos/%s: no forge — local %s advanced to %s; %s" %
                          (r.name, r.base, gostr.short(r.merge_commit), delivery))
@@ -411,6 +421,7 @@ class Merge:
                                 current_base = g.rev(r.dir, "refs/remotes/origin/" + r.base)
                                 r.why = default_branch_update_reason(r.verified_base, current_base)
                             if not r.why:
+                                r.title = pr.title
                                 opened.append(r)
             else:
                 r.why = "its PR %s is %s" % (r.pr_url, pr.state.lower())
@@ -421,7 +432,7 @@ class Merge:
             return 1
         # 2. each open PR merged at the verified head
         for i, r in enumerate(opened):
-            inv.say("repos/%s: gh pr merge %s --merge --match-head-commit %s" % (r.name, r.pr_url, gostr.short(r.head)))
+            inv.say("repos/%s: gh pr merge %s --squash --match-head-commit %s" % (r.name, r.pr_url, gostr.short(r.head)))
             merr: Optional[GoError] = None
             try:
                 g.merge_pr(r.dir, r.pr_url, r.head)
@@ -432,10 +443,14 @@ class Merge:
             except GoError as err:
                 return self.not_judged("repos/%s: reading the PR %s after the merge (%s): %s" % (r.name, r.pr_url, _v(merr), err))
             if pr.state == "MERGED":
-                try:
-                    self.take_landing(r, pr.merge_commit, merr is None)
-                except GoError as err:
-                    return self.not_judged(str(err))
+                if merr is None:
+                    r.merge_commit, r.by_this_run, r.how = pr.merge_commit, True, HOW_SQUASH
+                    self.inv.say("repos/%s: landed as %s (squash)" % (r.name, gostr.short(r.merge_commit)))
+                else:
+                    try:
+                        self.take_landing(r, pr.merge_commit, False)
+                    except GoError as err:
+                        return self.not_judged(str(err))
             elif pr.state != "OPEN":
                 r.why = "the merge was refused (%s) and the PR is %s" % (_v(merr), pr.state.lower())
             else:
@@ -564,6 +579,7 @@ def run(inv: Invocation, a: argparse.Namespace, held: List[Details]) -> int:
             branch = branch[len("refs/heads/"):]
         r = MergeRepo(name=name, pr_url=gostr.trim_text(p.get("pr_url") or ""), branch=branch,
                       published=gostr.trim_text(p.get("head") or ""), head=vheads.get(name, ""),
+                      title=gostr.trim_text(p.get("title") or ""),
                       verified_base=vbases.get(name, ""),
                       dir=os.path.join(capsule, "repos", name))
         r.no_forge = no_forge or r.pr_url == ""

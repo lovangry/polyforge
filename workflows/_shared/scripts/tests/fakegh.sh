@@ -64,7 +64,7 @@ case "$sub" in
     ( git clone -q "$FAKE_GH_ORIGINS/$repo.git" "$w/c" && cd "$w/c" && git checkout -q "$(cat "$d/base")" &&
       if [ "$method" = --squash ]; then
         git -c user.name=gh -c user.email=gh@invalid merge -q --squash "origin/$(cat "$d/head")" &&
-        git -c user.name=gh -c user.email=gh@invalid commit -qm "$(cat "$d/title")"
+        git -c user.name=gh -c user.email=gh@invalid commit -qm "$(cat "$d/title" 2>/dev/null || echo 'polyforge: change')"
       else
         git -c user.name=gh -c user.email=gh@invalid merge -q --no-ff -m "Merge pull request #${target##*/} from $(cat "$d/head")" "origin/$(cat "$d/head")"
       fi &&
