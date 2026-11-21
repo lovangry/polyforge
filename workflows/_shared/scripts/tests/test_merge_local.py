@@ -49,9 +49,9 @@ class LocalLandingTest(GitCase):
         result = merge.Merge(inv, merge.Git(ctx), ctx).judge(details)
         self.assertEqual(result, expected, r.why)
         if expected == 0:
-            self.assertEqual(r.how, "merged")
+            self.assertEqual(r.how, "squash")
             self.assertEqual(git(self.source, "rev-parse", "refs/heads/" + self.base), r.merge_commit)
-            self.assertEqual(git(self.source, "rev-parse", r.merge_commit + "^2"), r.head)
+            self.assertEqual(git(self.source, "rev-parse", r.merge_commit + "^"), self.before)
         return cast(dict[str, Any], merge.landing_of(details)["repos"][0])
 
     def test_clean(self) -> None:
