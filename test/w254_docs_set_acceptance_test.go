@@ -444,13 +444,14 @@ func TestW254QuickstartsMovedIntact(t *testing.T) {
 // - the v0.2.1 section appended with units already red before the change (facts.py build --replay understands pre_existing_red: true in units.json: no test_commit, the red evidence is a replay on the tree of the change's base, and a run green there fails the unit — review classes that test_weakened)
 // - the v0.2.1 section appended with no-forge repositories merged locally (the merge step creates a no-ff commit, pushes it to origin, and records how: merged plus merge_commit)
 // - the v0.2.1 section appended with capsule-baseline local landing (origin-side worktrees, stash recovery, and nothing-published records)
+// - the v0.2.1 section appended with baseline-complete empty unit declarations (explicit per-AC paths, mutual exclusion, and owner-authorized self-validation for this ticket)
 // upgrade-sections:end
 // The file is only routed to, from the install ops page and the README
 // landing page.
 func TestW254UpgradeByteIdentical(t *testing.T) {
 	raw := []byte(w254Read(t, "docs/upgrade.md"))
 	sum := sha256.Sum256(raw)
-	if got := hex.EncodeToString(sum[:]); got != "54f2c986ee7b3658d138bb412c13e5b7ca64c87d4a0ed649b524fcb807799641" {
+	if got := hex.EncodeToString(sum[:]); got != "02b16baf68f05fae0ff50aea2b1f28c5e8e6203e6f7deb55d426baccf6d8fd01" {
 		t.Fatalf("docs/upgrade.md must stay byte-identical (only routed to, never rewritten): sha256 %s != the pinned pre-move sha256", got)
 	}
 	// the list beside the pin: one whole `// - ` line per appended section

@@ -72,7 +72,7 @@ once, in the scoped command, and nowhere else. (3) implement until it is green, 
 fast checks:
 {{fast_checks}}
 {{fast_checks_build}}
-For an unchanged baseline, `units.json` may be `[]` only when sibling `change-analysis.json` declares `baseline_complete` with non-empty `justification` (≤500 characters) and non-empty per-AC `criteria` whose `impl` and `tests` paths exist. This declaration is mutually exclusive with non-empty units or `pre_existing_red`, and must never replace an unimplemented acceptance criterion.
+For an unchanged baseline, `units.json` may be `[]` only when sibling `change-analysis.json` declares `baseline_complete` with non-empty `justification` (≤500 characters) and non-empty per-AC `criteria` whose `ac` is an integer and whose `impl` and `tests` paths exist. This declaration is mutually exclusive with non-empty units or `pre_existing_red`, and must never replace an unimplemented acceptance criterion.
 
 (4) commit the implementation (C_i, `impl_commit`) — the tree is the one the green run of (3)
 saw, and a bare commit changes no tree, so the command is not run again on it; (5) record the
