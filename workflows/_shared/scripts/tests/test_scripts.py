@@ -315,6 +315,22 @@ class MergeScriptTest(unittest.TestCase):
                 {"repo": "app", "pr": r["pr_url"], "head": head, "how": "squash", "light_verified_head": head, "merge_commit": r["merge_commit"]}],
                 "merge_commits": {"app": [r["merge_commit"]]}})
 
+    def test_a_merged_answer_that_names_no_merge_commit_is_refused(self) -> None:
+        w = World(self, "app")
+        w.change("app", {"feature.txt": "f\n"}, "app-section")
+        entry = w.publish("app")
+        publish, verified, out = self.inputs(w, entry)
+        # the merge command succeeded but the read-back names no merge
+        # commit: not a landing (the refusal the merged-elsewhere path
+        # keeps — r1#5)
+        write(os.path.join(w.gh, "app", "prs", "1"), "hide-merge", "\n")
+        code, res, err = w.run("merge.py", "--publish", publish, "--verified", verified, "--landing-out",
+                               os.path.join(w.capsule, "artifacts", "merge", "landing.json"),
+                               "--capsule", w.capsule, "--json", "--out", out)
+        assert res is not None
+        self.assertEqual(code, 1, err)
+        self.assertIn("names no merge commit", repo_of(res, "app")["why"])
+
     def test_squash_lands_one_first_parent_commit_titled_as_the_pr(self) -> None:
         w = World(self, "app")
         head = w.change("app", {"feature.txt": "f\n"}, "app-section")

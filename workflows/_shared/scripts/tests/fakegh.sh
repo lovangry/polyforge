@@ -70,6 +70,9 @@ case "$sub" in
       fi &&
       git push -q origin "HEAD:refs/heads/$(cat "$d/base")" && git rev-parse HEAD > "$d/merge" ) || { rm -rf "$w"; exit 1; }
     rm -rf "$w"; echo MERGED > "$d/state"
+    # a test's hook: the merged answer names no merge commit (an API that
+    # answered MERGED with a null mergeCommit)
+    [ -e "$d/hide-merge" ] && : > "$d/merge"
     # a test's hook: what happens on the default branch right after this
     # merge (a human pushing to main)
     [ -x "$d/after-merge" ] && "$d/after-merge" "$FAKE_GH_ORIGINS/$repo.git"
