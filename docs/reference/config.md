@@ -1110,3 +1110,16 @@ resolver takes its model like a step, from the `sync` step's list
 the integration lane dispatches no sub-agent: its fix tickets and the
 owner's rulings are its steps' own `pf step hub` writes and `pf step
 ask`s, on the steps' lists.
+
+## Capsule cache warmup
+
+A repository may opt into best-effort capsule cache warmup with
+`.polyforge/capsule-cache.conf`. Supported keys are:
+
+- `node_modules = true|false` — reuse same-repository, same-baseline dependencies by hardlinking.
+- `build_paths = path/glob, another/path` — copy matching build outputs from the warmed capsule.
+- `install = <command>` — offline fallback command, run after cache preparation fails.
+
+The cache is optional. Missing or invalid declarations, missing paths, cache limits,
+and install failures are logged and do not prevent capsule materialization. Hardlinked
+dependencies are removed before installation so the source capsule is never mutated.

@@ -216,6 +216,7 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	if err := atomicfile.Write(filepath.Join(j.capsuleDir, capsule.CapsuleJSON), blob, 0o644); err != nil {
 		return err
 	}
+	warmCapsuleCache(j.capsuleDir, j.project, repoSHAs)
 	// Task-repo inventory and the F1 task-definition file land before
 	// the bundle copy; the materialized work-item.json is the ONE
 	// authoritative statement of the ask inside the capsule (v1 has no
