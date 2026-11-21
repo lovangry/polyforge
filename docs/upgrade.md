@@ -210,3 +210,13 @@ Repositories can opt into best-effort warmup with `.polyforge/capsule-cache.conf
 See the configuration reference for `node_modules`, `build_paths`, and offline
 `install` fallback behavior. The feature is optional and failures do not block
 materialization.
+
+## v0.2.1, a no-forge head already on the remote baseline
+
+For a repository without a forge whose verified head is already contained by
+`origin/<base>` (landed by hand, or by an earlier run), the merge step no
+longer re-merges an empty no-op: it judges the containment against the fetched
+remote-tracking branch (`git branch -r --contains`, never the capsule's local
+branch) and records the landing as it stands — `how: merged` with no
+`by_this_run` and the verified head itself as `merge_commit`. Before, that
+corner claimed `by_this_run: true` with the baseline tip as the merge commit.

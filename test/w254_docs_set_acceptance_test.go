@@ -445,13 +445,14 @@ func TestW254QuickstartsMovedIntact(t *testing.T) {
 // - the v0.2.1 section appended with no-forge repositories merged locally (the merge step creates a no-ff commit, pushes it to origin, and records how: merged plus merge_commit)
 // - the v0.2.1 section appended with capsule-baseline local landing (origin-side worktrees, stash recovery, and nothing-published records)
 // - the capsule build-cache warmup section appended (same-baseline hardlinks, build-path copies, and offline install fallback)
+// - the v0.2.1 section appended with containment landing for a no-forge head already on the remote baseline (git branch -r --contains against the fetched remote-tracking branch; how: merged with no by_this_run and the verified head itself as merge_commit; no empty re-merge)
 // upgrade-sections:end
 // The file is only routed to, from the install ops page and the README
 // landing page.
 func TestW254UpgradeByteIdentical(t *testing.T) {
 	raw := []byte(w254Read(t, "docs/upgrade.md"))
 	sum := sha256.Sum256(raw)
-	if got := hex.EncodeToString(sum[:]); got != "b3735618f6f42cbedaa78cae5c9a576ce13931a36f3894d92fe31f66f37971b6" {
+	if got := hex.EncodeToString(sum[:]); got != "f9e93864410387ad47aee8838cbf47946ada417bc9dc1e567c2058fdb9e0a5cc" {
 		t.Fatalf("docs/upgrade.md must stay byte-identical (only routed to, never rewritten): sha256 %s != the pinned pre-move sha256", got)
 	}
 	// the list beside the pin: one whole `// - ` line per appended section
