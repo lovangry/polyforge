@@ -72,6 +72,8 @@ once, in the scoped command, and nowhere else. (3) implement until it is green, 
 fast checks:
 {{fast_checks}}
 {{fast_checks_build}}
+For an unchanged baseline, `units.json` may be `[]` only when sibling `change-analysis.json` declares `baseline_complete` with non-empty `justification` (≤500 characters) and non-empty per-AC `criteria` whose `ac` is an integer and whose `impl` and `tests` paths exist. This declaration is mutually exclusive with non-empty units or `pre_existing_red`, and must never replace an unimplemented acceptance criterion.
+
 (4) commit the implementation (C_i, `impl_commit`) — the tree is the one the green run of (3)
 saw, and a bare commit changes no tree, so the command is not run again on it; (5) record the
 unit in `artifacts/build/units.json` as your skill
@@ -103,7 +105,7 @@ Run the fast checks over the whole change (the written command once per touched 
 every unit test targeted, then the written unit check over the whole `artifacts/build/units.json`
 (the same command with no `--unit`) (the full bar is `verification`'s). Read your full diff (per repo `git diff
 $(git merge-base HEAD origin/HEAD)..HEAD`) as `review` will, against its five blocking classes:
-`bug`, `ac_gap`, `project_rule`, `test_weakened`, `guarantee`; write each hit and its disposition
+`bug`, `ac_gap`, `project_rule`, `test_weakened`, `guarantee`; when `baseline_complete` is declared, its `ac ↔ impl ↔ tests` mapping must match every ticket acceptance criterion and named tests must run green; write each hit and its disposition
 to `artifacts/self-review.md` and fix what you can now (a new unit for a behaviour fix).
 
 Write the change analysis — `artifacts/build/change-analysis.json`, the structured file
