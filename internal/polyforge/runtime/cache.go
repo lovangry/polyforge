@@ -91,7 +91,7 @@ func findWarmSource(cur, project, name, base string) string {
 		d := filepath.Join(filepath.Dir(cur), e.Name())
 		var id cacheIdentity
 		raw, e2 := os.ReadFile(filepath.Join(d, capsule.CapsuleJSON))
-		if e2 != nil || json.Unmarshal(raw, &id) != nil || id.Project != project {
+		if e2 != nil || json.Unmarshal(raw, &id) != nil || id.Project != project || id.Repos[name] != base {
 			continue
 		}
 		if _, e2 = os.Stat(filepath.Join(d, capsule.DirRepos, name, ".polyforge-warmed")); e2 == nil {
