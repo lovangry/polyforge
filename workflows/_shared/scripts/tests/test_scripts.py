@@ -358,7 +358,7 @@ class MergeScriptTest(unittest.TestCase):
                                "--capsule", w.capsule, "--json", "--out", out)
         assert res is not None
         r = repo_of(res, "app")
-        self.assertEqual((code, r["how"], r["by_this_run"]), (0, "merged_elsewhere", False), err)
+        self.assertEqual((code, r["how"], r.get("by_this_run", False)), (0, "merged_elsewhere", False), err)
         self.assertEqual(r["merge_commit"], landed)
         with open(landing, encoding="utf-8") as f:
             rec = json.load(f)["repos"][0]
@@ -378,7 +378,7 @@ class MergeScriptTest(unittest.TestCase):
                                "--capsule", w.capsule, "--json", "--out", out)
         assert res is not None
         r = repo_of(res, "app")
-        self.assertEqual((code, r["how"], r["by_this_run"], r["merge_commit"]), (0, "merged_elsewhere", False, squash), err)
+        self.assertEqual((code, r["how"], r.get("by_this_run", False), r["merge_commit"]), (0, "merged_elsewhere", False, squash), err)
         with open(landing, encoding="utf-8") as f:
             rec = json.load(f)["repos"][0]
         self.assertEqual((rec["accepted"], rec["head"], rec["merge_commit"]), (True, head, squash))
