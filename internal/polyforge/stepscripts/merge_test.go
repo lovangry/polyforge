@@ -104,11 +104,13 @@ func TestMergeMergesAtTheVerifiedHead(t *testing.T) {
 			t.Fatalf("%s: the PR is merged on origin's main: %s %s", repo, w.prFile(repo, 1, "state"), w.originMain(repo))
 		}
 		// one commit on the default branch, its single parent the old main
-		// tip, its message the PR title: not a merge commit
-		if ps := parents(t, w.dir(repo), r.MergeCommit); len(ps) != 1 || ps[0] != before[repo] {
+		// tip, its message the PR title: not a merge commit (the squash
+		// lives on the bare origin: read it there)
+		origin := []string{"--git-dir=" + filepath.Join(w.origins, repo+".git")}
+		if ps := strings.Fields(gitT(t, w.root, append(origin, "rev-list", "--parents", "-n", "1", r.MergeCommit)...)); len(ps) != 2 || ps[0] != r.MergeCommit || ps[1] != before[repo] {
 			t.Fatalf("%s: a single-parent squash of the verified head: %v", repo, ps)
 		}
-		if got := gitT(t, w.dir(repo), "log", "-1", "--format=%s", r.MergeCommit); got != repo+": the change" {
+		if got := gitT(t, w.root, append(origin, "log", "-1", "--format=%s", r.MergeCommit)...); got != repo+": the change" {
 			t.Fatalf("%s: the squash's message is the PR title: %q", repo, got)
 		}
 		if got := d.MergeCommits[repo]; len(got) != 1 || got[0] != r.MergeCommit {
