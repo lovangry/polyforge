@@ -117,6 +117,9 @@ const PushTimeout = 60 * 1e9 // 60 seconds (ns, for time.Duration)
 // Daemon job states the watcher decides on.
 const (
 	JobNeedsInput = "needs_input"
+	// JobStalled: running, but the live dispatch has no agent pid and has
+	// outlived session_stall_window (presentation only, polyforge#42).
+	JobStalled = "stalled"
 	// JobEndPending: blocked, the hub not told yet (runtime.StateEndPending).
 	JobEndPending = "end_pending"
 )
