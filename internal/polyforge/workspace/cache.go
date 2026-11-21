@@ -3,6 +3,7 @@ package workspace
 import (
 	"bufio"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -45,6 +46,9 @@ func LoadCacheConfig(repoRoot string) (*CacheConfig, error) {
 			for _, x := range strings.Split(v, ",") {
 				x = strings.TrimSpace(x)
 				if x != "" {
+					if filepath.IsAbs(x) || filepath.Clean(x) == ".." || strings.HasPrefix(filepath.Clean(x), ".."+string(os.PathSeparator)) {
+						return nil, &Error{Path: CacheConfigPath(repoRoot), Reason: "build_paths must stay within repository"}
+					}
 					c.BuildPaths = append(c.BuildPaths, x)
 				}
 			}
