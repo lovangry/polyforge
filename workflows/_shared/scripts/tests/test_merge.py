@@ -35,16 +35,17 @@ class MergeNoForgeLandingTest(unittest.TestCase):
         return merge.MergeRepo(**base)
 
     class FakeGit:
-        def __init__(self, push_error: bool = False) -> None:
+        def __init__(self, push_error: bool = False, contains: bool = False) -> None:
             self.calls: list[tuple[str, tuple[str, ...]]] = []
             self.push_error = push_error
+            self.contains = contains
 
         def fetch(self, cwd: str, *branches: str) -> None:
             self.calls.append(("fetch", branches))
 
         def remote_branch_contains(self, cwd: str, branch: str, commit: str) -> bool:
             self.calls.append(("contains", (branch, commit)))
-            return True
+            return self.contains
 
         def rev(self, cwd: str, ref: str) -> str:
             if ref.endswith("origin/polyforge/capsule"):
