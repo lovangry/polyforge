@@ -4,7 +4,9 @@ package test
 // scenarios share (the develop lane's publish and merge, the bar lock):
 // task repos whose origins are local bare repos and a fake `gh` first on
 // the daemon's PATH that keeps PRs as files and performs `gh pr merge
-// --merge` as a real --no-ff merge. Its own deliver-step scenarios drove
+// --squash` as a real squash — one commit, its message the PR title
+// (`--merge` keeps the historical --no-ff shape). Its own deliver-step
+// scenarios drove
 // only the retired lanes and are deleted (owner 2026-11-09: deprecated
 // lanes retired, their tests are not maintained).
 
@@ -25,7 +27,7 @@ origin=$(git remote get-url origin 2>/dev/null) || { echo "fake gh: not in a rep
 S="$FAKE_GH_STATE/$(basename "$origin" .git)"; mkdir -p "$S/prs"
 [ "$1" = pr ] || { echo "fake gh: unsupported: $*" >&2; exit 2; }
 sub=$2; shift 2
-head=""; state=all; base=main; target=""; method=""; json=""; match=""
+head=""; state=all; base=main; target=""; method=""; json=""; match=""; title=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --head) head=$2; shift 2 ;;
@@ -33,7 +35,8 @@ while [ $# -gt 0 ]; do
     --base) base=$2; shift 2 ;;
     --json) json=$2; shift 2 ;;
     --match-head-commit) match=$2; shift 2 ;;
-    -q|--jq|--title|--body|--body-file) shift 2 ;;
+    -q|--jq|--body|--body-file) shift 2 ;;
+    --title) title=$2; shift 2 ;;
     --merge|--squash|--rebase) method=$1; shift ;;
     -*) shift ;;
     *) target=$1; shift ;;
@@ -58,10 +61,11 @@ case "$sub" in
     done
     n=$(( $(ls "$S/prs" | wc -l) + 1 )); d="$S/prs/$n"; mkdir -p "$d"
     echo "$head" > "$d/head"; echo "$base" > "$d/base"; echo OPEN > "$d/state"
+    echo "${title:-polyforge: change}" > "$d/title"
     echo "https://github.com/fake/$(basename "$S")/pull/$n" > "$d/url"; cat "$d/url" ;;
   merge)
     d="$S/prs/${target##*/}"
-    [ "$method" = --merge ] || { echo "fake gh: refusing merge method '$method'" >&2; exit 1; }
+    [ "$method" = --squash ] || [ "$method" = --merge ] || { echo "fake gh: refusing merge method '$method'" >&2; exit 1; }
     [ "$(cat "$d/state")" = OPEN ] || { echo "fake gh: PR not open" >&2; exit 1; }
     if [ -n "$match" ] && [ "$(git ls-remote "$origin" "refs/heads/$(cat "$d/head")" | cut -f1)" != "$match" ]; then
       echo "fake gh: the PR's head is not $match" >&2; exit 1
@@ -69,7 +73,12 @@ case "$sub" in
     w=$(mktemp -d); trap 'rm -rf "$w"' EXIT # a refused merge (a conflict) leaves nothing behind
     git clone -q "$origin" "$w/c" || exit 1
     (cd "$w/c" && git checkout -q "$(cat "$d/base")" &&
-      git merge -q --no-ff -m "Merge pull request #${target##*/} from $(cat "$d/head")" "origin/$(cat "$d/head")" &&
+      if [ "$method" = --squash ]; then
+        git -c user.name=gh -c user.email=gh@invalid merge -q --squash "origin/$(cat "$d/head")" &&
+        git -c user.name=gh -c user.email=gh@invalid commit -qm "$(cat "$d/title" 2>/dev/null || echo 'polyforge: change')"
+      else
+        git merge -q --no-ff -m "Merge pull request #${target##*/} from $(cat "$d/head")" "origin/$(cat "$d/head")"
+      fi &&
       git push -q origin "HEAD:refs/heads/$(cat "$d/base")" && git rev-parse HEAD > "$d/merge") || exit 1
     echo MERGED > "$d/state"; rm -rf "$w" ;;
   view)
@@ -78,7 +87,7 @@ case "$sub" in
       *headRefName*)
         # the daemon's merge step reads the PR whole
         mc=null; [ -s "$d/merge" ] && mc="{\"oid\":\"$(cat "$d/merge")\"}"
-        printf '{"state":"%s","headRefName":"%s","baseRefName":"%s","mergeCommit":%s}\n' "$(cat "$d/state")" "$(cat "$d/head")" "$(cat "$d/base")" "$mc" ;;
+        printf '{"state":"%s","headRefName":"%s","baseRefName":"%s","mergeCommit":%s,"title":"%s"}\n' "$(cat "$d/state")" "$(cat "$d/head")" "$(cat "$d/base")" "$mc" "$(cat "$d/title" 2>/dev/null || echo 'polyforge: change')" ;;
       *) cat "$d/merge" ;;
     esac ;;
 esac
