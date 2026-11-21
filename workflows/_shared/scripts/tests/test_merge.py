@@ -42,6 +42,10 @@ class MergeNoForgeLandingTest(unittest.TestCase):
         def fetch(self, cwd: str, *branches: str) -> None:
             self.calls.append(("fetch", branches))
 
+        def remote_branch_contains(self, cwd: str, branch: str, commit: str) -> bool:
+            self.calls.append(("contains", (branch, commit)))
+            return True
+
         def rev(self, cwd: str, ref: str) -> str:
             if ref.endswith("origin/polyforge/capsule"):
                 return "a" * 40

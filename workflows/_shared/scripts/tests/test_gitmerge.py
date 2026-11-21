@@ -82,6 +82,26 @@ def read_conf(d: str) -> Conf:
         return parse_conf(f.read())
 
 
+class RemoteBranchContainsTest(unittest.TestCase):
+    def test_remote_branch_contains_uses_remote_tracking_branch(self) -> None:
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        origin = os.path.join(root, "origin.git")
+        clone = os.path.join(root, "clone")
+        git(root, "init", "-q", "--bare", "-b", "main", origin)
+        git(root, "clone", "-q", origin, clone)
+        write(clone, "tracked", "one\n")
+        git(clone, "add", "tracked")
+        git(clone, "commit", "-qm", "one")
+        git(clone, "push", "-q", "origin", "HEAD:refs/heads/main")
+        head = git(clone, "rev-parse", "HEAD")
+        self.assertTrue(lane().remote_branch_contains(clone, "main", head))
+        write(clone, "tracked", "two\n")
+        git(clone, "commit", "-qam", "two")
+        local = git(clone, "rev-parse", "HEAD")
+        self.assertFalse(lane().remote_branch_contains(clone, "main", local))
+
+
 class World:
     """A bare origin whose main holds an append-only upgrade log, a pin
     holder carrying its sha256, and some code; a seed clone to make
