@@ -87,6 +87,7 @@ from pfstep.engine import default_engine, nested_roots, reached_roots  # noqa: E
 from pfstep.invoke import Invocation, duration_flag  # noqa: E402
 from pfstep.runner import Runner, bash_argv, raise_on_termination  # noqa: E402
 from pfstep.unitruns import UnitRunDecl, clean_cwd, marker_matches, marker_problem, read_unit_runs  # noqa: E402
+from pfstep.analysis import read_analysis  # noqa: E402
 from pfstep.units import output_lines  # noqa: E402
 
 NAME = "fast_checks.py"
@@ -438,6 +439,27 @@ def run(inv: Invocation) -> int:
             decls = read_unit_runs(a.check_units)
         except ValueError as err:
             return inv.usage("--check-units %s is not a usable units.json: %s" % (a.check_units, err))
+        analysis_path = os.path.join(os.path.dirname(os.path.abspath(a.check_units)), "change-analysis.json")
+        baseline = None
+        if os.path.exists(analysis_path):
+            try:
+                baseline = read_analysis(analysis_path).baseline_complete
+            except ValueError as err:
+                return inv.usage("--check-units %s has unusable change-analysis.json: %s" % (a.check_units, err))
+        if baseline is not None:
+            if any(d.pre_existing_red for d in decls):
+                return inv.usage("--check-units %s: baseline_complete is mutually exclusive with pre_existing_red" % a.check_units)
+            if decls:
+                return inv.usage("--check-units %s: baseline_complete is mutually exclusive with units" % a.check_units)
+            for criterion in baseline.criteria:
+                for key in ("impl", "tests"):
+                    for path in criterion[key]:
+                        if not any(os.path.exists(os.path.join(capsule, "repos", repo, path))
+                                   for repo in os.listdir(os.path.join(capsule, "repos"))):
+                            return inv.usage("--check-units %s: baseline_complete path does not exist: %s" % (a.check_units, path))
+            inv.details = {"units_file": a.check_units, "units": [], "baseline_complete": True}
+            inv.summary = "baseline complete: %d criteria, 0 units" % len(baseline.criteria)
+            return 0
         if a.unit:
             decls = [d for d in decls if d.id == a.unit]
             if not decls:

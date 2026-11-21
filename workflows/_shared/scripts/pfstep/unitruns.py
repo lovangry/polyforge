@@ -24,6 +24,7 @@ class UnitRunDecl:
     argv: List[str] = field(default_factory=list)
     marker: str = ""
     test_commit: str = ""
+    pre_existing_red: bool = False
 
     def check(self) -> str:
         return self.repo + ":unit-run:" + self.id
@@ -61,7 +62,8 @@ def read_unit_runs(path: str) -> List[UnitRunDecl]:
         if not isinstance(u, dict):
             raise ValueError("%s is not %s: entry %d is not an object" % (path, shape, i))
         d = UnitRunDecl(id=text(u.get("id"), "id"), marker=text(u.get("marker"), "marker"),
-                        test_commit=text(u.get("test_commit"), "test_commit"))
+                        test_commit=text(u.get("test_commit"), "test_commit"),
+                        pre_existing_red=u.get("pre_existing_red") is True)
         text(u.get("impl_commit"), "impl_commit")
         r = u.get("run")
         if r is not None:
