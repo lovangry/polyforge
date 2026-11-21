@@ -228,3 +228,7 @@ remote-tracking branch (`git branch -r --contains`, never the capsule's local
 branch) and records the landing as it stands — `how: merged` with no
 `by_this_run` and the verified head itself as `merge_commit`. Before, that
 corner claimed `by_this_run: true` with the baseline tip as the merge commit.
+
+## v0.2.1, capsule clones run the target repo's commit-msg hooks
+
+A repository that ships `.husky` (husky's convention, the usual commitlint setup) now has its hooks wired into the capsule clone at materialize time: `core.hooksPath` points at the clone's own `.husky` directory, so every commit the step agent makes in the clone runs the target repo's own commit-msg validation. A message the repo's commitlint rejects fails the commit loudly — and a hook whose runtime is missing (husky needs `node_modules`; the preheat of polyforge#26 provides it) fails the same way, never silently passes. The daemon's hardened task-repo reads keep their `core.hooksPath=/dev/null` pin: only the agent's working clone is wired.
