@@ -571,11 +571,11 @@ func (t *Tracker) Snapshot(now time.Time) Snapshot {
 		SessionSeen:    t.sessionSeen,
 		SessionSize:    t.sessionSize,
 		SessionWroteAt: t.sessionWroteAt,
-		ToolCalls:   t.toolCalls,
-		RecentFiles: append([]string(nil), t.recentFiles...),
-		WaitCalls:   t.waitCalls,
-		WaitSeconds: t.waitSecs,
-		LastError:   t.lastError,
+		ToolCalls:      t.toolCalls,
+		RecentFiles:    append([]string(nil), t.recentFiles...),
+		WaitCalls:      t.waitCalls,
+		WaitSeconds:    t.waitSecs,
+		LastError:      t.lastError,
 	}
 	if len(t.contextWindows) > 0 {
 		s.ContextWindows = make(map[string]int64, len(t.contextWindows))

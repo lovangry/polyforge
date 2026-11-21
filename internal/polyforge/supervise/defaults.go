@@ -65,6 +65,11 @@ func (d Defaults) Fill() Defaults {
 	if d.AskWarmWindow <= 0 {
 		d.AskWarmWindow = DefaultAskWarmWindow
 	}
+	// zero takes the default; a negative SessionStall passes through
+	// (it disables rule 0 at the guard, so Fill must not bury it)
+	if d.SessionStall == 0 {
+		d.SessionStall = DefaultSessionStall
+	}
 	return d
 }
 

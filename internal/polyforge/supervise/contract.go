@@ -46,7 +46,7 @@ const (
 	// first token. Model-class: the candidate is judged unusable and the
 	// chain moves on. The record-based harness_silent below stays the
 	// backstop for harnesses with no watchable transcript.
-	CauseSessionStalled Cause = "session_stalled"
+	CauseSessionStalled       Cause = "session_stalled"
 	CauseHarnessSilent        Cause = "harness_silent"          // rule 0 (record-based)
 	CauseModelError           Cause = "model_error"             // rule 1 (error-ended turn)
 	CauseEndedWithoutResult   Cause = "ended_without_result"    // rule 1 (ok-ended turn)

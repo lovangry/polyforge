@@ -122,8 +122,8 @@ func TestSessionStalledNotMisjudged(t *testing.T) {
 		c := &fixClock{now: time.Unix(1000, 0)}
 		tr := newTrackerAt(c, sessionStallThresholds())
 		tr.SessionWrite(100, c.now)
-		c.advance(2 * time.Minute)   // 2 minutes watched
-		c.advance(10 * time.Minute)  // the owner's ask: the supervisor does not watch
+		c.advance(2 * time.Minute)  // 2 minutes watched
+		c.advance(10 * time.Minute) // the owner's ask: the supervisor does not watch
 		tr.ObserveTick(c.now, 10*time.Minute)
 		c.advance(2 * time.Minute) // 4 minutes watched in total
 		if v := judge(c, tr); v != nil {

@@ -29,7 +29,33 @@ func Judge(s Snapshot, now time.Time, grace time.Duration) *StepDead {
 	}
 	age := now.Sub(s.StartedAt)
 
-	// 0: harness_silent — nothing but silence (or UI noise) since dispatch.
+	// 0: session_stalled — the dispatch's live session file has not been
+	// written inside the session-stall window: the model delivered nothing
+	// at all (the polyforge#42 zero-output wedge, #38/#40 — a connected
+	// endpoint that never sends even its first token; the file froze at
+	// the dispatch prompt while every rule below waited for a turn that
+	// never began). The clock runs from the last write the watch observed
+	// — a write inside the window restarts it, so a slow first token that
+	// lands is a write, never a stall — and never before the dispatch
+	// itself (a resumed transcript's old mtime). Zero work-class signals
+	// is the shared guard with the record-based rule below: any work the
+	// harness records defers to the record rules. A watch that never saw
+	// the file (no locatable transcript) leaves this inert; harness_silent
+	// keeps its backstop.
+	if th.SessionStall > 0 && s.SessionSeen && s.WorkSignals == 0 {
+		since := s.StartedAt
+		if s.SessionWroteAt.After(since) {
+			since = s.SessionWroteAt
+		}
+		if idle := now.Sub(since); idle >= th.SessionStall {
+			return dead(CauseSessionStalled, fmt.Sprintf(
+				"stalled: no session output within %s of the last write (the live session file stayed at %d bytes; %s since the dispatch)",
+				th.SessionStall.Round(time.Second), s.SessionSize, idle.Round(time.Second)))
+		}
+	}
+	// 0b: harness_silent — nothing but silence (or UI noise) since dispatch:
+	// the record-based backstop for harnesses without a watchable
+	// transcript (session_stalled above fires first when it can judge).
 	if th.Silence > 0 && s.WorkSignals == 0 && age >= th.Silence {
 		return dead(CauseHarnessSilent, fmt.Sprintf(
 			"no work-class signal within %s of dispatch (%d non-work records seen: UI chatter and echoes never count as work)",
