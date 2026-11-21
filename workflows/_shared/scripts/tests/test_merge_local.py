@@ -143,7 +143,7 @@ class LocalLandingTest(GitCase):
         self.assertEqual(rec["merge_commit"], "")
         self.assertEqual(repo.head(), head)
 
-
+    def test_head_already_on_baseline(self) -> None:
         """A no-forge head already contained by origin's baseline is recorded
         as landed by the containment judgement — how: merged, by_this_run
         honestly absent, the verified head itself the landed commit — and no
@@ -170,6 +170,7 @@ class LocalLandingTest(GitCase):
         self.assertEqual(owner.head(), landed)
         self.assertEqual(git(self.owner.dir, "status", "--porcelain"), "")
 
+    def test_a_no_forge_entry_without_a_title_is_refused(self) -> None:
         repo = Repo(os.path.join(self.tmp, "repos", "app"))
         head = repo.head()
         write(self.tmp, {
