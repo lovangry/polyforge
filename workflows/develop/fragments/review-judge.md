@@ -75,9 +75,9 @@
    `project_rule`, an undeclared change that removes or weakens a guarantee is
    `guarantee`; anything else is recorded non-blocking.
 
-6. **Baseline-complete mapping (`ac_gap`)** — when `baseline_complete` is declared, its `ac ↔ impl ↔ tests` mapping must match the ticket's acceptance criteria and every named test must run green; an incomplete mapping or unrun/red test blocks review.
+6a. **Baseline-complete mapping (`ac_gap`)** — when `baseline_complete` is declared, its `ac ↔ impl ↔ tests` mapping must match the ticket's acceptance criteria and every named test must run green; an incomplete mapping or unrun/red test blocks review.
 
-7. **The change analysis (`test_weakened`)** — read `artifacts/build/change-analysis.json`
+6. **The change analysis (`test_weakened`)** — read `artifacts/build/change-analysis.json`
    (build's close wrote it): the analysis is review's to judge for obviously missing tests —
    a changed behavior, component or interface it names (or the diff shows) that an existing
    test already pins, one the analysis does not list, is a blocking `test_weakened` finding:
