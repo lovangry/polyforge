@@ -203,3 +203,10 @@ The merge step now creates and pushes a no-ff merge commit for repositories with
 ## v0.2.1, local landing follows the capsule baseline
 
 For a local non-bare origin, the merge step now advances the capsule's `origin/HEAD` baseline in the origin-side worktree rather than pushing a hosting service. If the owner has another branch checked out, a temporary detached worktree advances only the baseline ref. Dirty changes are preserved through a stash retry when necessary; a conflicting stash stays available by its recorded object ID, while landing still succeeds with `stash_conflict: true`. Bare or remote origins use push. Landing records `worktree_synced`, and repositories with nothing to publish record an empty published branch and land as `how: nothing` with an empty merge commit.
+
+## Capsule build-cache warmup
+
+Repositories can opt into best-effort warmup with `.polyforge/capsule-cache.conf`.
+See the configuration reference for `node_modules`, `build_paths`, and offline
+`install` fallback behavior. The feature is optional and failures do not block
+materialization.
