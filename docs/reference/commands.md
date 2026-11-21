@@ -842,19 +842,22 @@ the lane's own identity.
   fetch that failed, work committed on top of the run's record,
   `--continue` with nothing to continue).
 - `merge.py --publish <publish.json> --verified <result.json>
-  [--landing-out <file>]` merges the
-  published PRs (`{repos: [{name, branch, pr_url, head, skipped_reason}]}`)
+  [--landing-out <file>]` squashes the
+  published PRs (`{repos: [{name, branch, pr_url, title, head, skipped_reason}]}`)
   at the heads the verification's result file carries, `gh pr merge
-  --merge --match-head-commit <verified head>`, every repo judged before
+  --squash --match-head-commit <verified head>` — one commit on the default
+  branch per PR, its message the PR's `title` — every repo judged before
   anything merges (a repo whose entry carries `no_forge: true` has no forge: it is judged
-  with git alone — origin's branch must stand at the verified head — and its
-  landing record carries `how: merged`, `merge_commit`, and `worktree_synced`.
+  with git alone — origin's branch must stand at the verified head and the entry
+  must carry a `title`, the squash commit's message — and its
+  landing record carries `how: squash`, `merge_commit`, and `worktree_synced`.
   Local non-bare origins advance the capsule baseline in an origin-side worktree
   without pushing a remote service; bare or remote origins use push): a PR MERGED already is taken by the
   landing rules
   (its branch side is the verified head, `how:
   merged`; or, merged outside the lane, its merge commit is on the default
-  branch and contains the verified head, `how: merged_elsewhere`); an open
+  branch and contains the verified head — or, a squash, lands exactly its tree —
+  `how: merged_elsewhere`); an open
   one must target the default branch, head the published branch and stand
   at the verified head, and origin's default branch must still be at the
   base the verification result records (`details.repos[].base`, when it
@@ -867,9 +870,10 @@ the lane's own identity.
   branch advanced after the verified version (origin's default branch is no
   longer the verified base), or the forge refused (the later PRs stay open; the merged ones are landed and a
   re-run takes them); 2: not judged (an unreadable file, a published repo
-  the verification names no head for, gh or git unreachable). On exit 0
+  the verification names no head for, a no-forge entry with no title, gh or
+  git unreachable). On exit 0
   `--landing-out` gets the landing record (`{state: landed, repos[{repo,
-  pr, head, light_verified_head, merge_commit, accepted}],
+  pr, head, how, light_verified_head, merge_commit, accepted}],
   merge_commits}`: the verified head as the head and the light-verified
   one; a `merged_elsewhere` repo's head its branch side, `accepted:
   true`), which the merge skill registers with `pf step hub wrap-attrs

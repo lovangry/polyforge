@@ -670,7 +670,7 @@ func TestV2MicroLaneEndToEnd(t *testing.T) {
 	if exits := w374RunExits(t, capDir, v2mMergeLine); len(exits) != 2 || exits[0] != 1 || exits[1] != 0 {
 		t.Fatalf("merge.py && its wrap-attrs line exits (the moved head refused, then landed and registered): %v", exits)
 	}
-	if w.prState("demo", "1") != "MERGED" || w.calls("gh pr merge") != 1 || w.calls("gh pr merge https://github.com/fake/demo/pull/1 --merge --match-head-commit "+head) != 1 {
+	if w.prState("demo", "1") != "MERGED" || w.calls("gh pr merge") != 1 || w.calls("gh pr merge https://github.com/fake/demo/pull/1 --squash --match-head-commit "+head) != 1 {
 		t.Fatalf("the merge step merges the PR once at the run's head: state %q merges %d (head %s)", w.prState("demo", "1"), w.calls("gh pr merge"), head)
 	}
 	fmt.Println("PASS M3 merge FAILed to sync on the moved PR head, then landed it once re-run")

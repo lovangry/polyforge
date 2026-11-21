@@ -1,12 +1,14 @@
 package stepscripts
 
-// merge_test.go: merge.py (workflows/_shared/scripts) against the fake gh — the published PRs merged
-// with --match-head-commit at the verified heads, a PR moved off the
+// merge_test.go: merge.py (workflows/_shared/scripts) against the fake gh — the published PRs
+// squashed with --match-head-commit at the verified heads (one commit on
+// the default branch per PR, its message the PR title), a PR moved off the
 // verified head (nothing merged), every repo judged before anything
-// merges, a PR merged elsewhere taken by the landing rule or refused, a
-// crashed run's own merge taken on re-entry, the forge's refusal, and the
-// refused invocations; and the landing record --landing-out writes on a
-// landing (workflow contract 4: registered with `pf step hub wrap-attrs
+// merges, a PR merged elsewhere taken by the landing rule (a merge by its
+// branch side, a squash by the verified tree) or refused, a crashed run's
+// own squash taken on re-entry, the forge's refusal, and the refused
+// invocations; and the landing record --landing-out writes on a landing
+// (workflow contract 4: registered with `pf step hub wrap-attrs
 // integration`), removed when the run does not land.
 
 import (
@@ -87,6 +89,7 @@ func TestMergeMergesAtTheVerifiedHead(t *testing.T) {
 	w := newGitWorld(t, "app", "lib")
 	appHead := w.change("app", map[string]string{"feature.txt": "f\n"}, "app-section")
 	libHead := w.change("lib", map[string]string{"lib.txt": "l\n"}, "")
+	before := map[string]string{"app": w.originMain("app"), "lib": w.originMain("lib")}
 	publish, verified, out := mergeInputs(w)
 	exit, res, d, errb := runMerge(w, publish, verified, out)
 	if exit != 0 || res.Verdict != VerdictPass || res.Round != "round-m" {
@@ -94,14 +97,21 @@ func TestMergeMergesAtTheVerifiedHead(t *testing.T) {
 	}
 	for repo, head := range map[string]string{"app": appHead, "lib": libHead} {
 		r := mergeRepoOf(t, d, repo)
-		if r.How != HowMerged || !r.ByThisRun || r.Head != head || r.MergeCommit == "" || r.MergeCommit != w.prFile(repo, 1, "merge") || r.BranchSide != head || r.Why != "" {
+		if r.How != HowSquash || !r.ByThisRun || r.Head != head || r.MergeCommit == "" || r.MergeCommit != w.prFile(repo, 1, "merge") || r.BranchSide != "" || r.Why != "" {
 			t.Fatalf("%s: %+v (fake merge %s)", repo, r, w.prFile(repo, 1, "merge"))
 		}
 		if w.prFile(repo, 1, "state") != "MERGED" || w.originMain(repo) != r.MergeCommit {
 			t.Fatalf("%s: the PR is merged on origin's main: %s %s", repo, w.prFile(repo, 1, "state"), w.originMain(repo))
 		}
-		if ps := parents(t, w.dir(repo), r.MergeCommit); len(ps) != 2 || ps[1] != head {
-			t.Fatalf("%s: a merge commit of the verified head: %v", repo, ps)
+		// one commit on the default branch, its single parent the old main
+		// tip, its message the PR title: not a merge commit (the squash
+		// lives on the bare origin: read it there)
+		origin := []string{"--git-dir=" + filepath.Join(w.origins, repo+".git")}
+		if ps := strings.Fields(gitT(t, w.root, append(origin, "rev-list", "--parents", "-n", "1", r.MergeCommit)...)); len(ps) != 2 || ps[0] != r.MergeCommit || ps[1] != before[repo] {
+			t.Fatalf("%s: a single-parent squash of the verified head: %v", repo, ps)
+		}
+		if got := gitT(t, w.root, append(origin, "log", "-1", "--format=%s", r.MergeCommit)...); got != repo+": the change" {
+			t.Fatalf("%s: the squash's message is the PR title: %q", repo, got)
 		}
 		if got := d.MergeCommits[repo]; len(got) != 1 || got[0] != r.MergeCommit {
 			t.Fatalf("%s: merge_commits %v", repo, d.MergeCommits)
@@ -114,11 +124,12 @@ func TestMergeMergesAtTheVerifiedHead(t *testing.T) {
 		t.Fatalf("summary %q", res.Summary)
 	}
 	// the landing record: per repo its PR, the verified head as both the
-	// merged and the light-verified head, its merge commit; no waiver
+	// merged and the light-verified head, its squash, its merge commit; no
+	// waiver
 	app, lib := mergeRepoOf(t, d, "app"), mergeRepoOf(t, d, "lib")
 	want, _ := json.Marshal(landingRecord{State: "landed", Repos: []landingRepo{
-		{Repo: "app", PR: app.PRURL, Head: appHead, LightVerifiedHead: appHead, MergeCommit: app.MergeCommit},
-		{Repo: "lib", PR: lib.PRURL, Head: libHead, LightVerifiedHead: libHead, MergeCommit: lib.MergeCommit},
+		{Repo: "app", PR: app.PRURL, Head: appHead, LightVerifiedHead: appHead, How: HowSquash, MergeCommit: app.MergeCommit},
+		{Repo: "lib", PR: lib.PRURL, Head: libHead, LightVerifiedHead: libHead, How: HowSquash, MergeCommit: lib.MergeCommit},
 	}, MergeCommits: map[string][]string{"app": {app.MergeCommit}, "lib": {lib.MergeCommit}}})
 	if got := readLanding(t, out); string(got) != string(want) {
 		t.Fatalf("the landing record:\n got %s\nwant %s", got, want)
@@ -126,14 +137,14 @@ func TestMergeMergesAtTheVerifiedHead(t *testing.T) {
 	if raw, _ := os.ReadFile(landingPath(out)); strings.Contains(string(raw), "waived") || strings.Contains(string(raw), "accepted") {
 		t.Fatalf("the lane's own merge carries no waiver and no acceptance: %s", raw)
 	}
-	// a re-run (a crash after the merge, before the result): the merges
-	// are found and taken as the lane's own
+	// a re-run (a crash after the squash, before the result): the squash
+	// is found and taken by the landing rules
 	exit, _, d, errb = runMerge(w, publish, verified, out)
 	if exit != 0 {
 		t.Fatalf("re-run: exit %d\n%s", exit, errb)
 	}
-	if r := mergeRepoOf(t, d, "app"); r.How != HowMerged || r.ByThisRun || r.MergeCommit != w.prFile("app", 1, "merge") {
-		t.Fatalf("re-run takes the merge as the lane's: %+v", r)
+	if r := mergeRepoOf(t, d, "app"); r.How != HowMergedElsewhere || r.ByThisRun || r.MergeCommit != w.prFile("app", 1, "merge") || r.BranchSide != "" {
+		t.Fatalf("re-run takes the squash as the landing: %+v", r)
 	}
 	if calls := countLines(t, filepath.Join(w.ghState, "calls.log"), "gh pr merge"); calls != 2 {
 		t.Fatalf("the forge was asked to merge twice in all, not again on the re-run: %d", calls)
@@ -211,10 +222,11 @@ func TestMergeTakesAPRMergedElsewhereByTheLandingRule(t *testing.T) {
 	if exit != 1 || r.How != "" || !strings.Contains(r.Why, "does not contain the light-verified head "+short(head)) || !strings.Contains(r.Why, "merged outside this step") {
 		t.Fatalf("exit %d, %+v", exit, r)
 	}
-	// and a squash merge (no branch side) that lands the tree without the
-	// head is refused the same way
+	// a squash landed by hand that lands exactly the verified head's tree is
+	// taken the same way: one commit on main, no branch side, the verified
+	// tree (a re-run after a crash, or a human squashing the PR)
 	w3 := newGitWorld(t, "app")
-	w3.change("app", map[string]string{"feature.txt": "f\n"}, "")
+	verifiedHead3 := w3.change("app", map[string]string{"feature.txt": "f\n"}, "")
 	publish, verified, out = mergeInputs(w3)
 	squash := w3.mainMoves("app", map[string]string{"feature.txt": "f\n"}, "")
 	for k, v := range map[string]string{"state": "MERGED", "merge": squash} {
@@ -222,7 +234,30 @@ func TestMergeTakesAPRMergedElsewhereByTheLandingRule(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if exit, _, d, _ = runMerge(w3, publish, verified, out); exit != 1 || !strings.Contains(mergeRepoOf(t, d, "app").Why, "no branch side") {
+	if exit, res, d, errb = runMerge(w3, publish, verified, out); exit != 0 {
+		t.Fatalf("exit %d, %+v\n%s", exit, res, errb)
+	}
+	if r = mergeRepoOf(t, d, "app"); r.How != HowMergedElsewhere || r.ByThisRun || r.MergeCommit != squash || r.BranchSide != "" || r.Head != verifiedHead3 {
+		t.Fatalf("taken by the landing rule (the verified tree): %+v", r)
+	}
+	want, _ = json.Marshal(landingRecord{State: "landed", Repos: []landingRepo{
+		{Repo: "app", PR: r.PRURL, Head: verifiedHead3, LightVerifiedHead: verifiedHead3, MergeCommit: squash, Accepted: true},
+	}, MergeCommits: map[string][]string{"app": {squash}}})
+	if got := readLanding(t, out); string(got) != string(want) {
+		t.Fatalf("the landing record of a squash landed elsewhere:\n got %s\nwant %s", got, want)
+	}
+	// a squash off the verified tree carries no branch side and not the
+	// verified tree: what landed cannot be told from the published change
+	w4 := newGitWorld(t, "app")
+	w4.change("app", map[string]string{"feature.txt": "f\n"}, "")
+	publish, verified, out = mergeInputs(w4)
+	stray4 := w4.mainMoves("app", map[string]string{"feature.txt": "f\n", "stray.txt": "s\n"}, "")
+	for k, v := range map[string]string{"state": "MERGED", "merge": stray4} {
+		if err := os.WriteFile(filepath.Join(w4.prDir("app", 1), k), []byte(v+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if exit, _, d, _ = runMerge(w4, publish, verified, out); exit != 1 || !strings.Contains(mergeRepoOf(t, d, "app").Why, "no branch side") {
 		t.Fatalf("exit %d, %+v", exit, mergeRepoOf(t, d, "app"))
 	}
 }

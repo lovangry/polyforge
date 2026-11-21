@@ -191,10 +191,12 @@ func TestShippedDevelopLanePromptsRender(t *testing.T) {
 			// contract 3's verify-first of publish's repos against the verified heads
 			"**publish's hand-off against the verified heads.**",
 			// contract 3's `state: landed` handoff: the landing record the command writes, registered for the wrap
-			"`{state: landed, repos: [{repo, pr, head, light_verified_head, merge_commit, accepted?}], merge_commits}`",
+			// (the squash era: each repo's `how` — squash for this run's landing, merged_elsewhere for a landing-rule take)
+			"`{state: landed, repos: [{repo, pr, head, how, light_verified_head, merge_commit, accepted?}], merge_commits}`",
 			"`pf step hub wrap-attrs integration @artifacts/merge/landing.json`",
 			// contract 3's `merged_elsewhere` mapping is the command's: the landing rules
-			"a PR already merged is taken only by the landing rules (its branch side the verified head, or a merge commit on the default branch containing it)",
+			// (the squash era: a squash landing whose tree is exactly the verified head's is the third take)
+			"a PR already merged is taken only by the landing rules (its branch side the verified head, a merge commit on the default branch containing it, or a squash landing exactly the verified head's tree)",
 			"you never write the landing record yourself",
 			"`accepted: true`"},
 	} {

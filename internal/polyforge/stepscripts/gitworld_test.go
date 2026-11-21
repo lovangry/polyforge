@@ -177,7 +177,7 @@ func (w *gitWorld) openPR(repo, branch string) (string, int) {
 	if err := os.MkdirAll(d, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for k, v := range map[string]string{"head": branch, "base": "main", "state": "OPEN", "url": w.prURL(repo, n)} {
+	for k, v := range map[string]string{"head": branch, "base": "main", "state": "OPEN", "url": w.prURL(repo, n), "title": "polyforge: change"} {
 		if err := os.WriteFile(filepath.Join(d, k), []byte(v+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -205,12 +205,15 @@ func (w *gitWorld) gh(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-// publish pushes the capsule branch of repo to origin and opens its PR:
-// the publish artifact's entry.
+// publish pushes the capsule branch of repo to origin and opens its PR
+// (titled as publish.json would title it: the squash's message): the
+// publish artifact's entry.
 func (w *gitWorld) publish(repo string) publishEntry {
 	gitT(w.t, w.dir(repo), "push", "-q", "origin", "HEAD:refs/heads/"+w.branch)
 	url, _ := w.openPR(repo, w.branch)
-	return publishEntry{Name: repo, Branch: w.branch, PRURL: url, Head: w.head(repo)}
+	title := repo + ": the change"
+	writeFile(w.t, w.prDir(repo, w.prCount(repo)), "title", title+"\n")
+	return publishEntry{Name: repo, Branch: w.branch, PRURL: url, Head: w.head(repo), Title: title}
 }
 
 // writePublish writes the publish artifact at path.
