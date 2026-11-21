@@ -42,8 +42,8 @@ the source and what did not hold (the lane goes back to the step that makes the 
    `git symbolic-ref --short refs/remotes/origin/HEAD` less `origin/` (else `main`).
    `git rev-list --count origin/<default>..HEAD` of 0: record `branch: ""`,
    `pr_url: ""`, and `skipped_reason: "nothing to publish"`; do not push or claim a
-   published branch. Merge records `how: "nothing"` and `merge_commit: ""` without
-   fetching or judging this repo. Else: `git status --porcelain --untracked-files=all` is empty, no tag points at
+   published branch — the merge step sees no `head` for this repo and records nothing
+   without fetching it. Else: `git status --porcelain --untracked-files=all` is empty, no tag points at
    a commit of this work item (a hit is a `## Follow-up` point, not a stop). The branch is
    `polyforge/<capsule directory name>` (`basename "$PWD"`). **Push, idempotent:**
    `git ls-remote origin refs/heads/<branch>` absent, or an ancestor of HEAD:
