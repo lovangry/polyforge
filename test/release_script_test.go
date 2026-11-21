@@ -482,8 +482,9 @@ func (w *relWorld) commitOnMain(file, msg string) string {
 	return relGit(w.t, w.work, "rev-parse", "HEAD")
 }
 
-// mergeOnMain lands one file the way `gh pr merge --merge` does — a topic
-// branch commit merged with --no-ff onto main — and pushes main. recordPR
+// mergeOnMain lands one file the way a merge-shaped PR does — a topic
+// branch commit merged with --no-ff onto main (a shape main's history
+// carries; the lane itself lands squashes) — and pushes main. recordPR
 // registers the merge commit as a merged PR's merge commit in the fake gh.
 func (w *relWorld) mergeOnMain(file, content, msg string, recordPR bool) string {
 	w.t.Helper()

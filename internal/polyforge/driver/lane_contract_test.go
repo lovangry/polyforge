@@ -165,7 +165,8 @@ func TestShippedMicroLanePrompts(t *testing.T) {
 			// contract 3's verify-first of publish's repos against the evidence's heads
 			"**publish's hand-off against the verified heads.**",
 			// contract 3's `state: landed` handoff: the landing record and its registration
-			"`{state: landed, repos: [{repo, pr, head, light_verified_head, merge_commit, accepted?}], merge_commits}`",
+			// (the squash era: each repo's `how` — squash for this run's landing, merged_elsewhere for a landing-rule take)
+			"`{state: landed, repos: [{repo, pr, head, how, light_verified_head, merge_commit, accepted?}], merge_commits}`",
 			"`pf step hub wrap-attrs integration @artifacts/merge/landing.json`",
 			// the wrap summary is written before the pass is handed off
 			"write the wrap summary (the step header's Memory section), then hand off `done`",

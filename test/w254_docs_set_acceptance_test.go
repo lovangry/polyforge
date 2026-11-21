@@ -446,13 +446,14 @@ func TestW254QuickstartsMovedIntact(t *testing.T) {
 // - the v0.2.1 section appended with capsule-baseline local landing (origin-side worktrees, stash recovery, and nothing-published records)
 // - the capsule build-cache warmup section appended (same-baseline hardlinks, build-path copies, and offline install fallback)
 // - the v0.2.1 section appended with baseline-complete empty unit declarations (explicit per-AC paths, mutual exclusion, and owner-authorized self-validation for this ticket)
+// - the v0.2.1 section appended with squash-merge landings (each PR lands as one squash commit titled by the PR title: gh pr merge --squash --match-head-commit for forge, git merge --squash plus one explicit commit for no-forge; how: squash, and a branch-side-less MERGED commit taken as merged_elsewhere only when its tree equals the verified head's)
 // upgrade-sections:end
 // The file is only routed to, from the install ops page and the README
 // landing page.
 func TestW254UpgradeByteIdentical(t *testing.T) {
 	raw := []byte(w254Read(t, "docs/upgrade.md"))
 	sum := sha256.Sum256(raw)
-	if got := hex.EncodeToString(sum[:]); got != "3b6886757224392d12f9c0eec97255c15b6ee545949d7d9d3e400015ec877d39" {
+	if got := hex.EncodeToString(sum[:]); got != "d150fab049f69a9f768e101fdb35e8530b3ad2e2a84970c33479a08c5abe53b7" {
 		t.Fatalf("docs/upgrade.md must stay byte-identical (only routed to, never rewritten): sha256 %s != the pinned pre-move sha256", got)
 	}
 	// the list beside the pin: one whole `// - ` line per appended section

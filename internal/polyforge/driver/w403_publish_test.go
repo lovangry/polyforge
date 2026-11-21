@@ -34,7 +34,7 @@ func TestW403ShippedDevelopEndsWithPublishThenMerge(t *testing.T) {
 	p := strings.Join(strings.Fields(spawnStepPrompt(t, "develop", publishStepID)), " ")
 	for _, want := range []string{
 		"**You do not merge, merge nothing into the branch and run no test**",
-		"**Write** `artifacts/publish.json` — `{\"repos\": [{name, branch, pr_url, head, skipped_reason, no_forge}]}`",
+		"**Write** `artifacts/publish.json` — `{\"repos\": [{name, branch, pr_url, title, head, skipped_reason, no_forge}]}`",
 	} {
 		if !strings.Contains(p, want) {
 			t.Errorf("publish's prompt lacks %q", want)
