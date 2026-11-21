@@ -73,6 +73,9 @@ func warmCapsuleCache(capsuleDir, project string, baselines map[string]string) {
 }
 func cacheLog(root, msg string) {
 	p := filepath.Join(root, "logs", "cache.log")
+	if e := os.MkdirAll(filepath.Dir(p), 0755); e != nil {
+		return
+	}
 	f, e := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if e == nil {
 		defer f.Close()
