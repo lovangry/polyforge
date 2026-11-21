@@ -623,6 +623,7 @@ func (d *Daemon) wrapRoute(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) statusJobs() ([]statusJob, int) {
 	faces := d.execFaces(time.Now())
 	activity := d.obs.Activities()
+	stallWindow := d.sessionStallWindow()
 	jobs := make([]statusJob, 0, 8)
 	// running slots: a retained PAUSED job (Finding 2) holds no agent and
 	// no queue slot — the ops face must not count it as running work.
@@ -669,6 +670,9 @@ func (d *Daemon) statusJobs() ([]statusJob, int) {
 			if !act.StepStartedAt.IsZero() {
 				age := int64(time.Since(act.StepStartedAt) / time.Second)
 				sj.StepAgeSec = &age
+				if stalledRow(sj.Status, sj.AgentPID, true, time.Since(act.StepStartedAt), stallWindow) {
+					sj.Status = protocol.JobStalled
+				}
 			}
 			if !act.LastWorkAt.IsZero() {
 				ago := int64(time.Since(act.LastWorkAt) / time.Second)

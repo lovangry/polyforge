@@ -124,12 +124,13 @@ func TestBareStartMachineID(t *testing.T) {
 // TestApplyDaemonTablePrecedence (decision 2026-10-16 G2): an explicit
 // command-line flag > the cli.toml [daemon] table > the built-in default.
 func TestApplyDaemonTablePrecedence(t *testing.T) {
-	table := cli.DaemonSettings{StepTimeout: 45 * time.Minute, StallWindow: -time.Second,
+	table := cli.DaemonSettings{StepTimeout: 45 * time.Minute, StallWindow: -time.Second, SessionStallWindow: 4 * time.Minute,
 		HarnessRoot: "/t/root", OperatorAgentDir: "/t/op", MaxConcurrentJobs: 6}
-	parse := func(args ...string) (time.Duration, time.Duration, string, string, int) {
+	parse := func(args ...string) (time.Duration, time.Duration, time.Duration, string, string, int) {
 		fs := flag.NewFlagSet("t", flag.ContinueOnError)
 		st := fs.Duration("step-timeout", 0, "")
 		sw := fs.Duration("stall-window", 0, "")
+		ssw := fs.Duration("session-stall-window", 0, "")
 		hr := fs.String("harness-root", "", "")
 		op := fs.String("operator-agent-dir", "", "")
 		mx := fs.Int("max-concurrent-jobs", 0, "")
@@ -137,24 +138,25 @@ func TestApplyDaemonTablePrecedence(t *testing.T) {
 		if err := fs.Parse(args); err != nil {
 			t.Fatal(err)
 		}
-		applyDaemonTable(fs, table, st, sw, aw, hr, op, mx)
-		return *st, *sw, *hr, *op, *mx
+		applyDaemonTable(fs, table, st, sw, aw, ssw, hr, op, mx)
+		return *st, *sw, *ssw, *hr, *op, *mx
 	}
-	st, sw, hr, op, mx := parse()
-	if st != 45*time.Minute || sw != -time.Second || hr != "/t/root" || op != "/t/op" || mx != 6 {
-		t.Fatalf("table not applied: %v %v %q %q %d", st, sw, hr, op, mx)
+	st, sw, ssw, hr, op, mx := parse()
+	if st != 45*time.Minute || sw != -time.Second || ssw != 4*time.Minute || hr != "/t/root" || op != "/t/op" || mx != 6 {
+		t.Fatalf("table not applied: %v %v %v %q %q %d", st, sw, ssw, hr, op, mx)
 	}
-	st, sw, hr, op, mx = parse("-step-timeout", "5m", "-stall-window", "0", "-harness-root", "/f/root",
+	st, sw, ssw, hr, op, mx = parse("-step-timeout", "5m", "-stall-window", "0", "-session-stall-window", "-7m", "-harness-root", "/f/root",
 		"-operator-agent-dir", "/f/op", "-max-concurrent-jobs", "2")
-	if st != 5*time.Minute || sw != 0 || hr != "/f/root" || op != "/f/op" || mx != 2 {
-		t.Fatalf("explicit flags must beat the table: %v %v %q %q %d", st, sw, hr, op, mx)
+	if st != 5*time.Minute || sw != 0 || ssw != -7*time.Minute || hr != "/f/root" || op != "/f/op" || mx != 2 {
+		t.Fatalf("explicit flags must beat the table: %v %v %v %q %q %d", st, sw, ssw, hr, op, mx)
 	}
 	fs := flag.NewFlagSet("t", flag.ContinueOnError)
 	st0, sw0 := fs.Duration("step-timeout", 0, ""), fs.Duration("stall-window", 0, "")
+	ssw0 := fs.Duration("session-stall-window", 0, "")
 	hr0, op0, mx0 := fs.String("harness-root", "", ""), fs.String("operator-agent-dir", "", ""), fs.Int("max-concurrent-jobs", 0, "")
 	aw0 := fs.Duration("ask-warm-window", 0, "")
-	applyDaemonTable(fs, cli.DaemonSettings{}, st0, sw0, aw0, hr0, op0, mx0)
-	if *st0 != 0 || *sw0 != 0 || *aw0 != 0 || *hr0 != "" || *op0 != "" || *mx0 != 0 {
+	applyDaemonTable(fs, cli.DaemonSettings{}, st0, sw0, aw0, ssw0, hr0, op0, mx0)
+	if *st0 != 0 || *sw0 != 0 || *ssw0 != 0 || *aw0 != 0 || *hr0 != "" || *op0 != "" || *mx0 != 0 {
 		t.Fatal("an empty table must leave the built-in defaults")
 	}
 }

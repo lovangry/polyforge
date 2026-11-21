@@ -52,6 +52,7 @@ var configKeyDefs = []configKeyDef{
 	{"claude_bin", keyFlat, ConfigLive},
 	{"step_timeout", keyDaemon, ConfigLive},
 	{"stall_window", keyDaemon, ConfigLive},
+	{"session_stall_window", keyDaemon, ConfigRestartOnly},
 	{"ask_warm_window", keyDaemon, ConfigRestartOnly},
 	{"harness_root", keyDaemon, ConfigRestartOnly},
 	{"operator_agent_dir", keyDaemon, ConfigRestartOnly},
@@ -94,6 +95,10 @@ func ConfigSchema(name string) map[string]any {
 	case "step_timeout", "ask_warm_window":
 		return map[string]any{"kind": "duration", "min_exclusive": 0}
 	case "stall_window":
+		return map[string]any{"kind": "duration", "nonzero": true, "allow_negative": true}
+	case "session_stall_window":
+		// polyforge#42: the zero-output stall window — same shape as
+		// stall_window (non-zero; negative disables).
 		return map[string]any{"kind": "duration", "nonzero": true, "allow_negative": true}
 	case "max_concurrent_jobs", "max_concurrent_bars", "cell_max_concurrent_jobs":
 		return map[string]any{"kind": "int", "min": 1}

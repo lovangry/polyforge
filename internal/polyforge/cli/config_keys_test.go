@@ -16,6 +16,7 @@ func TestConfigKeyParsing(t *testing.T) {
 		{"max_concurrent_bars", keyDaemon, "max_concurrent_bars", ConfigLive},
 		{"[daemon] max_concurrent_bars", keyDaemon, "max_concurrent_bars", ConfigLive},
 		{"[daemon] step_timeout", keyDaemon, "step_timeout", ConfigLive},
+		{"[daemon] session_stall_window", keyDaemon, "session_stall_window", ConfigRestartOnly},
 		{`[workspace."/srv/ws"]`, keyWorkspace, "/srv/ws", ConfigNextClaim},
 	}
 	for _, c := range cases {

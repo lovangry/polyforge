@@ -157,6 +157,10 @@ type dispatchState struct {
 	// ctx reads the dispatch's step-session context usage (contextusage.go;
 	// set before the state is published, never replaced).
 	ctx *contextSource
+	// watch feeds rule 0 (session_stalled) from the dispatch's live
+	// session file: one stat per tick on the monitor goroutine (session_watch.go;
+	// set before the state is published, never replaced).
+	watch *sessionWatch
 }
 
 // waitTotal is a step's folded wait-call count and summed seconds
@@ -461,6 +465,7 @@ func (m *Monitor) onStepStarted(f supervise.StepStarted) {
 		d.startedAt = m.now()
 	}
 	d.ctx = newContextSource(m.wi.CapsuleDir, f, m.cfg.locateLive)
+	d.watch = newSessionWatch(m.wi.CapsuleDir, f, m.cfg.locateLive)
 	m.cur = d
 	m.setPhase(phaseInStep)
 	// F3: the transcript sync sources from the latest step_started
@@ -604,6 +609,11 @@ func (m *Monitor) judge() {
 		if m.cur.verdicted || m.cur.awaiting {
 			return // nothing is judged while the owner is asked
 		}
+		// Rule 0's clock source (polyforge#42): one stat of the dispatch's
+		// live session file per tick, reported to the tracker — a write
+		// inside the window restarts the stall clock. Monitor goroutine
+		// only; no I/O under a lock.
+		m.cur.watch.feed(m.cur.tracker)
 		snap := m.cur.tracker.Snapshot(now)
 		if hasLive {
 			// A live step_timeout reaches an in-flight dispatch: recompute

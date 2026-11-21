@@ -1434,14 +1434,28 @@ session resumed once with T doubled; a second timeout parks) or — only
 when the dispatch that hit T itself ran at least half of it and spent at
 least half of its own time waiting on the model — `step_timeout_slow_model`
 (model class: the next candidate, T doubled); N (`--stall-window`) ends the driver between
-steps as `driver_stalled`. While a dispatch of a step
+steps as `driver_stalled`; S (`--session-stall-window`, default 5m, negative
+disables) ends a dispatch as `session_stalled` when its live session
+file has seen no write inside the window and no work-class signal
+arrived at all — the model delivered not even its first token (the
+zero-output wedge, #38/#40): the clock runs from the later of the
+dispatch's start and the last write the watch observed, so a write
+that lands inside the window restarts it (a slow first token that
+arrives is never judged), and a resumed transcript's old mtime never
+satisfies it; a dispatch whose transcript the watch never locates is
+not judged by S — X's `harness_silent` keeps that backstop. `pf ops
+status` renders such a row `stalled` (not `running`): AGENT PID empty
+and STEP-AGE at least the same window, with the idle span and the
+candidate on the same line — a pending question keeps `needs_input`
+and every closing state its own name, and a negative window renders
+none — presentation only, never workflow state. While a dispatch of a step
 declaring `resources: { admission: heavy }` waits for the heavy-run
 admission (`max_concurrent_bars`, `bar_load_threshold`) no
 clock runs at all — N included — and no job slot is held. `pf ops status` then shows a
 `VERIFY` column (`queued #2: <the holding gate>`). A turn that ends without `pf step
 handoff` inside `--model-error-grace` (test/dev-only) is `model_error`
 when it ended on a model error — model class with `model_hung`,
-`step_timeout_slow_model` and an exit naming a model, allowance or auth
+`session_stalled`, `step_timeout_slow_model` and an exit naming a model, allowance or auth
 problem: the next candidate at once, and none left parks the work item
 (no agent can start) — or `ended_without_result` when it ended normally:
 the same session resumes with the reminder to end with a hand-off, and
@@ -1460,7 +1474,7 @@ second timeout parks); any other exit (`exit_other`, `exit_host_class`,
 restarted daemon serves only what is left of a backoff, and `pf ops
 status` shows it as `retry in 45s: <cause>` (whole minutes from a
 minute on). In production only T
-(`--step-timeout`) and N (`--stall-window`) are settable, through the
+(`--step-timeout`), N (`--stall-window`) and S (`--session-stall-window`) are settable, through the
 `cli.toml` `[daemon]` table; the other bounds are test/dev-only. Their
 running values are observable as `supervision.{step_timeout,stall_window}`
 in `pf ops status --json`, so a live reload of either key is visible

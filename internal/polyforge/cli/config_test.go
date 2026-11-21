@@ -343,12 +343,12 @@ func TestConfigDaemonTable(t *testing.T) {
 	ws := t.TempDir()
 	base := "server = \"http://hub:8420\"\n[workspace.\"" + ws + "\"]\nprojects = [\"e2e\"]\n"
 
-	cfg, err := LoadConfig(writeTempConfig(t, base+"\n[daemon]\nstep_timeout = \"45m\"\nstall_window = \"10m\"\n"+
+	cfg, err := LoadConfig(writeTempConfig(t, base+"\n[daemon]\nstep_timeout = \"45m\"\nstall_window = \"10m\"\nsession_stall_window = \"5m\"\n"+
 		"harness_root = \"/srv/h\"\noperator_agent_dir = '/srv/pi/agent'\nmax_concurrent_jobs = 6 # comment\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := DaemonSettings{StepTimeout: 45 * time.Minute, StallWindow: 10 * time.Minute, HarnessRoot: "/srv/h", OperatorAgentDir: "/srv/pi/agent", MaxConcurrentJobs: 6}
+	want := DaemonSettings{StepTimeout: 45 * time.Minute, StallWindow: 10 * time.Minute, SessionStallWindow: 5 * time.Minute, HarnessRoot: "/srv/h", OperatorAgentDir: "/srv/pi/agent", MaxConcurrentJobs: 6}
 	if cfg.Daemon != want {
 		t.Fatalf("daemon table = %+v, want %+v", cfg.Daemon, want)
 	}
@@ -366,6 +366,7 @@ func TestConfigDaemonTable(t *testing.T) {
 		{"step timeout zero", "step_timeout = \"0s\"", "step_timeout"},
 		{"step timeout negative", "step_timeout = \"-5m\"", "step_timeout"},
 		{"stall zero", "stall_window = \"0\"", "stall_window"},
+		{"session stall zero", "session_stall_window = \"0\"", "session_stall_window"},
 		{"harness root relative", "harness_root = \"rel/dir\"", "harness_root"},
 		{"operator dir tilde", "operator_agent_dir = \"~/.pi/agent\"", "operator_agent_dir"},
 		{"max quoted", "max_concurrent_jobs = \"6\"", "max_concurrent_jobs"},
@@ -388,6 +389,15 @@ func TestConfigDaemonTable(t *testing.T) {
 	}
 	if _, err := LoadConfig(writeTempConfig(t, base+"\n[daemon]\n[daemon]\n")); err == nil || !strings.Contains(err.Error(), "duplicate [daemon]") {
 		t.Fatalf("a second [daemon] table must refuse: %v", err)
+	}
+	// the session stall window disables with a negative value, like
+	// stall_window (polyforge#42)
+	cfg, err = LoadConfig(writeTempConfig(t, base+"\n[daemon]\nsession_stall_window = \"-5m\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Daemon.SessionStallWindow != -5*time.Minute {
+		t.Fatalf("session_stall_window negative = %v, want -5m (disables the session-stall rule)", cfg.Daemon.SessionStallWindow)
 	}
 }
 

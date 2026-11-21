@@ -79,6 +79,7 @@ one partition; `internal/polyforge/cellcfg/schema.go` owns it):
 | `claude_bin` | flat | Cell | live | execution configuration |
 | `step_timeout` | `[daemon]` | Cell | live | execution configuration |
 | `stall_window` | `[daemon]` | Cell | live | execution configuration |
+| `session_stall_window` | `[daemon]` | Cell | restart-only | how long a dispatch's live session file may see no write before the step is judged session_stalled (zero-output no longer spins) |
 | `ask_warm_window` | `[daemon]` | Cell | restart-only | how long a step process that asked the owner (`pf step ask`) stays resident for the reply |
 | `command_path` | `[daemon]` | Cell | live | the PATH of the commands the daemon runs in-process, and of every step process behind the daemon's `pf` directory and the harness binary's |
 | `cell_max_concurrent_jobs` | `[daemon]` | Cell | live | optional per-Cell ceiling; absent = no extra limit. A reload applies it to the Cell's admission at once, clamped to the Host ceiling (`max_concurrent_jobs`); unset (or `0`) falls back to the Host's current ceiling. A raise admits queued work up to the new value, a lower value only stops new starts (nothing is killed); other Cells are untouched. `GET /profiles` reports the applied value and the effective `max_concurrent` |
@@ -192,6 +193,7 @@ this table > the built-in default. At most one table per file.
 [daemon]
 step_timeout = "45m"                 # --step-timeout: Go duration, > 0
 stall_window = "10m"                 # --stall-window: Go duration, non-zero; negative disables
+session_stall_window = "5m"           # --session-stall-window: Go duration, non-zero; negative disables
 ask_warm_window = "15m"              # --ask-warm-window: Go duration, > 0
 harness_root = "/srv/polyforge/h"    # --harness-root: absolute path
 operator_agent_dir = "/home/u/.pi/agent"  # --operator-agent-dir: absolute path
@@ -210,6 +212,7 @@ defaults:
 | --- | --- | --- | --- |
 | `step_timeout` | `--step-timeout` | `90m` | T: the cumulative step runtime bound across a step's dispatches. |
 | `stall_window` | `--stall-window` | `10m` | N: the driver between steps (not waiting on a human) for longer than this is judged stalled; a negative value disables it. |
+| `session_stall_window` | `--session-stall-window` | `5m` | How long a dispatch's live session file may see no write before the step is judged `session_stalled`: the candidate is judged unusable and the chain moves to the next one at once (a fresh conversation, no backoff) — zero-output no longer spins; `pf ops status` renders the row `stalled`. The clock runs from the last observed write, so a long, quiet-but-alive task is never misjudged; a negative value disables the check. Restart-only: a dispatch's window is fixed at its start. |
 | `ask_warm_window` | `--ask-warm-window` | `15m` | How long a step process that asked the owner (`pf step ask`, docs/reference/commands.md) is kept resident for the reply before the daemon ends it (stdin closed, then the signal); the step stays awaiting the owner either way and the reply resumes the session. While it waits the job holds no running slot and nothing of the dispatch is judged. Restart-only. |
 | `harness_root` | `--harness-root` | `<data-dir>` | Parent root of the step harness dirs: `<root>/step-agent` (the dedicated step agent dir), `/step-agent-sessions` (pi sessions) `/claude-config` (claude's config dir; its settings.json env block is the credential authority layer) and `/summarize-cwd` (the working directory of the summarize lane's one-shot dispatches, never the daemon's `$HOME` cwd). Replaces the former `--harness-sessions-root`, which is refused. |
 | `operator_agent_dir` | `--operator-agent-dir` | `~/.pi/agent` | SOURCE of the dedicated step agent dir — a credential surface: the daemon copies the minimal set (`auth.json`, `models.json`, `agents/`, `extensions/subagent/`) from here into `<harness-root>/step-agent`, and every pi step runs against that copy. A configured source without a readable `auth.json` refuses the daemon start. |
@@ -370,7 +373,8 @@ class table the reload path uses, including `next-claim` for a whole
 constraints the shared validator actually enforces — `max_concurrent_jobs`,
 `max_concurrent_bars` `{kind:"int",min:1}`, `bar_load_threshold`
 `{kind:"number",min_exclusive:0}`, `step_timeout` `{kind:"duration",min_exclusive:0}`,
-`stall_window` `{kind:"duration",nonzero:true,allow_negative:true}`, `command_path`
+`stall_window` `{kind:"duration",nonzero:true,allow_negative:true}`,
+`session_stall_window` `{kind:"duration",nonzero:true,allow_negative:true}`, `command_path`
 `{kind:"string"}` (the validator also requires every `:`-separated entry to be absolute),
 `agent_language` `{kind:"enum",values:["en","zh-CN"]}`;
 `language` has no enum). The three `summarize.*` items carry their
