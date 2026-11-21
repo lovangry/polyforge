@@ -57,7 +57,7 @@ record exactly what ran.
    words. Act on it and fold what it changes into the plan's `## Acceptance` /
    `## Non-goals`. A plan the owner replied to is the judged list — never judge against a
    list only you wrote. A reply that calls the work off: hand off `cancel` citing it.
-3. **Each unit red, then green, then recorded.** Commit the unit's test files alone
+3. **Each unit red, then green, then recorded.** For an unchanged baseline, `units.json` may be `[]` only when sibling `change-analysis.json` declares `baseline_complete` with non-empty `justification` (at most 500 characters) and non-empty per-AC `criteria` whose `impl` and `tests` paths exist. This is mutually exclusive with non-empty units or `pre_existing_red` and never replaces an unimplemented acceptance criterion. Commit the unit's test files alone
    (`test_commit`) and run its targeted command on that clean commit yourself: it fails on
    an assertion. The targeted command runs only that unit's test, filtered by the test
    runner's own name filter (`go test -run`, `pytest -k`, or the suite's own scenario
