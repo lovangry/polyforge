@@ -8,10 +8,12 @@ commands: [merge.py]
 One pre-written script reads what publish opened (`artifacts/publish.json`) and the
 verified heads — the result file of the lane's verifying gate: develop's `verification`
 (`artifacts/verify/result.json`), micro's `evidence` (`artifacts/run/result.json`) —
-judges every PR before anything merges and merges each open one with
-`gh pr merge --merge --match-head-commit <verified head>`; a PR already merged is taken
-only by the landing rules (its branch side the verified head, or a merge commit on the
-default branch containing it). On a pass it also writes the landing record the work item
+judges every PR before anything merges and squashes each open one with
+`gh pr merge --squash --match-head-commit <verified head>` — one commit on the default
+branch per PR, its message the PR title; a PR already merged is taken
+only by the landing rules (its branch side the verified head, a merge commit on the
+default branch containing it, or a squash landing exactly the verified head's tree). On a
+pass it also writes the landing record the work item
 is wrapped with. You never merge by hand, and you never write the landing record yourself.
 
 | Lane | The line, run exactly as written (no argument added or removed, no Bash timeout) |
@@ -40,12 +42,14 @@ is wrapped with. You never merge by hand, and you never write the landing record
 
 **A repo with no forge** — its `publish.json` entry carries `no_forge: true` and an empty
 `pr_url` (a local or intranet origin, or no `gh`) — is judged with git alone:
-origin's `<branch>` must stand at the verified head and the capsule's `origin/HEAD`
+origin's `<branch>` must stand at the verified head, its entry must carry a `title` (the
+squash commit's message), and the capsule's `origin/HEAD`
 baseline must still match verification. A local non-bare origin is merged in its
-worktree, or in a temporary detached worktree if another branch is checked out.
+worktree, or in a temporary detached worktree if another branch is checked out:
+`git merge --squash` at the verified head, committed once with the title.
 Dirty changes are preserved, retrying through stash push/pop if necessary. A stash
 pop conflict retains the stash, records `stash_conflict: true`, removes conflict
-markers, and still passes. Landing records `how: merged`, `merge_commit`, and
+markers, and still passes. Landing records `how: squash`, `merge_commit`, and
 `worktree_synced`. Bare or remote origins use push. An empty published branch with
 a skipped reason records `how: nothing` and an empty merge commit without a fetch.
 Your hand-off names the baseline and commit, states that no remote service was
@@ -59,7 +63,7 @@ moved, or a default branch that gained commits, is the same FAIL as a PR that mo
 2. **Run your lane's line** (the table above).
 3. **Route on the exit code.**
    - **0** — every published PR is landed, and the script wrote the landing record
-     (`artifacts/merge/landing.json`: `{state: landed, repos: [{repo, pr, head,
+     (`artifacts/merge/landing.json`: `{state: landed, repos: [{repo, pr, head, how,
      light_verified_head, merge_commit, accepted?}], merge_commits}`). Register it for the
      wrap, exactly this line: `pf step hub wrap-attrs integration @artifacts/merge/landing.json`
      — the work item is wrapped with it as its `integration` attr, awaiting the integration

@@ -1,6 +1,6 @@
-"""merge.py — the work item's published PRs merged into the default branch
+"""merge.py — the work item's published PRs squashed into the default branch
 at the heads the lane verified (the successor of the Go step command
-pf-merge: the same ``gh pr merge --merge --match-head-commit`` and the same
+pf-merge: ``gh pr merge --squash --match-head-commit`` and the same
 landing rules, written to a result file; no update of the PR branch — a
 default branch that moved since verification is the sync step's again).
 
@@ -10,10 +10,14 @@ Usage (from the capsule root, or with --capsule)::
         [--landing-out PATH] [--capsule DIR] [--deadline D] [--json] [--out PATH]
 
 ``--publish`` is the publish step's artifact: ``{"repos": [{name, branch,
-pr_url, head, skipped_reason}]}`` (a repo with a skipped_reason has nothing
-to merge). An entry with **``no_forge: true``** (or a branch with no pr_url) is
+pr_url, title, head, skipped_reason}]}`` (a repo with a skipped_reason has nothing
+to merge). ``title`` is the PR's title (``<slug>: <one line>``): the message
+of the squash commit — a no-forge entry must carry it. An entry with
+**``no_forge: true``** (or a branch with no pr_url) is
 a repo published with no forge (a local or intranet origin, or no ``gh``): it is
-landed in the origin-side baseline worktree and recorded with ``how: merged`` and
+landed as one squash commit — ``git merge --squash`` at the verified head,
+committed once with the title — in the origin-side baseline worktree, and
+recorded with ``how: squash`` and
 its merge commit. A local origin is advanced without pushing to a remote service. ``--verified`` is the verifying gate's result file (schema
 pf-step-result/1): its ``heads`` are the heads the merge matches, one per
 published repo — a published repo it names no head for is exit 2. Every
@@ -21,15 +25,17 @@ repo is judged before anything merges, in name order: its PR read (``gh pr
 view``); one MERGED already is taken as the landing by the landing rules
 (its branch side is the verified head — ``how: merged`` — or, merged
 outside the lane, its merge commit is on the default branch and contains
-the verified head — ``how: merged_elsewhere``), refused otherwise; one OPEN
+the verified head — ``how: merged_elsewhere`` — or, a squash, lands
+exactly the verified head's tree), refused otherwise; one OPEN
 must target the default branch, head the published branch and stand, on
 origin, at the verified head, and — when the verified result records the
 default branch's base (``details.repos[].base``, develop's verification) —
 origin's default branch must still be at that base: one that gained commits
 after verification is refused (sync, verify and publish again); any other
 state is refused. A refusal merges
-nothing (exit 1). Then each open PR is merged with ``gh pr merge --merge
---match-head-commit <verified head>``; a refused merge is read back once —
+nothing (exit 1). Then each open PR is merged with ``gh pr merge --squash
+--match-head-commit <verified head>`` — one commit on the default branch
+per PR, its message the PR title; a refused merge is read back once —
 merged after all (the landing rules again), its branch moved, or the
 forge's own refusal (a conflict with the default branch: sync again) — and
 stops the pass: the later PRs stay open (exit 1), the merged ones are
@@ -45,10 +51,10 @@ The result's details::
 
 ``--landing-out`` (the merge skill registers it with ``pf step hub
 wrap-attrs integration``) is written atomically on exit 0 — the landing
-record: ``{state: landed, repos: [{repo, pr, head, light_verified_head,
+record: ``{state: landed, repos: [{repo, pr, head, how, light_verified_head,
 merge_commit, accepted}], merge_commits}``, per landed repo its name, PR and
 merge commit, the verified head as its light-verified head, and as its head
-the verified head (``how: merged``) or, for a merge made elsewhere
+the verified head (``how: squash``) or, for a merge made elsewhere
 (``merged_elsewhere``), the merge's branch side (else the verified head)
 with ``accepted: true``. It carries no waiver. On any other exit a stale
 landing file is removed.
@@ -56,7 +62,8 @@ landing file is removed.
 Exit 0: every published PR and no-forge repo is landed with a merge commit. Exit 1: a
 PR moved (its head is not the verified one), is closed or retargeted, was merged
 elsewhere off the verified head, or the forge refused the merge. Exit 2: not judged — an
-unreadable publish or verified file, a missing verified head, a task repo
+unreadable publish or verified file, a missing verified head, a no-forge
+entry with no title, a task repo
 missing, gh or git unreachable, the deadline — or the invocation unusable.
 """
 
@@ -180,14 +187,12 @@ def landing_of(d: Details) -> Dict[str, Any]:
     repos = []
     for r in d.repos:
         e: Dict[str, Any] = {"repo": r.name, "pr": r.pr_url, "head": r.head}
-        if r.no_forge or r.how in ("nothing", HOW_SQUASH):
+        if r.no_forge or r.how in ("nothing", HOW_MERGED, HOW_SQUASH):
             e["how"] = r.how
         if r.no_forge and r.by_this_run:
             e["by_this_run"] = True
         if r.no_forge and r.how in (HOW_MERGED, HOW_SQUASH):
             e["worktree_synced"] = r.worktree_synced
-        if r.how == HOW_SQUASH:
-            e["how"] = HOW_SQUASH
         if r.stash:
             e["stash"] = r.stash
         if r.stash_conflict:
@@ -338,7 +343,7 @@ class Merge:
                         except GoError:
                             pass
                     raise first
-            commit_title = r.title or (r.name + ": squash")
+            commit_title = r.title  # the PR title: the squash's message
             g.git(target, "-c", "user.name=polyforge", "-c", "user.email=polyforge@local",
                   "commit", "-m", commit_title)
             if stashed:
@@ -589,6 +594,9 @@ def run(inv: Invocation, a: argparse.Namespace, held: List[Details]) -> int:
         if r.head == "":
             return inv.usage("--verified %s names no head for the published repo %s: the merge has nothing to match (the"
                              " verification must have run over it)" % (a.verified, name))
+        if r.no_forge and r.title == "":
+            return inv.usage("--publish %s: repos[%d] (%s) needs a title (the squash commit's message; the publish"
+                             " skill records the PR title)" % (a.publish, i, name))
         if not os.path.isdir(r.dir):
             return inv.usage("repos/%s is not a task repo of the capsule %s" % (name, capsule))
         details.repos.append(r)
