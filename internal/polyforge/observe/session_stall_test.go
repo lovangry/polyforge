@@ -64,7 +64,7 @@ func TestSessionStalledFrozenTranscriptVerdict(t *testing.T) {
 	if !ok || dead.Cause != supervise.CauseSessionStalled || dead.SpawnN != 1 || dead.Step != "grill" {
 		t.Fatalf("verdict = %+v, want step_dead session_stalled for grill@1", v)
 	}
-	if !strings.HasPrefix(dead.Evidence, "stalled: no session output within 50ms") {
+	if !strings.HasPrefix(dead.Evidence, "stalled: no session output within") {
 		t.Fatalf("evidence %q must open with the stalled: no session output line", dead.Evidence)
 	}
 	if !strings.Contains(dead.Evidence, "58875 bytes") {

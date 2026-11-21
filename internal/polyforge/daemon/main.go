@@ -176,6 +176,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			StallWindow:            *stallWindow,
 			ModelErrorGrace:        *modelErrorGrace,
 			AskWarmWindow:          *askWarmWindow,
+			SessionStallWindow:     *sessionStallWindow,
 			SessionRevalidateEvery: *revalidateEvery,
 		},
 	}
@@ -313,6 +314,9 @@ func applyDaemonTable(fs *flag.FlagSet, t cli.DaemonSettings, stepTimeout, stall
 	if !set["ask-warm-window"] && t.AskWarmWindow != 0 {
 		*askWarmWindow = t.AskWarmWindow
 	}
+	if !set["session-stall-window"] && t.SessionStallWindow != 0 {
+		*sessionStallWindow = t.SessionStallWindow
+	}
 	if !set["harness-root"] && t.HarnessRoot != "" {
 		*harnessRoot = t.HarnessRoot
 	}
@@ -389,6 +393,7 @@ func cellConfig(base Config, in cellBuildInput) (Config, error) {
 		cfg.Supervision.StepTimeout = c.Daemon.StepTimeout
 		cfg.Supervision.StallWindow = c.Daemon.StallWindow
 		cfg.Supervision.AskWarmWindow = c.Daemon.AskWarmWindow
+		cfg.Supervision.SessionStallWindow = c.Daemon.SessionStallWindow
 		cfg.Auto = nil
 		cfg.EnvWarnings = nil
 		switch c.ModelSource {

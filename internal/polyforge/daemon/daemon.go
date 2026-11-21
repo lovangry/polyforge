@@ -270,6 +270,12 @@ type SupervisionConfig struct {
 	// ask`) stays resident for the reply before the daemon ends it
 	// (default 15m; [daemon] ask_warm_window / --ask-warm-window).
 	AskWarmWindow time.Duration
+	// SessionStallWindow is the zero-output stall window (polyforge#42):
+	// a dispatch whose live session file sees no write for this long is
+	// judged session_stalled and the candidate chain moves on (0 = the
+	// default 5m; negative disables the session-stall check; restart-only:
+	// the window a dispatch runs under is fixed at its step_started).
+	SessionStallWindow time.Duration
 	// SessionRevalidateEvery is the M4 periodic session-revalidation
 	// cadence of the held records — observe's running jobs and the
 	// runtime's retained paused records (0 = the default 30s; negative =
@@ -281,7 +287,7 @@ func (c SupervisionConfig) limits() supervise.Defaults {
 	return supervise.Defaults{
 		Silence: c.SilenceWindow, Tool: c.ToolWindow,
 		StepTimeout: c.StepTimeout, ModelErrorGrace: c.ModelErrorGrace,
-		AskWarmWindow: c.AskWarmWindow,
+		AskWarmWindow: c.AskWarmWindow, SessionStall: c.SessionStallWindow,
 	}
 }
 
@@ -572,6 +578,10 @@ func New(cfg Config) (*Daemon, error) {
 			DriverStall:     live.StallWindow(),
 			ModelErrorGrace: cfg.Supervision.ModelErrorGrace,
 			AskWarmWindow:   cfg.Supervision.AskWarmWindow,
+			// restart-only (polyforge#42): the session-stall window is fixed at
+			// daemon start (a reload never rewrites this baseline), and a
+			// dispatch's window is fixed at its step_started on top of that.
+			SessionStall: cfg.Supervision.SessionStallWindow,
 		}
 	}
 

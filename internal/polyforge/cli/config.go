@@ -235,7 +235,7 @@ func parseDaemonTable(file string, kvs []daemonKV) (DaemonSettings, error) {
 				return s, refuse("must be a non-empty quoted string")
 			}
 			s.MachineID = v
-		case "step_timeout", "stall_window":
+		case "step_timeout", "stall_window", "session_stall_window":
 			v, err := parseQuotedValue(kv.val, kv.line)
 			if err != nil {
 				return s, refuse(`must be a quoted Go duration, e.g. "45m"`)
@@ -249,11 +249,19 @@ func parseDaemonTable(file string, kvs []daemonKV) (DaemonSettings, error) {
 					return s, refuse("must be > 0")
 				}
 				s.StepTimeout = d
-			} else {
+			} else if kv.key == "stall_window" {
 				if d == 0 {
 					return s, refuse("must be non-zero (a negative value disables the stall check; remove the key for the default)")
 				}
 				s.StallWindow = d
+			} else {
+				// polyforge#42: a dispatch's live session file with zero writes
+				// for this long is judged session_stalled — non-zero, negative
+				// disables, like stall_window.
+				if d == 0 {
+					return s, refuse("must be non-zero (a negative value disables the session-stall check; remove the key for the default)")
+				}
+				s.SessionStallWindow = d
 			}
 		case "harness_root", "operator_agent_dir":
 			v, err := parseQuotedValue(kv.val, kv.line)
