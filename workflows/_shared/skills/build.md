@@ -67,7 +67,15 @@ record exactly what ran.
    commit changes no tree), so the command is not run again on it. Never amend (`git
    commit --amend`) or otherwise rewrite a commit you have made — no rebase, no reset past
    it: the daemon backs every commit up to aihub and cannot back up a rewritten history
-   over it; a fix is a new commit. The red run just made is the build's own red evidence —
+   over it; a fix is a new commit. A commit's message follows the repository's own language,
+   read from the repository's own facts — the last 50 commit bodies on the default branch
+   (`workflows/_shared/scripts/pfstep/commitlang.py` is the one reading: Chinese when they
+   carry more Chinese characters than Latin letters, an exact tie keeping English). In a
+   Chinese-primary repository the test and impl commit bodies are Chinese, keeping
+   the conventional prefix kept verbatim — the type-enum word, `test:`, `feat:` —
+   and the header length per the repository's own commitlint; an English-primary
+   repository keeps English. The repository's commit-msg hook — wired into the clone —
+   is the judge of the header: a refused message is fixed in the message, never routed around. The red run just made is the build's own red evidence —
    beside it no manual worktree replay is made (the facts engine's replay is the record),
    and a command's result already in hand on one tree (the same tree hash) is not re-run: a
    differently spelled command proves nothing new on it. A flaky failure re-runs only the
@@ -145,4 +153,6 @@ test itself is wrong, change it in a commit whose message cites the finding, `r<
 say so in your hand-off); end a turn that needs the owner without `pf step ask`; hand off a
 round a FAIL opened on an unchanged tree with an unchanged units.json and no reason per
 point; run a unit's command in the background and poll it — each run is a foreground call
-that ends with its exit code.
+that ends with its exit code; a commit through `--no-verify` or a `core.hooksPath` of your own
+— the repository's commit-msg hook is the judge of the message's header, a refusal is fixed in
+the message.

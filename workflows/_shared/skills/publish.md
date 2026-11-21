@@ -54,7 +54,14 @@ the source and what did not hold (the lane goes back to the step that makes the 
    number,url,state`: an OPEN one — `gh pr edit <url> --body-file artifacts/publish-pr-<name>.md`;
    a MERGED one whose branch carries new commits since — exactly one follow-up PR; none —
    `gh pr create --base <default> --head <branch> --title "<slug>: <one line>" --body-file
-   artifacts/publish-pr-<name>.md`. **No forge** (an origin that is not GitHub, or no `gh` on
+   artifacts/publish-pr-<name>.md`. The title's `<one line>` follows the repository's
+   language — the same reading as the capsule's commit bodies, the last 50 commit bodies
+   on the default branch (`workflows/_shared/scripts/pfstep/commitlang.py`): a
+   Chinese-primary repository's line is Chinese, the `<slug>: ` prefix kept verbatim; an
+   English-primary repository's line is English
+   (`workflows/_shared/scripts/pfstep/commitmsg.py`'s `pr_title` is the one
+   construction). The recorded `title` is the same line with or without a forge: the merge
+   step's squash commit lands it verbatim, both languages. **No forge** (an origin that is not GitHub, or no `gh` on
    PATH): open nothing — record `pr_url` empty, `no_forge: true` and a `skipped_reason` naming it
    ("no forge (GitHub only): <branch> at <head> pushed, no PR opened"), and go on: this is not a
    `blocked`.
