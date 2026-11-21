@@ -34,8 +34,20 @@ import (
 // on the model for at least half of its runtime, 4a otherwise.
 type Cause string
 
+// The causes in rule-priority order (see rules.go); when several fire at
+// once the lowest-numbered one wins. `model-class` causes (model_error,
+// exit_model_class, model_hung, session_stalled, step_timeout_slow_model:
+// the candidate itself is unusable) switch the model candidate at once,
+// fresh conversation, no backoff.
 const (
-	CauseHarnessSilent        Cause = "harness_silent"          // rule 0
+	// CauseSessionStalled is rule 0: the dispatch's live session file has
+	// not been written inside the session-stall window — the zero-output
+	// wedge of polyforge#42 (#38/#40): the model never delivered even its
+	// first token. Model-class: the candidate is judged unusable and the
+	// chain moves on. The record-based harness_silent below stays the
+	// backstop for harnesses with no watchable transcript.
+	CauseSessionStalled Cause = "session_stalled"
+	CauseHarnessSilent        Cause = "harness_silent"          // rule 0 (record-based)
 	CauseModelError           Cause = "model_error"             // rule 1 (error-ended turn)
 	CauseEndedWithoutResult   Cause = "ended_without_result"    // rule 1 (ok-ended turn)
 	CauseModelHung            Cause = "model_hung"              // rule 2
@@ -74,9 +86,16 @@ const (
 // step_started (relaxed values already folded in, 2.4). Zero disables a
 // rule.
 type Thresholds struct {
-	// Silence is X: no work-class signal after dispatch (rule 0) and no
-	// model output while waiting for the model (rule 2).
+	// Silence is X: no work-class signal after dispatch (rule 0, the
+	// record-based backstop) and no model output while waiting for the
+	// model (rule 2).
 	Silence time.Duration `json:"silence"`
+	// SessionStall is rule 0's window: zero writes to the dispatch's live
+	// session file within this span of the last observed write is
+	// session_stalled (polyforge#42). The clock starts at the later of the
+	// last write's stamp and the dispatch start; a write inside the
+	// window restarts it. Negative disables the rule.
+	SessionStall time.Duration `json:"session_stall"`
 	// Tool is Y: one tool running longer than this is tool_hung.
 	Tool time.Duration `json:"tool"`
 	// StepTimeout is T: the CUMULATIVE step runtime bound.

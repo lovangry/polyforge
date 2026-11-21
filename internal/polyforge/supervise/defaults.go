@@ -29,7 +29,19 @@ type Defaults struct {
 	// (workflow contract v2 §5.2; default DefaultAskWarmWindow; [daemon]
 	// ask_warm_window).
 	AskWarmWindow time.Duration
+	// SessionStall is the session-stall window (polyforge#42): a dispatch
+	// whose live session file sees no write within this span of the last
+	// observed write is judged session_stalled and the candidate chain
+	// moves on. Zero takes the default; negative disables the rule (it
+	// passes Fill untouched — the rule's own guard is the consumer).
+	SessionStall time.Duration
 }
+
+// DefaultSessionStall is the documented default of rule 0's window
+// (polyforge#42: the #38/#40 incident sat 25-30 minutes on a frozen
+// session file; five minutes of zero output is the wedge, not a slow
+// first token).
+const DefaultSessionStall = 5 * time.Minute
 
 // DefaultAskWarmWindow is the documented warm window of a step awaiting
 // the owner: ~15 minutes, then the idle process exits (owner ruling Q9).

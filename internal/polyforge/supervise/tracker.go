@@ -109,6 +109,15 @@ type Tracker struct {
 	// tracker no monitor ever ticks.
 	closedSinceTick []closedPhase
 
+	// session-file watch (polyforge#42): the dispatch's live transcript
+	// observed by the monitor's session watch. sessionSeen marks that a
+	// stat ever landed (false = no locatable transcript: rule 0 stays
+	// inert and harness_silent keeps the backstop); sessionSize and
+	// sessionWroteAt are the newest observed size and write stamp.
+	sessionSeen    bool
+	sessionSize    int64
+	sessionWroteAt time.Time
+
 	lastError string
 	exit      *ExitInfo
 }
@@ -409,6 +418,27 @@ func (t *Tracker) ProcessExit(info ExitInfo) {
 	t.mu.Unlock()
 }
 
+// SessionWrite records one observation of the dispatch's live session
+// file: its current size and the moment it was last written (the file's
+// mtime as the monitor stat'd it). The monitor's session watch feeds it
+// every tick; a size change is a write (rule 0's clock restarts on it),
+// an unchanged size keeps the previous stamp — freshness is the watch's
+// to own, this counter only folds what it saw. Zero disables nothing
+// here: a zero wroteAt is simply never later than the dispatch start.
+func (t *Tracker) SessionWrite(size int64, wroteAt time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.sessionSeen {
+		t.sessionSeen = true
+	}
+	if size != t.sessionSize {
+		t.sessionSize = size
+		if wroteAt.After(t.sessionWroteAt) {
+			t.sessionWroteAt = wroteAt
+		}
+	}
+}
+
 // ObserveTick records one supervisor observation. shift > 0 declares an
 // observation gap: every instant stamped at or before cutoff is moved
 // forward by shift (the span the supervisor did not watch), and the
@@ -427,6 +457,7 @@ func (t *Tracker) ObserveTick(cutoff time.Time, shift time.Duration) {
 		at(&t.meta.StartedAt)
 		at(&t.waitingSince)
 		at(&t.lastOutput)
+		at(&t.sessionWroteAt)
 		at(&t.turnEndedAt)
 		at(&t.turnErrAt)
 		for _, run := range t.tools {
@@ -479,6 +510,13 @@ type Snapshot struct {
 	TurnErrText string
 	TurnErrAt   time.Time
 
+	// SessionSeen reports that the session watch ever observed the live
+	// transcript; SessionSize and SessionWroteAt are its newest size and
+	// write stamp (rule 0's clock).
+	SessionSeen    bool
+	SessionSize    int64
+	SessionWroteAt time.Time
+
 	// ToolCalls counts the tools this dispatch started; RecentFiles are
 	// the last few paths edit/write tools touched (oldest first).
 	ToolCalls   int
@@ -529,6 +567,10 @@ func (t *Tracker) Snapshot(now time.Time) Snapshot {
 		TurnError:   t.turnErr,
 		TurnErrText: t.turnErrText,
 		TurnErrAt:   t.turnErrAt,
+
+		SessionSeen:    t.sessionSeen,
+		SessionSize:    t.sessionSize,
+		SessionWroteAt: t.sessionWroteAt,
 		ToolCalls:   t.toolCalls,
 		RecentFiles: append([]string(nil), t.recentFiles...),
 		WaitCalls:   t.waitCalls,
