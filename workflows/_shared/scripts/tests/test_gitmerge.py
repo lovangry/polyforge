@@ -7,6 +7,8 @@ the landing rules. Every repository here is hermetic: no git configuration
 and no identity anywhere (the release gate's container has none), so a
 path relying on the host's identity fails here as it does there."""
 
+# carries: workflows/_shared/scripts/pfstep/gitmerge/git.py, workflows/_shared/scripts/pfstep/gitmerge/landing.py
+
 import hashlib
 import os
 import shutil
