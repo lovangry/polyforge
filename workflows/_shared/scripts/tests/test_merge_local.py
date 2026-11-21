@@ -142,6 +142,34 @@ class LocalLandingTest(GitCase):
         self.assertEqual(rec["merge_commit"], "")
         self.assertEqual(repo.head(), head)
 
+    def test_head_already_on_baseline(self) -> None:
+        """A no-forge head already contained by origin's baseline is recorded
+        as landed by the containment judgement — how: merged, by_this_run
+        honestly absent, the verified head itself the landed commit — and no
+        second, empty merge is made (the old record claimed by_this_run: true
+        with the baseline tip as its merge commit)."""
+        owner = self.fixture()
+        r = self.publish({"new": "verified\n"})
+        # A hand (or a crashed earlier run) already landed the head on the
+        # baseline: a real merge commit whose second parent is the head.
+        owner.git("merge", "--no-ff", "-m", "hand landing", r.head)
+        landed = owner.head()
+        r.verified_base = landed  # verification snapshotted the already-landed base
+        inv = type("I", (), {"say": lambda self, text: None})()
+        ctx = merge.Ctx()
+        details = merge.Details("", "")
+        details.repos.append(r)
+        result = merge.Merge(inv, merge.Git(ctx), ctx).judge(details)
+        self.assertEqual(result, 0, r.why)
+        rec = cast(dict[str, Any], merge.landing_of(details)["repos"][0])
+        self.assertEqual(rec["how"], "merged")
+        self.assertNotIn("by_this_run", rec)
+        self.assertEqual(rec["merge_commit"], r.head)
+        self.assertFalse(rec["worktree_synced"])
+        self.assertEqual(owner.head(), landed)
+        self.assertEqual(git(self.owner.dir, "status", "--porcelain"), "")
+        self.assertEqual(git(self.capsule, "branch", "--show-current"), "topic")
+
     def test_bare_origin(self) -> None:
         self.fixture(bare=True)
         r = self.publish({"new": "verified\n"})
