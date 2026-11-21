@@ -36,7 +36,7 @@ import (
 // anchor.
 func IsModelClass(cause string) bool {
 	switch cause {
-	case FailModelError, FailModelHung, FailStepTimeoutSlowModel, FailExitModel:
+	case FailModelError, FailModelHung, FailSessionStalled, FailStepTimeoutSlowModel, FailExitModel:
 		return true
 	}
 	return false

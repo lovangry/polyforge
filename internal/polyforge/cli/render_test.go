@@ -67,6 +67,40 @@ wi_ask         needs_input  -                 -      43         q_zz9     -     
 `)
 }
 
+// polyforge#42: the incident row — no agent pid, a dispatch idle for 14
+// minutes on its candidate — renders `stalled` with the idle time (STEP-AGE)
+// and the candidate on the same line; a live-pid row beside it stays running.
+func TestGoldenStatusStalledRow(t *testing.T) {
+	s := StatusResponse{
+		MachineID: "m1",
+		Auto:      true,
+		Jobs: []StatusJob{
+			{WorkItemID: "wi_inc", Slug: "polyforge#38", Status: "stalled", SpawnN: 2, SessionFingerprint: "ab12cd34ef56aa00",
+				StepAgeSec: int64Ptr(840), Candidate: "pi:llm-center-openai-4/gpt-6.1-sol"},
+			{WorkItemID: "wi_ok", Slug: "polyforge#40", Status: "running", SpawnN: 1, SessionFingerprint: "00aa11bb22cc33dd", AgentPID: 42,
+				StepAgeSec: int64Ptr(840), LastWorkAgoSec: int64Ptr(7), Candidate: "pi:llm-center-openai-4/gpt-6.1-sol"},
+		},
+		Queue: QueueStats{Running: 2, MaxConcurrent: 2},
+	}
+	var b bytes.Buffer
+	renderStatus(&b, &s)
+	got := b.String()
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "polyforge#38") {
+			for _, want := range []string{"stalled", "14:00", "pi:llm-center-openai-4/gpt-6.1-sol"} {
+				if !strings.Contains(line, want) {
+					t.Fatalf("incident row %q lacks %q\nfull render:\n%s", line, want, got)
+				}
+			}
+			if strings.Contains(line, "running") {
+				t.Fatalf("incident row still reads running: %q", line)
+			}
+			return
+		}
+	}
+	t.Fatalf("incident row missing:\n%s", got)
+}
+
 func TestGoldenWIDetail(t *testing.T) {
 	milestone := "m1"
 	labels := []string{"infra"}
