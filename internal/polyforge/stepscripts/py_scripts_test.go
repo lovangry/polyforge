@@ -132,6 +132,7 @@ func (r *syncRecord) repo(name string) *syncRepo {
 const (
 	HowMerged          = "merged"
 	HowMergedElsewhere = "merged_elsewhere"
+	HowSquash          = "squash"
 )
 
 type publishFile struct {
@@ -144,6 +145,7 @@ type publishEntry struct {
 	Branch        string `json:"branch"`
 	PRURL         string `json:"pr_url"`
 	Head          string `json:"head"`
+	Title         string `json:"title,omitempty"`
 }
 
 type mergeRepo struct {

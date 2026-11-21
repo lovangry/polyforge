@@ -168,14 +168,16 @@ type landingRecord struct {
 }
 
 // landingRepo is one merge of the landing record: its repo, its PR, the
-// head it merged, the light-verified head (absent: none verified), the
-// PR's merge commit, and whether the owner accepted a merge made outside
-// the merge step as the landing.
+// head it merged, the light-verified head (absent: none verified), how it
+// landed (a squash the step made itself), the PR's merge commit, and
+// whether the owner accepted a merge made outside the merge step as the
+// landing.
 type landingRepo struct {
 	Repo              string `json:"repo"`
 	PR                string `json:"pr"`
 	Head              string `json:"head"`
 	LightVerifiedHead string `json:"light_verified_head,omitempty"`
+	How               string `json:"how,omitempty"`
 	MergeCommit       string `json:"merge_commit,omitempty"`
 	Accepted          bool   `json:"accepted,omitempty"`
 }

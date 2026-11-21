@@ -75,7 +75,9 @@ class MergeNoForgeLandingTest(unittest.TestCase):
         g = self.FakeGit()
         inv = type("I", (), {"say": lambda self, text: None})()
         merge.Merge(inv, g, merge.Ctx()).judge_local(r)
-        self.assertEqual(r.how, merge.HOW_MERGED)
+        # (r1#3) the literal, not the impl's symbol: the red must be the
+        # assertion the record promises, not a missing name
+        self.assertEqual(r.how, "squash")
         self.assertEqual(r.merge_commit, "b" * 40)
         self.assertTrue(r.by_this_run)
         calls = [c[1] for c in g.calls if c[0] == "git"]
@@ -84,7 +86,7 @@ class MergeNoForgeLandingTest(unittest.TestCase):
         d = merge.Details("p.json", "v.json")
         d.repos.append(r)
         rec = merge.landing_of(d)["repos"][0]
-        self.assertEqual(rec["how"] if "how" in rec else r.how, "merged")
+        self.assertEqual(rec["how"] if "how" in rec else r.how, "squash")
         self.assertEqual(rec["merge_commit"], "b" * 40)
         self.assertNotIn("manual_merge_required", rec)
 

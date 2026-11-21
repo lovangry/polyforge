@@ -39,6 +39,7 @@ class LocalLandingTest(GitCase):
         git(self.capsule, "push", "origin", "HEAD:refs/heads/topic")
         return merge.MergeRepo(name="app", pr_url="", branch="topic", head=head,
                                published=head, dir=self.capsule, no_forge=True,
+                               title="app: the change",
                                verified_base=self.before)
 
     def land(self, r: Any, expected: int = 0) -> dict[str, Any]:
@@ -49,9 +50,9 @@ class LocalLandingTest(GitCase):
         result = merge.Merge(inv, merge.Git(ctx), ctx).judge(details)
         self.assertEqual(result, expected, r.why)
         if expected == 0:
-            self.assertEqual(r.how, "merged")
+            self.assertEqual(r.how, "squash")
             self.assertEqual(git(self.source, "rev-parse", "refs/heads/" + self.base), r.merge_commit)
-            self.assertEqual(git(self.source, "rev-parse", r.merge_commit + "^2"), r.head)
+            self.assertEqual(git(self.source, "rev-parse", r.merge_commit + "^"), self.before)
         return cast(dict[str, Any], merge.landing_of(details)["repos"][0])
 
     def test_clean(self) -> None:
@@ -142,7 +143,7 @@ class LocalLandingTest(GitCase):
         self.assertEqual(rec["merge_commit"], "")
         self.assertEqual(repo.head(), head)
 
-    def test_head_already_on_baseline(self) -> None:
+
         """A no-forge head already contained by origin's baseline is recorded
         as landed by the containment judgement — how: merged, by_this_run
         honestly absent, the verified head itself the landed commit — and no
@@ -168,7 +169,25 @@ class LocalLandingTest(GitCase):
         self.assertFalse(rec["worktree_synced"])
         self.assertEqual(owner.head(), landed)
         self.assertEqual(git(self.owner.dir, "status", "--porcelain"), "")
-        self.assertEqual(git(self.capsule, "branch", "--show-current"), "topic")
+
+        repo = Repo(os.path.join(self.tmp, "repos", "app"))
+        head = repo.head()
+        write(self.tmp, {
+            "publish.json": json.dumps({"repos": [{"name": "app", "branch": "topic", "pr_url": "",
+                                                      "head": head, "no_forge": True}]}),
+            "verified.json": json.dumps({"schema": "pf-step-result/1", "heads": {"app": head}}),
+        })
+        out = os.path.join(self.tmp, "result.json")
+        landing = os.path.join(self.tmp, "landing.json")
+        proc = subprocess.run([sys.executable, cast(str, merge.__file__),
+                               "--capsule", self.tmp, "--publish", os.path.join(self.tmp, "publish.json"),
+                               "--verified", os.path.join(self.tmp, "verified.json"),
+                               "--landing-out", landing, "--json", "--out", out],
+                              capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+        self.assertIn("title", proc.stderr)
+        self.assertFalse(os.path.exists(landing))
+
 
     def test_bare_origin(self) -> None:
         self.fixture(bare=True)

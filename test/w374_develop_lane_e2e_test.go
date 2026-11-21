@@ -55,7 +55,7 @@ package test
 //     NOTES.md in place and continues, verification (u1's run green:
 //     `demo:unit-run:u1`) and publish run again (the PR body lists
 //     "conflict resolved in sync: NOTES.md"), `merge.py` lands the PR at
-//     the re-verified head (`gh pr merge --merge --match-head-commit`) and
+//     the re-verified head (`gh pr merge --squash --match-head-commit`) and
 //     writes artifacts/merge/landing.json, the merge agent registers it
 //     (`pf step hub wrap-attrs integration @artifacts/merge/landing.json`)
 //     before its `done`, and the wrap carries it: aihub's attrs
@@ -819,7 +819,7 @@ func TestW374DevelopLaneEndToEnd(t *testing.T) {
 	if exits := w374RunExits(t, capDir, w374MergeLine); len(exits) != 2 || exits[0] != 1 || exits[1] != 0 {
 		t.Fatalf("merge.py exits (the default branch moved since verification, then landed): %v", exits)
 	}
-	if w.prState("demo", "1") != "MERGED" || w.calls("gh pr merge") != 1 || w.calls("gh pr merge https://github.com/fake/demo/pull/1 --merge --match-head-commit "+head) != 1 {
+	if w.prState("demo", "1") != "MERGED" || w.calls("gh pr merge") != 1 || w.calls("gh pr merge https://github.com/fake/demo/pull/1 --squash --match-head-commit "+head) != 1 {
 		t.Fatalf("the merge step asks the forge once, at the re-verified head (the moved default never reaches gh pr merge): state %q, merges %d (head %s)", w.prState("demo", "1"), w.calls("gh pr merge"), head)
 	}
 	// the conflicting main (the seed's last push) is merged into the landed head

@@ -176,8 +176,9 @@
 # as the merge commit of a merged PR - `gh api
 # repos/<repo>/pulls?state=closed&sort=updated&direction=desc`, the merged PR
 # whose merge_commit_sha is that commit. Both shapes a merged PR leaves behind
-# count: the two-parent merge commit `gh pr merge --merge` (the lanes' merge
-# step, run by the daemon) produces, and a squash/rebase PR's one-parent commit. The
+# count: the one-parent squash commit `gh pr merge --squash` (the lanes' merge
+# step, run by the daemon) produces, the two-parent `--merge` commits of
+# older history, and a rebase PR's one-parent commit. The
 # commit->PR index (`commits/<sha>/pulls`, GraphQL associatedPullRequests, PR
 # search) is deliberately NOT consulted: GitHub's index can be empty even for a
 # merged PR's own merge commit, so an empty index answer must never be read as
@@ -205,7 +206,7 @@
 # with no merged-PR record still refuses. A PR merged by hand (a local git merge
 # pushed with the pre-push hook's PF_ALLOW_MAIN_PUSH override) passes only if
 # GitHub records that very commit as the PR's merge commit; otherwise it is
-# refused - merge with gh pr merge --merge.
+# refused - merge with gh pr merge --squash.
 # The one exception is the owner-direct allowlist (OWNER_DIRECT_EMAILS below,
 # polyforge#240): a first-parent commit whose git AUTHOR EMAIL exactly equals an
 # allowlisted email passes whatever its shape, and each one prints an audit line

@@ -12,11 +12,12 @@ lanes, `develop` and `micro` (`workflows/<lane>/README.md`):
    open one (with **no forge** — an origin that is not GitHub, or no `gh` — it
    opens nothing and records the branch as published, leaving the merge to the
    owner), and never merges;
-2. `merge` merges the PR with `gh pr merge --merge
+2. `merge` squashes the PR with `gh pr merge --squash
    --match-head-commit <head>` under the repo's merge lock and lands the work
-   item (with no forge the branch must stand at the verified head; the script
-   merges into the capsule baseline in the local origin worktree, preserving dirty
-   changes, and records `how: merged`, `merge_commit`, and `worktree_synced`.
+   item (with no forge the branch must stand at the verified head and the
+   entry carry a title; the script
+   squashes into the capsule baseline in the local origin worktree, preserving dirty
+   changes, and records `how: squash`, `merge_commit`, and `worktree_synced`.
    Bare or remote origins use push) — on both lanes through the merge agent
    step's `merge.py` (a PR it
    cannot take — closed, moved, refused, a moved default branch that

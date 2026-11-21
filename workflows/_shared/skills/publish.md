@@ -86,9 +86,10 @@ the source and what did not hold (the lane goes back to the step that makes the 
    instruction verbatim and the PR links in the body (the owner answered, so it spends no
    rewind). Anything else: ask again. The material is read-only — never edit, regenerate
    or commit it. No such line anywhere: ask nothing; the note says "no owner-review declared".
-4. **Write** `artifacts/publish.json` — `{"repos": [{name, branch, pr_url, head,
-   skipped_reason, no_forge}]}`, `head` the sha you pushed (what the merge step matches); with no
-   forge `pr_url` is empty, `no_forge` is `true` and `skipped_reason` says why — and
+4. **Write** `artifacts/publish.json` — `{"repos": [{name, branch, pr_url, title, head,
+   skipped_reason, no_forge}]}`, where `title` is the exact `<slug>: <one line>` PR title. `head` the
+   sha you pushed (what the merge step matches); with no forge `pr_url` is empty, `no_forge` is
+   `true` and `skipped_reason` says why — the merge step uses the same title for its squash commit — and
    `artifacts/delivery.md` (the PR body's content plus the owner-review record).
 5. **The last step.** Only when the step order of your dispatch header notes you as the last
    step (the

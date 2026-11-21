@@ -74,6 +74,7 @@ class PR:
     head_ref_name: str = ""
     base_ref_name: str = ""
     merge_commit: str = ""
+    title: str = ""
 
     def mismatch(self, base: str, branch: str) -> str:
         """Why an OPEN PR is not the lane's PR of branch into base ("" = it is)."""
@@ -277,7 +278,7 @@ class Git:
     # -- gh --
 
     def view_pr(self, cwd: str, url: str) -> PR:
-        out = _text(self.cmd(cwd, "gh", "pr", "view", url, "--json", "state,headRefName,baseRefName,mergeCommit"))
+        out = _text(self.cmd(cwd, "gh", "pr", "view", url, "--json", "state,headRefName,baseRefName,mergeCommit,title"))
         try:
             v = json.loads(out)
             if not isinstance(v, dict):
@@ -285,14 +286,15 @@ class Git:
         except ValueError as err:
             raise GoError("gh pr view %s: unreadable answer %s: %s" % (url, gostr.quote(out.strip()), _json_why(out, err))) from None
         return PR(state=_str(v.get("state")), head_ref_name=_str(v.get("headRefName")),
-                  base_ref_name=_str(v.get("baseRefName")), merge_commit=_oid(v.get("mergeCommit")))
+                  base_ref_name=_str(v.get("baseRefName")), merge_commit=_oid(v.get("mergeCommit")),
+                  title=_str(v.get("title")))
 
     def merge_pr(self, cwd: str, url: str, head: str) -> None:
-        """Merge a PR with a merge commit, only while its head is head
-        (``--match-head-commit``)."""
+        """Squash-merge a PR, only while its head is head
+        (``--match-head-commit``); the forge uses the PR title."""
         if head == "":
             raise GoError("gh pr merge %s: no head commit to match" % url)
-        self.cmd(cwd, "gh", "pr", "merge", url, "--merge", "--match-head-commit", head)
+        self.cmd(cwd, "gh", "pr", "merge", url, "--squash", "--match-head-commit", head)
 
     def create_pr(self, cwd: str, base: str, head: str, title: str, body: str) -> str:
         """Open a PR; its URL."""

@@ -133,17 +133,20 @@ class World:
         return sha
 
     def publish(self, repo: str) -> Dict[str, str]:
-        """Push the branch, open its PR at the fake gh: the publish entry."""
+        """Push the branch, open its PR at the fake gh: the publish entry.
+        The PR carries a title (publish.json's): the squash's message."""
         self.git(self.dir(repo), "push", "-q", "origin", "HEAD:refs/heads/" + self.BRANCH)
         prs = os.path.join(self.gh, repo, "prs")
         n = len(os.listdir(prs)) + 1 if os.path.isdir(prs) else 1
         url = "https://github.com/fake/%s/pull/%d" % (repo, n)
-        for k, v in {"head": self.BRANCH, "base": "main", "state": "OPEN", "url": url}.items():
+        title = repo + ": the change"
+        for k, v in {"head": self.BRANCH, "base": "main", "state": "OPEN", "url": url, "title": title}.items():
             write(os.path.join(prs, str(n)), k, v + "\n")
-        return {"name": repo, "branch": self.BRANCH, "pr_url": url, "head": self.head(repo)}
+        return {"name": repo, "branch": self.BRANCH, "pr_url": url, "head": self.head(repo), "title": title}
 
-    def land(self, repo: str, branch: str, files: Dict[str, str]) -> str:
-        """A work item landed on origin's main through the fake gh: its merge."""
+    def land(self, repo: str, branch: str, files: Dict[str, str], method: str = "--merge") -> str:
+        """A work item landed on origin's main through the fake gh: its merge
+        (a merge commit by default, a squash when method --squash)."""
         seed = self.seeds[repo]
         self.git(seed, "fetch", "-q", "origin")
         self.git(seed, "checkout", "-q", "-B", branch, "origin/main")
@@ -156,7 +159,7 @@ class World:
         url = "https://github.com/fake/%s/pull/%d" % (repo, n)
         for k, v in {"head": branch, "base": "main", "state": "OPEN", "url": url}.items():
             write(os.path.join(prs, str(n)), k, v + "\n")
-        out = subprocess.run([os.path.join(self.bin, "gh"), "pr", "merge", url, "--merge", "--match-head-commit", head],
+        out = subprocess.run([os.path.join(self.bin, "gh"), "pr", "merge", url, method, "--match-head-commit", head],
                              cwd=seed, env=self.env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if out.returncode != 0:
             raise AssertionError(out.stdout.decode())
@@ -306,11 +309,110 @@ class MergeScriptTest(unittest.TestCase):
                                "--capsule", w.capsule, "--json", "--out", out)
         assert res is not None
         r = repo_of(res, "app")
-        self.assertEqual((code, r["how"], r["by_this_run"], r["branch_side"]), (0, "merged", True, head), err)
+        self.assertEqual((code, r["how"], r["by_this_run"]), (0, "squash", True), err)
         with open(landing, encoding="utf-8") as f:
             self.assertEqual(json.load(f), {"state": "landed", "repos": [
-                {"repo": "app", "pr": r["pr_url"], "head": head, "light_verified_head": head, "merge_commit": r["merge_commit"]}],
+                {"repo": "app", "pr": r["pr_url"], "head": head, "how": "squash", "light_verified_head": head, "merge_commit": r["merge_commit"]}],
                 "merge_commits": {"app": [r["merge_commit"]]}})
+
+    def test_a_merged_answer_that_names_no_merge_commit_is_refused(self) -> None:
+        w = World(self, "app")
+        w.change("app", {"feature.txt": "f\n"}, "app-section")
+        entry = w.publish("app")
+        publish, verified, out = self.inputs(w, entry)
+        # the merge command succeeded but the read-back names no merge
+        # commit: not a landing (the refusal the merged-elsewhere path
+        # keeps — r1#5)
+        write(os.path.join(w.gh, "app", "prs", "1"), "hide-merge", "\n")
+        code, res, err = w.run("merge.py", "--publish", publish, "--verified", verified, "--landing-out",
+                               os.path.join(w.capsule, "artifacts", "merge", "landing.json"),
+                               "--capsule", w.capsule, "--json", "--out", out)
+        assert res is not None
+        self.assertEqual(code, 1, err)
+        self.assertIn("names no merge commit", repo_of(res, "app")["why"])
+
+    def test_squash_lands_one_first_parent_commit_titled_as_the_pr(self) -> None:
+        w = World(self, "app")
+        head = w.change("app", {"feature.txt": "f\n"}, "app-section")
+        entry = w.publish("app")
+        before = w.git(w.dir("app"), "rev-parse", "refs/remotes/origin/main")
+        publish, verified, out = self.inputs(w, entry)
+        landing = os.path.join(w.capsule, "artifacts", "merge", "landing.json")
+        code, res, err = w.run("merge.py", "--publish", publish, "--verified", verified, "--landing-out", landing,
+                               "--capsule", w.capsule, "--json", "--out", out)
+        assert res is not None
+        r = repo_of(res, "app")
+        self.assertEqual((code, r["how"], r["by_this_run"]), (0, "squash", True), err)
+        # the squash lives on the bare origin: read it there
+        origin = ["--git-dir=" + os.path.join(w.origins, "app.git")]
+        self.assertEqual(r["merge_commit"], w.git(w.root, *origin, "rev-parse", "refs/heads/main"))
+        # one commit on the first-parent line of the default branch, its
+        # message the PR title (publish.json's), not a merge commit
+        self.assertEqual(w.git(w.root, *origin, "rev-list", "--first-parent", "--count", before + ".." + r["merge_commit"]), "1")
+        parents = w.git(w.root, *origin, "rev-list", "--parents", "-n", "1", r["merge_commit"]).split()
+        self.assertEqual(parents, [r["merge_commit"], before])
+        subject = w.git(w.root, *origin, "log", "-1", "--format=%s", r["merge_commit"])
+        self.assertEqual(subject, entry["title"])
+        self.assertNotIn("Merge pull request", subject)
+        self.assertNotIn("branch_side", r)
+
+    def test_a_crashed_run_is_taken_on_rerun_by_the_landing_rules(self) -> None:
+        w = World(self, "app")
+        w.change("app", {"feature.txt": "f\n"}, "app-section")
+        entry = w.publish("app")
+        publish, verified, out = self.inputs(w, entry)
+        landing = os.path.join(w.capsule, "artifacts", "merge", "landing.json")
+        code, res, err = w.run("merge.py", "--publish", publish, "--verified", verified, "--landing-out", landing,
+                               "--capsule", w.capsule, "--json", "--out", out)
+        assert res is not None
+        r = repo_of(res, "app")
+        self.assertEqual((code, r["how"], r["by_this_run"]), (0, "squash", True), err)
+        landed = r["merge_commit"]
+        # the run crashed after the forge answered MERGED (before it wrote
+        # anything): a re-run takes the landing by the landing rules
+        code, res, err = w.run("merge.py", "--publish", publish, "--verified", verified, "--landing-out", landing,
+                               "--capsule", w.capsule, "--json", "--out", out)
+        assert res is not None
+        r = repo_of(res, "app")
+        self.assertEqual((code, r["how"], r.get("by_this_run", False)), (0, "merged_elsewhere", False), err)
+        self.assertEqual(r["merge_commit"], landed)
+        with open(landing, encoding="utf-8") as f:
+            rec = json.load(f)["repos"][0]
+        self.assertEqual((rec["accepted"], rec["head"]), (True, entry["head"]))
+
+    def test_a_squash_merged_outside_with_the_verified_tree_is_taken(self) -> None:
+        w = World(self, "app")
+        head = w.change("app", {"feature.txt": "f\n"})
+        entry = w.publish("app")
+        publish, verified, out = self.inputs(w, entry)
+        # a human squashed the PR: one new commit on main, the branch's tree
+        squash = w.main_moves("app", {"feature.txt": "f\n"})
+        write(os.path.join(w.gh, "app", "prs", "1"), "merge", squash + "\n")
+        write(os.path.join(w.gh, "app", "prs", "1"), "state", "MERGED\n")
+        landing = os.path.join(w.capsule, "artifacts", "merge", "landing.json")
+        code, res, err = w.run("merge.py", "--publish", publish, "--verified", verified, "--landing-out", landing,
+                               "--capsule", w.capsule, "--json", "--out", out)
+        assert res is not None
+        r = repo_of(res, "app")
+        self.assertEqual((code, r["how"], r.get("by_this_run", False), r["merge_commit"]), (0, "merged_elsewhere", False, squash), err)
+        with open(landing, encoding="utf-8") as f:
+            rec = json.load(f)["repos"][0]
+        self.assertEqual((rec["accepted"], rec["head"], rec["merge_commit"]), (True, head, squash))
+        # a squash off the verified tree is still the sync step's: refused
+        w = World(self, "app")
+        w.change("app", {"feature.txt": "f\n"})
+        entry = w.publish("app")
+        publish, verified, out = self.inputs(w, entry)
+        stray = w.main_moves("app", {"feature.txt": "f\n", "extra.txt": "drift\n"})
+        pr1 = os.path.join(w.gh, "app", "prs", "1")
+        write(pr1, "merge", stray + "\n")
+        write(pr1, "state", "MERGED\n")
+        code, res, err = w.run("merge.py", "--publish", publish, "--verified", verified, "--landing-out",
+                               os.path.join(w.capsule, "artifacts", "merge", "landing.json"),
+                               "--capsule", w.capsule, "--json", "--out", out)
+        assert res is not None
+        self.assertEqual(code, 1, err)
+        self.assertIn("no branch side", repo_of(res, "app")["why"])
 
     def test_default_branch_freshness_controls_merge(self) -> None:
         w = World(self, "app")
@@ -321,7 +423,7 @@ class MergeScriptTest(unittest.TestCase):
         code, res, err = w.run("merge.py", "--publish", publish, "--verified", verified, "--landing-out", landing,
                                "--capsule", w.capsule, "--json", "--out", out)
         assert res is not None
-        self.assertEqual((code, res["verdict"], repo_of(res, "app")["how"]), (0, "pass", "merged"), err)
+        self.assertEqual((code, res["verdict"], repo_of(res, "app")["how"]), (0, "pass", "squash"), err)
         self.assertTrue(os.path.exists(landing))
         self.assertEqual(repo_of(res, "app")["head"], head)
 
@@ -375,6 +477,35 @@ sys.exit(1)
 
 @unittest.skipUnless(HAVE_GIT, "git or bash not installed")
 class RevertScriptTest(unittest.TestCase):
+    def test_reverts_a_squash_landing(self) -> None:
+        w = World(self, "app")
+        with open(os.path.join(w.bin, "pf"), "w", encoding="utf-8") as f:
+            f.write(FAKE_PF)
+        os.chmod(os.path.join(w.bin, "pf"), 0o755)
+        # the item landed as the lane now lands: a squash, one commit
+        m = w.land("app", "p1", {"pkg/code.go": "package pkg\n\nfunc F() int { return 2 }\n"}, method="--squash")
+        w.git(w.seeds["app"], "fetch", "-q", "origin")
+        parents = w.git(w.seeds["app"], "rev-list", "--parents", "-n", "1", m).split()
+        self.assertEqual(len(parents), 2)  # the squash and its single parent
+        items = os.path.join(w.root, "items.json")
+        with open(items, "w", encoding="utf-8") as f:
+            json.dump([{"id": "wi_1", "slug": "p#1", "status": "wrapped", "attrs": {"integration": {"state": "landed", "merge_commits": {"app": [m]}}}}], f)
+        pins = {"app": w.git(w.seeds["app"], "rev-parse", "HEAD")}
+        batch = os.path.join(w.capsule, "artifacts", "integrate", "batch.json")
+        write(w.capsule, "artifacts/integrate/batch.json", json.dumps({
+            "schema": "pf-step-result/1", "heads": pins,
+            "details": {"items": [{"id": "wi_1", "slug": "p#1", "merge_commits": {"app": [m]}, "fix_tickets": []}], "gated": ["app"]}}))
+        out = os.path.join(w.capsule, "artifacts", "integrate", "revert.json")
+        code, res, err = w.run("revert.py", "--batch", batch, "--item", "wi_1", "--capsule", w.capsule,
+                               "--json", "--out", out, PF_WI_ID="wi_batch", FAKE_PF_ITEMS=items)
+        assert res is not None
+        self.assertEqual(code, 0, err)
+        rr = res["details"]["reverts"][0]["repos"][0]
+        self.assertIn("return 1", w.git(w.dir("app"), "show", rr["revert_merge"] + ":pkg/code.go"))
+        # the revert of a squash is itself one commit on the first-parent line
+        rp = w.git(w.dir("app"), "rev-list", "--parents", "-n", "1", rr["revert_merge"]).split()
+        self.assertEqual(len(rp), 2)
+
     def test_reverts_an_item_and_writes_its_move(self) -> None:
         w = World(self, "app")
         with open(os.path.join(w.bin, "pf"), "w", encoding="utf-8") as f:
