@@ -83,6 +83,13 @@ func TestStartClonesTaskRepos(t *testing.T) {
 	if !dirExists(filepath.Join(repoDir, ".git")) {
 		t.Fatal("repos/app is not a git clone (no .git)")
 	}
+	// The clone's origin is the project URL the claim served — a materialized
+	// repo never points at a capsule-local path or a rewritten remote.
+	if out, err := exec.Command("git", "-C", repoDir, "remote", "get-url", "origin").Output(); err != nil {
+		t.Fatalf("reading the clone's origin: %v", err)
+	} else if got := strings.TrimSpace(string(out)); got != url {
+		t.Fatalf("clone origin = %q, want the claim-served project URL %q", got, url)
+	}
 	if b, err := os.ReadFile(filepath.Join(repoDir, "hello.txt")); err != nil || string(b) != "hello\n" {
 		t.Fatalf("cloned content wrong: %q, %v", b, err)
 	}
