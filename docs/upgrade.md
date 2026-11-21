@@ -196,6 +196,10 @@ Everything else is unchanged: an ordinary unit keeps its test commit and
 the four requirements of the test-first shape, and verification still
 runs every recorded run green on the final tree.
 
+## v0.2.1, baseline-complete empty unit declarations
+
+A build may record an unchanged baseline with an empty `artifacts/build/units.json` only when sibling `change-analysis.json` declares `baseline_complete`: a non-empty justification of at most 500 characters and non-empty per-AC criteria with integer `ac` values and existing `impl` and `tests` paths. The declaration is mutually exclusive with non-empty units and `pre_existing_red`, and never substitutes for an acceptance criterion that is not implemented. For this self-referential change, the owner rulings of 2026-11-21T08:30:41Z and 08:43:02Z authorize repository-script self-validation; ordinary tickets still require the normal red-then-green unit evidence.
+
 ## v0.2.1, no-forge repositories are merged locally
 
 The merge step now creates and pushes a no-ff merge commit for repositories without a forge, recording `how: merged` and `merge_commit` in the landing record.

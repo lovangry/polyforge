@@ -1046,7 +1046,7 @@ full reference.
   exits 0 and one output line matches its marker; a marker problem, a
   red run or no matching line — a marker wrong by one `$` against a
   suffixed output line — is red on the spot, the result naming the unit,
-  its marker and the closest output line. Details: `units_file, units[{id,
+  its marker and the closest output line. An empty `units.json` is accepted only with a sibling `change-analysis.json` declaring valid `baseline_complete` with integer `ac`, non-empty bounded justification, non-empty criteria, and existing impl/tests paths; its summary is `baseline complete: N criteria, 0 units`, and it is mutually exclusive with non-empty units or `pre_existing_red`. Details: `units_file, units[{id,
   check, repo, cwd, argv, marker, passed, why, exit_code, log,
   closest_line}]`. Exit 0: every checked unit passed; 1: a unit is red;
   2: not judged (an unusable units.json, `--unit` naming no unit, a file
