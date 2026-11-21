@@ -13,7 +13,10 @@ from . import commitlang
 
 
 def _line_problem(line: str, lang: str) -> str:
-    """Why the line cannot be this repository's language ("" = it can)."""
+    """Why the line cannot be this repository's language ("" = it can):
+    a Chinese-primary repository's line carries no Chinese character."""
+    if lang == commitlang.CHINESE and commitlang.cjk_chars(line) == 0:
+        return "a Chinese-primary repository's line carries no Chinese character: %r" % line
     return ""
 
 
@@ -21,18 +24,27 @@ def subject(lang: str, kind: str, line: str, tag: str = "") -> str:
     """A capsule commit's subject: ``<kind>: <line>`` — the repository's
     type-enum word kept verbatim — with the marker tag appended as
     `` (tag)`` when given, the line in the repository's language."""
-    return ""
+    problem = _line_problem(line, lang)
+    if problem != "":
+        raise ValueError(problem)
+    out = "%s: %s" % (kind, line)
+    return "%s (%s)" % (out, tag) if tag != "" else out
 
 
 def pr_title(lang: str, slug: str, line: str) -> str:
     """The publish PR's title: ``<slug>: <one line>`` — the slug and the
     colon-space shape fixed, the one line in the repository's
     language."""
-    return ""
+    problem = _line_problem(line, lang)
+    if problem != "":
+        raise ValueError(problem)
+    return "%s: %s" % (slug, line)
 
 
 def sync_message(lang: str, default_branch: str, branch: str) -> str:
     """The sync merge message in the repository's language:
     byte-identical English in an English-primary repository, Chinese in
     a Chinese-primary one."""
-    return ""
+    if lang == commitlang.CHINESE:
+        return "合并 %s 到 %s (sync)" % (default_branch, branch)
+    return "Merge %s into %s (sync)" % (default_branch, branch)
