@@ -7,6 +7,8 @@ the landing rules. Every repository here is hermetic: no git configuration
 and no identity anywhere (the release gate's container has none), so a
 path relying on the host's identity fails here as it does there."""
 
+# carries: workflows/_shared/scripts/pfstep/gitmerge/git.py, workflows/_shared/scripts/pfstep/gitmerge/landing.py
+
 import hashlib
 import os
 import shutil
@@ -80,6 +82,26 @@ def sha(s: str) -> str:
 def read_conf(d: str) -> Conf:
     with open(os.path.join(d, CONF_REL), "rb") as f:
         return parse_conf(f.read())
+
+
+class RemoteBranchContainsTest(unittest.TestCase):
+    def test_remote_branch_contains_uses_remote_tracking_branch(self) -> None:
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, True)
+        origin = os.path.join(root, "origin.git")
+        clone = os.path.join(root, "clone")
+        git(root, "init", "-q", "--bare", "-b", "main", origin)
+        git(root, "clone", "-q", origin, clone)
+        write(clone, "tracked", "one\n")
+        git(clone, "add", "tracked")
+        git(clone, "commit", "-qm", "one")
+        git(clone, "push", "-q", "origin", "HEAD:refs/heads/main")
+        head = git(clone, "rev-parse", "HEAD")
+        self.assertTrue(lane().remote_branch_contains(clone, "main", head))
+        write(clone, "tracked", "two\n")
+        git(clone, "commit", "-qam", "two")
+        local = git(clone, "rev-parse", "HEAD")
+        self.assertFalse(lane().remote_branch_contains(clone, "main", local))
 
 
 class World:

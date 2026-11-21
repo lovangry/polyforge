@@ -218,3 +218,13 @@ materialization.
 ## v0.2.1, the merge step lands each PR as one squash commit
 
 `gh pr merge --squash --match-head-commit <head>` replaces the no-ff merge commit for forge repositories (a no-forge repository gets `git merge --squash` plus one explicit commit in its baseline worktree): each PR lands as exactly one new commit on the default branch's first-parent line, its message the PR title, which publish.json now carries as `title` (a no-forge entry without one is a usage error, exit 2). The landing record writes `how: squash` for the step's own landing. A PR the step finds already MERGED, squashed on the default branch with no branch side, is taken as `how: merged_elsewhere` (`accepted: true`, `by_this_run` false) when the commit's tree is byte-identical to the verified head's tree — the content the lane verified, re-committed; any drift keeps the refusal, as does a MERGED answer that names no merge commit on the read-back.
+
+## v0.2.1, a no-forge head already on the remote baseline
+
+For a repository without a forge whose verified head is already contained by
+`origin/<base>` (landed by hand, or by an earlier run), the merge step no
+longer re-merges an empty no-op: it judges the containment against the fetched
+remote-tracking branch (`git branch -r --contains`, never the capsule's local
+branch) and records the landing as it stands — `how: merged` with no
+`by_this_run` and the verified head itself as `merge_commit`. Before, that
+corner claimed `by_this_run: true` with the baseline tip as the merge commit.

@@ -280,6 +280,15 @@ class Merge:
             if moved:
                 r.why = moved + " (no forge: sync, verify and publish again)"
                 return
+        # The containment judgement: a head already on origin's baseline is
+        # landed — recorded as merged, not landed by this run — instead of an
+        # empty re-merge that would claim by_this_run with the baseline tip as
+        # its merge commit.
+        if g.remote_branch_contains(r.dir, r.base, r.head):
+            r.merge_commit, r.how, r.by_this_run = r.head, HOW_MERGED, False
+            self.inv.say("repos/%s: no forge — the verified head %s is already on origin/%s" %
+                         (r.name, gostr.short(r.head), r.base))
+            return
         source = ""
         temp = ""
         target = r.dir

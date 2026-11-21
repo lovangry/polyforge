@@ -176,6 +176,20 @@ class Git:
             return False
         return True
 
+    def remote_branch_contains(self, cwd: str, branch: str, commit: str) -> bool:
+        """Whether a fetched remote branch contains commit.
+
+        Use Git's branch containment query so the decision is explicitly
+        against the remote-tracking branch, never the capsule's checked-out
+        local branch.
+        """
+        try:
+            self.fetch(cwd, branch)
+            out = self.git(cwd, "branch", "-r", "--contains", commit, "--list", "origin/" + branch)
+        except GoError:
+            return False
+        return any(line.strip() == "origin/" + branch for line in out.splitlines())
+
     def default_branch(self, cwd: str) -> str:
         """origin's default branch (origin/HEAD, else main)."""
         try:
