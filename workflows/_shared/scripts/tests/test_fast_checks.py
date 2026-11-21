@@ -79,7 +79,9 @@ class FastChecksCase(GitCase):
         if not os.path.exists(self.out):
             raise AssertionError("fast_checks.py wrote no result file (exit %d): %s" % (c.returncode, c.stderr[-500:]))
         with open(self.out, encoding="utf-8") as f:
-            return c.returncode, json.load(f)
+            result = json.load(f)
+        result["_stderr"] = c.stderr
+        return c.returncode, result
 
     def go_repo(self, conf: str = CONF, change: Optional[Dict[str, str]] = None) -> str:
         return self.task_repo("app", {
@@ -268,21 +270,26 @@ class CheckUnitsTest(FastChecksCase):
         self.go_repo()
         code, res = self.run_units([])
         self.assertEqual(code, 2)
+        self.assertIn("--check-units", res["_stderr"])
+        self.assertIn("names no unit: nothing to check", res["_stderr"])
 
     def test_baseline_complete_is_mutually_exclusive_with_units_and_pre_existing_red(self) -> None:
         self.go_repo()
         self.baseline_analysis()
         code, res = self.run_units([self.unit("u1", "^x", ["sh", "-c", "echo x"])])
         self.assertEqual(code, 2)
+        self.assertIn("mutually exclusive", res["_stderr"])
         self.baseline_analysis({"baseline_complete": {"justification": "done", "criteria": [{"ac": 1, "impl": ["app/app.go"], "tests": ["app/app_test.go"]}]}})
         code, res = self.run_units([{"id": "u1", "pre_existing_red": True, "run": {"repo": "app", "cwd": ".", "argv": ["true"]}, "marker": "^x"}])
         self.assertEqual(code, 2)
-
+        self.assertIn("mutually exclusive", res["_stderr"])
+        
     def test_baseline_complete_requires_existing_paths_and_nonempty_fields(self) -> None:
         self.go_repo()
         cases = [
             ({"justification": "done", "criteria": [{"ac": 1, "impl": ["missing.go"], "tests": ["app/app_test.go"]}]}, "missing.go"),
             ({"justification": "", "criteria": [{"ac": 1, "impl": ["app/app.go"], "tests": ["app/app_test.go"]}]}, "justification"),
+            ({"justification": "x" * 501, "criteria": [{"ac": 1, "impl": ["app/app.go"], "tests": ["app/app_test.go"]}]}, "justification"),
             ({"justification": "done", "criteria": []}, "criteria"),
         ]
         for body, expected in cases:
@@ -290,6 +297,7 @@ class CheckUnitsTest(FastChecksCase):
                 self.baseline_analysis({"baseline_complete": body})
                 code, res = self.run_units([])
                 self.assertEqual(code, 2)
+                self.assertIn(expected, res["_stderr"])
 
 
     def test_the_23_marker_is_red_with_the_closest_line(self) -> None:
