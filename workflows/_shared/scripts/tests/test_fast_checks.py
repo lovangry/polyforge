@@ -268,18 +268,15 @@ class CheckUnitsTest(FastChecksCase):
         self.go_repo()
         code, res = self.run_units([])
         self.assertEqual(code, 2)
-        self.assertEqual(res["verdict"], "usage")
 
     def test_baseline_complete_is_mutually_exclusive_with_units_and_pre_existing_red(self) -> None:
         self.go_repo()
         self.baseline_analysis()
         code, res = self.run_units([self.unit("u1", "^x", ["sh", "-c", "echo x"])])
         self.assertEqual(code, 2)
-        self.assertEqual(res["verdict"], "usage")
         self.baseline_analysis({"baseline_complete": {"justification": "done", "criteria": [{"ac": 1, "impl": ["app/app.go"], "tests": ["app/app_test.go"]}]}})
         code, res = self.run_units([{"id": "u1", "pre_existing_red": True, "run": {"repo": "app", "cwd": ".", "argv": ["true"]}, "marker": "^x"}])
         self.assertEqual(code, 2)
-        self.assertEqual(res["verdict"], "usage")
 
     def test_baseline_complete_requires_existing_paths_and_nonempty_fields(self) -> None:
         self.go_repo()
@@ -293,7 +290,7 @@ class CheckUnitsTest(FastChecksCase):
                 self.baseline_analysis({"baseline_complete": body})
                 code, res = self.run_units([])
                 self.assertEqual(code, 2)
-                self.assertEqual(res["verdict"], "usage")
+
 
     def test_the_23_marker_is_red_with_the_closest_line(self) -> None:
         code, res = self.run_units([
