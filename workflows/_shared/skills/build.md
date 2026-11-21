@@ -75,7 +75,9 @@ record exactly what ran.
    the conventional prefix kept verbatim — the type-enum word, `test:`, `feat:` —
    and the header length per the repository's own commitlint; an English-primary
    repository keeps English. The repository's commit-msg hook — wired into the clone —
-   is the judge of the header: a refused message is fixed in the message, never routed around. The red run just made is the build's own red evidence —
+   is the judge of the header: a refused message is fixed in the message, never routed
+   around. A hook that cannot run — no `node_modules`, no `pnpm` on PATH — fails the commit
+   loudly: that is a `blocked` hand-off naming it, never a bypass. The red run just made is the build's own red evidence —
    beside it no manual worktree replay is made (the facts engine's replay is the record),
    and a command's result already in hand on one tree (the same tree hash) is not re-run: a
    differently spelled command proves nothing new on it. A flaky failure re-runs only the
