@@ -32,6 +32,7 @@ import (
 // Which cause gets which disposal is decideFailureLocked's table.
 const (
 	FailHarnessSilent        = string(supervise.CauseHarnessSilent)
+	FailSessionStalled       = string(supervise.CauseSessionStalled)
 	FailModelError           = string(supervise.CauseModelError)
 	FailEndedWithoutResult   = string(supervise.CauseEndedWithoutResult)
 	FailModelHung            = string(supervise.CauseModelHung)

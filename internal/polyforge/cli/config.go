@@ -134,6 +134,12 @@ type DaemonSettings struct {
 	// duration > 0; 0 = unset, daemon default 15m); flag --ask-warm-window.
 	// Restart-only.
 	AskWarmWindow time.Duration
+	// SessionStallWindow is how long a dispatch's live session file may
+	// see no write before the step is judged session_stalled and the
+	// candidate chain moves on (polyforge#42: zero-output no longer
+	// spins; Go duration non-zero, negative disables; daemon default 5m);
+	// flag --session-stall-window. Restart-only.
+	SessionStallWindow time.Duration
 	// HarnessRoot is the parent of the step harness dirs (absolute path;
 	// daemon default <data-dir>); flag --harness-root.
 	HarnessRoot string

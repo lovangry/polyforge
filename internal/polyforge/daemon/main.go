@@ -68,6 +68,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	silenceWindow, toolWindow, stepTimeout, stallWindow := f.SilenceWindow, f.ToolWindow, f.StepTimeout, f.StallWindow
 	modelErrorGrace, revalidateEvery, heartbeatEvery := f.ModelErrorGrace, f.RevalidateEvery, f.HeartbeatEvery
 	askWarmWindow := f.AskWarmWindow
+	sessionStallWindow := f.SessionStallWindow
 	if err := fs.Parse(argv); err != nil {
 		return 2
 	}
@@ -142,7 +143,7 @@ func Main(argv []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	// The Host-only [daemon] knobs: an explicit flag (tests/dev) beats the
 	// table.
-	applyDaemonTable(fs, host.Daemon, stepTimeout, stallWindow, askWarmWindow, harnessRoot, operatorAgentDir, maxConcurrent)
+	applyDaemonTable(fs, host.Daemon, stepTimeout, stallWindow, askWarmWindow, sessionStallWindow, harnessRoot, operatorAgentDir, maxConcurrent)
 	envWarnings := retiredEnvWarnings(os.Getenv, *harnessRoot, *dataDir, *operatorAgentDir)
 	for _, w := range envWarnings {
 		fmt.Fprintln(stderr, "pf daemon: WARNING: "+w)
@@ -300,7 +301,7 @@ func flagPinned(fs *flag.FlagSet) map[string]bool {
 // applyDaemonTable fills each knob the command line did not set
 // explicitly from the config's [daemon] table (already validated by
 // cli.LoadConfig); an unset table key leaves the built-in default.
-func applyDaemonTable(fs *flag.FlagSet, t cli.DaemonSettings, stepTimeout, stallWindow, askWarmWindow *time.Duration, harnessRoot, operatorAgentDir *string, maxConcurrent *int) {
+func applyDaemonTable(fs *flag.FlagSet, t cli.DaemonSettings, stepTimeout, stallWindow, askWarmWindow, sessionStallWindow *time.Duration, harnessRoot, operatorAgentDir *string, maxConcurrent *int) {
 	set := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 	if !set["step-timeout"] && t.StepTimeout != 0 {
