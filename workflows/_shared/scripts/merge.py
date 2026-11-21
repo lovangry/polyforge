@@ -449,8 +449,14 @@ class Merge:
                 return self.not_judged("repos/%s: reading the PR %s after the merge (%s): %s" % (r.name, r.pr_url, _v(merr), err))
             if pr.state == "MERGED":
                 if merr is None:
-                    r.merge_commit, r.by_this_run, r.how = pr.merge_commit, True, HOW_SQUASH
-                    self.inv.say("repos/%s: landed as %s (squash)" % (r.name, gostr.short(r.merge_commit)))
+                    if pr.merge_commit == "":
+                        # the read-back of a successful merge named no commit:
+                        # not a landing (the merged-elsewhere path keeps the
+                        # same refusal)
+                        r.why = "the forge names no merge commit for its MERGED answer"
+                    else:
+                        r.merge_commit, r.by_this_run, r.how = pr.merge_commit, True, HOW_SQUASH
+                        self.inv.say("repos/%s: landed as %s (squash)" % (r.name, gostr.short(r.merge_commit)))
                 else:
                     try:
                         self.take_landing(r, pr.merge_commit, False)
