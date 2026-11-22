@@ -74,8 +74,13 @@ case "$sub" in
     git clone -q "$origin" "$w/c" || exit 1
     (cd "$w/c" && git checkout -q "$(cat "$d/base")" &&
       if [ "$method" = --squash ]; then
+        # --allow-empty: a PR whose branch's tree is already the base's
+        # (the rewind-to-fix scenario: fix adopted main's exact line) squashes
+        # to an empty diff, and the real forge still writes its (empty)
+        # squash commit — the fake must land it too, or a landing that
+        # happens on GitHub reads here as the forge's refusal.
         git -c user.name=gh -c user.email=gh@invalid merge -q --squash "origin/$(cat "$d/head")" &&
-        git -c user.name=gh -c user.email=gh@invalid commit -qm "$(cat "$d/title" 2>/dev/null || echo 'polyforge: change')"
+        git -c user.name=gh -c user.email=gh@invalid commit --allow-empty -qm "$(cat "$d/title" 2>/dev/null || echo 'polyforge: change')"
       else
         git merge -q --no-ff -m "Merge pull request #${target##*/} from $(cat "$d/head")" "origin/$(cat "$d/head")"
       fi &&

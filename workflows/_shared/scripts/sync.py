@@ -82,7 +82,7 @@ import traceback  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
 from typing import Any, Dict, List, Mapping, Optional, Tuple  # noqa: E402
 
-from pfstep import atomic, jsonout, runner  # noqa: E402
+from pfstep import atomic, commitlang, commitmsg, jsonout, runner  # noqa: E402
 from pfstep.invoke import Invocation, duration_flag, go_list  # noqa: E402
 from pfstep.gitmerge import gostr  # noqa: E402
 from pfstep.gitmerge import merge as gm  # noqa: E402
@@ -496,8 +496,13 @@ class Sync:
             inv.say("repos/%s: fast-forwarded to %s (%s)" % (name, r.default_branch, gostr.short(r.default_head)))
             return
         # the merge attribute override lives for this merge only: the clone
-        # is the work item's working clone
-        msg = "Merge %s into %s (sync)" % (r.default_branch, gostr.or_text(r.branch, "HEAD"))
+        # is the work item's working clone; the message's language follows
+        # the repository's own default branch (its history read through
+        # commitlang — the capsule's commits on the working branch are never
+        # the fact it follows)
+        msg = commitmsg.sync_message(
+            commitlang.repo_language(d, "refs/remotes/origin/" + r.default_branch),
+            r.default_branch, gostr.or_text(r.branch, "HEAD"))
         try:
             synced = g.keep_attributes(d, lambda: gm.sync(g, d, r.default_branch, r.default_head, conf, msg))
         except GoError as err:

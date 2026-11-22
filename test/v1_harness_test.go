@@ -1740,14 +1740,21 @@ func waitExecution(t *testing.T, capDir string, bound time.Duration, desc string
 }
 
 // execDigest is a one-line summary of an execution view for failure
-// messages.
+// messages. The steps print in sorted id order: the line is a signature
+// the pre-existing classifier compares byte for byte across runs, and
+// Go's map iteration order would give every run its own words.
 func execDigest(x *executionView) string {
 	if x == nil {
 		return "<absent>"
 	}
 	desc := fmt.Sprintf("status=%s version=%d", x.WorkflowStatus, x.Version)
-	for id, st := range x.Steps {
-		desc += fmt.Sprintf(" %s=%s", id, st.Status)
+	ids := make([]string, 0, len(x.Steps))
+	for id := range x.Steps {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, id := range ids {
+		desc += fmt.Sprintf(" %s=%s", id, x.Steps[id].Status)
 	}
 	return desc
 }

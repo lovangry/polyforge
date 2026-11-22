@@ -31,7 +31,7 @@ class LocalLandingTest(GitCase):
         self.before = git(source, "rev-parse", "refs/heads/" + base)
         return owner
 
-    def publish(self, files: dict[str, str]) -> Any:
+    def publish(self, files: dict[str, str], title: str = "app: the change") -> Any:
         write(self.capsule, files)
         git(self.capsule, "add", "-A")
         git(self.capsule, "commit", "-qm", "verified")
@@ -39,7 +39,7 @@ class LocalLandingTest(GitCase):
         git(self.capsule, "push", "origin", "HEAD:refs/heads/topic")
         return merge.MergeRepo(name="app", pr_url="", branch="topic", head=head,
                                published=head, dir=self.capsule, no_forge=True,
-                               title="app: the change",
+                               title=title,
                                verified_base=self.before)
 
     def land(self, r: Any, expected: int = 0) -> dict[str, Any]:
@@ -169,6 +169,26 @@ class LocalLandingTest(GitCase):
         self.assertFalse(rec["worktree_synced"])
         self.assertEqual(owner.head(), landed)
         self.assertEqual(git(self.owner.dir, "status", "--porcelain"), "")
+
+    def test_the_landing_message_is_the_pr_title_in_chinese(self) -> None:
+        """The no-forge squash's message is the PR title verbatim: a
+        Chinese-primary repository's title lands as its Chinese words
+        (polyforge#41 u3)."""
+        self.fixture()
+        r = self.publish({"new": "验证过的修改\n"}, title="app: 让胶囊克隆运行仓库的钩子")
+        self.land(r)
+        self.assertEqual(git(self.source, "log", "--format=%B", "-n", "1"),
+                         "app: 让胶囊克隆运行仓库的钩子")
+
+    def test_the_landing_message_is_the_pr_title_in_english(self) -> None:
+        """The mirrored pin: an English-primary repository's landing keeps
+        today's exact bytes — the title verbatim (polyforge#41 u3)."""
+        self.fixture()
+        r = self.publish({"new": "a verified change\n"},
+                         title="app: run the repo's hooks from a capsule clone")
+        self.land(r)
+        self.assertEqual(git(self.source, "log", "--format=%B", "-n", "1"),
+                         "app: run the repo's hooks from a capsule clone")
 
     def test_a_no_forge_entry_without_a_title_is_refused(self) -> None:
         repo = Repo(os.path.join(self.tmp, "repos", "app"))

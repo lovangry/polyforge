@@ -129,6 +129,15 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 		// The previous session's uncommitted work (polyforge#167):
 		// checked out on top of the restored head, never committed.
 		r.restoreTaskWIP(ctx, j, store, pr.Name, dir, sha)
+		// The repo's own commit-msg validation (polyforge#41): wired
+		// last, on the settled worktree, so a carrier or WIP restore
+		// that removes the directory cannot leave a dangling path. The
+		// daemon's hardened reads (taskrepo pins core.hooksPath=/dev/null)
+		// are untouched — this is the agent's working clone, whose
+		// commits the repo validates.
+		if err := wireRepoHooks(ctx, dir); err != nil {
+			return nil, repoCloneErr(j.wi, pr, "wiring the repo's git hooks failed: %v", err)
+		}
 		out[pr.Name] = sha
 	}
 	return out, nil
@@ -345,6 +354,25 @@ const carrierFallbackBranch = "pf-carrier"
 // task-repo git calls of this file.
 func gitTask(ctx context.Context, dir string, args ...string) (string, error) {
 	return gitTaskEnv(ctx, taskGitEnv(), dir, args...)
+}
+
+// wireRepoHooks points a materialized task-repo clone's core.hooksPath at
+// the .husky directory the repository itself ships (the husky convention,
+// what a commitlint project uses), so every commit the capsule makes in
+// the clone runs the target repo's own commit-msg validation. The path is
+// absolute — it holds from any working directory the agent commits from.
+// A repository without .husky is left on git's own default (its .git/hooks
+// samples), and a hook whose runtime is missing (husky needs node_modules)
+// fails the commit loudly — never silently lets it through.
+func wireRepoHooks(ctx context.Context, dir string) error {
+	hooks := filepath.Join(dir, ".husky")
+	if fi, err := os.Stat(hooks); err != nil || !fi.IsDir() {
+		return nil
+	}
+	if _, err := gitTask(ctx, dir, "config", "core.hooksPath", hooks); err != nil {
+		return err
+	}
+	return nil
 }
 
 // gitLowSpeed is the team default of each HTTP low-speed threshold: a
