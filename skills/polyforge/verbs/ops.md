@@ -67,8 +67,10 @@ exit ends the restart loop as well; `pf daemon ensure` starts it again.
 
 The daemon's other production knobs are not ops verbs: they live in the
 `[daemon]` table of `cli.toml` (`step_timeout`, `stall_window`,
-`harness_root`, `operator_agent_dir`, `max_concurrent_jobs`,
-`max_concurrent_bars` — how many heavy runs run at once, default 2), which
+`session_stall_window` — the zero-output window that judges a dispatch
+`session_stalled`, restart-only —, `harness_root`, `operator_agent_dir`,
+`max_concurrent_jobs`, `max_concurrent_bars` — how many heavy runs run at
+once, default 2), which
 the daemon reads itself. Change one with `pf
 config set <key> <value>`; a hand edit needs `pf config reload`. The running daemon applies the live
 keys (`step_timeout`, `stall_window`, `max_concurrent_jobs`,
