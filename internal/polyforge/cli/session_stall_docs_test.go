@@ -4,8 +4,8 @@ package cli
 // default's documentation carries its P99 calibration basis, and the ops
 // verb's [daemon] knob enumeration names the key (#42's docs sync synced
 // commands/config/uds-routes but missed the verb page). The acceptance is
-// itself that document text (默认值说明附 P99 校准依据), so the text is the
-// behaviour this pins.
+// itself that document text (AC7: the default's description carries its
+// P99 calibration basis), so the text is the behaviour this pins.
 //
 // carries: docs/reference/config.md, skills/polyforge/verbs/ops.md
 
