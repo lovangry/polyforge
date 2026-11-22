@@ -25,7 +25,7 @@ func TestExecDigestPrintsStepsInSortedOrder(t *testing.T) {
 		"publish":  {Status: "pending"},
 		"evidence": {Status: "pending"},
 	}}
-	want := "status=blocked version=25 evidence=pending fix=done merge=in_progress publish=pending review=done sync=pending"
+	want := "status=blocked version=25 evidence=pending fix=done merge=in_progress publish=pending review=done sync=in_progress"
 	for i := 0; i < 200; i++ {
 		if got := execDigest(x); got != want {
 			t.Fatalf("execDigest (run %d) = %q, want the sorted step order %q", i, got, want)
