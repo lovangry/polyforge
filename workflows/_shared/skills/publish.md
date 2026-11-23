@@ -38,7 +38,8 @@ the source and what did not hold (the lane goes back to the step that makes the 
 ## Procedure
 
 1. **Per task repo** (`repos/<name>/`; a capsule with none publishes nothing and writes
-   `{"repos": []}`): `git fetch origin`; `<default>` is
+   `{"repos": []}`): `git fetch origin`; `<default>` is the repo's branch pin
+   (capsule.json's `repo_branches`) when the capsule records one (polyforge#45) — else
    `git symbolic-ref --short refs/remotes/origin/HEAD` less `origin/` (else `main`).
    `git rev-list --count origin/<default>..HEAD` of 0: record `branch: ""`,
    `pr_url: ""`, and `skipped_reason: "nothing to publish"`; do not push or claim a

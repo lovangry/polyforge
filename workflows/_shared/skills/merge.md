@@ -12,7 +12,12 @@ judges every PR before anything merges and squashes each open one with
 `gh pr merge --squash --match-head-commit <verified head>` — one commit on the default
 branch per PR, its message the PR title; a PR already merged is taken
 only by the landing rules (its branch side the verified head, a merge commit on the
-default branch containing it, or a squash landing exactly the verified head's tree). On a
+default branch containing it, or a squash landing exactly the verified head's tree). A repo
+the capsule pins to a branch (capsule.json's `repo_branches`, polyforge#45) — the
+`name=url#branch` registration — is no exception: a pinned repo's landing target is its
+pin, never the server-advertised default (its PR opens against the pin and the squash
+lands on it; a no-forge repo's local merge merges into it); an unpinned repo lands on the
+default branch, exactly as before. On a
 pass it also writes the landing record the work item
 is wrapped with. You never merge by hand, and you never write the landing record yourself.
 
