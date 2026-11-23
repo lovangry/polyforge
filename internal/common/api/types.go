@@ -118,8 +118,8 @@ type Project struct {
 }
 
 type ProjectRepo struct {
-	Name        string `json:"name"`
-	URL         string `json:"url"`
+	Name string `json:"name"`
+	URL  string `json:"url"`
 	// Branch pins the repo's development branch: the capsule clone
 	// checks it out and the lane lands on it; empty = the
 	// server-advertised default (today's behavior).
