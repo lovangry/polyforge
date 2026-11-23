@@ -336,6 +336,9 @@ class Sync:
         self.inv = inv
         self.g = g
         self.capsule = capsule
+        # the capsule's repo branch pins (polyforge#45): repo name -> the
+        # branch a pinned repo syncs from
+        self.pins: Dict[str, str] = {}
         self.record = record
 
     def dir(self, name: str) -> str:
