@@ -229,6 +229,35 @@ class SyncScriptTest(unittest.TestCase):
         assert res is not None
         self.assertEqual((code, res["details"]["aborted"], res["summary"]), (0, True, "aborted: no sync in progress, nothing to abort"))
 
+    def test_a_pinned_repo_syncs_from_the_pinned_branch(self) -> None:
+        """A repo the capsule pins (name=url#branch, polyforge#45) syncs from
+        the pin, not the origin-advertised default: the pin's tip is fetched
+        and merged, and the default branch's moves are not taken in."""
+        w = World(self, "app")
+        d = w.dir("app")
+        out = os.path.join(w.capsule, "artifacts", "sync", "result.json")
+        write(w.capsule, "capsule.json", json.dumps({"repo_branches": {"app": "feat-cloud"}}))
+        # the pin branch moves on origin; so does the default branch
+        seed = w.seeds["app"]
+        w.git(seed, "fetch", "-q", "origin")
+        w.git(seed, "checkout", "-q", "-B", "feat-cloud", "origin/main")
+        write(seed, "from-the-pin.txt", "pin\n")
+        pin_head = w.commit(seed, "the pin moves")
+        w.git(seed, "push", "-q", "origin", "HEAD:refs/heads/feat-cloud")
+        w.git(seed, "checkout", "-q", "main")
+        before = w.change("app", {"work.txt": "mine\n"})
+        main = w.main_moves("app", {"from-main.txt": "main\n"})
+        code, res, err = w.run("sync.py", "--capsule", w.capsule, "--json", "--out", out, PF_ROUND="r1")
+        assert res is not None
+        app = repo_of(res, "app")
+        self.assertEqual((code, app["default_branch"], app["default_head"]), (0, "feat-cloud", pin_head), err)
+        self.assertNotIn("fast_forwarded", app, "a branch with its own commit is merged, not fast-forwarded")
+        self.assertEqual(w.git(d, "log", "-1", "--format=%P"), before + " " + pin_head)
+        # the default branch's move is not taken in
+        files = w.git(d, "ls-tree", "--name-only", "HEAD").splitlines()
+        self.assertIn("from-the-pin.txt", files)
+        self.assertNotIn("from-main.txt", files, "the default branch's move must stay out")
+
     def test_continue_refuses_a_resolution_that_drops_lines_both_parents_keep(self) -> None:
         w = World(self, "app")
         d = w.dir("app")
