@@ -114,7 +114,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pfstep  # noqa: E402
-from pfstep import container, duration, git, gostr, jsonout, result, runner, stepenv, tmpdir  # noqa: E402
+from pfstep import container, duration, git, gostr, jsonout, repopin, result, runner, stepenv, tmpdir  # noqa: E402
 from pfstep import progress  # noqa: E402
 from pfstep.analysis import Analysis, AnalysisDecl, read_analysis  # noqa: E402
 from pfstep.carries import file_carries, glob_match  # noqa: E402
@@ -441,8 +441,10 @@ class Verification:
         self.capsule = capsule
         self.engine = engine
         # the capsule's repo branch pins (polyforge#45): repo name -> the
-        # branch a pinned repo's baseline is measured against
-        self.pins: Dict[str, str] = {}
+        # branch a pinned repo's baseline is measured against (repopin never
+        # faults the run on a capsule.json it cannot read; an unpinned repo
+        # reads no pin and keeps the origin-advertised default)
+        self.pins: Dict[str, str] = repopin.pins_of(capsule)
         self.deadline = deadline  # ns: the whole run's
         # the tier as resolved: light (the default) or full (an
         # integration-fix ticket); tier_requested is what the line asked
@@ -611,7 +613,10 @@ class Verification:
                         " (its real conflicts resolved, then the sync skill's continue line, `\"$PF_PYTHON\""
                         " \"$PF_SHARED_DIR/scripts/sync.py\" --continue --json --out artifacts/sync/result.json`)"
                         " before a verification runs")
-        default = resolve_default(rr.dir)
+        # the baseline to measure against: the repo's branch pin when the
+        # capsule records one (polyforge#45) — the pin, not the
+        # origin-advertised default, is this repo's baseline; else the default
+        default = self.pins.get(rr.name, "") or resolve_default(rr.dir)
         if default == "":
             return fail("the origin default branch is unresolvable (no refs/remotes/origin/HEAD, origin/main or"
                         " origin/master in the clone): nothing to measure the change against")
