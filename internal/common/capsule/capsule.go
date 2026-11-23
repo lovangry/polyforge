@@ -80,7 +80,12 @@ type Identity struct {
 	Project    string            `json:"project"`
 	BundleName string            `json:"bundle_name"`
 	Repos      map[string]string `json:"repos"` // repo name -> checked-out SHA at the latest materialization
-	CreatedAt  string            `json:"created_at"`
+	// RepoBranches records the claim inventory's branch pins (repo name
+	// -> the pinned branch, polyforge#45): the capsule clone stands on
+	// the pin and the lane lands on it. Absent when no repo is pinned —
+	// the pre-#45 capsule.json stays byte-identical.
+	RepoBranches map[string]string `json:"repo_branches,omitempty"` // repo name -> the pinned branch, when set
+	CreatedAt    string            `json:"created_at"`
 }
 
 // WorkItemDoc is runtime-state/work-item.json: the daemon-materialized
