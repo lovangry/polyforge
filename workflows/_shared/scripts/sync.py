@@ -455,7 +455,8 @@ class Sync:
     def sync_one(self, d: str, r: SyncRepo) -> None:
         """The default branch fetched and merged into one repo (r.before is
         HEAD): nothing when HEAD already contains it, a fast-forward when the
-        branch has no commit of its own, else gitmerge's sync."""
+        branch has no commit of its own, a discard (kept under the discarded
+        refs) when the merge would change nothing, else gitmerge's sync."""
         g, inv, name = self.g, self.inv, r.name
         r.default_branch = g.default_branch(d)
         try:
@@ -510,10 +511,34 @@ class Sync:
         r.mechanical = append_new(r.mechanical, *synced.resolved)
         r.notes = append_new(r.notes, *synced.notes)
         if not synced.conflicts:
-            r.after = synced.updated
-            inv.say("repos/%s: merged %s (%s) as %s; resolved mechanically: %s" % (
-                name, r.default_branch, gostr.short(r.default_head), gostr.short(r.after),
-                gostr.or_text(", ".join(synced.resolved), "nothing")))
+            # A merge whose tree is byte-identical to HEAD's: the default
+            # branch's content reached this branch by another route (a
+            # restored snapshot, a re-recorded patch) without its ancestry.
+            # The merge is kept under the discarded refs and the repo left at
+            # HEAD — the same "never a commit it would then have to publish"
+            # a fast-forwardable repo gets — never an empty merge commit.
+            if non_empty_lines(g.git(d, "diff", "--stat", head, synced.updated)):
+                r.after = synced.updated
+                inv.say("repos/%s: merged %s (%s) as %s; resolved mechanically: %s" % (
+                    name, r.default_branch, gostr.short(r.default_head), gostr.short(r.after),
+                    gostr.or_text(", ".join(synced.resolved), "nothing")))
+                return
+            ref = DISCARDED_PREFIX + _nano_stamp()
+            try:
+                g.git(d, "update-ref", ref, synced.updated)
+            except GoError as err:
+                raise err.wrap("repos/%s: keeping the empty merge %s under %s" % (
+                    name, gostr.short(synced.updated), ref)) from None
+            try:
+                g.git(d, "reset", "-q", "--hard", head)
+            except GoError as err:
+                raise err.wrap("repos/%s: resetting the branch to %s" % (name, gostr.short(head))) from None
+            r.discarded.append(Discarded(commit=synced.updated, ref=ref))
+            r.after = head
+            inv.say("repos/%s: %s (%s) carries nothing the branch lacks — its content arrived by another"
+                    " route; the empty merge %s kept under %s, the branch left at %s" % (
+                        name, r.default_branch, gostr.short(r.default_head), gostr.short(synced.updated), ref,
+                        gostr.short(head)))
             return
         r.conflicts, r.mechanical_blobs = list(synced.conflicts), {}
         for f in synced.resolved:
