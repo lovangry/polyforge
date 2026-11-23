@@ -109,5 +109,61 @@ class MergeNoForgeLandingTest(unittest.TestCase):
         self.assertEqual(rec["merge_commit"], "b" * 40)
 
 
+class MergeNoForgePinnedBranchTest(unittest.TestCase):
+    """回归测试：钉了分支的 no-forge 仓库落在钉住的分支上。"""
+
+    def _repo(self, **kw: Any) -> Any:
+        base = dict(name="local", pr_url="", branch="polyforge/capsule", head="a" * 40,
+                    published="a" * 40, dir="/tmp/local", no_forge=True, base="", pin="feat-cloud")
+        base.update(kw)
+        return merge.MergeRepo(**base)
+
+    class FakeGit:
+        # origin/HEAD would answer main; a pin must never read it
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[str, ...]]] = []
+
+        def fetch(self, cwd: str, *branches: str) -> None:
+            self.calls.append(("fetch", branches))
+
+        def remote_branch_contains(self, cwd: str, branch: str, commit: str) -> bool:
+            self.calls.append(("contains", (branch, commit)))
+            return False
+
+        def rev(self, cwd: str, ref: str) -> str:
+            if ref.endswith("origin/polyforge/capsule"):
+                return "a" * 40
+            if ref == "HEAD":
+                return "b" * 40
+            if ref.endswith("origin/feat-cloud"):
+                return "base" * 10
+            raise AssertionError("a pinned landing must not read %s" % ref)
+
+        def git(self, cwd: str, *args: str) -> str:
+            self.calls.append(("git", args))
+            if args[:4] == ("symbolic-ref", "--short", "refs/remotes/origin/HEAD"):
+                raise AssertionError("a pinned landing must not resolve origin/HEAD")
+            if args[:4] == ("symbolic-ref", "--short", "-q", "HEAD"):
+                return "polyforge/capsule\n"
+            if args[:3] == ("remote", "get-url", "origin"):
+                return "/tmp/local\n"
+            if args[:3] == ("--git-dir", "/tmp/local", "rev-parse"):
+                return "true\n"
+            return ""
+
+    def test_pinned_no_forge_lands_on_the_pin(self) -> None:
+        r = self._repo()
+        g = self.FakeGit()
+        inv = type("I", (), {"say": lambda self, text: None})()
+        merge.Merge(inv, g, merge.Ctx()).judge_local(r)
+        self.assertEqual((r.how, r.by_this_run, r.base), ("squash", True, "feat-cloud"), r.why)
+        self.assertEqual(r.merge_commit, "b" * 40)
+        calls = [c[1] for c in g.calls if c[0] == "git"]
+        self.assertIn(("switch", "--detach", "refs/remotes/origin/feat-cloud"), calls)
+        self.assertIn(("push", "-q", "origin", "HEAD:refs/heads/feat-cloud"), calls)
+        self.assertNotIn(("push", "-q", "origin", "HEAD:refs/heads/main"), calls)
+        self.assertIn(("feat-cloud", "polyforge/capsule"), [c[1] for c in g.calls if c[0] == "fetch"])
+
+
 if __name__ == "__main__":
     unittest.main()

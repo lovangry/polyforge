@@ -584,9 +584,14 @@ func flagChanged(fs *flag.FlagSet, name string) bool {
 }
 
 // parseRepoRefs parses the -repos spelling "name=url[,name=url...]" into
-// the wire's full-replacement inventory list. An EMPTY string answers an
-// empty non-nil list (the explicit clear); a malformed entry is an error,
-// never a silent drop.
+// the wire's full-replacement inventory list. A repo pins its branch with
+// a trailing "#<branch>" on its URL — the LAST "#" splits, an earlier
+// one stays part of the URL (git URLs never use a fragment; "," already
+// separates the list, "@" would collide with scp-style user@host) — and
+// an empty branch after "#" is an error, never a silent drop of the pin
+// (a lost pin lands the lane on the server's default). An EMPTY string
+// answers an empty non-nil list (the explicit clear); a malformed entry
+// is an error, never a silent drop.
 func parseRepoRefs(s string) ([]aihubclient.RepoRef, error) {
 	out := []aihubclient.RepoRef{}
 	s = strings.TrimSpace(s)
@@ -598,14 +603,31 @@ func parseRepoRefs(s string) ([]aihubclient.RepoRef, error) {
 		if pair == "" {
 			continue
 		}
-		name, url, ok := strings.Cut(pair, "=")
-		name, url = strings.TrimSpace(name), strings.TrimSpace(url)
+		name, rest, ok := strings.Cut(pair, "=")
+		name = strings.TrimSpace(name)
+		url, branch := cutRepoBranch(strings.TrimSpace(rest))
 		if !ok || name == "" || url == "" {
 			return nil, fmt.Errorf("-repos entry %q must be name=url", pair)
 		}
-		out = append(out, aihubclient.RepoRef{Name: name, URL: url})
+		// a "#" that names no branch: the pin was meant and is empty —
+		// refused, never dropped to the server's default
+		if branch == "" && strings.Contains(rest, "#") {
+			return nil, fmt.Errorf("-repos entry %q names no branch after %q", pair, "#")
+		}
+		out = append(out, aihubclient.RepoRef{Name: name, URL: url, Branch: branch})
 	}
 	return out, nil
+}
+
+// cutRepoBranch splits a -repos URL's trailing "#<branch>" pin off:
+// the LAST "#" separates the URL from the branch name. An absent "#"
+// answers (url, ""); a "#" that names no branch leaves the branch empty
+// (the caller's error — an entry that only LOOKS pinned).
+func cutRepoBranch(url string) (string, string) {
+	if i := strings.LastIndex(url, "#"); i >= 0 {
+		return url[:i], url[i+1:]
+	}
+	return url, ""
 }
 
 // stringList collects a repeatable string flag (--label a --label b).

@@ -13,7 +13,10 @@ One pass, per task repo (repos/<name>) in name order: a linked worktree is
 refused (its merge attribute override would land in the shared common
 dir); a merge a crash left in progress (MERGE_HEAD) is aborted; then
 origin's default branch is fetched and merged into the branch checked out —
-fast-forwarded when the branch has no commit of its own, else a ``--no-ff``
+the default being the repo's branch pin when the capsule records one
+(capsule.json's ``repo_branches``, the ``name=url#branch`` registration,
+polyforge#45) — fast-forwarded when the branch has no commit of its own,
+else a ``--no-ff``
 merge with every in-tree merge attribute overridden for it only and the
 conflicts the DEFAULT BRANCH's .polyforge/integrate.conf makes mechanical
 resolved and committed as the lane's identity. A real conflict is left in
@@ -82,7 +85,7 @@ import traceback  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
 from typing import Any, Dict, List, Mapping, Optional, Tuple  # noqa: E402
 
-from pfstep import atomic, commitlang, commitmsg, jsonout, runner  # noqa: E402
+from pfstep import atomic, commitlang, commitmsg, jsonout, repopin, runner  # noqa: E402
 from pfstep.invoke import Invocation, duration_flag, go_list  # noqa: E402
 from pfstep.gitmerge import gostr  # noqa: E402
 from pfstep.gitmerge import merge as gm  # noqa: E402
@@ -336,6 +339,11 @@ class Sync:
         self.inv = inv
         self.g = g
         self.capsule = capsule
+        # the capsule's repo branch pins (polyforge#45): repo name -> the
+        # branch a pinned repo syncs from (repopin never faults the run on
+        # a capsule.json it cannot read; an unpinned repo reads no pin and
+        # keeps the origin-advertised default)
+        self.pins: Dict[str, str] = repopin.pins_of(capsule)
         self.record = record
 
     def dir(self, name: str) -> str:
@@ -457,7 +465,10 @@ class Sync:
         HEAD): nothing when HEAD already contains it, a fast-forward when the
         branch has no commit of its own, else gitmerge's sync."""
         g, inv, name = self.g, self.inv, r.name
-        r.default_branch = g.default_branch(d)
+        # the branch to sync from: the repo's pin when the capsule records
+        # one (polyforge#45) — never resolved from origin/HEAD; else the
+        # origin's advertised default
+        r.default_branch = self.pins.get(r.name, "") or g.default_branch(d)
         try:
             g.fetch(d, r.default_branch)
         except GoError as err:

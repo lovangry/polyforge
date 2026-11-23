@@ -4,6 +4,13 @@ pf-merge: ``gh pr merge --squash --match-head-commit`` and the same
 landing rules, written to a result file; no update of the PR branch — a
 default branch that moved since verification is the sync step's again).
 
+A repo the capsule pins to a branch (capsule.json's ``repo_branches``,
+the ``name=url#branch`` registration, polyforge#45) lands on the PIN,
+not the server-advertised default: its PR must target the pin and the
+squash lands on it (a no-forge repo's local landing switches to it and
+pushes it). An unpinned repo keeps the default-branch behavior above,
+exactly.
+
 Usage (from the capsule root, or with --capsule)::
 
     "$PF_PYTHON" "$PF_SHARED_DIR/scripts/merge.py" --publish <publish.json> --verified <result.json> \\
@@ -80,6 +87,7 @@ from dataclasses import dataclass  # noqa: E402
 from typing import Any, Dict, List, Mapping, Optional  # noqa: E402
 
 from pfstep import atomic, jsonout, runner  # noqa: E402
+from pfstep import repopin  # noqa: E402
 from pfstep.invoke import Invocation, duration_flag, go_list  # noqa: E402
 from pfstep.gitmerge import gostr  # noqa: E402
 from pfstep.gitmerge.ctx import Ctx, GoError, background  # noqa: E402
@@ -117,6 +125,10 @@ class MergeRepo:
     stash_conflict: bool = False
     # no_forge: publish opened no PR for this repo (pr_url empty).
     no_forge: bool = False
+    # pin: the capsule's branch pin for this repo ("" = unpinned): the
+    # landing target when set — a pinned repo's squash lands on the
+    # pin, not the server-advertised default (polyforge#45).
+    pin: str = ""
     why: str = ""
     # The default branch commit recorded by verification (before the branch
     # was published).  ``base`` below is the branch name learned from the
@@ -260,11 +272,18 @@ class Merge:
         """Land a no-forge publication in the origin-side baseline worktree."""
         g = self.g
         try:
-            base_ref = g.git(r.dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").strip()
-            if base_ref.startswith("origin/"):
-                r.base = base_ref[7:]
-            if not r.base:
-                raise GoError("origin/HEAD does not name a baseline branch")
+            # the landing target: the capsule's branch pin when set
+            # (polyforge#45) — never resolved from origin/HEAD, the pin is
+            # the repo's baseline as far as this lane is concerned; else
+            # the origin's advertised default
+            if r.pin:
+                r.base = r.pin
+            else:
+                base_ref = g.git(r.dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").strip()
+                if base_ref.startswith("origin/"):
+                    r.base = base_ref[7:]
+                if not r.base:
+                    raise GoError("origin/HEAD does not name a baseline branch")
             g.fetch(r.dir, r.base, r.branch)
             r.tip = g.rev(r.dir, "refs/remotes/origin/" + r.branch)
         except GoError as err:
@@ -398,7 +417,10 @@ class Merge:
         for r in details.repos:
             if r.how == "nothing":
                 continue
-            r.base = g.default_branch(r.dir)
+            # the landing target: the capsule's branch pin when set
+            # (polyforge#45) — the PR must target it and the squash lands
+            # on it; else the origin's advertised default
+            r.base = r.pin or g.default_branch(r.dir)
             if r.no_forge:
                 self.judge_local(r)
                 if r.why:
@@ -579,6 +601,11 @@ def run(inv: Invocation, a: argparse.Namespace, held: List[Details]) -> int:
     except GoError as err:
         return inv.usage("--verified: %s" % err)
     details = Details(a.publish, a.verified)
+    # the capsule's branch pins (polyforge#45): the repos registered as
+    # name=url#branch. An unpinned repo reads "" and keeps today's
+    # default-branch behavior; the reader never faults the lane on a
+    # capsule.json it cannot read.
+    pins = repopin.pins_of(capsule)
     for i, p in enumerate(entries):
         name = gostr.trim_text(p.get("name") or "")
         if name == "":
@@ -601,7 +628,8 @@ def run(inv: Invocation, a: argparse.Namespace, held: List[Details]) -> int:
                       published=gostr.trim_text(p.get("head") or ""), head=vheads.get(name, ""),
                       title=gostr.trim_text(p.get("title") or ""),
                       verified_base=vbases.get(name, ""),
-                      dir=os.path.join(capsule, "repos", name))
+                      dir=os.path.join(capsule, "repos", name),
+                      pin=pins.get(name, ""))
         r.no_forge = no_forge or r.pr_url == ""
 
         if r.branch == "" or r.published == "":

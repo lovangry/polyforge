@@ -229,6 +229,35 @@ class SyncScriptTest(unittest.TestCase):
         assert res is not None
         self.assertEqual((code, res["details"]["aborted"], res["summary"]), (0, True, "aborted: no sync in progress, nothing to abort"))
 
+    def test_a_pinned_repo_syncs_from_the_pinned_branch(self) -> None:
+        """A repo the capsule pins (name=url#branch, polyforge#45) syncs from
+        the pin, not the origin-advertised default: the pin's tip is fetched
+        and merged, and the default branch's moves are not taken in."""
+        w = World(self, "app")
+        d = w.dir("app")
+        out = os.path.join(w.capsule, "artifacts", "sync", "result.json")
+        write(w.capsule, "capsule.json", json.dumps({"repo_branches": {"app": "feat-cloud"}}))
+        # the pin branch moves on origin; so does the default branch
+        seed = w.seeds["app"]
+        w.git(seed, "fetch", "-q", "origin")
+        w.git(seed, "checkout", "-q", "-B", "feat-cloud", "origin/main")
+        write(seed, "from-the-pin.txt", "pin\n")
+        pin_head = w.commit(seed, "the pin moves")
+        w.git(seed, "push", "-q", "origin", "HEAD:refs/heads/feat-cloud")
+        w.git(seed, "checkout", "-q", "main")
+        before = w.change("app", {"work.txt": "mine\n"})
+        main = w.main_moves("app", {"from-main.txt": "main\n"})
+        code, res, err = w.run("sync.py", "--capsule", w.capsule, "--json", "--out", out, PF_ROUND="r1")
+        assert res is not None
+        app = repo_of(res, "app")
+        self.assertEqual((code, app["default_branch"], app["default_head"]), (0, "feat-cloud", pin_head), err)
+        self.assertNotIn("fast_forwarded", app, "a branch with its own commit is merged, not fast-forwarded")
+        self.assertEqual(w.git(d, "log", "-1", "--format=%P"), before + " " + pin_head)
+        # the default branch's move is not taken in
+        files = w.git(d, "ls-tree", "--name-only", "HEAD").splitlines()
+        self.assertIn("from-the-pin.txt", files)
+        self.assertNotIn("from-main.txt", files, "the default branch's move must stay out")
+
     def test_continue_refuses_a_resolution_that_drops_lines_both_parents_keep(self) -> None:
         w = World(self, "app")
         d = w.dir("app")
@@ -456,6 +485,68 @@ class MergeScriptTest(unittest.TestCase):
         code, _, err = w.run("merge.py", "--publish", publish, "--capsule", w.capsule)
         self.assertEqual(code, 2)
         self.assertIn("both required", err)
+
+    # the capsule's repo_branches fact pins app to feat-cloud; the pin is
+    # the landing target (polyforge#45): the PR opens against it and the
+    # squash lands on it, with origin's default branch untouched
+    def pinned_inputs(self, w: World, entry: Dict[str, str], head: str) -> Tuple[str, str, str]:
+        publish = os.path.join(w.capsule, "artifacts", "publish.json")
+        write(w.capsule, "artifacts/publish.json", json.dumps({"repos": [entry]}))
+        w.git(w.dir("app"), "fetch", "-q", "origin")
+        base = w.git(w.dir("app"), "rev-parse", "refs/remotes/origin/feat-cloud")
+        verified = os.path.join(w.capsule, "artifacts", "verify", "result.json")
+        write(w.capsule, "artifacts/verify/result.json", json.dumps(
+            {"schema": "pf-step-result/1", "heads": {"app": head},
+             "details": {"repos": [{"name": "app", "base": base}]}}))
+        return publish, verified, os.path.join(w.capsule, "artifacts", "merge", "result.json")
+
+    def pinned_world(self) -> Tuple[World, Dict[str, str], str]:
+        w = World(self, "app")
+        # the pinned branch starts at the default branch's tip
+        w.git(w.seeds["app"], "push", "-q", "origin", "refs/heads/main:refs/heads/feat-cloud")
+        write(w.capsule, "capsule.json", json.dumps({"repo_branches": {"app": "feat-cloud"}}))
+        head = w.change("app", {"feature.txt": "f\n"}, "app-section")
+        entry = w.publish("app")
+        # publish opened the PR against the pin (the skill's <default>)
+        write(os.path.join(w.gh, "app", "prs", "1"), "base", "feat-cloud\n")
+        return w, entry, head
+
+    def test_pinned_repo_lands_its_squash_on_the_pin(self) -> None:
+        w, entry, head = self.pinned_world()
+        publish, verified, out = self.pinned_inputs(w, entry, head)
+        landing = os.path.join(w.capsule, "artifacts", "merge", "landing.json")
+        code, res, err = w.run("merge.py", "--publish", publish, "--verified", verified, "--landing-out", landing,
+                               "--capsule", w.capsule, "--json", "--out", out)
+        assert res is not None
+        r = repo_of(res, "app")
+        self.assertEqual(code, 0, err)
+        self.assertEqual((r["how"], r["by_this_run"]), ("squash", True))
+        origin = ["--git-dir=" + os.path.join(w.origins, "app.git")]
+        # the squash lives on origin's PINNED branch; the default branch is untouched
+        self.assertEqual(r["merge_commit"], w.git(w.root, *origin, "rev-parse", "refs/heads/feat-cloud"))
+        self.assertEqual(w.git(w.root, *origin, "rev-parse", "refs/heads/main"),
+                         w.git(w.root, *origin, "rev-parse", r["merge_commit"] + "^"))
+
+    def test_a_moved_pin_after_verification_refuses_the_merge(self) -> None:
+        w, entry, head = self.pinned_world()
+        publish, verified, out = self.pinned_inputs(w, entry, head)
+        # the pin gains commits after verification
+        seed = w.seeds["app"]
+        w.git(seed, "fetch", "-q", "origin")
+        w.git(seed, "checkout", "-q", "-B", "feat-cloud", "origin/feat-cloud")
+        write(seed, "pin-moved.txt", "moved\n")
+        moved = w.commit(seed, "the pin moves")
+        w.git(seed, "push", "-q", "origin", "HEAD:refs/heads/feat-cloud")
+        landing = os.path.join(w.capsule, "artifacts", "merge", "landing.json")
+        code, res, err = w.run("merge.py", "--publish", publish, "--verified", verified, "--landing-out", landing,
+                               "--capsule", w.capsule, "--json", "--out", out)
+        assert res is not None
+        self.assertEqual(code, 1, err)
+        self.assertIn("default branch moved since verification", res["summary"])
+        self.assertFalse(os.path.exists(landing))
+        self.assertEqual(read(os.path.join(w.gh, "app", "prs", "1"), "state").strip(), "OPEN")
+        origin = ["--git-dir=" + os.path.join(w.origins, "app.git")]
+        self.assertEqual(w.git(w.root, *origin, "rev-parse", "refs/heads/feat-cloud"), moved)
 
 
 # FAKE_PF answers `pf --json step hub get <ref>` from FAKE_PF_ITEMS (a

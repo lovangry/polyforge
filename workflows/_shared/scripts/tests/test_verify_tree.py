@@ -19,11 +19,13 @@ from .verifyfix import (
     Fixture,
     Run,
     cmd_of,
+    commit_all,
     engine_args,
     fake_engine,
     git_t,
     report,
     run_verify,
+    write_files,
 )
 
 
@@ -136,6 +138,39 @@ class TreeTest(unittest.TestCase):
         git_t(d, "update-ref", "refs/remotes/origin/master", "refs/remotes/origin/main")
         git_t(d, "update-ref", "-d", "refs/remotes/origin/main")
         self.assertEqual(verify.resolve_default(d), "master", "fallback")
+
+
+    def test_pinned_repo_measures_against_the_pinned_branch(self) -> None:
+        """A repo the capsule pins (name=url#branch, polyforge#45) is measured
+        against its pin, not the origin-advertised default: the default branch
+        recorded, the base and the engine's --base are the merge-base with
+        origin/<pin>."""
+        fx = Fixture(self.root, {"app": {"a.txt": "base\n"}})
+        seed = fx.seeds["app"]
+        git_t(seed, "checkout", "-q", "-b", "feat-cloud")
+        write_files(seed, {"pin.txt": "pinned\n"})
+        pin_head = commit_all(seed, "the pin tip")
+        git_t(seed, "push", "-q", "origin", "feat-cloud")
+        git_t(seed, "checkout", "-q", "main")
+        # the default branch moves on, as defaults do; the pin does not
+        fx.advance_origin("app", {"b.txt": "upstream\n"})
+        repo = fx.repo("app")
+        git_t(repo, "fetch", "-q", "origin")
+        git_t(repo, "checkout", "-q", "-B", "feature", "origin/feat-cloud")
+        head = fx.commit_in_repo("app", {"c.txt": "mine\n"}, "feature")
+        with open(os.path.join(fx.capsule, "capsule.json"), encoding="utf-8") as f:
+            doc = json.load(f)
+        doc["repo_branches"] = {"app": "feat-cloud"}
+        with open(os.path.join(fx.capsule, "capsule.json"), "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+        eng = trivial_plan(self.root, "app")
+        r = run_verify(fx.capsule, eng)
+        m = self.doc(r)["merge_outcomes"]["app"]
+        self.assertEqual((m["outcome"], m["touched"], m["head"], m["default_branch"], m["base"]),
+                         (verify.MERGE_NONE, True, head, "feat-cloud", pin_head), m)
+        self.assertIn("--json --light --base " + pin_head, "\n".join(engine_args(eng)))
+        c = r.check("app:full-1")
+        self.assertEqual(c["status"], "pass", c)
 
 
 if __name__ == "__main__":

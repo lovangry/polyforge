@@ -101,7 +101,7 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 		if pr.URL == "" {
 			return nil, repoCloneErr(j.wi, pr, "recorded in the prior capsule.json but absent from the claim inventory: no URL to clone from")
 		}
-		if err := gitClone(ctx, pr.URL, dir); err != nil {
+		if err := gitClone(ctx, pr.URL, pr.Branch, dir); err != nil {
 			return nil, repoCloneErr(j.wi, pr, "clone failed: %v", err)
 		}
 		// A clone of a history-less remote succeeds with no HEAD: the
@@ -198,6 +198,18 @@ var (
 	carrierFetchBackoff = time.Second
 )
 
+// repoPin answers the branch the claim inventory pins name to ("
+// when the repo is unpinned). The inventory is the full replacement
+// the claim served; its Branch field is the pin (polyforge#45).
+func repoPin(j *job, name string) string {
+	for _, pr := range j.repos {
+		if pr.Name == name {
+			return pr.Branch
+		}
+	}
+	return ""
+}
+
 // restoreTaskRepoState moves a FRESH task-repo clone to the head the
 // previous session left in the WI's carrier ref (gitops.TaskRefName):
 // fetch the ref, point a local branch at it, sync index and worktree.
@@ -239,9 +251,19 @@ func (r *Runtime) restoreTaskRepoState(ctx context.Context, j *job, store gitops
 	if out, err := gitTask(ctx, dir, "cat-file", "-e", sha+"^{commit}"); err != nil {
 		return "", fmt.Errorf("carrier %s names %s, which is not a readable commit: %v: %s", ref, sha, err, strings.TrimSpace(out))
 	}
-	branch := carrierFallbackBranch
-	if b, err := gitTask(ctx, dir, "symbolic-ref", "--short", "HEAD"); err == nil && strings.TrimSpace(b) != "" {
-		branch = strings.TrimSpace(b)
+	// The branch the restore attaches HEAD to: the claim inventory's
+	// pin first (polyforge#45, design point 5) — the pinned clone
+	// already stands on it, and a detached or unborn HEAD must not
+	// drift the restore to the fallback either; the carried SHA still
+	// rules (checkout -B moves the pin to it below). An UNPINNED repo
+	// keeps the symbolic-ref read with the deterministic fallback —
+	// today's behavior, exactly.
+	branch := repoPin(j, name)
+	if branch == "" {
+		branch = carrierFallbackBranch
+		if b, err := gitTask(ctx, dir, "symbolic-ref", "--short", "HEAD"); err == nil && strings.TrimSpace(b) != "" {
+			branch = strings.TrimSpace(b)
+		}
 	}
 	// checkout --force -B: attaches HEAD to the branch (a detached or
 	// unborn HEAD included) and syncs index+worktree to it.
@@ -453,8 +475,21 @@ func repoCloneErr(wi string, pr api.ProjectRepo, format string, args ...any) *ap
 // A cancelled ctx (a stop or a shutdown during the claim) kills
 // the whole process group — git hands the transfer to a remote helper
 // that would otherwise keep running and keep the output pipe open.
-func gitClone(ctx context.Context, url, dir string) error {
-	cmd := exec.CommandContext(ctx, "git", "clone", "--", url, dir)
+func gitClone(ctx context.Context, url, branch, dir string) error {
+	argv := []string{"clone"}
+	// The branch pin (polyforge#45): --branch makes the clone stand on
+	// the pinned branch. Only when set — an empty pin must leave the
+	// clone's command line exactly today's (the server-advertised
+	// default checkout, verified by the clone tests that predate the
+	// pin). A pin naming a branch the origin lacks fails the clone
+	// right here: the pin is a fact about the lane, not a hint, so the
+	// claim closes blocked (DAEMON-507) instead of landing on the
+	// default branch.
+	if branch != "" {
+		argv = append(argv, "--branch", branch)
+	}
+	argv = append(argv, "--", url, dir)
+	cmd := exec.CommandContext(ctx, "git", argv...)
 	cmd.Env = cloneGitEnv()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
