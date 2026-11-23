@@ -191,7 +191,7 @@ var cmdProjects = &Command{
 	Usage: "pf projects create --name N\n" +
 		"pf projects list\n" +
 		"pf projects get <id-or-name>\n" +
-		"pf projects patch <id-or-name> [--repos name=url[,name=url...]]\n" +
+		"pf projects patch <id-or-name> [--repos name=url[#branch][,name=url...]]\n" +
 		"pf projects members add <id-or-name> --user U --role viewer|writer|maintainer\n" +
 		"pf projects members remove <id-or-name> --user U [--user U ...]\n" +
 		"pf projects delete <id-or-name> [--yes]\n" +
@@ -260,8 +260,10 @@ var cmdProjects = &Command{
 			// -repos is the task-repo inventory as an EXPLICIT FULL
 			// REPLACEMENT (the wire face's semantics): omit to leave
 			// unchanged, -repos "" clears, and every spelling is
-			// name=url pairs, comma-separated.
-			repos := f.String("repos", "", "task-repo inventory (explicit full replacement): name=url[,name=url...]")
+			// name=url pairs, comma-separated — a repo pins its branch
+			// with a trailing "#<branch>" on its URL (the LAST "#" splits;
+			// empty = the server-advertised default).
+			repos := f.String("repos", "", "task-repo inventory (explicit full replacement): name=url[#branch][,name=url...] — #branch pins the repo's branch, empty = the server's default")
 			ids, err := parseCommandArgs(f, rest)
 			if err != nil {
 				return err
