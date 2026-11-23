@@ -10,6 +10,7 @@ verifying gate sees a synced repo, not a merge it must publish."""
 import importlib.util
 import os
 import unittest
+from typing import Tuple
 
 from .gitworld import GitCase, Repo, git, write
 
@@ -26,7 +27,7 @@ class SyncEmptyMergeTest(GitCase):
     advanced by a commit whose tree is the topic's own (the content
     arrived by another route; only the ancestry is new)."""
 
-    def prepare(self) -> tuple:
+    def prepare(self) -> Tuple[str, str, str]:
         origin = Repo(self.new_dir("origin"), {"base": "one\n"})
         app = os.path.join(self.new_dir("capsule"), "repos", "app")
         git(self.tmp, "clone", "-q", origin.dir, app)
