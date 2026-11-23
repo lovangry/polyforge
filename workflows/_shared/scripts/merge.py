@@ -117,6 +117,10 @@ class MergeRepo:
     stash_conflict: bool = False
     # no_forge: publish opened no PR for this repo (pr_url empty).
     no_forge: bool = False
+    # pin: the capsule's branch pin for this repo ("" = unpinned): the
+    # landing target when set — a pinned repo's squash lands on the
+    # pin, not the server-advertised default (polyforge#45).
+    pin: str = ""
     why: str = ""
     # The default branch commit recorded by verification (before the branch
     # was published).  ``base`` below is the branch name learned from the
