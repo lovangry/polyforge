@@ -121,6 +121,12 @@ exit 0
 		// failure injected after the daemon was stopped
 		"ln": "#!/bin/sh\necho \"ln $*\" >> \"$W174_JOURNAL\"\n" +
 			"[ \"${W174_LN_FAIL:-}\" = 1 ] && [ \"$1\" = -sfn ] && exit 1\nexec " + lnReal + " \"$@\"\n",
+		// the machine the installer sees is the release's own Linux one
+		// (x86_64), never the host running the test — an arm64 gate
+		// container or a dev's Mac must not fail the release matrix's
+		// asset pick (the release carries no linux-arm64 pf). The Darwin
+		// and AIX scenarios shim their own uname over this default.
+		"uname": "#!/bin/sh\ncase \"$1\" in -s) echo Linux ;; -m) echo x86_64 ;; *) echo x86_64 ;; esac\n",
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(in.shim, name), []byte(body), 0o755); err != nil {
