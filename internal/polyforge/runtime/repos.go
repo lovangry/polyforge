@@ -198,6 +198,18 @@ var (
 	carrierFetchBackoff = time.Second
 )
 
+// repoPin answers the branch the claim inventory pins name to ("
+// when the repo is unpinned). The inventory is the full replacement
+// the claim served; its Branch field is the pin (polyforge#45).
+func repoPin(j *job, name string) string {
+	for _, pr := range j.repos {
+		if pr.Name == name {
+			return pr.Branch
+		}
+	}
+	return ""
+}
+
 // restoreTaskRepoState moves a FRESH task-repo clone to the head the
 // previous session left in the WI's carrier ref (gitops.TaskRefName):
 // fetch the ref, point a local branch at it, sync index and worktree.
@@ -239,9 +251,19 @@ func (r *Runtime) restoreTaskRepoState(ctx context.Context, j *job, store gitops
 	if out, err := gitTask(ctx, dir, "cat-file", "-e", sha+"^{commit}"); err != nil {
 		return "", fmt.Errorf("carrier %s names %s, which is not a readable commit: %v: %s", ref, sha, err, strings.TrimSpace(out))
 	}
-	branch := carrierFallbackBranch
-	if b, err := gitTask(ctx, dir, "symbolic-ref", "--short", "HEAD"); err == nil && strings.TrimSpace(b) != "" {
-		branch = strings.TrimSpace(b)
+	// The branch the restore attaches HEAD to: the claim inventory's
+	// pin first (polyforge#45, design point 5) — the pinned clone
+	// already stands on it, and a detached or unborn HEAD must not
+	// drift the restore to the fallback either; the carried SHA still
+	// rules (checkout -B moves the pin to it below). An UNPINNED repo
+	// keeps the symbolic-ref read with the deterministic fallback —
+	// today's behavior, exactly.
+	branch := repoPin(j, name)
+	if branch == "" {
+		branch = carrierFallbackBranch
+		if b, err := gitTask(ctx, dir, "symbolic-ref", "--short", "HEAD"); err == nil && strings.TrimSpace(b) != "" {
+			branch = strings.TrimSpace(b)
+		}
 	}
 	// checkout --force -B: attaches HEAD to the branch (a detached or
 	// unborn HEAD included) and syncs index+worktree to it.
