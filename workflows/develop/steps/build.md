@@ -74,13 +74,12 @@ fast checks:
 {{fast_checks_build}}
 For an unchanged baseline, `units.json` may be `[]` only when sibling `change-analysis.json` declares `baseline_complete` with non-empty `justification` (≤500 characters) and non-empty per-AC `criteria` whose `ac` is an integer and whose `impl` and `tests` paths exist. This declaration is mutually exclusive with non-empty units or `pre_existing_red`, and must never replace an unimplemented acceptance criterion.
 
-(4) commit the implementation (C_i, `impl_commit`) — never a second copy of a patch the
-branch already carries: on a later round, before committing, match the staged diff's `git
-patch-id --stable` against the branch's own commits (`git show <c> | git patch-id --stable`);
-a match means the unit is already implemented — amend that commit, or reference it in the
-unit's record, never record the same patch under a second message. The tree is the one the
-green run of (3) saw, and a bare commit changes no tree, so the command is not run again on
-it; (5) record the
+(4) commit the implementation (C_i, `impl_commit`) — the tree is the one the green run of (3)
+saw, and a bare commit changes no tree, so the command is not run again on it; never a second
+copy of a patch the branch already carries: on a later round, before committing, match the
+staged diff's `git patch-id --stable` against the branch's own commits (`git show <c> | git
+patch-id --stable`); a match means the unit is already implemented — amend that commit, or
+reference it in the unit's record, never record the same patch under a second message. (5) record the
 unit in `artifacts/build/units.json` as your skill
 says — the run exactly as it ran red and green, and its marker. A unit is not recorded until
 the written check has passed it: `"$PF_PYTHON" "$PF_SHARED_DIR/scripts/fast_checks.py"
