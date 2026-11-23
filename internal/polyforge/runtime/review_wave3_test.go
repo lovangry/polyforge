@@ -66,7 +66,7 @@ func TestTaskRepoCloneIsNonInteractive(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GIT_TERMINAL_PROMPT", "")
 	os.Unsetenv("GIT_TERMINAL_PROMPT")
-	_ = gitClone(context.Background(), "https://example.invalid/r.git", filepath.Join(t.TempDir(), "r"))
+	_ = gitClone(context.Background(), "https://example.invalid/r.git", "", filepath.Join(t.TempDir(), "r"))
 	raw, err := os.ReadFile(envOut)
 	if err != nil {
 		t.Fatal(err)

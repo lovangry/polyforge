@@ -101,7 +101,7 @@ func (r *Runtime) cloneTaskRepos(ctx context.Context, j *job) (map[string]string
 		if pr.URL == "" {
 			return nil, repoCloneErr(j.wi, pr, "recorded in the prior capsule.json but absent from the claim inventory: no URL to clone from")
 		}
-		if err := gitClone(ctx, pr.URL, dir); err != nil {
+		if err := gitClone(ctx, pr.URL, pr.Branch, dir); err != nil {
 			return nil, repoCloneErr(j.wi, pr, "clone failed: %v", err)
 		}
 		// A clone of a history-less remote succeeds with no HEAD: the
@@ -453,8 +453,21 @@ func repoCloneErr(wi string, pr api.ProjectRepo, format string, args ...any) *ap
 // A cancelled ctx (a stop or a shutdown during the claim) kills
 // the whole process group — git hands the transfer to a remote helper
 // that would otherwise keep running and keep the output pipe open.
-func gitClone(ctx context.Context, url, dir string) error {
-	cmd := exec.CommandContext(ctx, "git", "clone", "--", url, dir)
+func gitClone(ctx context.Context, url, branch, dir string) error {
+	argv := []string{"clone"}
+	// The branch pin (polyforge#45): --branch makes the clone stand on
+	// the pinned branch. Only when set — an empty pin must leave the
+	// clone's command line exactly today's (the server-advertised
+	// default checkout, verified by the clone tests that predate the
+	// pin). A pin naming a branch the origin lacks fails the clone
+	// right here: the pin is a fact about the lane, not a hint, so the
+	// claim closes blocked (DAEMON-507) instead of landing on the
+	// default branch.
+	if branch != "" {
+		argv = append(argv, "--branch", branch)
+	}
+	argv = append(argv, "--", url, dir)
+	cmd := exec.CommandContext(ctx, "git", argv...)
 	cmd.Env = cloneGitEnv()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }

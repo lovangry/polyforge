@@ -199,13 +199,28 @@ func (r *Runtime) materialize(ctx context.Context, j *job) error {
 	if err != nil {
 		return err
 	}
+	// The branch pins of the claim inventory (polyforge#45): recorded
+	// beside the SHAs they belong to — the capsule clone stands on the
+	// pin and the lane (sync, merge, verification) reads it from here.
+	// Absent when no repo is pinned: an unpinned capsule.json stays
+	// byte-identical to the pre-#45 shape.
+	pins := map[string]string{}
+	for _, pr := range j.repos {
+		if pr.Branch != "" {
+			pins[pr.Name] = pr.Branch
+		}
+	}
+	if len(pins) == 0 {
+		pins = nil
+	}
 	idn := capsule.Identity{
-		WorkItemID: j.wi,
-		CapsuleID:  "cap_" + j.wi,
-		Project:    j.project,
-		BundleName: j.bundleName,
-		Repos:      repoSHAs,
-		CreatedAt:  nowStamp(),
+		WorkItemID:   j.wi,
+		CapsuleID:    "cap_" + j.wi,
+		Project:      j.project,
+		BundleName:   j.bundleName,
+		Repos:        repoSHAs,
+		RepoBranches: pins,
+		CreatedAt:    nowStamp(),
 	}
 	// polyforge#79: the claim-time audit record — the parsed yaml
 	// verbatim and the resolved repo sources. A no-yaml claim records
