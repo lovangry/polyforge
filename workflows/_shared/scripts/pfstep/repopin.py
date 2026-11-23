@@ -27,4 +27,19 @@ def pins_of(capsule_dir: str) -> Dict[str, str]:
     unpinned lane keeps today's behavior, and no reader may crash on
     the capsule's bookkeeping.
     """
-    return {}
+    try:
+        with open(os.path.join(capsule_dir, "capsule.json"), "rb") as f:
+            raw = f.read()
+    except OSError:
+        return {}
+    try:
+        doc = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    branches = doc.get("repo_branches")
+    if not isinstance(branches, dict):
+        return {}
+    return {name: branch for name, branch in branches.items()
+            if isinstance(name, str) and isinstance(branch, str) and branch != ""}
