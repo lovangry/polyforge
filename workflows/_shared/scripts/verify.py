@@ -6,7 +6,11 @@ step left them (develop's verification step).
 
 Each task repo's tree is verified at its HEAD: no fetch, no merge (a merge in
 progress makes the run not judged); the base, and the baseline a still-red
-unit is proven pre-existing on, is ``merge-base HEAD origin/<default>``. The
+unit is proven pre-existing on, is ``merge-base HEAD origin/<default>`` — the
+default being the repo's branch pin when the capsule records one
+(``repo_branches``, the ``name=url#branch`` registration, polyforge#45),
+else the origin's advertised default. A pinned repo is measured against
+its pin; an unpinned one keeps today's behavior, exactly. The
 scope engine plans each touched repo ``--light`` and every nested engine root
 the diff reaches (a subdirectory with its own tracked
 ``.polyforge/verify-scope.conf``; its commands run behind ``cd <root> &&``);
@@ -436,6 +440,9 @@ class Verification:
     ) -> None:
         self.capsule = capsule
         self.engine = engine
+        # the capsule's repo branch pins (polyforge#45): repo name -> the
+        # branch a pinned repo's baseline is measured against
+        self.pins: Dict[str, str] = {}
         self.deadline = deadline  # ns: the whole run's
         # the tier as resolved: light (the default) or full (an
         # integration-fix ticket); tier_requested is what the line asked
