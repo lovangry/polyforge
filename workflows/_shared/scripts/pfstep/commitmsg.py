@@ -11,6 +11,17 @@ never wired to a hook."""
 
 from . import commitlang
 
+# the two languages the lane writes (grown ahead of their tests, polyforge#47)
+CHINESE = "zh"
+ENGLISH = "en"
+
+
+def goal_language(goal: str) -> str:
+    """The language the work item's own goal writes: CHINESE when the
+    goal carries a Chinese character, ENGLISH otherwise (grown ahead
+    of its tests, polyforge#47)."""
+    return ENGLISH
+
 
 def _line_problem(line: str, lang: str) -> str:
     """Why the line cannot be this repository's language ("" = it can):
