@@ -83,6 +83,11 @@ class World:
             self.seeds[r] = seed
             self.git(self.root, "clone", "-q", origin, self.dir(r))
             self.git(self.dir(r), "checkout", "-q", "-b", self.BRANCH)
+        # the state file polyforge#47's sync reads the lane's message
+        # language from (the work item's own goal; an English goal keeps
+        # these fixtures' message bytes unchanged)
+        write(self.capsule, "runtime-state/work-item.json",
+              json.dumps({"id": "wi_test", "goal": "sync the task repos' default branches"}))
 
     def env(self, **extra: str) -> Dict[str, str]:
         e = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "PF_"))}
