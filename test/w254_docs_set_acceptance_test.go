@@ -451,14 +451,14 @@ func TestW254QuickstartsMovedIntact(t *testing.T) {
 // - the v0.2.1 section appended with capsule clones running the target repo's commit-msg hooks (core.hooksPath wired to the clone's .husky when the repo ships one; a violating commit fails loudly, the daemon's hardened reads keep their own pin)
 // - the v0.2.1 section appended with the commit message language following the repository (the last 50 default-branch bodies' Chinese-to-Latin ratio, tie keeping English; the conventional prefix kept verbatim; sync, landing and PR-title messages and the capsule's own commit bodies follow it)
 // - the v0.2.1 section appended with the skills teaching the commit-message language (build.md's commit paragraph and Never list, publish.md's PR-title rule; a contract test registered in the contract-scan alternation pins it)
-// - the v0.2.1 section appended with a project repository pinned to a development branch (name=url#branch at registration: clone --branch, sync, verification, publish and merge all target the pin, recorded in capsule.json's repo_branches; a missing pinned branch fails the claim, an unpinned repo byte-identical to before)
+// - the v0.2.1 section appended with the capsule's message language following the work item's goal (the PR title Simplified Chinese by default, the goal read from runtime-state/work-item.json by commitmsg.goal_language, commitlang.py and its repository-history reading retired; the conventional prefix and the repo's commit-msg validation stay the judge)
 // upgrade-sections:end
 // The file is only routed to, from the install ops page and the README
 // landing page.
 func TestW254UpgradeByteIdentical(t *testing.T) {
 	raw := []byte(w254Read(t, "docs/upgrade.md"))
 	sum := sha256.Sum256(raw)
-	if got := hex.EncodeToString(sum[:]); got != "526a787cba9cb936de11f904e6672f4bf566ffbdf803a5e4e29d653f65e38ee6" {
+	if got := hex.EncodeToString(sum[:]); got != "c6686bf901a93f341e9811b4df277811345b90d9a02c8f5ffc865a8bec9f2335" {
 		t.Fatalf("docs/upgrade.md must stay byte-identical (only routed to, never rewritten): sha256 %s != the pinned pre-move sha256", got)
 	}
 	// the list beside the pin: one whole `// - ` line per appended section
