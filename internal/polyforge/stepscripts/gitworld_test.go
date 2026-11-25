@@ -91,6 +91,11 @@ func newGitWorld(t *testing.T, repos ...string) *gitWorld {
 	}
 	raw, _ := json.Marshal(map[string]any{"work_item_id": "wi_gw", "bundle_name": "develop", "repos": heads})
 	writeFile(t, w.capsule, "capsule.json", string(raw))
+	// runtime-state/work-item.json: the daemon-materialized work item every
+	// real capsule carries (polyforge#47: sync.py reads the lane's message
+	// language from its goal) — the world is one.
+	witem, _ := json.Marshal(map[string]any{"id": "wi_gw", "project": "p", "goal": "land the lane's repos"})
+	writeFile(t, w.capsule, filepath.Join("runtime-state", "work-item.json"), string(witem))
 	return w
 }
 
