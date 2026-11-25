@@ -37,7 +37,13 @@ func TestOwnerFacingRequestsUseSimplifiedChineseWithoutTranslatingTokens(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, token := range []string{"owner-review:", "「过目通过」", "「不通过:"} {
+	for _, token := range []string{
+		"owner-review:", "「过目通过」", "「不通过:",
+		// the landing title's one line is Simplified Chinese by default, the
+		// work item's own goal deciding the language (polyforge#47)
+		"the work item's own goal decides the language",
+		"no reason to write this one in English",
+	} {
 		if !strings.Contains(string(publish), token) {
 			t.Errorf("publish lost structured token %q", token)
 		}
