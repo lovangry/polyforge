@@ -85,7 +85,7 @@ import traceback  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
 from typing import Any, Dict, List, Mapping, Optional, Tuple  # noqa: E402
 
-from pfstep import atomic, commitlang, commitmsg, jsonout, repopin, runner  # noqa: E402
+from pfstep import atomic, commitmsg, jsonout, repopin, runner  # noqa: E402
 from pfstep.invoke import Invocation, duration_flag, go_list  # noqa: E402
 from pfstep.gitmerge import gostr  # noqa: E402
 from pfstep.gitmerge import merge as gm  # noqa: E402
@@ -345,6 +345,21 @@ class Sync:
         # keeps the origin-advertised default)
         self.pins: Dict[str, str] = repopin.pins_of(capsule)
         self.record = record
+        # the lane's message language (polyforge#47): the work item's own
+        # goal decides it, read once here through commitmsg — never the
+        # repository's history (a work item the capsule cannot read is
+        # refused: the capsule is incomplete, the run not judged)
+        self.lang = self._goal_language()
+
+    def _goal_language(self) -> str:
+        """The language the capsule's work item writes its goal in."""
+        p = os.path.join(self.capsule, "runtime-state", "work-item.json")
+        try:
+            with open(p, encoding="utf-8") as f:
+                goal = json.load(f).get("goal", "")
+        except (OSError, ValueError) as err:
+            raise Refused("cannot read the work item's goal at %s: %s" % (p, err)) from None
+        return commitmsg.goal_language(goal)
 
     def dir(self, name: str) -> str:
         return os.path.join(self.capsule, "repos", name)
@@ -508,12 +523,12 @@ class Sync:
             return
         # the merge attribute override lives for this merge only: the clone
         # is the work item's working clone; the message's language follows
-        # the repository's own default branch (its history read through
-        # commitlang — the capsule's commits on the working branch are never
-        # the fact it follows)
+        # the work item's own goal (self.lang, read once through
+        # commitmsg.goal_language — the repository's history, its own
+        # commits on the working branch included, is never the fact it
+        # follows)
         msg = commitmsg.sync_message(
-            commitlang.repo_language(d, "refs/remotes/origin/" + r.default_branch),
-            r.default_branch, gostr.or_text(r.branch, "HEAD"))
+            self.lang, r.default_branch, gostr.or_text(r.branch, "HEAD"))
         try:
             synced = g.keep_attributes(d, lambda: gm.sync(g, d, r.default_branch, r.default_head, conf, msg))
         except GoError as err:
