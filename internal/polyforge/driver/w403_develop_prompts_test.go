@@ -20,7 +20,7 @@ func TestDevelopPromptsAskOnlyOnSurprisesAndCarryE2E(t *testing.T) {
 	for step, c := range map[string]struct{ wants, stale []string }{
 		"build": {wants: []string{
 			"## 3a. Plan", "Do not grill it again: no clarity checklist, no batched round of questions",
-			"**Ask only in these cases** — run `pf step ask -` with the Simplified Chinese question body via stdin with real newlines, then end your turn; the answer is your next turn. Never at the end of your work; without one of these you do not ask:",
+			"**Ask only in these cases** — run `pf step ask -` with the Simplified Chinese question body via stdin with real newlines, then end your turn; the answer is your next turn. Write all owner-facing explanatory prose in Simplified Chinese. Never at the end of your work; without one of these you do not ask:",
 			"(a) the code reveals something the ticket did not decide", "(b) the plan diverges from the ticket",
 			"(c) the ticket says `confirm_plan: true` — right after `artifacts/plan.md` is written and before the first test",
 			"(d) no acceptance section, or an incomplete one — once, right after the plan, the list you propose in the question.",

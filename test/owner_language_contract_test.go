@@ -1,4 +1,4 @@
-// carries: workflows/_shared/skills/publish.md, workflows/_shared/skills/review.md, workflows/_shared/skills/verify.md, test/owner_language_contract_test.go
+// carries: workflows/_shared/skills/build.md, workflows/_shared/skills/publish.md, workflows/_shared/skills/review.md, workflows/_shared/skills/verify.md, test/owner_language_contract_test.go
 package test
 
 import (
@@ -11,6 +11,7 @@ import (
 func TestOwnerFacingRequestsUseSimplifiedChineseWithoutTranslatingTokens(t *testing.T) {
 	root := v1Root(t)
 	files := []string{
+		"workflows/_shared/skills/build.md",
 		"workflows/_shared/skills/publish.md",
 		"workflows/_shared/skills/review.md",
 		"workflows/_shared/skills/verify.md",
@@ -22,6 +23,7 @@ func TestOwnerFacingRequestsUseSimplifiedChineseWithoutTranslatingTokens(t *test
 		}
 		s := string(b)
 		required := map[string]string{
+			"workflows/_shared/skills/build.md":   "Write all owner-facing explanatory prose in Simplified Chinese.",
 			"workflows/_shared/skills/publish.md": "Write all owner-facing explanatory prose in Simplified Chinese;",
 			"workflows/_shared/skills/review.md":  "Write all owner-facing explanatory prose in Simplified Chinese.",
 			"workflows/_shared/skills/verify.md":  "Write all owner-facing explanatory prose in Simplified Chinese",
@@ -33,7 +35,9 @@ func TestOwnerFacingRequestsUseSimplifiedChineseWithoutTranslatingTokens(t *test
 			t.Errorf("%s puts mixed-language wording into the English step-agent instructions", rel)
 		}
 	}
-	publish, err := os.ReadFile(filepath.Join(root, files[0]))
+	// publish's tokens below are read by name, never by the files slice's
+	// order (build.md sorts first; polyforge#48)
+	publish, err := os.ReadFile(filepath.Join(root, "workflows/_shared/skills/publish.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
