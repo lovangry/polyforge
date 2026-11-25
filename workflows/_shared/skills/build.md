@@ -67,17 +67,15 @@ record exactly what ran.
    commit changes no tree), so the command is not run again on it. Never amend (`git
    commit --amend`) or otherwise rewrite a commit you have made — no rebase, no reset past
    it: the daemon backs every commit up to aihub and cannot back up a rewritten history
-   over it; a fix is a new commit. A commit's message follows the work item's own goal
-   (`workflows/_shared/scripts/pfstep/commitmsg.py` reads it: a goal that carries a
-   Chinese character makes the message Chinese, a goal written in English keeps it
-   English), never the repository's history: a repository whose commits are all English
-   is no reason to write this one in English. The goal in Chinese makes the test and
-   impl commit bodies Chinese, keeping the conventional prefix kept verbatim —
-   the type-enum word, `test:`, `feat:` — and
-   the header length per the repository's own commitlint; an English goal keeps English.
-   The repository's commit-msg hook —
-   wired into the clone — is the judge of the header: a refused message is fixed in
-   the message, never routed around.
+   over it; a fix is a new commit. A commit's message follows the repository's own language,
+   read from the repository's own facts — the last 50 commit bodies on the default branch
+   (`workflows/_shared/scripts/pfstep/commitlang.py` is the one reading: Chinese when they
+   carry more Chinese characters than Latin letters, an exact tie keeping English). In a
+   Chinese-primary repository the test and impl commit bodies are Chinese, keeping
+   the conventional prefix kept verbatim — the type-enum word, `test:`, `feat:` —
+   and the header length per the repository's own commitlint; an English-primary
+   repository keeps English. The repository's commit-msg hook — wired into the clone —
+   is the judge of the header: a refused message is fixed in the message, never routed around.
    A hook that cannot run — no `node_modules`, no `pnpm` on PATH — fails the commit
    loudly: that is a `blocked` hand-off naming it, never a bypass. The red run just made is the build's own red evidence —
    beside it no manual worktree replay is made (the facts engine's replay is the record),
