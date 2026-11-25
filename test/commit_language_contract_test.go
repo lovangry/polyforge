@@ -30,8 +30,9 @@ func TestCommitMessageLanguageFollowsTheRepository(t *testing.T) {
 		{"workflows/_shared/skills/build.md", "the header length per the repository's own commitlint", "the repository's own commit-msg rules stay the judge"},
 		{"workflows/_shared/skills/build.md", "never routed around", "a refused message is fixed in the message, not routed around the hook"},
 		{"workflows/_shared/skills/build.md", "a `core.hooksPath` of your own", "the Never list keeps the repository's commit-msg hook the judge"},
-		{"workflows/_shared/skills/publish.md", "the same reading as the capsule's commit bodies", "the PR title follows the repository's language"},
-		{"workflows/_shared/skills/publish.md", "`workflows/_shared/scripts/pfstep/commitlang.py`", "the one reading is named"},
+		{"workflows/_shared/skills/publish.md", "is written in Simplified Chinese", "the landing title's one line is Simplified Chinese by default"},
+		{"workflows/_shared/skills/publish.md", "the work item's own goal decides the language", "the title's language is the goal's, never the repository's history"},
+		{"workflows/_shared/skills/publish.md", "no reason to write this one in English", "an English commit history never decides the title's language"},
 		{"workflows/_shared/skills/publish.md", "the `<slug>: ` prefix kept verbatim", "the title keeps the conventional prefix"},
 		{"workflows/_shared/skills/publish.md", "lands it verbatim", "the landing squash's message is the title, both languages"},
 	} {
